@@ -38,6 +38,7 @@ constexpr std::uint32_t sampling_end       = 1;
 constexpr std::uint32_t ready_end          = 2;
 constexpr std::uint32_t edge_due           = 3;
 constexpr std::uint32_t calibration_end    = 4;
+constexpr std::uint32_t injected_edge_due  = 5;
 constexpr std::size_t   injected_ranks     = 4;
 constexpr std::size_t   trigger_selections = 32;
 constexpr std::uint32_t exten_rising       = 1;
@@ -763,9 +764,33 @@ struct l4_adc_state
   std::uint64_t                       enable_lock_ps{};
   bool                                injecting{};
   std::uint8_t                        injected_rank{};
+  std::array<adc_edge, 2>             injected_edges{};
+  std::uint32_t                       injected_edge_generation{};
 
   friend auto operator==(l4_adc_state const&, l4_adc_state const&) -> bool = default;
 };
+
+consteval auto adc_state_is_prefix() -> bool
+{
+  auto const context = std::meta::access_context::unchecked();
+  auto const common  = std::meta::nonstatic_data_members_of(^^adc_state, context);
+  auto const flat    = std::meta::nonstatic_data_members_of(^^l4_adc_state, context);
+  if(flat.size() < common.size())
+  {
+    return false;
+  }
+  for(std::size_t index = 0; index < common.size(); ++index)
+  {
+    if(std::meta::identifier_of(common[index]) != std::meta::identifier_of(flat[index])
+       or std::meta::type_of(common[index]) != std::meta::type_of(flat[index]))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+static_assert(adc_state_is_prefix());
 
 struct adc_common_state
 {
@@ -1183,19 +1208,24 @@ struct adc_clock
  *        RM0351 18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB,
  *        SMPTRIG and SMPPLUS do not exist.
  *
- *        The L4 converts the injected group with JQDIS 1 and JEXTEN 0, RM0351 18.4.19. A JADSTART
- *        write with ADEN converts the JL + 1 channels of JSQ1 to JSQ4 into ADC_JDR1 to ADC_JDR4 at
- *        once. Each conversion takes the regular time of its channel. JEOC sets with each result
- *        and clears on a CPU read of an ADC_JDRy, JEOS and the JADSTART clear come with the last.
- *        ALIGN aligns ADC_JDRy as ADC_DR. AWD1 guards the injected results with JAWD1EN, AWD2 and
- *        AWD3 their channels. With JDISCEN each JADSTART converts the next channel and JADSTART
- *        clears after it, inferred. JADSTP drops the injected conversion in progress and clears
- *        JADSTART, and the next start converts from JSQ1. ADDIS and ADCRST drop it too. A JADSTART
- *        write with ADEN 0 or ADDIS 1 is ignored, logged once, a model_error under
- *        strict_peripherals, RM0351 18.7.3. An ADC_JSQR write with JADSTART 1 and JQDIS 1 applies
- *        to the next sequence, logged once, a model_error under strict_peripherals, RM0351 18.7.16
- *        as corrected by ES0250 2.8.2. These log a warning once, a model_error under
- *        strict_peripherals: JADSTART with JEXTEN set, which converts nothing, JADSTART during a
+ *        The L4 converts the injected group with JQDIS 1, RM0351 18.4.19. A JADSTART write with
+ *        ADEN converts the JL + 1 channels of JSQ1 to JSQ4 into ADC_JDR1 to ADC_JDR4 at once with
+ *        JEXTEN 0. With JEXTEN set, JADSTART stays set and each JEXTEN edge of the JEXTSEL event
+ *        of RM0351 Table 112 converts the group after the tLATR of a regular trigger. Each
+ *        conversion takes the regular time of its channel. JEOC sets with each result and clears
+ *        on a CPU read of an ADC_JDRy, JEOS sets with the last, and with JEXTEN 0 JADSTART clears
+ *        with JEOS. ALIGN aligns ADC_JDRy as ADC_DR. AWD1 guards the injected results with
+ *        JAWD1EN, AWD2 and AWD3 their channels. With JDISCEN each trigger converts the next
+ *        channel, RM0351 18.4.20. With JDISCEN and JEXTEN 0 each JADSTART converts the next
+ *        channel and JADSTART clears after it, inferred. JADSTP drops the injected conversion in
+ *        progress and clears JADSTART, and the next start converts from JSQ1. ADDIS and ADCRST drop
+ *        it too. A hardware trigger during an injected conversion is ignored, RM0351 18.4.18.
+ *        JEXTSEL 8 and 10, the TRGO2 selections no L4 timer model produces, log a warning once, a
+ *        model_error under strict_peripherals. A JADSTART write with ADEN 0 or ADDIS 1 is ignored,
+ *        logged once, a model_error under strict_peripherals, RM0351 18.7.3. An ADC_JSQR write with
+ *        JADSTART 1 and JQDIS 1 applies to the next sequence, logged once, a model_error under
+ *        strict_peripherals, RM0351 18.7.16 as corrected by ES0250 2.8.2. These log a warning
+ *        once, a model_error under strict_peripherals: an injected start or trigger during a
  *        regular conversion, which converts nothing, a regular start or trigger during the
  *        injected group, which converts nothing and leaves ADSTART as written, JQDIS 0, converted
  *        as JQDIS 1, JAUTO, which converts no injected group, and JOVSE, converted without
@@ -1266,6 +1296,13 @@ public:
 private:
   friend class adc_common_model<Traits>;
 
+  auto write_word(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void               restore_reset_values();
   [[nodiscard]] auto flags() const -> std::uint32_t;
   [[nodiscard]] auto common() const -> adc_common_model<Traits> const*;
@@ -1292,15 +1329,23 @@ private:
   [[nodiscard]] auto dma() const -> dma_mode;
   [[nodiscard]] auto dma_level() const -> bool;
   [[nodiscard]] auto listened() const -> std::optional<std::uint32_t>;
+  [[nodiscard]] auto regular_listens(std::string_view signal) const -> bool;
   void               retune(std::optional<std::uint32_t> was);
   [[nodiscard]] auto injecting() const -> bool;
   [[nodiscard]] auto injected_length() const -> std::size_t;
-  void               injected_written(std::uint32_t old, std::uint32_t now);
-  void               prepare_injected();
-  void               begin_injected(std::uint64_t start_ps);
-  void               finish_injected();
-  void               abort_injected();
-  void               regular_blocked(std::string_view what);
+  [[nodiscard]] auto injected_listened() const -> std::optional<std::uint32_t>;
+  [[nodiscard]] auto injected_listens(std::string_view signal) const -> bool;
+  void               injected_notify(std::optional<std::uint32_t> selection);
+  void               retune_injected(std::optional<std::uint32_t> was);
+  void injected_triggered(std::string_view signal, trigger_edge edge, trigger_time at);
+  void fire_injected(adc_edge& slot);
+  void start_triggered_injected(std::uint64_t at_ps);
+  void injected_written(std::uint32_t old, std::uint32_t now);
+  void prepare_injected();
+  void begin_injected(std::uint64_t start_ps);
+  void finish_injected();
+  void abort_injected();
+  void regular_blocked(std::string_view what);
   [[nodiscard]] auto aligned(std::uint32_t result) const -> std::uint32_t;
   [[nodiscard]] auto trigger_latency_ps(std::uint64_t at_ps) -> std::uint64_t;
   void               require_factory_word(std::uint32_t channel) const;
@@ -1425,7 +1470,7 @@ private:
   bool                                             switch_logged_{};
   bool                                             calibration_refused_logged_{};
   bool                                             enable_lost_logged_{};
-  bool                                             injected_trigger_logged_{};
+  std::array<bool, trigger_selections>             injected_unproduced_logged_{};
   bool                                             injected_refused_logged_{};
   bool                                             injected_preemption_logged_{};
   bool                                             regular_blocked_logged_{};
@@ -1856,8 +1901,11 @@ template <typename Traits> void adc_model<Traits>::on_bus_reset()
     static_cast<void>(
         interest_changed(ctx_.peers, trigger_signal<typename Traits::trigger_enum>(*was)));
   }
+  auto const injected_was = injected_listened();
+  injected_notify(injected_was);
   restore_reset_values();
   retune(was);
+  retune_injected(injected_was);
 }
 
 template <typename Traits> void adc_model<Traits>::restore_reset_values()
@@ -1881,6 +1929,7 @@ template <typename Traits> void adc_model<Traits>::restore_reset_values()
   if constexpr(injected_group)
   {
     abort_injected();
+    state_.injected_edges = {};
   }
   request_.resolve();
   signal();
@@ -2617,24 +2666,41 @@ template <typename Traits> auto adc_model<Traits>::listened() const -> std::opti
   return get(regs_, trigger_select_);
 }
 
-template <typename Traits> auto adc_model<Traits>::listens(std::string_view signal) const -> bool
+template <typename Traits>
+auto adc_model<Traits>::regular_listens(std::string_view signal) const -> bool
 {
   auto const selected = listened();
   return selected and trigger_signals<typename Traits::trigger_enum>()[*selected & 31u] == signal;
 }
 
+template <typename Traits> auto adc_model<Traits>::listens(std::string_view signal) const -> bool
+{
+  return regular_listens(signal) or injected_listens(signal);
+}
+
 template <typename Traits> auto adc_model<Traits>::can_listen(std::string_view signal) const -> bool
 {
+  if constexpr(injected_group)
+  {
+    if(std::ranges::contains(trigger_signals<typename Traits::injected_enum>(), signal))
+    {
+      return true;
+    }
+  }
   return std::ranges::contains(trigger_signals<typename Traits::trigger_enum>(), signal);
 }
 
 template <typename Traits>
 void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
+  if constexpr(injected_group)
+  {
+    injected_triggered(signal, edge, at);
+  }
   auto const polarity = get(regs_, trigger_);
   auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
                                                      : (polarity & exten_falling) != 0;
-  if(not detected or not listens(signal))
+  if(not detected or not regular_listens(signal))
   {
     return;
   }
@@ -2717,19 +2783,40 @@ auto adc_model<Traits>::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
-  auto const word = offset & ~3u;
   if constexpr(injected_group)
   {
-    if(word == injected_->sequence_register.offset
-       and get(regs_, injected_start_) != 0
-       and get(regs_, injected_->queue_disable) != 0)
+    auto const word = offset & ~3u;
+    if(word == start_.offset or word == injected_->sequence_register.offset)
     {
-      forbidden(
-          sequence_written_logged_, "ADC_JSQR",
-          "ADC_JSQR written with JADSTART 1 and JQDIS 1, RM0351 18.7.16 as corrected by ES0250 "
-          "2.8.2: the write applies to the next injected sequence");
+      if(word != start_.offset
+         and get(regs_, injected_start_) != 0
+         and get(regs_, injected_->queue_disable) != 0)
+      {
+        forbidden(
+            sequence_written_logged_, "ADC_JSQR",
+            "ADC_JSQR written with JADSTART 1 and JQDIS 1, RM0351 18.7.16 as corrected by ES0250 "
+            "2.8.2: the write applies to the next injected sequence");
+      }
+      auto const was = injected_listened();
+      injected_notify(was);
+      auto const result = write_word(regs, offset, size, old, value, access);
+      retune_injected(was);
+      return result;
     }
   }
+  return write_word(regs, offset, size, old, value, access);
+}
+
+template <typename Traits>
+auto adc_model<Traits>::write_word(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     access) -> std::expected<void, bus_error>
+{
+  auto const word = offset & ~3u;
   if(word != start_.offset and word != trigger_.offset)
   {
     return base::on_write(regs, offset, size, old, value, access);
@@ -2796,6 +2883,140 @@ template <typename Traits> auto adc_model<Traits>::injected_length() const -> st
 }
 
 template <typename Traits>
+auto adc_model<Traits>::injected_listened() const -> std::optional<std::uint32_t>
+{
+  if constexpr(injected_group)
+  {
+    if(get(regs_, enable_) != 0
+       and get(regs_, injected_start_) != 0
+       and get(regs_, injected_->trigger) != 0)
+    {
+      return get(regs_, injected_->select);
+    }
+  }
+  return std::nullopt;
+}
+
+template <typename Traits>
+auto adc_model<Traits>::injected_listens(std::string_view signal) const -> bool
+{
+  if constexpr(injected_group)
+  {
+    auto const selected = injected_listened();
+    return selected
+       and trigger_signals<typename Traits::injected_enum>()[*selected & 31u] == signal;
+  }
+  return false;
+}
+
+template <typename Traits>
+void adc_model<Traits>::injected_notify(std::optional<std::uint32_t> selection)
+{
+  if constexpr(injected_group)
+  {
+    if(selection)
+    {
+      static_cast<void>(
+          interest_changed(ctx_.peers, trigger_signal<typename Traits::injected_enum>(*selection)));
+    }
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::retune_injected(std::optional<std::uint32_t> was)
+{
+  if constexpr(injected_group)
+  {
+    auto const now = injected_listened();
+    if(now == was)
+    {
+      return;
+    }
+    injected_notify(was);
+    if(not now)
+    {
+      return;
+    }
+    if(not interest_changed(ctx_.peers, trigger_signal<typename Traits::injected_enum>(*now)))
+    {
+      unmodelled(
+          injected_unproduced_logged_[*now], "ADC_JSQR",
+          std::format(
+              "JEXTSEL {}: trigger {}", *now, trigger_name<typename Traits::injected_enum>(*now)));
+    }
+  }
+}
+
+template <typename Traits>
+void adc_model<Traits>::injected_triggered(
+    std::string_view signal,
+    trigger_edge     edge,
+    trigger_time     at)
+{
+  if constexpr(injected_group)
+  {
+    auto const polarity = get(regs_, injected_->trigger);
+    auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
+                                                       : (polarity & exten_falling) != 0;
+    if(not detected or not injected_listens(signal))
+    {
+      return;
+    }
+    auto const free = std::ranges::find(state_.injected_edges, false, &adc_edge::pending);
+    if(at.ps > ctx_.clock.time().ps and free != state_.injected_edges.end())
+    {
+      *free = {
+          .pending    = true,
+          .falling    = edge == trigger_edge::falling,
+          .reposted   = false,
+          .selection  = static_cast<std::uint8_t>(*injected_listened()),
+          .generation = ++state_.injected_edge_generation,
+          .ps         = at.ps};
+      ctx_.events.schedule_at(vtime{at.ps}, injected_edge_due, free->generation, ctx_.clock);
+      return;
+    }
+    start_triggered_injected(at.ps);
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::fire_injected(adc_edge& slot)
+{
+  if constexpr(injected_group)
+  {
+    auto const polarity  = get(regs_, injected_->trigger);
+    auto const detected  = (polarity & (slot.falling ? exten_falling : exten_rising)) != 0;
+    auto const selection = injected_listened();
+    if(not detected or selection != std::optional<std::uint32_t>{slot.selection})
+    {
+      slot.pending = false;
+      return;
+    }
+    if(busy() and not std::exchange(slot.reposted, true))
+    {
+      ctx_.events.schedule_at(vtime{slot.ps}, injected_edge_due, slot.generation, ctx_.clock);
+      return;
+    }
+    slot.pending = false;
+    start_triggered_injected(slot.ps);
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::start_triggered_injected(std::uint64_t at_ps)
+{
+  if(injecting())
+  {
+    return;
+  }
+  if(busy())
+  {
+    unmodelled(
+        injected_preemption_logged_, "ADC_JSQR",
+        "an injected trigger during a regular conversion: injected preemption");
+    return;
+  }
+  begin_injected(at_ps + trigger_latency_ps(at_ps));
+}
+
+template <typename Traits>
 void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
 {
   if constexpr(injected_group)
@@ -2815,7 +3036,6 @@ void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
     prepare_injected();
     if(get(regs_, injected_->trigger) != 0)
     {
-      unmodelled(injected_trigger_logged_, "ADC_JSQR", "JEXTEN: injected hardware triggers");
       return;
     }
     if(busy())
@@ -2971,6 +3191,21 @@ void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
       if(payload == state_.calibration_generation and get(regs_, calibrate_) != 0)
       {
         end_calibration();
+      }
+      return;
+    }
+  }
+  if constexpr(injected_group)
+  {
+    if(kind == injected_edge_due)
+    {
+      auto const found =
+          std::ranges::find_if(state_.injected_edges, [payload](adc_edge const& slot) {
+            return slot.pending and slot.generation == payload;
+          });
+      if(found != state_.injected_edges.end())
+      {
+        fire_injected(*found);
       }
       return;
     }

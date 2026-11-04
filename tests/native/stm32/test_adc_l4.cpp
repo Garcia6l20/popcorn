@@ -967,6 +967,147 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "RM0351 Table 112: each timer JEXTSEL starts the injected group at its event, waits for the "
+    "ADC clock edge, then tLATR 1.5 cycles, inferred, JADSTART stays set")
+{
+  struct leg
+  {
+    std::uint32_t    selection;
+    std::string_view unit;
+    std::string_view ccr;
+  };
+  for(auto const& [selection, unit, ccr] : {
+          leg{0,  "TIM1",  ""    },
+          leg{1,  "TIM1",  "CCR4"},
+          leg{2,  "TIM2",  ""    },
+          leg{3,  "TIM2",  "CCR1"},
+          leg{4,  "TIM3",  "CCR4"},
+          leg{5,  "TIM4",  ""    },
+          leg{7,  "TIM8",  "CCR4"},
+          leg{9,  "TIM8",  ""    },
+          leg{11, "TIM3",  "CCR3"},
+          leg{12, "TIM3",  ""    },
+          leg{13, "TIM3",  "CCR1"},
+          leg{14, "TIM6",  ""    },
+          leg{15, "TIM15", ""    },
+  })
+  {
+    CAPTURE(selection);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, selection));
+    auto const trigger = r.timer(unit, ccr);
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    auto const end = trigger + edge_after(trigger, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8;
+    r.run_until(end - cycle_ps);
+    CHECK(r.isr("JEOC") == 0);
+    r.run_until(end);
+    CHECK(r.isr("JEOC") == 1);
+    CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+    CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 1);
+    CHECK(r.isr("EOC") == 0);
+    CHECK(r.warnings().empty());
+  }
+}
+
+TEST_CASE(
+    "RM0351 Table 112: JEXTSEL 6 starts the injected group at a rising edge of EXTI line 15, "
+    "JEXTSEL 8 tim1_trgo2 and 10 tim8_trgo2 log one warning each")
+{
+  rig const r;
+  r.set("GPIOA", "MODER", "MODER15", 0);
+  r.enable();
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  pins->drive(15, false);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, 6));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.isr("JEOC") == 0);
+  auto const edge = r.now();
+  pins->drive(15, true);
+  r.run_until(edge + edge_after(edge, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.warnings().empty());
+  for(auto const selection : {8u, 10u})
+  {
+    r.write("ADC1", "ADC_CR", enabled | jadstp);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, selection));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+  }
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 2);
+  CHECK(logged[0].message.contains("JEXTSEL 8: trigger tim1_trgo2"));
+  CHECK(logged[1].message.contains("JEXTSEL 10: trigger tim8_trgo2"));
+}
+
+TEST_CASE(
+    "RM0351 18.4.18: a TIM1 TRGO during an injected conversion is ignored, "
+    "the next one after it converts")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, 0));
+  r.clock("TIM1");
+  r.write("TIM1", "PSC", 3);
+  r.write("TIM1", "ARR", 99);
+  r.write("TIM1", "CR2", 2u << 4);
+  r.write("TIM1", "EGR", 1);
+  r.write("TIM1", "SR", 0);
+  auto const started = r.now();
+  r.write("TIM1", "CR1", 1u);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const trigger = started + 100 * us;
+  auto const end     = trigger + edge_after(trigger, cycle_ps) + (12 + 8 * 653) * cycle_ps / 8;
+  r.run_until(end - cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(end);
+  CHECK(r.isr("JEOC") == 1);
+  r.write("ADC1", "ADC_ISR", jeoc | jeos);
+  r.run_until(end + 100 * us);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(started + 300 * us + 170 * us);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.20: with JDISCEN each TIM1 TRGO converts the next JSQ channel, JEOS at the last, "
+    "the fourth converts JSQ1 again")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 375'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | jdiscen);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 2, 3}, 1, 0));
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 2048);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 0);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 1024);
+  CHECK(r.read("ADC1", "ADC_JDR3") == 0);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(trigger + 2 * ms + 100 * us);
+  CHECK(r.read("ADC1", "ADC_JDR3") == 512);
+  CHECK(r.isr("JEOS") == 1);
+  r.write("ADC1", "ADC_ISR", jeoc | jeos);
+  r.port().drive(1, 375'000);
+  r.run_until(trigger + 3 * ms + 100 * us);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 512);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 1);
+}
+
+TEST_CASE(
     "with JDISCEN and JEXTEN 0 each JADSTART converts the next JSQ channel and JADSTART clears "
     "after it, inferred")
 {
@@ -1035,8 +1176,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the injected and regular groups overlapping, JEXTEN set, JQDIS 0, JAUTO and JOVSE each "
-    "log once, a model_error when strict")
+    "the injected and regular groups overlapping, JQDIS 0, JAUTO and JOVSE each log once, a "
+    "model_error when strict")
 {
   struct leg
   {
@@ -1056,14 +1197,12 @@ TEST_CASE(
   auto const queue     = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
   auto const automatic = [](rig const& r) { r.write("ADC1", "ADC_CFGR", jqdis | jauto); };
   auto const sampled   = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
-  auto const hardware  = [](rig const& r) { r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, 0)); };
   for(auto const& [what, setup, cr] : {
           leg{"injected preemption",              regular,   enabled | adstart | jadstart},
           leg{"the regular conversions after it", injected,  enabled | jadstart | adstart},
           leg{"JQDIS 0",                          queue,     enabled | jadstart          },
           leg{"JAUTO",                            automatic, enabled | adstart           },
           leg{"JOVSE",                            sampled,   enabled | jadstart          },
-          leg{"JEXTEN",                           hardware,  enabled | jadstart          },
   })
   {
     CAPTURE(what);
@@ -1181,6 +1320,137 @@ TEST_CASE(
   CHECK(r.read("ADC1", "ADC_ISR") == 0);
   CHECK(r.read("ADC1", "ADC_JDR1") == 0);
   CHECK(r.read("ADC1", "ADC_DR") == 0);
+}
+
+TEST_CASE(
+    "checklist 31: an injected falling edge pending ahead of the machine time converts, "
+    "ADCRST drops it")
+{
+  constexpr std::uint64_t tick = 2'000'000;
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    rig const r;
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_CR", advregen);
+    r.write("ADC1", "ADC_CR", enabled);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}, 2, 1));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.set("RCC", "CFGR", "PPRE2", 7);
+    r.clock("TIM1");
+    r.write("TIM1", "ARR", 6);
+    r.write("TIM1", "CCR4", 1);
+    r.write("TIM1", "EGR", 1);
+    r.write("TIM1", "SR", 0);
+    auto const from = r.now();
+    r.set("TIM1", "CR1", "CEN", 1);
+    r.run_until(from + tick + tick / 2);
+    if(reset)
+    {
+      popcorn::testing::rcc_reset_pulse(*r.f, "AHB2RSTR", "ADCRST");
+      r.write("ADC1", "ADC_CR", advregen);
+      r.write("ADC1", "ADC_CR", enabled);
+      r.write("ADC1", "ADC_JSQR", jsqr({1}, 2, 1));
+      r.write("ADC1", "ADC_CR", enabled | jadstart);
+    }
+    r.run_until(from + 6 * tick);
+    CHECK(r.isr("JEOC") == (reset ? 0u : 1u));
+  }
+}
+
+TEST_CASE(
+    "checklist 66: an injected falling edge pending ahead of the machine time survives a "
+    "snapshot, it and the next edge convert at the times of the run without one")
+{
+  constexpr std::uint64_t tick = 2'000'000;
+  auto const              pend = [](rig const& r) {
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_CR", advregen);
+    r.write("ADC1", "ADC_CR", enabled);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}, 2, 1));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.set("RCC", "CFGR", "PPRE2", 7);
+    r.clock("TIM1");
+    r.write("TIM1", "ARR", 6);
+    r.write("TIM1", "CCR4", 1);
+    r.write("TIM1", "EGR", 1);
+    r.write("TIM1", "SR", 0);
+    auto const from = r.now();
+    r.set("TIM1", "CR1", "CEN", 1);
+    return from;
+  };
+  auto const rises = [](rig const& r, std::uint64_t from, std::uint64_t to) {
+    for(auto t = from; t <= to; t += cycle_ps / 8)
+    {
+      r.run_until(t);
+      if(r.isr("JEOC") != 0)
+      {
+        r.write("ADC1", "ADC_ISR", jeoc | jeos);
+        return t;
+      }
+    }
+    return std::uint64_t{};
+  };
+  rig const  reference;
+  auto const from  = pend(reference);
+  auto const first = rises(reference, from + tick + tick / 2, from + 6 * tick);
+  auto const next  = rises(reference, first + cycle_ps, first + 9 * tick);
+  REQUIRE(first != 0);
+  REQUIRE(next != 0);
+  rig const snapped;
+  CHECK(pend(snapped) == from);
+  snapped.run_until(from + tick + tick / 2);
+  auto const bytes = core::encode_snapshot(snapped.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(rises(fresh, from + tick + tick / 2, from + 6 * tick) == first);
+  CHECK(rises(fresh, first + cycle_ps, first + 9 * tick) == next);
+}
+
+TEST_CASE(
+    "two TIM1 compare falling edges ahead of the machine time each start a conversion, on the "
+    "regular and on the injected group")
+{
+  for(auto const injected : {false, true})
+  {
+    CAPTURE(injected);
+    rig const r;
+    r.set("RCC", "CR", "MSIRGSEL", 1);
+    r.set("RCC", "CR", "MSIRANGE", 11);
+    r.set("RCC", "CFGR", "HPRE", 15);
+    r.set("RCC", "CFGR", "PPRE2", 7);
+    r.clock("TIM1");
+    r.write("TIM1", "ARR", 99);
+    r.write("TIM1", "EGR", 1);
+    r.write("TIM1", "SR", 0);
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    if(injected)
+    {
+      r.write("ADC1", "ADC_JSQR", jsqr({1}, 2, 1));
+      r.write("ADC1", "ADC_CR", enabled | jadstart);
+    }
+    else
+    {
+      r.write("ADC1", "ADC_CFGR", jqdis | 2u << 10 | extsel(0));
+      r.start(1);
+    }
+    auto const              event = injected ? 1u << 4 : 1u << 1;
+    auto const              flag  = injected ? "JEOC" : "EOC";
+    auto const              data  = injected ? "ADC_JDR1" : "ADC_DR";
+    constexpr std::uint64_t tick  = 85'333'334;
+    auto const              first = r.now();
+    r.write("TIM1", "EGR", event);
+    r.run_until(first + 40 * us);
+    auto const second = r.now();
+    r.write("TIM1", "EGR", event);
+    r.run_until(first + tick + 10 * us);
+    CHECK(r.isr(flag) == 1);
+    CHECK(r.cpu_read("ADC1", data) == 2048);
+    CHECK(r.isr(flag) == 0);
+    r.run_until(second + tick + 10 * us);
+    CHECK(r.isr(flag) == 1);
+  }
 }
 
 TEST_CASE("ADDIS during an injected conversion drops it and clears JADSTART, no flag past its end")

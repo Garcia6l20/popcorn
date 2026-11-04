@@ -313,13 +313,16 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   At CKMODE 01, 10 and 11 tLATR is the Table 76 maximum, 2, 2.25 and 2.125 cycles.
 - The factory TS_CAL1 and VREFINT_CAL words are the datasheet typical values of the L4 patch,
   inferred.
-- The injected group converts with JQDIS 1 and JEXTEN 0: JADSTART converts the JSQ channels at
-  once. With JDISCEN each JADSTART converts the next channel and JADSTART clears after it,
-  inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
-- These injected settings are logged once, a model_error under strict_peripherals: JADSTART with
-  JEXTEN set converts nothing, JADSTART during a regular conversion converts nothing, a regular
-  start or trigger during the injected group converts nothing, JQDIS 0 converts as JQDIS 1, JAUTO
-  converts no injected group and JOVSE converts without oversampling.
+- The injected group converts with JQDIS 1. JADSTART with JEXTEN 0 converts the JSQ channels at
+  once, with JEXTEN set each edge of the JEXTSEL event of RM0351 Table 112 converts them after the
+  tLATR of a regular trigger. With JDISCEN and JEXTEN 0 each JADSTART converts the next channel and
+  JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
+- These injected settings are logged once, a model_error under strict_peripherals: an injected
+  start or trigger during a regular conversion converts nothing, a regular start or trigger during
+  the injected group converts nothing, JQDIS 0 converts as JQDIS 1, JAUTO converts no injected
+  group and JOVSE converts without oversampling.
+- `JEXTSEL` 8 and 10, TIM1_TRGO2 and TIM8_TRGO2, have no source and are logged once, a
+  model_error under strict_peripherals. `JEXTSEL` 6 takes EXTI line 15 from the line input.
 - An `ADC_JSQR` write with JADSTART 1 and JQDIS 1 applies to the next injected sequence and is
   logged once, a model_error under strict_peripherals, RM0351 18.7.16 as corrected by ES0250 2.8.2.
 
