@@ -341,6 +341,17 @@ Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a
   `SYSCFG_EXTICRn` write that moves a line to a pin of another level is an edge on the line, and
   a selector code RM0038 8.5.3 to 8.5.6 does not list selects no pin.
+- STM32L4: lines 0 to 31 sit in `EXTI_IMR1` to `EXTI_PR1`, lines 32 to 39 in `EXTI_IMR2` to
+  `EXTI_PR2`, RM0351 14.5. Both banks follow the STM32L1 rules above, the inferred ones inferred
+  on the STM32L4 too.
+- STM32L4: the direct lines 17, 23 to 34 and 39, RM0351 Table 62, have an `EXTI_IMRx` and an
+  `EXTI_EMRx` bit, storage with the reset value. A direct line sets no PR bit and raises no NVIC
+  line, as RM0351 14.3 gives while the system runs. Its source raises its own NVIC line. A deep-sleep
+  WFI idles as a plain WFI, so a direct line wakes nothing.
+- STM32L4: lines 16 and 35 to 38, the PVD and PVM1 to PVM4, raise `PVD_PVM_IRQn`, lines 18 to
+  22 `RTC_Alarm_IRQn`, `TAMP_STAMP_IRQn`, `RTC_WKUP_IRQn` and `COMP_IRQn`. These lines take their
+  edges from `EXTI_SWIERx` only.
+- STM32L4: `EXTI_EMR1` and `EXTI_EMR2` are storage, and an EXTI event wakes no WFE.
 
 ## GPIO
 
@@ -1374,6 +1385,11 @@ Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 - STM32L1: `SYSCFG_MEMRMP` is storage. The machine boots from main flash, BOOT_MODE and
   MEM_MODE read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write
   logs one `model_warning`. Under `strict` it raises `ModelError` before the store.
+- STM32L4: `SYSCFG_EXTICR1` to `EXTICR4` select PA to PG on every line and PH on lines 0 and 1,
+  code 7, RM0351 9.2.3 to 9.2.6. `SYSCFG_MEMRMP`, `CFGR1`, `SCSR`, `CFGR2`, `SWPR` and `SKR` are
+  storage: a firmware write logs one `model_warning` per register, and under `strict` raises
+  `ModelError` before the store. A SYSCFGRST pulse resets the EXTI selection and keeps
+  `SYSCFG_MEMRMP`, inferred.
 - STM32L1: `SYSCFG_PMC.USB_PU` drives the USB D+ pull-up. `LCD_CAPA` is storage: a firmware
   write that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError`
   before the store.

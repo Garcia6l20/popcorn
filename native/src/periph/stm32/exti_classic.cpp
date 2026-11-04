@@ -34,18 +34,25 @@ struct exti_classic_state
 static_assert(std::is_empty_v<exti_classic_state>);
 
 /**
- * @brief Classic EXTI of the STM32L1, RM0038 section 10.2, one register per role and one bit per
- *        line, 23 or 24 lines from the variant. Lines 0 to 15 take the pin of the GPIO port the
- *        SYSCFG peer selects in `SYSCFG_EXTICRn`, lines 16 and up the sources that call
- *        exti_line_input::line_changed(). A rising edge of a line with its EXTI_RTSR bit set, or
- *        a falling edge with its EXTI_FTSR bit set, sets its EXTI_PR bit while its EXTI_IMR bit
- *        is set, RM0038 10.2.4. A write of 1 to an EXTI_SWIER bit that reads 0 sets the EXTI_PR
- *        bit of an unmasked line, the SWIER bit reads 1 until a write of 1 to the PR bit, RM0038
- *        10.3.5. A write of 1 to an EXTI_PR bit clears it and the SWIER bit of the line, whether
- *        the PR bit was set or not. Each NVIC line of the variant is raised while the PR bit of
- *        one of its lines is set, the pending register feeding the NVIC, RM0038 Figure 32. A line
- *        in no NVIC group of the variant sets its PR bit and raises nothing. EXTI_EMR is storage
- *        the model leaves unclaimed, and an EXTI event wakes no WFE. Every reset brings the
+ * @brief Classic EXTI of the STM32L1, RM0038 section 10.2, and of the STM32L47x/L48x, RM0351
+ *        section 14, one register per role and bank and one bit per line, the banks from the
+ *        variant: `IMR`, `RTSR`, `FTSR`, `SWIER` and `PR` on the STM32L1, `IMR1` to `PR1` for lines
+ *        0 to 31 and `IMR2` to `PR2` for lines 32 to 39 on the STM32L4. Lines 0 to 15 take the pin
+ *        of the GPIO port the SYSCFG peer selects in `SYSCFG_EXTICRn`, lines 16 and up the sources
+ *        that call exti_line_input::line_changed(). A rising edge of a line with its RTSR bit set,
+ *        or a falling edge with its FTSR bit set, sets its PR bit while its IMR bit is set, RM0038
+ *        10.2.4. A write of 1 to a SWIER bit that reads 0 sets the PR bit of an unmasked line, the
+ *        SWIER bit reads 1 until a write of 1 to the PR bit, RM0038 10.3.5. A write of 1 to a PR
+ *        bit clears it and the SWIER bit of the line, whether the PR bit was set or not. Each NVIC
+ *        line of the variant is raised while the PR bit of one of its lines is set, in either bank,
+ *        the pending register feeding the NVIC, RM0038 Figure 32. A line in no NVIC group of the
+ *        variant sets its PR bit and raises nothing. A direct line of the STM32L4, 17, 23 to 34 and
+ *        39, RM0351 Table 62, has an IMR and an EMR bit only, storage with the reset value: it
+ *        latches nothing and raises no NVIC line, as RM0351 14.3 gives for a running system, and
+ *        its source raises its own NVIC line. A deep-sleep WFI idles as a plain WFI, so a direct
+ *        line wakes nothing. The description must give each RTSR, FTSR, SWIER and PR register
+ *        exactly the bank's lines without the direct lines, and IMR the bank's lines. EMR is
+ *        storage the model leaves unclaimed, and an EXTI event wakes no WFE. Every reset brings the
  *        registers to their description reset, PR 0. Each GPIO line n drives the trigger signal
  *        `extin`, the input of the line before its edge detection: an edge at each change of the
  *        selected pin, at the time of the pin edge, and at a `SYSCFG_EXTICRn` write that moves the
@@ -73,45 +80,89 @@ public:
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
 
-  void software_written(std::uint32_t old, std::uint32_t now);
-  void pending_written(std::uint32_t old, std::uint32_t now);
+  template <std::size_t Bank> void software_written(std::uint32_t old, std::uint32_t now);
+  template <std::size_t Bank> void pending_written(std::uint32_t old, std::uint32_t now);
 
 private:
-  [[nodiscard]] auto line_field(std::string_view reg, std::string_view name) const -> field_ref;
+  struct bank_regs
+  {
+    std::uint8_t  first{};
+    std::uint32_t lines{};
+    std::uint32_t edges{};
+    std::uint32_t imr{};
+    std::uint32_t rtsr{};
+    std::uint32_t ftsr{};
+    std::uint32_t swier{};
+    std::uint32_t pr{};
+  };
+
+  [[nodiscard]] auto bank_of(exti_bank const& bank) const -> bank_regs;
+  [[nodiscard]] auto line_register(std::string_view name, std::uint32_t lines) const
+      -> std::uint32_t;
+  [[nodiscard]] auto pending() const -> std::uint64_t;
   void               interrupts();
   [[nodiscard]] auto output_of(std::string_view signal) const -> std::optional<std::uint8_t>;
 
   register_file&                                   regs_;
-  std::uint32_t                                    lines_;
-  field_ref                                        unmasked_;
-  field_ref                                        rising_;
-  field_ref                                        falling_;
-  field_ref                                        software_;
-  field_ref                                        pending_;
-  std::vector<std::pair<std::uint32_t, irq_line*>> irqs_;
+  std::vector<bank_regs>                           banks_;
+  std::vector<std::pair<std::uint64_t, irq_line*>> irqs_;
   std::vector<trigger_output>                      outputs_;
   std::optional<std::uint64_t>                     edge_ps_;
 };
 
-constexpr std::array<write_entry<exti_classic>, 5> exti_classic_writes{
+constexpr std::size_t max_banks = 2;
+
+auto exti_classic_writes(
+    model_context&              ctx,
+    peripheral_desc const&      desc,
+    exti_classic_variant const& variant) -> std::vector<write_entry<exti_classic>>
+{
+  constexpr std::array software{
+      &exti_classic::software_written<0>, &exti_classic::software_written<1>};
+  constexpr std::array pending{
+      &exti_classic::pending_written<0>, &exti_classic::pending_written<1>};
+  if(variant.banks.empty() or variant.banks.size() > max_banks)
+  {
+    throw config_error(
+        ctx.part.part, 0, std::format("peripherals.{}", desc.name),
+        std::format("one or two EXTI banks, the variant gives {}", variant.banks.size()));
+  }
+  std::vector<write_entry<exti_classic>> out;
+  for(std::size_t at = 0; at < variant.banks.size(); ++at)
+  {
+    auto const& bank = variant.banks[at];
+    for(auto const& [role, handler] : {
+            std::pair{std::string_view{"IMR"},   decltype(software)::value_type{}},
+            std::pair{std::string_view{"RTSR"},  decltype(software)::value_type{}},
+            std::pair{std::string_view{"FTSR"},  decltype(software)::value_type{}},
+            std::pair{std::string_view{"SWIER"}, software[at]                    },
+            std::pair{std::string_view{"PR"},    pending[at]                     },
+    })
     {
-     {"IMR", nullptr},
-     {"RTSR", nullptr},
-     {"FTSR", nullptr},
-     {"SWIER", &exti_classic::software_written},
-     {"PR", &exti_classic::pending_written},
-     }
-};
+      auto const  name  = std::format("{}{}", role, bank.suffix);
+      auto const* found = find_register(desc, name);
+      if(found == nullptr)
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("peripherals.{}.registers.{}", desc.name, name),
+            "a register of the EXTI bank");
+      }
+      out.push_back({found->name, handler});
+    }
+  }
+  return out;
+}
 
 exti_classic::exti_classic(
     model_context&              ctx,
     peripheral_desc const&      desc,
     exti_classic_variant const& variant)
-    : dispatch_model{ctx, desc, "EXTI", exti_classic_writes}, regs_{ctx.regs},
-      lines_{(std::uint32_t{1} << variant.lines) - 1u}, unmasked_{line_field("IMR", "MR")},
-      rising_{line_field("RTSR", "TR")}, falling_{line_field("FTSR", "TR")},
-      software_{line_field("SWIER", "SWIER")}, pending_{line_field("PR", "PR")}
+    : dispatch_model{ctx, desc, "EXTI", exti_classic_writes(ctx, desc, variant)}, regs_{ctx.regs}
 {
+  for(auto const& bank : variant.banks)
+  {
+    banks_.push_back(bank_of(bank));
+  }
   for(auto const& group : variant.irqs)
   {
     auto const width = group.last - group.first + 1u;
@@ -122,7 +173,17 @@ exti_classic::exti_classic(
           ctx.part.part, 0, std::format("peripherals.{}.irqs", desc.name),
           std::format("NVIC line {}, which the EXTI model raises", group.irq));
     }
-    irqs_.emplace_back(((std::uint32_t{1} << width) - 1u) << group.first, &irq(named->name));
+    auto const lines = ((std::uint64_t{1} << width) - 1u) << group.first;
+    auto*      line  = &irq(named->name);
+    auto const same  = std::ranges::find(irqs_, line, &decltype(irqs_)::value_type::second);
+    if(same != irqs_.end())
+    {
+      same->first |= lines;
+    }
+    else
+    {
+      irqs_.emplace_back(lines, line);
+    }
   }
   for(std::uint8_t line = 0; line < gpio_lines; ++line)
   {
@@ -130,17 +191,38 @@ exti_classic::exti_classic(
   }
 }
 
-auto exti_classic::line_field(std::string_view reg, std::string_view name) const -> field_ref
+auto exti_classic::line_register(std::string_view name, std::uint32_t lines) const -> std::uint32_t
 {
-  auto const bits = field(reg, name);
-  if(bits.lsb % 32u != 0 or bits.width != std::popcount(lines_))
+  auto const&   described = describe(name);
+  std::uint32_t mask      = 0;
+  for(auto const& bits : described.fields)
+  {
+    mask |= static_cast<std::uint32_t>(((std::uint64_t{1} << bits.width) - 1u) << bits.lsb);
+  }
+  if(mask != lines)
   {
     throw config_error(
-        ctx_.part.part, 0,
-        std::format("peripherals.{}.registers.{}.fields.{}", desc_.name, reg, name),
-        std::format("one bit per line from bit 0, {} lines", std::popcount(lines_)));
+        ctx_.part.part, 0, std::format("peripherals.{}.registers.{}.fields", desc_.name, name),
+        std::format(
+            "one bit per line, line mask {:#010x}, the description gives {:#010x}", lines, mask));
   }
-  return bits;
+  return reg(name).offset;
+}
+
+auto exti_classic::bank_of(exti_bank const& bank) const -> bank_regs
+{
+  auto const lines = static_cast<std::uint32_t>((std::uint64_t{1} << bank.lines) - 1u);
+  auto const edges = lines & ~bank.direct;
+  auto const named = [&](std::string_view role) { return std::format("{}{}", role, bank.suffix); };
+  return {
+      .first = bank.first,
+      .lines = lines,
+      .edges = edges,
+      .imr   = line_register(named("IMR"), lines),
+      .rtsr  = line_register(named("RTSR"), edges),
+      .ftsr  = line_register(named("FTSR"), edges),
+      .swier = line_register(named("SWIER"), edges),
+      .pr    = line_register(named("PR"), edges)};
 }
 
 void exti_classic::reset(register_file& regs, reset_kind)
@@ -155,12 +237,22 @@ void exti_classic::reset(register_file& regs, reset_kind)
 void exti_classic::on_event(std::uint32_t, std::uint64_t)
 {}
 
+auto exti_classic::pending() const -> std::uint64_t
+{
+  std::uint64_t out = 0;
+  for(auto const& bank : banks_)
+  {
+    out |= std::uint64_t{regs_.peek(bank.pr) & bank.edges} << bank.first;
+  }
+  return out;
+}
+
 void exti_classic::interrupts()
 {
-  auto const pending = get(regs_, pending_);
+  auto const lines_pending = pending();
   for(auto const& [lines, line] : irqs_)
   {
-    if((pending & lines) != 0)
+    if((lines_pending & lines) != 0)
     {
       line->raise();
     }
@@ -198,8 +290,15 @@ void exti_classic::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
 
 void exti_classic::line_changed(std::uint8_t line, bool level)
 {
-  auto const bit = std::uint32_t{1} << line;
-  if(line >= 32 or (lines_ & bit) == 0)
+  auto const bank = std::ranges::find_if(banks_, [&](bank_regs const& b) {
+    return line >= b.first and line - b.first < std::popcount(b.lines);
+  });
+  if(bank == banks_.end())
+  {
+    return;
+  }
+  auto const bit = std::uint32_t{1} << (line - bank->first);
+  if((bank->edges & bit) == 0)
   {
     return;
   }
@@ -209,27 +308,30 @@ void exti_classic::line_changed(std::uint8_t line, bool level)
         level ? trigger_edge::rising : trigger_edge::falling,
         edge_ps_.value_or(ctx_.clock.time().ps));
   }
-  auto const edge = get(regs_, level ? rising_ : falling_);
-  if((edge & get(regs_, unmasked_) & bit) == 0)
+  auto const edge = regs_.peek(level ? bank->rtsr : bank->ftsr);
+  if((edge & regs_.peek(bank->imr) & bit) == 0)
   {
     return;
   }
-  update(regs_, pending_, get(regs_, pending_) | bit);
+  regs_.poke(bank->pr, regs_.peek(bank->pr) | bit);
   interrupts();
 }
 
+template <std::size_t Bank>
 void exti_classic::software_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const raised = software_.of(now) & ~software_.of(old) & get(regs_, unmasked_);
-  update(regs_, pending_, get(regs_, pending_) | raised);
+  auto const& bank   = banks_[Bank];
+  auto const  raised = now & ~old & bank.edges & regs_.peek(bank.imr);
+  regs_.poke(bank.pr, regs_.peek(bank.pr) | raised);
   interrupts();
 }
 
-void exti_classic::pending_written(std::uint32_t old, std::uint32_t now)
+template <std::size_t Bank> void exti_classic::pending_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const cleared = pending_.of(old) & pending_.of(now);
-  regs_.poke(pending_.offset, pending_.with(old, pending_.of(old) & ~cleared));
-  update(regs_, software_, get(regs_, software_) & ~pending_.of(now));
+  auto const& bank    = banks_[Bank];
+  auto const  written = now & bank.edges;
+  regs_.poke(bank.pr, old & ~written);
+  regs_.poke(bank.swier, regs_.peek(bank.swier) & ~written);
   interrupts();
 }
 

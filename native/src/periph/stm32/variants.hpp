@@ -118,13 +118,26 @@ struct exti_line_group
   std::uint16_t irq;
 };
 
+/** @brief One register bank of the classic EXTI: `IMR<suffix>` to `PR<suffix>` and its lines. */
+struct exti_bank
+{
+  /** @brief Suffix of the bank's register names, empty on a single-bank EXTI. */
+  std::string_view suffix;
+  /** @brief Line of bit 0. */
+  std::uint8_t first;
+  /** @brief Lines, bits 0 to lines - 1 of `IMR<suffix>`. */
+  std::uint8_t lines;
+  /** @brief Direct lines by bit: an IMR bit only, no RTSR, FTSR, SWIER or PR bit. */
+  std::uint32_t direct;
+};
+
 /** @brief Differences between the classic EXTI controllers the model rows serve. */
 struct exti_classic_variant
 {
-  /** @brief Lines, the width of each register's line field. */
-  std::uint8_t lines;
+  /** @brief Register banks, one or two. */
+  std::span<exti_bank const> banks;
   /** @brief NVIC lines the EXTI raises. A line in no group sets its pending bit and raises
-   *         nothing. */
+   *         nothing. Groups of one NVIC line merge. */
   std::span<exti_line_group const> irqs;
 };
 
@@ -147,10 +160,46 @@ inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {20, 20, 3 },
     {21, 22, 22},
 });
+/** @brief STM32L1 Cat.1 and Cat.2 bank, RM0038 10.2: 23 lines. */
+inline constexpr auto l1_exti_banks_23 = std::to_array<exti_bank>({
+    {"", 0, 23, 0},
+});
+/** @brief STM32L1 Cat.3 to Cat.6 bank, RM0038 10.2: 24 lines. */
+inline constexpr auto l1_exti_banks_24 = std::to_array<exti_bank>({
+    {"", 0, 24, 0},
+});
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
-inline constexpr exti_classic_variant l1_exti_23{.lines = 23, .irqs = l1_exti_irqs};
+inline constexpr exti_classic_variant l1_exti_23{.banks = l1_exti_banks_23, .irqs = l1_exti_irqs};
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 10.2: 24 lines. */
-inline constexpr exti_classic_variant l1_exti_24{.lines = 24, .irqs = l1_exti_irqs};
+inline constexpr exti_classic_variant l1_exti_24{.banks = l1_exti_banks_24, .irqs = l1_exti_irqs};
+
+/** @brief STM32L47x/L48x, RM0351 14.5 and Table 62: lines 0 to 31 in bank 1, 32 to 39 in bank 2,
+ *         direct lines 17, 23 to 34 and 39, IMR1 reset 0xFF820000 and IMR2 0x00000087. */
+inline constexpr auto l4_exti_banks = std::to_array<exti_bank>({
+    {"1", 0,  32, 0xFF82'0000},
+    {"2", 32, 8,  0x0000'0087},
+});
+/** @brief STM32L47x/L48x, RM0351 Table 61 by NVIC line: EXTI0 to EXTI4 on 6 to 10 one line each,
+ *         EXTI9_5 on 23, EXTI15_10 on 40, line 16 PVD and lines 35 to 38 PVM1 to PVM4 on PVD_PVM 1,
+ *         line 18 RTC alarm on 41, line 19 RTC tamper and timestamp on 2, line 20 RTC wakeup on 3,
+ *         lines 21 and 22 COMP1 and COMP2 on 64. The direct lines raise no NVIC line. */
+inline constexpr auto l4_exti_irqs = std::to_array<exti_line_group>({
+    {0,  0,  6 },
+    {1,  1,  7 },
+    {2,  2,  8 },
+    {3,  3,  9 },
+    {4,  4,  10},
+    {5,  9,  23},
+    {10, 15, 40},
+    {16, 16, 1 },
+    {35, 38, 1 },
+    {18, 18, 41},
+    {19, 19, 2 },
+    {20, 20, 3 },
+    {21, 22, 64},
+});
+/** @brief STM32L47x/L48x, RM0351 section 14. */
+inline constexpr exti_classic_variant l4_exti{.banks = l4_exti_banks, .irqs = l4_exti_irqs};
 
 /** @brief One hardware request of a classic DMA controller: its signal and its channel. */
 struct dma_classic_request
@@ -314,6 +363,30 @@ inline constexpr syscfg_classic_variant l1_syscfg{
     .usb_peer             = "USB",
     .remap_register       = "MEMRMP",
     .storage_registers    = l1_syscfg_storage};
+/** @brief RM0351 9.2.3 to 9.2.6, STM32L47x/L48x: PA to PG on every line, PH for lines 0 and 1
+ *         only, 3-bit fields. */
+inline constexpr auto l4_exti_ports = std::to_array<exti_port_code>({
+    {0, 'A'},
+    {1, 'B'},
+    {2, 'C'},
+    {3, 'D'},
+    {4, 'E'},
+    {5, 'F'},
+    {6, 'G'},
+    {7, 'H', 0x0003},
+});
+/** @brief STM32L47x/L48x storage registers of SYSCFG: MEMRMP, CFGR1, SCSR, CFGR2, SWPR, SKR. */
+inline constexpr auto l4_syscfg_storage =
+    std::to_array<std::string_view>({"MEMRMP", "CFGR1", "SCSR", "CFGR2", "SWPR", "SKR"});
+/** @brief STM32L47x/L48x, RM0351 section 9.2: EXTI selection, MEMRMP kept by a SYSCFGRST pulse,
+ *         no USB pull-up. */
+inline constexpr syscfg_classic_variant l4_syscfg{
+    .ports                = l4_exti_ports,
+    .usb_pull_up_register = "",
+    .usb_pull_up_field    = "",
+    .usb_peer             = "",
+    .remap_register       = "MEMRMP",
+    .storage_registers    = l4_syscfg_storage};
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 8.5.3: codes 0110 and 0111, PF and
  *         PG, exist on Cat.3 to Cat.6 only. */
 inline constexpr syscfg_classic_variant l1_syscfg_cat12{

@@ -24,7 +24,8 @@ public:
   auto operator=(exti_line_input&&) -> exti_line_input& = delete;
 
   /**
-   * @brief The input of a line changed level. A line the EXTI lacks is ignored.
+   * @brief The input of a line changed level. A line the EXTI lacks and a direct line, which has
+   *        no edge detection, are ignored.
    * @param line Line number.
    * @param level New level.
    */

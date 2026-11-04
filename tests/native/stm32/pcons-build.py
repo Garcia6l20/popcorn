@@ -108,6 +108,7 @@ l4_firmwares = {
         "l476_l4_pwr_ll",
         "l476_l4_flash_ll",
         "l476_l4_gpio_ll",
+        "l476_l4_exti_ll",
     )
 }
 l4_env = {
@@ -270,6 +271,7 @@ for program, source in (
     ("stm32-power-l4", "test_power_l4.cpp"),
     ("stm32-flash-l4", "test_flash_l4.cpp"),
     ("stm32-gpio-l4", "test_gpio_l4.cpp"),
+    ("stm32-exti-l4", "test_exti_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

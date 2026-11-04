@@ -32,20 +32,22 @@ struct syscfg_classic_state
 static_assert(std::is_empty_v<syscfg_classic_state>);
 
 /**
- * @brief Classic SYSCFG of the STM32L1, RM0038 section 8.5, its register roles from the variant.
- *        `SYSCFG_EXTICR1` to `SYSCFG_EXTICR4` select the GPIO port of the EXTI lines 0 to 15
- *        through the codes of the variant, a code with no port for that line selects none, and the
- *        EXTI peer reads them. A selector write that moves a line to a pin of another level hands
- *        the EXTI peer that edge, as the line input changes on the switch. The USB D+ pull-up
- *        enable, `SYSCFG_PMC.USB_PU`, is published through usb_pull_up_source, and every change of
- *        it, by a write or a reset, is told to the USB peer through usb_pull_up_listener. The other
- *        fields of its register, `LCD_CAPA` on the STM32L1, and the registers the variant lists as
- *        storage, `SYSCFG_MEMRMP` on the STM32L1, are storage the model does not model: the machine
- *        boots from main flash, which BOOT_MODE and MEM_MODE 00 give. A firmware write that sets a
- *        bit of those fields or lands on such a register logs one model_warning per register, and
- *        raises model_error under strict_peripherals before it is stored. Every reset brings the
- *        registers to their description reset, a SYSCFGRST pulse except the memory remap register,
- *        RM0038 8.5.1. The model is stateless.
+ * @brief Classic SYSCFG of the STM32L1, RM0038 section 8.5, and of the STM32L47x/L48x, RM0351
+ *        section 9.2, its register roles from the variant. `SYSCFG_EXTICR1` to `SYSCFG_EXTICR4`
+ *        select the GPIO port of the EXTI lines 0 to 15 through the codes of the variant, a code
+ *        with no port for that line selects none, and the EXTI peer reads them. A selector write
+ *        that moves a line to a pin of another level hands the EXTI peer that edge, as the line
+ *        input changes on the switch. The USB D+ pull-up enable, `SYSCFG_PMC.USB_PU`, is published
+ *        through usb_pull_up_source, and every change of it, by a write or a reset, is told to the
+ *        USB peer through usb_pull_up_listener. The other fields of its register, `LCD_CAPA` on the
+ *        STM32L1, and the registers the variant lists as storage, `SYSCFG_MEMRMP` on the STM32L1,
+ *        are storage the model does not model, every register but the EXTI selectors on the
+ *        STM32L4: the machine boots from main flash, which BOOT_MODE and MEM_MODE 00 give. A
+ *        firmware write that sets a bit of those fields or lands on such a register logs one
+ *        model_warning per register, and raises model_error under strict_peripherals before it is
+ *        stored. Every reset brings the registers to their description reset, a SYSCFGRST pulse
+ *        except the memory remap register, RM0038 8.5.1, inferred on the STM32L4. The model is
+ *        stateless.
  */
 class syscfg_classic final : public dispatch_model<syscfg_classic, syscfg_classic_state>,
                              public exti_selector,

@@ -111,7 +111,6 @@ struct l4_storage
 };
 
 constexpr auto l4_storage_rows = std::to_array<l4_storage>({
-    {.name = "EXTI",    .ip = "EXTI",   .version = "",               .base = 0x4001'0400},
     {.name = "UART4",   .ip = "UART",   .version = "sci2_v2_1_Cube", .base = 0x4000'4C00},
     {.name = "LPUART1", .ip = "LPUART", .version = "sci3_v1_1_Cube", .base = 0x4000'8000},
     {.name = "DBGMCU",  .ip = "DBGMCU", .version = "",               .base = 0xE004'2000},
@@ -225,11 +224,6 @@ TEST_CASE("the shipped U5 and H5 parts attach the scoped models")
   attached(
       popcorn::testing::description_from("POPCORN_H573_DESC"),
       {"EXTI", "DBGMCU", "CRS", "ADCC", "UART4"});
-}
-
-TEST_CASE("an STM32L4 EXTI of no IP version attaches as storage")
-{
-  CHECK(machine_of(toy_l4(storage_row("EXTI"))).model("EXTI") == nullptr);
 }
 
 TEST_CASE("an STM32L4 UART4 of sci2_v2_1_Cube attaches as storage")

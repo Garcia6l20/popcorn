@@ -601,3 +601,18 @@ TEST_CASE("trigger_source_of finds EXTI for exti0 to exti15, no source for exti1
     CHECK(stm32::trigger_source_of(peers, signal) == nullptr);
   }
 }
+
+TEST_CASE("a Cat.5 description whose RTSR field covers 23 lines, one less than the bank, throws")
+{
+  auto part       = l152re();
+  auto peripheral = std::ranges::find(
+      part.peripherals, std::string_view{"EXTI"}, &popcorn::peripheral_desc::name);
+  REQUIRE(peripheral != part.peripherals.end());
+  auto rtsr_desc = std::ranges::find(
+      peripheral->registers, std::string_view{"RTSR"}, &popcorn::register_desc::name);
+  REQUIRE(rtsr_desc != peripheral->registers.end());
+  REQUIRE(rtsr_desc->fields.size() == 1);
+  rtsr_desc->fields.front().width = 23;
+  CHECK_THROWS_WITH_AS(
+      (stm32_fixture{std::move(part), firmware}), doctest::Contains("RTSR"), popcorn::config_error);
+}
