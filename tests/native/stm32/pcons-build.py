@@ -130,6 +130,7 @@ l4_firmwares = {
         "l476_l4_rtc_ll",
         "l476_l4_sai_ll",
         "l476_l4_spi_ll",
+        "l476_l4_adc_ll",
     )
 }
 l4_env = {

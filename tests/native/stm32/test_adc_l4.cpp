@@ -4,6 +4,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <format>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -34,6 +36,7 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
 constexpr std::string_view firmware = "l476_l4_rcc_ll";
+constexpr std::string_view adc_ll   = "l476_l4_adc_ll";
 constexpr std::uint64_t    cycle_ps = 250'000;
 constexpr std::uint64_t    us       = 1'000'000;
 constexpr std::uint64_t    ms       = 1'000 * us;
@@ -43,6 +46,9 @@ constexpr std::uint32_t adstart  = 1u << 2;
 constexpr std::uint32_t adstp    = 1u << 4;
 constexpr std::uint32_t advregen = 1u << 28;
 constexpr std::uint32_t deeppwd  = 1u << 29;
+constexpr std::uint32_t adcal    = 1u << 31;
+constexpr std::uint32_t adcaldif = 1u << 30;
+constexpr std::uint32_t addis    = 1u << 1;
 constexpr std::uint32_t eoc      = 1u << 2;
 constexpr std::uint32_t eocie    = 1u << 2;
 constexpr std::uint32_t exten_up = 1u << 10;
@@ -78,7 +84,7 @@ struct rig
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
-  explicit rig(bool strict = false)
+  explicit rig(bool strict = false, bool routed = true)
   {
     stm32::board board{};
     board.supply.vdda_mv       = vdda_mv;
@@ -91,6 +97,14 @@ struct rig
         [this](core::log_record const& record) { logged.push_back(record); });
     set("RCC", "AHB2ENR", "ADCEN", 1);
     set("RCC", "CCIPR", "ADCSEL", 3);
+    if(routed)
+    {
+      for(auto const port : {"GPIOA", "GPIOB", "GPIOC", "GPIOF"})
+      {
+        set("RCC", "AHB2ENR", std::string{port} + "EN", 1);
+        write(port, "ASCR", 0xFFFF);
+      }
+    }
   }
 
   [[nodiscard]] auto reg(std::string_view unit, std::string_view name) const
@@ -188,6 +202,7 @@ struct rig
   {
     write(unit, "ADC_CR", advregen);
     write(unit, "ADC_CR", advregen | aden);
+    run_until(now() + 15 * cycle_ps);
   }
 
   void start(std::uint32_t channel, std::string_view unit = "ADC1") const
@@ -565,4 +580,351 @@ TEST_CASE("a DUAL write other than 0 logs once on ADC_Common, a model_error when
   CHECK_THROWS_AS(
       static_cast<void>(r.f->target->mem().write(r.at("ADC_Common", "ADC_CCR"), 4, 6u)),
       popcorn::model_error);
+}
+
+TEST_CASE(
+    "DS10198 Table 76 tSTAB, inferred as one 12-bit conversion: ADRDY sets 15 ADC clock cycles "
+    "after the ADEN write, 30 at PRESC /2")
+{
+  for(auto const& [prescaler, divider] : {
+          std::pair{0u, 1u},
+          std::pair{1u, 2u}
+  })
+  {
+    CAPTURE(divider);
+    rig const r;
+    r.write("ADC_Common", "ADC_CCR", prescaler << 18);
+    r.write("ADC1", "ADC_CR", advregen);
+    auto const at = r.now();
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    r.run_until(at + cycle_ps * divider);
+    CHECK(r.isr("ADRDY") == 0);
+    r.run_until(at + (15 * divider - 1) * cycle_ps);
+    CHECK(r.isr("ADRDY") == 0);
+    r.run_until(at + 15 * divider * cycle_ps);
+    CHECK(r.isr("ADRDY") == 1);
+  }
+}
+
+TEST_CASE(
+    "ADEN in deep power-down or with ADVREGEN 0 sets no ADRDY, and ADDIS before ADRDY drops the "
+    "pending ADRDY")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", deeppwd | aden);
+  r.settle();
+  CHECK(r.isr("ADRDY") == 0);
+  r.write("ADC1", "ADC_CR", aden | addis);
+  r.write("ADC1", "ADC_CR", aden);
+  r.settle();
+  CHECK(r.isr("ADRDY") == 0);
+  r.write("ADC1", "ADC_CR", aden | addis);
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CR", advregen | aden);
+  r.run_until(r.now() + 5 * cycle_ps);
+  r.write("ADC1", "ADC_CR", advregen | aden | addis);
+  r.run_until(r.now() + 5 * cycle_ps);
+  auto const again = r.now();
+  r.write("ADC1", "ADC_CR", advregen | aden);
+  r.run_until(again + 14 * cycle_ps);
+  CHECK(r.isr("ADRDY") == 0);
+  r.run_until(again + 15 * cycle_ps);
+  CHECK(r.isr("ADRDY") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.8: ADCAL stays set for tCAL, 116 ADC clock cycles, DS10198 Table 76, and clears "
+    "CALFACT_S, or CALFACT_D with ADCALDIF")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CALFACT", 0x007F'007Fu);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  CHECK(r.get("ADC1", "ADC_CALFACT", "CALFACT_S") == 0);
+  CHECK(r.get("ADC1", "ADC_CALFACT", "CALFACT_D") == 0x7F);
+  r.write("ADC1", "ADC_CR", advregen);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  r.run_until(at + 115 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  r.run_until(at + 116 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 0);
+  r.write("ADC1", "ADC_CR", advregen | adcaldif | adcal);
+  CHECK(r.get("ADC1", "ADC_CALFACT", "CALFACT_D") == 0);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.9 as corrected by ES0250 2.8.4: ADEN written while ADCAL is set or within 4 ADC "
+    "clock cycles after it clears is dropped and logged once, a model_error when strict")
+{
+  {
+    rig const r;
+    r.write("ADC1", "ADC_CR", advregen);
+    auto const at = r.now();
+    r.write("ADC1", "ADC_CR", advregen | adcal);
+    r.write("ADC1", "ADC_CR", advregen | adcal | aden);
+    CHECK(r.get("ADC1", "ADC_CR", "ADEN") == 0);
+    r.run_until(at + 116 * cycle_ps);
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    CHECK(r.get("ADC1", "ADC_CR", "ADEN") == 0);
+    r.run_until(at + 119 * cycle_ps);
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    CHECK(r.get("ADC1", "ADC_CR", "ADEN") == 0);
+    r.settle();
+    CHECK(r.isr("ADRDY") == 0);
+    auto const logged = r.warnings();
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("ES0250 2.8.4"));
+    r.run_until(at + 200 * cycle_ps);
+    auto const late = r.now();
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    CHECK(r.get("ADC1", "ADC_CR", "ADEN") == 1);
+    r.run_until(late + 15 * cycle_ps);
+    CHECK(r.isr("ADRDY") == 1);
+  }
+  rig const r{true};
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f->target->mem().write(r.at("ADC1", "ADC_CR"), 4, advregen | aden)),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "RM0351 18.4.8: ADCAL with ADEN 1, DEEPPWD 1 or ADVREGEN 0 is ignored and logged once, a "
+    "model_error when strict")
+{
+  for(auto const setup : {advregen | aden, deeppwd, 0u})
+  {
+    CAPTURE(setup);
+    rig const r;
+    r.write("ADC1", "ADC_CR", setup == (advregen | aden) ? advregen : setup);
+    r.write("ADC1", "ADC_CR", setup);
+    r.write("ADC1", "ADC_CR", setup | adcal);
+    CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 0);
+    auto const logged = r.warnings();
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("ADCAL written with ADEN 1, DEEPPWD 1 or ADVREGEN 0"));
+  }
+  rig const r{true};
+  r.write("ADC1", "ADC_CR", 0);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f->target->mem().write(r.at("ADC1", "ADC_CR"), 4, adcal)),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "a calibration without an ADC kernel clock waits, then runs its 116 cycles from the ADCSEL "
+    "write that selects a clock")
+{
+  rig const r;
+  r.set("RCC", "CCIPR", "ADCSEL", 0);
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.settle();
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  auto const at = r.now();
+  r.set("RCC", "CCIPR", "ADCSEL", 3);
+  r.run_until(at + 115 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  r.run_until(at + 116 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 0);
+}
+
+TEST_CASE(
+    "checklist 31: ADCRST during a calibration drops its end, a calibration started after it "
+    "ends 116 cycles after its own start")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.run_until(at + 40 * cycle_ps);
+  popcorn::testing::rcc_reset_pulse(*r.f, "AHB2RSTR", "ADCRST");
+  CHECK(r.read("ADC1", "ADC_CR") == deeppwd);
+  r.write("ADC1", "ADC_CR", advregen);
+  auto const again = r.now();
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.run_until(at + 120 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  r.run_until(again + 116 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 0);
+}
+
+TEST_CASE(
+    "checklist 31: ADCRST during a calibration drops its end for a calibration that then waits "
+    "for a kernel clock")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.run_until(at + 40 * cycle_ps);
+  popcorn::testing::rcc_reset_pulse(*r.f, "AHB2RSTR", "ADCRST");
+  r.set("RCC", "CCIPR", "ADCSEL", 0);
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.run_until(at + 120 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  auto const clocked = r.now();
+  r.set("RCC", "CCIPR", "ADCSEL", 3);
+  r.run_until(clocked + 115 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  r.run_until(clocked + 116 * cycle_ps);
+  CHECK(r.get("ADC1", "ADC_CR", "ADCAL") == 0);
+}
+
+TEST_CASE(
+    "a snapshot taken during a calibration ends it at the same time once restored and keeps "
+    "the ADEN lockout after it")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", advregen | adcal);
+  r.run_until(at + 50 * cycle_ps);
+  auto const saved = r.f->target->snapshot();
+  r.run_until(at + 117 * cycle_ps);
+  CHECK(
+      popcorn::testing::saved_integer(*r.f, "ADC1", "enable_lock_ps")
+      == static_cast<std::int64_t>(at + 120 * cycle_ps));
+  auto const bytes = core::encode_snapshot(saved.data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(at + 115 * cycle_ps);
+  CHECK(fresh.get("ADC1", "ADC_CR", "ADCAL") == 1);
+  fresh.run_until(at + 117 * cycle_ps);
+  CHECK(fresh.get("ADC1", "ADC_CR", "ADCAL") == 0);
+  fresh.write("ADC1", "ADC_CR", advregen | aden);
+  CHECK(fresh.get("ADC1", "ADC_CR", "ADEN") == 0);
+}
+
+TEST_CASE(
+    "RM0351 18.4.11 caution: a channel converted with its GPIOx_ASCR switch open reads 0 and logs "
+    "once, a model_error at ADSTART when strict, the pads of RM0351 Figures 68 to 70")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::uint32_t    channel;
+    std::string_view port;
+    std::uint32_t    pin;
+  };
+  for(auto const& [unit, channel, port, pin] : {
+          leg{"ADC1", 1,  "GPIOC", 0 },
+          leg{"ADC1", 5,  "GPIOA", 0 },
+          leg{"ADC2", 16, "GPIOB", 1 },
+          leg{"ADC3", 6,  "GPIOF", 3 },
+          leg{"ADC3", 13, "GPIOF", 10},
+  })
+  {
+    CAPTURE(unit);
+    CAPTURE(channel);
+    rig const r;
+    r.write(port, "ASCR", 0xFFFFu & ~(1u << pin));
+    r.enable(unit);
+    r.port(unit).drive(channel, 750'000);
+    CHECK(r.convert(channel, unit) == 0);
+    auto const logged = r.warnings();
+    REQUIRE(logged.size() == 1);
+    CHECK(
+        logged[0].message.contains(
+            std::format("channel {} converted with {}_ASCR.ASC{} clear", channel, port, pin)));
+    r.write(port, "ASCR", 0xFFFF);
+    CHECK(r.convert(channel, unit) == 1024);
+    CHECK(r.warnings().size() == 1);
+  }
+  rig const r{true};
+  r.write("GPIOC", "ASCR", 0);
+  r.enable();
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          r.f->target->mem().write(r.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "a snapshot taken during a regular sequence keeps the driven inputs and ends it at the same "
+    "time once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_SQR1", 1u | 1u << 6 | 2u << 12);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  r.run_until(at + 20 * cycle_ps);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.port().input(1) == 1'500'000);
+  fresh.run_until(at + 29 * cycle_ps);
+  CHECK(fresh.isr("EOS") == 0);
+  fresh.run_until(at + 30 * cycle_ps);
+  CHECK(fresh.isr("EOS") == 1);
+  CHECK(fresh.cpu_read("ADC1", "ADC_DR") == 1024);
+  CHECK(fresh.get("ADC1", "ADC_CR", "ADSTART") == 0);
+}
+
+namespace
+{
+struct firmware_result
+{
+  std::vector<std::uint32_t>    log;
+  std::vector<core::log_record> warnings;
+};
+
+auto run_adc_ll(std::string_view entry) -> firmware_result
+{
+  stm32::board board{};
+  board.supply.vdda_mv = vdda_mv;
+  auto options         = popcorn::testing::stm32_options();
+  options.models       = stm32::factories(board, l476rc());
+  auto const      f    = std::make_unique<stm32_fixture>(l476rc(), adc_ll, std::move(options));
+  firmware_result out;
+  auto const      sink = f->target->add_log_sink([&out](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      out.warnings.push_back(record);
+    }
+  });
+  auto* const     port = f->model_of<stm32::analog_port>("ADC1");
+  REQUIRE(port != nullptr);
+  port->drive(5, 1'500'000);
+  if(entry != "main")
+  {
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(adc_ll, "main")}).reason
+        == stop_reason::address);
+    f->set("pc", sym(adc_ll, entry));
+  }
+  auto const stopped = f->run_to_stop({.max_instructions = icount{1'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  out.log = f->log();
+  return out;
+}
+}
+
+TEST_CASE(
+    "LL firmware: calibration, ADEN after LL_ADC_DELAY_CALIB_ENABLE_ADC_CYCLES, PA0 with ASCR at "
+    "1500 mV reads 2048, VREFINT reads VREFINT_CAL, TS reads TS_CAL1, VREF+ computes to 3000 mV")
+{
+  auto const run = run_adc_ll("main");
+  CHECK(run.log == std::vector<std::uint32_t>{0, 1, 2048, vrefint_cal, ts_cal1, 3000});
+  CHECK(run.warnings.empty());
+}
+
+TEST_CASE(
+    "LL firmware, ES0250 2.8.4: LL_ADC_Enable right after the calibration leaves the ADC disabled "
+    "with no ADRDY, logged once")
+{
+  auto const run = run_adc_ll("aden_at_once");
+  CHECK(run.log == std::vector<std::uint32_t>{0, 0});
+  REQUIRE(run.warnings.size() == 1);
+  CHECK(run.warnings[0].message.contains("ES0250 2.8.4"));
 }

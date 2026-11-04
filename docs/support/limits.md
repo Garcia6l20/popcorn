@@ -282,8 +282,19 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   26:16, RM0351 18.8.1. ADC3 has no `ADC_CSR` bits.
 - `ADC_DR` holds one result. Under OVRMOD 0 a result that finds EOC set sets OVR and is
   discarded, and so is every result while OVR stays set, RM0351 18.4.26.
-- Deviation: ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD clear. DS10198 Table 76
-  gives a tSTAB of one conversion cycle.
+- ADRDY sets 15 ADC clock cycles after the ADEN write, the DS10198 Table 76 tSTAB of one
+  conversion cycle read as one 12-bit conversion at SMP 000, inferred. The tADCVREG_STUP wait of
+  Table 76 is the firmware's.
+- A calibration keeps ADCAL set for 116 ADC clock cycles, the DS10198 Table 76 tCAL, and leaves
+  CALFACT_S or CALFACT_D at 0, inferred: popcorn converts with no offset error. Without a kernel
+  clock it waits for one. An ADEN write within 4 ADC clock cycles after ADCAL clears is dropped,
+  RM0351 18.4.9 as corrected by ES0250 2.8.4.
+- A channel converted with the `GPIOx_ASCR` switch of its pad open reads 0, inferred, logged once,
+  a model_error under strict_peripherals.
+- ES0250 2.8.11 and 2.8.12, a wrong first result after 1 ms idle and spurious temperature
+  samples, have no counterpart: every result is the converted input. ES0250 2.8.18, the clamp of
+  an ADC input to VDD, has none either: inputs saturate at VDDA. ES0250 2.2.4, the VREFINT
+  corruption at Stop entry, has none: Stop is not modelled.
 - With ROVSE, AWD1 compares `ADC_DR[15:4]`, RM0351 18.4.30. AWD2 and AWD3 compare `ADC_DR[15:8]`,
   the STM32H5 rule, inferred: RM0351 18.4.29 and 18.4.30 give no oversampled rule for them.
 - VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`. The ADC2 channels 17 and 18

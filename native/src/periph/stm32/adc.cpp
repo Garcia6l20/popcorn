@@ -2,6 +2,7 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
 #include "factory_data.hpp"
+#include "gpio_peers.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -18,6 +19,7 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,13 +37,15 @@ constexpr std::uint32_t conversion_end     = 0;
 constexpr std::uint32_t sampling_end       = 1;
 constexpr std::uint32_t ready_end          = 2;
 constexpr std::uint32_t edge_due           = 3;
+constexpr std::uint32_t calibration_end    = 4;
 constexpr std::size_t   trigger_selections = 32;
 constexpr std::uint32_t exten_rising       = 1;
 constexpr std::uint32_t exten_falling      = 2;
 constexpr std::size_t   watchdogs          = 3;
 constexpr std::uint8_t  max_filter_count   = 8;
 
-using ready_pair = std::optional<std::array<std::uint32_t, 2>>;
+using ready_pair  = std::optional<std::array<std::uint32_t, 2>>;
+using cycle_count = std::optional<std::uint32_t>;
 
 enum class dma_mode : std::uint8_t
 {
@@ -172,6 +176,16 @@ template <typename Enum> [[nodiscard]] auto trigger_signals() -> std::array<std:
   return signals;
 }
 
+struct adc_state;
+struct l4_adc_state;
+
+struct adc_pad
+{
+  std::uint8_t channel;
+  char         port;
+  std::uint8_t pin;
+};
+
 struct adc_inputs
 {
   std::string_view             instance;
@@ -180,6 +194,7 @@ struct adc_inputs
   std::string_view             irq{};
   std::uint32_t                externals{};
   std::string_view             external_names{};
+  std::span<adc_pad const>     pads{};
 };
 
 struct threshold_names
@@ -235,6 +250,7 @@ struct u5_adc
 {
   using sequence     = rank_sequence;
   using trigger_enum = regular_trigger;
+  using state        = adc_state;
 
   static constexpr std::string_view unit_name           = "ADC";
   static constexpr std::string_view config              = "ADC_CFGR1";
@@ -253,6 +269,9 @@ struct u5_adc
   static constexpr bool             trigger_waits_edge  = false;
   static constexpr ready_pair       ready_cycles        = std::nullopt;
   static constexpr std::uint32_t    result_mask         = 0xFFFF'FFFF;
+  static constexpr cycle_count      ready_adc_cycles    = std::nullopt;
+  static constexpr cycle_count      calibration_cycles  = std::nullopt;
+  static constexpr std::uint32_t    enable_lockout      = 0;
   static constexpr unsigned         bits                = 14;
   static constexpr address          ts_cal1_address     = 0x0BFA'0710;
   static constexpr address          vrefint_cal_address = 0x0BFA'07A5;
@@ -341,6 +360,7 @@ struct h5_adc
 {
   using sequence     = rank_sequence;
   using trigger_enum = h5_regular_trigger;
+  using state        = adc_state;
 
   static constexpr std::string_view unit_name          = "ADC";
   static constexpr std::string_view config             = "ADC_CFGR";
@@ -369,6 +389,9 @@ struct h5_adc
    *        STM32H573 with the ADC clock at HCLK.
    */
   static constexpr ready_pair       ready_cycles        = std::array<std::uint32_t, 2>{35, 45};
+  static constexpr cycle_count      ready_adc_cycles    = std::nullopt;
+  static constexpr cycle_count      calibration_cycles  = std::nullopt;
+  static constexpr std::uint32_t    enable_lockout      = 0;
   static constexpr std::uint32_t    result_mask         = 0xFFFF;
   static constexpr unsigned         bits                = 12;
   static constexpr address          ts_cal1_address     = 0x08FF'F814;
@@ -469,6 +492,40 @@ struct h5_adc
   }
 };
 
+constexpr std::array<adc_pad, 16> l4_adc12_pads{
+    {{1, 'C', 0},
+     {2, 'C', 1},
+     {3, 'C', 2},
+     {4, 'C', 3},
+     {5, 'A', 0},
+     {6, 'A', 1},
+     {7, 'A', 2},
+     {8, 'A', 3},
+     {9, 'A', 4},
+     {10, 'A', 5},
+     {11, 'A', 6},
+     {12, 'A', 7},
+     {13, 'C', 4},
+     {14, 'C', 5},
+     {15, 'B', 0},
+     {16, 'B', 1}}
+};
+
+constexpr std::array<adc_pad, 12> l4_adc3_pads{
+    {{1, 'C', 0},
+     {2, 'C', 1},
+     {3, 'C', 2},
+     {4, 'C', 3},
+     {6, 'F', 3},
+     {7, 'F', 4},
+     {8, 'F', 5},
+     {9, 'F', 6},
+     {10, 'F', 7},
+     {11, 'F', 8},
+     {12, 'F', 9},
+     {13, 'F', 10}}
+};
+
 /**
  * @brief Family traits of the STM32L47x and STM32L48x ADC1, ADC2 and ADC3, `aditf5_v2_0_Cube`,
  *        RM0351 section 18: register names, 12-bit codes, the sampling times of RM0351 18.4.12
@@ -480,6 +537,7 @@ struct l4_adc
 {
   using sequence     = rank_sequence;
   using trigger_enum = l4_regular_trigger;
+  using state        = l4_adc_state;
 
   static constexpr std::string_view unit_name          = "ADC";
   static constexpr std::string_view config             = "ADC_CFGR";
@@ -500,8 +558,14 @@ struct l4_adc
   static constexpr bool             overrun_flush      = false;
   static constexpr bool             dma_end_stops      = false;
   /** @brief A trigger at CKMODE 00 waits for the next ADC clock edge, inferred from DS10198. */
-  static constexpr bool             trigger_waits_edge  = true;
-  static constexpr ready_pair       ready_cycles        = std::nullopt;
+  static constexpr bool       trigger_waits_edge = true;
+  static constexpr ready_pair ready_cycles       = std::nullopt;
+  /** @brief tSTAB, DS10198 Table 76 one conversion cycle, as one 12-bit conversion, inferred. */
+  static constexpr cycle_count ready_adc_cycles = 15;
+  /** @brief tCAL, DS10198 Table 76 typical. */
+  static constexpr cycle_count calibration_cycles = 116;
+  /** @brief ADC clock cycles after ADCAL clears that drop an ADEN write, RM0351 18.4.9. */
+  static constexpr std::uint32_t    enable_lockout      = 4;
   static constexpr std::uint32_t    result_mask         = 0xFFFF;
   static constexpr unsigned         bits                = 12;
   static constexpr address          ts_cal1_address     = 0x1FFF'75A8;
@@ -539,14 +603,23 @@ struct l4_adc
   static constexpr std::array<std::string_view, 2> dma_fields{"DMAEN", "DMACFG"};
   static constexpr std::array<std::uint32_t, 3>    synchronous_dividers{1, 2, 4};
   static constexpr std::array<adc_inputs, 3>       inputs{
-      {{.instance = "ADC1", .vrefint = 0, .sensor = 17, .irq = "ADC1_2_IRQn"},
-       {.instance = "ADC2", .vrefint = std::nullopt, .sensor = std::nullopt, .irq = "ADC1_2_IRQn"},
+      {{.instance = "ADC1",
+        .vrefint  = 0,
+        .sensor   = 17,
+        .irq      = "ADC1_2_IRQn",
+        .pads     = l4_adc12_pads},
+       {.instance = "ADC2",
+        .vrefint  = std::nullopt,
+        .sensor   = std::nullopt,
+        .irq      = "ADC1_2_IRQn",
+        .pads     = l4_adc12_pads},
        {.instance       = "ADC3",
         .vrefint        = std::nullopt,
         .sensor         = 17,
         .irq            = "ADC3_IRQn",
         .externals      = 0x3FDE,
-        .external_names = "1 to 4 or 6 to 13"}}
+        .external_names = "1 to 4 or 6 to 13",
+        .pads           = l4_adc3_pads}}
   };
   static constexpr std::array<threshold_names, watchdogs> thresholds{
       {{"ADC_TR1", "LT1", "ADC_TR1", "HT1"},
@@ -640,6 +713,32 @@ struct adc_state
   std::uint32_t                       edge_generation{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
+};
+
+struct l4_adc_state
+{
+  std::array<std::uint32_t, channels> input_uv{};
+  std::uint32_t                       generation{};
+  std::uint32_t                       ready_generation{};
+  std::uint64_t                       start_ps{};
+  std::uint64_t                       clock_hz{};
+  std::uint32_t                       divider{};
+  std::uint32_t                       held{};
+  std::uint32_t                       sum{};
+  bool                                converting{};
+  bool                                waiting_clock{};
+  std::uint8_t                        rank{};
+  std::uint8_t                        subgroup_left{};
+  std::vector<std::uint32_t>          data;
+  bool                                dma_stopped{};
+  std::uint8_t                        filter_count{};
+  std::array<adc_edge, 2>             edges{};
+  std::uint32_t                       edge_generation{};
+  std::uint32_t                       calibration_generation{};
+  bool                                calibration_waiting{};
+  std::uint64_t                       enable_lock_ps{};
+
+  friend auto operator==(l4_adc_state const&, l4_adc_state const&) -> bool = default;
 };
 
 struct adc_common_state
@@ -1007,35 +1106,49 @@ struct adc_clock
  *        with these differences. ADC_DR holds one result, RM0351 18.4.26: with OVRMOD 0 a result
  *        finding EOC set sets OVR and is discarded, and every result while OVR stays set. ADC1 and
  *        ADC2 raise ADC1_2_IRQn, ADC3 ADC3_IRQn. The kernel clock is the RCC_CCIPR.ADCSEL clock,
- *        common to the three ADCs. Deviation: ADRDY sets at the ADEN write with ADVREGEN set and
- *        DEEPPWD clear, where DS10198 Table 76 gives a tSTAB of one conversion cycle. The external
- *        channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3, RM0351 Figures 68 to
- *        70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the temperature sensor on
- *        17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000 / VDDA, RM0351
- *        18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15 of ADC3, and
- *        the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19 converts 0
- *        with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes 0 to 15:
- *        EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line SYSCFG_EXTICR3
- *        selects, and the TRGO2 selections 8 and 10, which no L4 timer model produces, log a
- *        warning once, a model_error under strict_peripherals. At CKMODE 00 a trigger waits for the
- *        next ADC clock edge, counted from virtual time 0, then tLATR 1.5 cycles, which spans the
- *        1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01, 10 and 11 tLATR is 2,
- *        2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA transfer leaves ADSTART
- *        set, which RM0351 18.4.15 does not list among its hardware clears, and drops the
- *        conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the ADC clock
- *        outside 0.14 to 80 MHz logs a warning. With ROVSE AWD1 compares ADC_DR[15:4], RM0351
- *        18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB, SMPTRIG and
- *        SMPPLUS do not exist.
+ *        common to the three ADCs. With ADVREGEN set and DEEPPWD clear, ADRDY sets tSTAB after the
+ *        ADEN write, DS10198 Table 76 one conversion cycle, here 15 ADC clock cycles, a 12-bit
+ *        conversion at SMP 000, inferred. The regulator start-up wait tADCVREG_STUP is the
+ *        firmware's. An ADCAL write with ADEN 0, DEEPPWD 0 and ADVREGEN 1 starts a calibration:
+ *        ADCAL stays set for tCAL, 116 ADC clock cycles, DS10198 Table 76, and clears, and
+ *        CALFACT_S, or CALFACT_D with ADCALDIF, reads 0 from the write on, the factor of a
+ *        converter with no offset, inferred. An ADCAL write with ADEN 1, DEEPPWD 1 or ADVREGEN 0 is
+ *        ignored, logged once, a model_error under strict_peripherals, RM0351 18.4.8. An ADEN write
+ *        while ADCAL is set or within 4 ADC clock cycles after it clears is dropped, ADEN reads 0
+ *        and no ADRDY follows, RM0351 18.4.9 as corrected by ES0250 2.8.4, logged once, a
+ *        model_error under strict_peripherals. Without a kernel clock a calibration waits for one.
+ *        An external channel converts its input only while the GPIOx_ASCR switch of its pad is
+ *        closed, RM0351 18.4.11, the pads of RM0351 Figures 68 to 70, PC0 to PC3 for channels 1 to
+ *        4, PA0 to PA7 for 5 to 12, PC4, PC5, PB0, PB1 for 13 to 16 on ADC1 and ADC2, PF3 to PF10
+ *        for 6 to 13 on ADC3. A sequence converting a channel with its switch open logs a warning
+ *        once, a model_error under strict_peripherals, and converts it as 0, the open-switch value
+ *        inferred. The external channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3,
+ *        RM0351 Figures 68 to 70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the
+ *        temperature sensor on 17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000
+ *        / VDDA, RM0351 18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15
+ *        of ADC3, and the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19
+ *        converts 0 with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes
+ *        0 to 15: EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line
+ *        SYSCFG_EXTICR3 selects, and the TRGO2 selections 8 and 10, which no L4 timer model
+ *        produces, log a warning once, a model_error under strict_peripherals. At CKMODE 00 a
+ *        trigger waits for the next ADC clock edge, counted from virtual time 0, then tLATR 1.5
+ *        cycles, which spans the 1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01,
+ *        10 and 11 tLATR is 2, 2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA
+ *        transfer leaves ADSTART set, which RM0351 18.4.15 does not list among its hardware clears,
+ *        and drops the conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the
+ *        ADC clock outside 0.14 to 80 MHz logs a warning. With ROVSE AWD1 compares ADC_DR[15:4],
+ *        RM0351 18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB,
+ *        SMPTRIG and SMPPLUS do not exist.
  */
 template <typename Traits>
-class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
+class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
                         public analog_port,
                         public clock_listener,
                         public dma_requester,
                         public trigger_sink,
                         public bus_reset_listener
 {
-  using base = dispatch_model<adc_model<Traits>, adc_state>;
+  using base = dispatch_model<adc_model<Traits>, typename Traits::state>;
   static_assert(not Traits::filter_gates_dma or not Traits::filter_field.empty());
   using base::claims;
   using base::ctx_;
@@ -1140,6 +1253,11 @@ private:
   [[nodiscard]] auto option_switch_set() const -> bool;
   void               check_option_switch(std::uint32_t channel);
   [[nodiscard]] auto option_open(std::uint32_t channel) const -> bool;
+  [[nodiscard]] auto switch_open(std::uint32_t channel) const -> std::optional<adc_pad>;
+  void               check_analog_switch(std::uint32_t channel);
+  [[nodiscard]] auto calibration_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t;
+  void               start_calibration();
+  void               end_calibration();
   void               warn_once(bool& logged, std::string_view reg, std::string_view what);
   void               unmodelled(bool& logged, std::string_view name, std::string_view what);
   void               forbidden(bool& logged, std::string_view name, std::string message);
@@ -1195,6 +1313,9 @@ private:
   field_ref                                        triggered_oversampling_;
   reg_ref                                          differential_;
   std::optional<field_ref>                         differential_field_;
+  std::optional<field_ref>                         calibration_mode_;
+  std::optional<field_ref>                         factor_single_;
+  std::optional<field_ref>                         factor_differential_;
   std::array<field_ref, channels>                  sampling_;
   std::array<offset_fields, offsets>               offsets_;
   std::optional<std::array<field_ref, channels>>   preselection_;
@@ -1228,6 +1349,9 @@ private:
   bool                                             sampling_trigger_logged_{};
   bool                                             triggered_oversampling_logged_{};
   bool                                             differential_logged_{};
+  bool                                             switch_logged_{};
+  bool                                             calibration_refused_logged_{};
+  bool                                             enable_lost_logged_{};
 };
 
 template <typename Traits>
@@ -1288,6 +1412,12 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
       triggered_oversampling_{field("ADC_CFGR2", "TROVS")}, differential_{reg("ADC_DIFSEL")},
       differential_field_{
           optional_field(not Traits::differential.empty(), "ADC_DIFSEL", Traits::differential)},
+      calibration_mode_{
+          optional_field(Traits::calibration_cycles.has_value(), "ADC_CR", "ADCALDIF")},
+      factor_single_{
+          optional_field(Traits::calibration_cycles.has_value(), "ADC_CALFACT", "CALFACT_S")},
+      factor_differential_{
+          optional_field(Traits::calibration_cycles.has_value(), "ADC_CALFACT", "CALFACT_D")},
       watchdog1_{field(Traits::config, "AWD1EN")},
       watchdog1_single_{field(Traits::config, "AWD1SGL")},
       watchdog1_channel_{field(Traits::config, "AWD1CH")}, watchdog1_filter_{optional_field(
@@ -1602,6 +1732,12 @@ template <typename Traits> void adc_model<Traits>::restore_reset_values()
   state_.filter_count = 0;
   state_.edges        = {};
   ++state_.edge_generation;
+  if constexpr(Traits::calibration_cycles.has_value())
+  {
+    ++state_.calibration_generation;
+    state_.calibration_waiting = false;
+    state_.enable_lock_ps      = 0;
+  }
   request_.resolve();
   signal();
 }
@@ -1635,6 +1771,18 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   {
     now = regulator_.with(now, 0);
   }
+  auto lost = false;
+  if constexpr(Traits::calibration_cycles.has_value())
+  {
+    now  = calibration_written(old, now);
+    lost = enable_.of(now) != 0
+       and enable_.of(old) == 0
+       and (calibrate_.of(now) != 0 or ctx_.clock.time().ps < state_.enable_lock_ps);
+    if(lost)
+    {
+      now = enable_.with(now, 0);
+    }
+  }
   regs_.poke(enable_.offset, now);
   if constexpr(Traits::regulator_flag)
   {
@@ -1642,7 +1790,17 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
         regs_, *regulator_ready_,
         regulator_.of(now) != 0 and deep_power_down_.of(now) == 0 ? 1u : 0u);
   }
-  update(regs_, calibrate_, 0);
+  if constexpr(not Traits::calibration_cycles.has_value())
+  {
+    update(regs_, calibrate_, 0);
+  }
+  if(lost)
+  {
+    forbidden(
+        enable_lost_logged_, "ADC_CR",
+        "ADEN set while ADCAL is set or within 4 ADC clock cycles after it clears, RM0351 18.4.9 "
+        "as corrected by ES0250 2.8.4: ADEN is cleared and the ADC stays disabled");
+  }
   if(injected_start_.of(now) != 0)
   {
     update(regs_, injected_start_, 0);
@@ -1661,7 +1819,29 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   }
   if(enable_.of(now) != 0 and enable_.of(old) == 0)
   {
-    if constexpr(Traits::ready_cycles.has_value())
+    if constexpr(Traits::ready_adc_cycles.has_value())
+    {
+      if(regulator_.of(now) != 0 and deep_power_down_.of(now) == 0)
+      {
+        auto const clock = source();
+        if(clock.hz == 0)
+        {
+          if(not std::exchange(no_clock_logged_, true))
+          {
+            warn("ADC_CR", "no ADC kernel clock: ADRDY waits");
+          }
+        }
+        else
+        {
+          ctx_.events.schedule_at(
+              vtime{
+                  ctx_.clock.time().ps
+                  + cycles_ps(*Traits::ready_adc_cycles, 1, clock.divider, clock.hz)},
+              ready_end, ++state_.ready_generation, ctx_.clock);
+        }
+      }
+    }
+    else if constexpr(Traits::ready_cycles.has_value())
     {
       if(deep_power_down_.of(now) == 0)
       {
@@ -1705,6 +1885,85 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   }
   signal();
   refuse_start(refused);
+}
+
+template <typename Traits>
+auto adc_model<Traits>::calibration_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t
+{
+  if(calibrate_.of(now) == 0 or calibrate_.of(old) != 0)
+  {
+    return now;
+  }
+  if(enable_.of(old) != 0 or deep_power_down_.of(now) != 0 or regulator_.of(now) == 0)
+  {
+    forbidden(
+        calibration_refused_logged_, "ADC_CR",
+        "ADCAL written with ADEN 1, DEEPPWD 1 or ADVREGEN 0, RM0351 18.4.8: the write is ignored");
+    return calibrate_.with(now, 0);
+  }
+  auto const factor = calibration_mode_->of(now) != 0 ? *factor_differential_ : *factor_single_;
+  update(regs_, factor, 0);
+  start_calibration();
+  return now;
+}
+
+template <typename Traits> void adc_model<Traits>::start_calibration()
+{
+  auto const clock = source();
+  if(clock.hz == 0)
+  {
+    if(not std::exchange(no_clock_logged_, true))
+    {
+      warn("ADC_CR", "no ADC kernel clock: the calibration waits");
+    }
+    state_.calibration_waiting = true;
+    return;
+  }
+  state_.calibration_waiting = false;
+  ctx_.events.schedule_at(
+      vtime{
+          ctx_.clock.time().ps
+          + cycles_ps(*Traits::calibration_cycles, 1, clock.divider, clock.hz)},
+      calibration_end, ++state_.calibration_generation, ctx_.clock);
+}
+
+template <typename Traits> void adc_model<Traits>::end_calibration()
+{
+  auto const clock = source();
+  update(regs_, calibrate_, 0);
+  state_.enable_lock_ps =
+      ctx_.clock.time().ps
+      + (clock.hz == 0 ? 0 : cycles_ps(Traits::enable_lockout, 1, clock.divider, clock.hz));
+  signal();
+}
+
+template <typename Traits>
+auto adc_model<Traits>::switch_open(std::uint32_t channel) const -> std::optional<adc_pad>
+{
+  auto const pad = std::ranges::find(inputs_.pads, channel, &adc_pad::channel);
+  if(pad == inputs_.pads.end())
+  {
+    return std::nullopt;
+  }
+  auto const* const port =
+      dynamic_cast<analog_switch_source const*>(ctx_.peers.find(std::format("GPIO{}", pad->port)));
+  if(port == nullptr or port->switch_closed(pad->pin))
+  {
+    return std::nullopt;
+  }
+  return *pad;
+}
+
+template <typename Traits> void adc_model<Traits>::check_analog_switch(std::uint32_t channel)
+{
+  if(auto const pad = switch_open(channel))
+  {
+    forbidden(
+        switch_logged_, "ADC_SQR1",
+        std::format(
+            "channel {} converted with GPIO{}_ASCR.ASC{} clear, RM0351 18.4.11: converted as 0",
+            channel, pad->port, pad->pin));
+  }
 }
 
 template <typename Traits> void adc_model<Traits>::refuse_start(bool refused)
@@ -1812,6 +2071,7 @@ template <typename Traits> void adc_model<Traits>::prepare()
     check_unmodelled(channel_at(rank));
     check_preselection(channel_at(rank));
     check_option_switch(channel_at(rank));
+    check_analog_switch(channel_at(rank));
     require_factory_word(channel_at(rank));
   }
 }
@@ -2322,6 +2582,17 @@ void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     return;
   }
+  if constexpr(Traits::calibration_cycles.has_value())
+  {
+    if(kind == calibration_end)
+    {
+      if(payload == state_.calibration_generation and get(regs_, calibrate_) != 0)
+      {
+        end_calibration();
+      }
+      return;
+    }
+  }
   if(kind == edge_due)
   {
     auto const found = std::ranges::find_if(state_.edges, [payload](adc_edge const& slot) {
@@ -2351,6 +2622,13 @@ void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 
 template <typename Traits> void adc_model<Traits>::on_clock_change()
 {
+  if constexpr(Traits::calibration_cycles.has_value())
+  {
+    if(state_.calibration_waiting and source().hz != 0)
+    {
+      start_calibration();
+    }
+  }
   if(state_.waiting_clock and source().hz != 0)
   {
     schedule(ctx_.clock.time().ps);
@@ -2391,7 +2669,7 @@ auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
              ? at_vdda<Traits>(calibration(Traits::ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
              : 0u;
   }
-  if(is_external(channel) and not option_open(channel))
+  if(is_external(channel) and not option_open(channel) and not switch_open(channel))
   {
     return code_of<Traits>(state_.input_uv[channel], supply_.vdda_mv);
   }
