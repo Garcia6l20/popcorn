@@ -31,6 +31,7 @@ using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
 using popcorn::testing::l476rc;
+using popcorn::testing::set_debug_freeze;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::trigger_probe;
@@ -1335,4 +1336,144 @@ TEST_CASE("RM0351 34.4.7: LL firmware SNGSTRT gives one CMPM and one ARRM, then 
   CHECK(run.reloads.front() - started > 35 * lsi_tick - us);
   CHECK(run.reloads.front() - started < 35 * lsi_tick + us);
 }
+}
+
+TEST_CASE("RM0351 48.16.4: DBG_LPTIM1_STOP freezes CNT, tick phase and CMPM due while held")
+{
+  rig        r;
+  auto const t = r.started(6, 100, cntstrt, presc(2), cmpm);
+  auto const a = t + 3 * cycle;
+  REQUIRE(r.pending() == a + 25 * cycle);
+  auto const x = a + 17 * cycle;
+  r.idle_to(x);
+  REQUIRE(r.read(lptim1 + cnt) == 4);
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  CHECK(r.pending() == std::nullopt);
+  r.idle_to(x + 40 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 4);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.f->target->hold_core(false);
+  auto const span = r.now_ps() - x;
+  CHECK(r.pending() == a + 25 * cycle + span);
+  r.idle_to(x + span + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 4);
+  r.idle_to(x + span + 3 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 5);
+  r.idle_to(a + 25 * cycle + span);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  CHECK((r.read(ispr2) & lptim1_irq) == lptim1_irq);
+}
+
+TEST_CASE("RM0351 48.16.5: DBG_LPTIM2_STOP freezes LPTIM2 only, LPTIM1 counts on while held")
+{
+  rig r;
+  r.write(lptim2 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  r.write(lptim2 + arr, 100);
+  r.write(lptim2 + cmp, 30);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  r.write(lptim2 + icr, cmpok | arrok);
+  static_cast<void>(r.started(30, 100));
+  r.write(lptim2 + cr, enable | cntstrt);
+  r.idle_to(r.now_ps() + 5 * cycle);
+  auto const first  = r.pending();
+  auto const second = r.pending("LPTIM2");
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  auto const x  = r.now_ps();
+  auto const c1 = r.read(lptim1 + cnt);
+  auto const c2 = r.read(lptim2 + cnt);
+  set_debug_freeze(*r.f, "DBG_LPTIM2_STOP", true);
+  r.f->target->hold_core(true);
+  CHECK(r.pending() == first);
+  CHECK(r.pending("LPTIM2") == std::nullopt);
+  r.idle_to(x + 10 * cycle);
+  CHECK(r.read(lptim1 + cnt) == c1 + 10);
+  CHECK(r.read(lptim2 + cnt) == c2);
+  r.f->target->hold_core(false);
+  CHECK(r.pending("LPTIM2") == *second + 10 * cycle);
+}
+
+TEST_CASE("RM0351 48.16.4: DBG_LPTIM1_STOP 0 leaves LPTIM1 counting while the core is held")
+{
+  rig        r;
+  auto const t = r.started(30, 100);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 5 * cycle);
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", false);
+  r.f->target->hold_core(true);
+  CHECK(r.pending() == a + 31 * cycle);
+  r.idle_to(a + 15 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 15);
+  r.f->target->hold_core(false);
+}
+
+TEST_CASE("inferred: a PCLK1 rate change while held keeps LPTIM1 frozen, the release runs at it")
+{
+  rig        r;
+  auto const t = r.started(30, 100);
+  auto const a = t + 3 * cycle;
+  auto const x = a + 5 * cycle;
+  r.idle_to(x);
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  r.idle_to(x + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 5);
+  CHECK(r.pending() == std::nullopt);
+  r.f->target->hold_core(false);
+  CHECK(r.pending() == r.now_ps() + 26 * 2 * cycle);
+}
+
+TEST_CASE("RM0351 34.4.14: the DBG_LPTIM1_STOP hold is kept across an LPTIM1RST pulse")
+{
+  rig r;
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  r.write(apb1rstr1, 1u << 31);
+  r.write(apb1rstr1, 0);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 10);
+  r.idle_to(r.now_ps() + 50 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == 0);
+  CHECK(r.pending() == std::nullopt);
+  r.f->target->hold_core(false);
+  auto const x = r.now_ps();
+  CHECK(r.pending() == x + 3 * cycle);
+  r.idle_to(x + 3 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == arrok);
+}
+
+TEST_CASE("RM0351 48.16.4: a power-on reset clears DBG_LPTIM1_STOP, LPTIM1 runs while held")
+{
+  rig r;
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  r.f->target->reset(popcorn::reset_kind::power_on);
+  r.write(apb1enr1, 1u << 31);
+  r.write(lptim1 + cr, enable);
+  auto const x = r.now_ps();
+  r.write(lptim1 + arr, 10);
+  CHECK(r.pending() == x + 3 * cycle);
+  r.idle_to(x + 3 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == arrok);
+  r.f->target->hold_core(false);
+}
+
+TEST_CASE("RM0351 48.16.4: a system reset keeps DBG_LPTIM1_STOP, LPTIM1 stays frozen while held")
+{
+  rig r;
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.write(apb1enr1, 1u << 31);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 10);
+  r.idle_to(r.now_ps() + 50 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == 0);
+  CHECK(r.pending() == std::nullopt);
+  r.f->target->hold_core(false);
+  auto const x = r.now_ps();
+  CHECK(r.pending() == x + 3 * cycle);
 }

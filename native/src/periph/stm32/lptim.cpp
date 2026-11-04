@@ -4,6 +4,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <algorithm>
 #include <array>
@@ -90,6 +91,7 @@ struct lptim_state
   std::uint8_t  polarity{};
   std::uint8_t  latched{};
   std::uint8_t  started_once{};
+  std::uint8_t  held{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -169,12 +171,20 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        the CFGR write, also with ENABLE 0, RM0351 34.4.9. ENABLE written to 0 and LPTIMxRST drop
  *        it to the inactive level at the write, inferred. A sink that starts listening sees the
  *        edges from then on. After a snapshot restore the output asks the sinks again at its first
- *        catch-up. The LPTIM counts on while the core is halted.
+ *        catch-up. While the machine holds its core with DBG_LPTIM1_STOP or DBG_LPTIM2_STOP
+ *        set, its counter clock stops, RM0351 34.4.14, 48.16.4 and 48.16.5, and the model
+ *        freezes it as a stopped kernel clock: CNT, the kernel clocks spent in the current tick
+ *        and those left before each pending term are kept and resume at the release, the
+ *        latencies inferred. A kernel rate change during the hold applies from the release,
+ *        inferred. The hold is kept across LPTIMxRST, RM0351 34.4.14. At a machine reset the
+ *        LPTIM reads DBG_LPTIMx_STOP again, which a system reset keeps and a power-on reset
+ *        clears, RM0351 48.16.4 and 48.16.5.
  *        Deviation: CNT reads exact, without the double-read rule of RM0351 34.7.8.
  */
 class lptim final : public dispatch_model<lptim, lptim_state>,
                     public clock_listener,
                     public bus_reset_listener,
+                    public core_hold_listener,
                     public trigger_source
 {
 public:
@@ -184,6 +194,7 @@ public:
   void               load(std::span<std::byte const> in) override;
   void               on_bus_reset() override;
   void               on_clock_change() override;
+  void               on_core_hold(bool held) override;
   void               interest_changed() override;
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
@@ -205,6 +216,7 @@ private:
   };
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
+  [[nodiscard]] auto kernel_hz() const -> std::uint64_t;
   [[nodiscard]] auto enabled() const -> bool;
   [[nodiscard]] auto anchor() const -> wide;
   [[nodiscard]] auto tick_unit() const -> wide;
@@ -263,6 +275,7 @@ private:
   bool                              value_logged_   = false;
   bool                              pending_logged_ = false;
   bool                              switch_logged_  = false;
+  bool                              freeze_logged_  = false;
   std::optional<bool>               listened_;
 };
 
@@ -309,6 +322,11 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
 auto lptim::now_ps() const -> std::uint64_t
 {
   return ctx_.clock.time().ps;
+}
+
+auto lptim::kernel_hz() const -> std::uint64_t
+{
+  return state_.held != 0 ? 0 : ctx_.clock.hz(kernel_);
 }
 
 auto lptim::enabled() const -> bool
@@ -833,7 +851,10 @@ void lptim::on_bus_reset()
   {
     out_.edge(trigger_edge::falling, now_ps());
   }
+  auto const held = state_.held;
   restore_reset_values();
+  state_.held = held;
+  state_.hz   = kernel_hz();
 }
 
 void lptim::restore_reset_values()
@@ -909,7 +930,7 @@ void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
 
 void lptim::on_clock_change()
 {
-  auto const hz = ctx_.clock.hz(kernel_);
+  auto const hz = kernel_hz();
   if(hz == state_.hz)
   {
     return;
@@ -917,6 +938,27 @@ void lptim::on_clock_change()
   auto const t = now_ps();
   catch_up(t);
   rebase(t, hz);
+  refresh();
+  reschedule();
+}
+
+void lptim::on_core_hold(bool held)
+{
+  if(held)
+  {
+    if(not debug_frozen(freeze_logged_) or state_.held != 0)
+    {
+      return;
+    }
+  }
+  else if(state_.held == 0)
+  {
+    return;
+  }
+  auto const t = now_ps();
+  catch_up(t);
+  state_.held = held ? 1 : 0;
+  rebase(t, kernel_hz());
   refresh();
   reschedule();
 }

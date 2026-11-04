@@ -988,8 +988,13 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   discarded until then, RM0351 34.4.7, the software start reading inferred. CMP at or above ARR
   keeps it inactive, inferred. WAVPOL inverts it at the CFGR write, also with ENABLE 0, RM0351
   34.4.9. ENABLE written to 0 and LPTIMxRST drop it to the inactive level at the write, inferred.
-- The LPTIM counts on while the core is halted, whatever DBG_LPTIM1_STOP and DBG_LPTIM2_STOP
-  hold.
+- While the core is halted with DBG_LPTIM1_STOP or DBG_LPTIM2_STOP set, that LPTIM's counter
+  clock stops, RM0351 34.4.14, 48.16.4 and 48.16.5. The model freezes it as a stopped kernel
+  clock: CNT, the kernel clocks spent in the current tick and those left before each pending
+  CMPOK, ARROK, match delay, mode switch and stop resume at the release, the latencies inferred.
+  A kernel rate change during the hold applies from the release, inferred. The hold is kept
+  across LPTIMxRST, RM0351 34.4.14. At a machine reset the LPTIM reads DBG_LPTIMx_STOP again,
+  which a system reset keeps and a power-on reset clears, RM0351 48.16.4 and 48.16.5.
 - EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and
   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
   stuck at Stop entry or at a flag clear racing a new event, are outside the model.
