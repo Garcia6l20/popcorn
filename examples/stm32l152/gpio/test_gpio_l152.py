@@ -108,3 +108,17 @@ async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
     await press(second)
     assert second.var("presses").value == 1
     assert second.periph.GPIOA.pin(5).level
+
+
+async def test_the_led_toggles_on_the_falling_edge_while_the_button_is_held(
+    gpio: Machine,
+) -> None:
+    await settle(gpio)
+    button = gpio.periph.GPIOC.pin(13)
+    led = gpio.periph.GPIOA.pin(5)
+    button.level = 0
+    await settle(gpio)
+    assert (led.level, gpio.var("presses").value) == (True, 1)
+    button.level = 1
+    await settle(gpio)
+    assert (led.level, gpio.var("presses").value) == (True, 1)
