@@ -304,6 +304,22 @@ struct rig
     return started + (ccr.empty() ? ms : 400 * us);
   }
 
+  [[nodiscard]] auto dues(std::string_view unit = "ADC1") const -> std::vector<std::uint64_t>
+  {
+    auto const& units = f->target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, unit, &popcorn::peripheral_desc::name) - units.begin());
+    std::vector<std::uint64_t> out;
+    for(auto const& event : f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner)
+      {
+        out.push_back(event.due_ps);
+      }
+    }
+    return out;
+  }
+
   [[nodiscard]] auto last_due(std::string_view unit = "ADC1") const -> std::uint64_t
   {
     auto const& units = f->target->description().peripherals;
@@ -1176,8 +1192,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the injected and regular groups overlapping, JQDIS 0, JAUTO and JOVSE each log once, a "
-    "model_error when strict")
+    "JQDIS 0, JAUTO, JOVSE and an injection into a ROVSE sequence with ROVSM 0 each log once, "
+    "a model_error when strict")
 {
   struct leg
   {
@@ -1185,24 +1201,20 @@ TEST_CASE(
     std::function_ref<void(rig const&)> setup;
     std::uint32_t                       cr;
   };
-  auto const regular = [](rig const& r) {
+  auto const continued = [](rig const& r) {
+    r.write("ADC1", "ADC_CFGR2", 1u);
     r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
     r.start(1);
-  };
-  auto const injected = [](rig const& r) {
-    r.write("ADC1", "ADC_SMPR1", 7u << 3);
-    r.write("ADC1", "ADC_JSQR", jsqr({1}));
-    r.write("ADC1", "ADC_CR", enabled | jadstart);
   };
   auto const queue     = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
   auto const automatic = [](rig const& r) { r.write("ADC1", "ADC_CFGR", jqdis | jauto); };
   auto const sampled   = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
   for(auto const& [what, setup, cr] : {
-          leg{"injected preemption",              regular,   enabled | adstart | jadstart},
-          leg{"the regular conversions after it", injected,  enabled | jadstart | adstart},
-          leg{"JQDIS 0",                          queue,     enabled | jadstart          },
-          leg{"JAUTO",                            automatic, enabled | adstart           },
-          leg{"JOVSE",                            sampled,   enabled | jadstart          },
+          leg{"ROVSM 0", continued, enabled | adstart | jadstart},
+          leg{"JQDIS 0", queue,     enabled | jadstart          },
+          leg{"JAUTO",   automatic, enabled | adstart           },
+          leg{"JOVSE",   sampled,   enabled | jadstart          },
   })
   {
     CAPTURE(what);
@@ -1223,6 +1235,307 @@ TEST_CASE(
         static_cast<void>(strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, cr)),
         popcorn::model_error);
   }
+}
+
+TEST_CASE(
+    "RM0351 18.4.31: an injection into a ROVSE x2 conversion with ROVSM 1 logs nothing, the "
+    "dropped rank converts two fresh samples after JEOS")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 10);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.start(1);
+  r.run_until(r.now() + 100 * cycle_ps);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 15) * cycle_ps / 8;
+  r.run_until(injected);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  r.run_until(injected + cycle_ps);
+  CHECK(std::ranges::contains(r.dues(), injected + 2 * 653 * cycle_ps));
+  r.run_until(injected + 2 * 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: JADSTART during the second regular rank drops it, the injected group starts "
+    "after tLATRINJ, the dropped rank converts again after JEOS")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 375'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_SQR1", 1u | 2u << 6 | 1u << 12);
+  r.write("ADC1", "ADC_JSQR", jsqr({3}));
+  auto const start = r.now();
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(start + 15 * cycle_ps);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1024);
+  r.run_until(start + 100 * cycle_ps);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 15) * cycle_ps / 8;
+  r.run_until(at + us);
+  CHECK(std::ranges::contains(r.dues(), injected));
+  r.run_until(injected);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 512);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  r.run_until(injected + cycle_ps);
+  CHECK(std::ranges::contains(r.dues(), injected + 653 * cycle_ps));
+  r.run_until(injected + 652 * cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(injected + 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.isr("EOS") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "DS10198 Table 76: tLATRINJ at CKMODE 01, 10 and 11 is 3, 3.25 and 3.125 cycles of HCLK / 1, "
+    "2 and 4, at CKMODE 00 the next ADC clock edge then 2.5 cycles, inferred")
+{
+  struct setting
+  {
+    std::uint32_t mode;
+    std::uint64_t divider;
+    std::uint64_t eighths;
+  };
+  for(auto const [mode, divider, eighths] : {
+          setting{0, 1, 20},
+          setting{1, 1, 24},
+          setting{2, 2, 26},
+          setting{3, 4, 25},
+  })
+  {
+    CAPTURE(mode);
+    rig const r;
+    r.write("ADC_Common", "ADC_CCR", ckmode(mode));
+    r.enable();
+    r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.write("ADC1", "ADC_CFGR", jqdis | cont);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+    auto const trigger = r.timer("TIM1", "");
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.start(1);
+    auto const period = cycle_ps * divider;
+    auto const edge   = mode == 0 ? edge_after(trigger, period) : 0;
+    auto const end    = trigger + edge + (eighths + 8 * 15) * period / 8;
+    r.run_until(trigger + us);
+    CHECK(std::ranges::contains(r.dues(), end));
+    CHECK(r.isr("JEOC") == 0);
+    r.run_until(end);
+    CHECK(r.isr("JEOC") == 1);
+    CHECK(r.warnings().empty());
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: a regular start and a TIM1 TRGO regular trigger during the injected group "
+    "wait for its end, the sequence starts at JEOS, inferred with no tLATR")
+{
+  for(auto const hardware : {false, true})
+  {
+    CAPTURE(hardware);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_SMPR1", 7u << 6);
+    r.write("ADC1", "ADC_SQR1", 1u << 6);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
+    auto at = r.now();
+    if(hardware)
+    {
+      r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+      auto const trigger = r.timer("TIM1", "");
+      r.run_until(trigger - 50 * us);
+      at = r.now();
+      r.write("ADC1", "ADC_CR", enabled | jadstart);
+      r.write("ADC1", "ADC_CR", enabled | adstart);
+    }
+    else
+    {
+      r.write("ADC1", "ADC_CR", enabled | jadstart);
+      r.run_until(at + 10 * cycle_ps);
+      r.write("ADC1", "ADC_CR", enabled | adstart);
+    }
+    auto const injected = at + 653 * cycle_ps;
+    r.run_until(injected);
+    CHECK(r.isr("JEOS") == 1);
+    CHECK(r.isr("EOC") == 0);
+    CHECK(std::ranges::contains(r.dues(), injected + 15 * cycle_ps));
+    r.run_until(injected + 14 * cycle_ps);
+    CHECK(r.isr("EOC") == 0);
+    r.run_until(injected + 15 * cycle_ps);
+    CHECK(r.isr("EOC") == 1);
+    CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+    CHECK(r.warnings().empty());
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.4.18: ADSTART with EXTEN set during the injected group arms the trigger, a TIM1 "
+    "TRGO after JEOS starts the regular sequence after tLATR")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+  auto const trigger = r.timer("TIM1", "");
+  r.run_until(trigger - 400 * us);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 10 * cycle_ps);
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  auto const injected = at + 653 * cycle_ps;
+  r.run_until(injected);
+  CHECK(r.isr("JEOS") == 1);
+  r.run_until(injected + 15 * cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  auto const end = trigger + edge_after(trigger, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8;
+  r.run_until(trigger + us);
+  CHECK(std::ranges::contains(r.dues(), end));
+  r.ends_at(end);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: a TIM1 CC1 falling edge held ahead of the machine time that lands inside the "
+    "injected group starts the regular sequence at JEOS")
+{
+  rig const r;
+  r.set("RCC", "CFGR", "HPRE", 15);
+  r.set("RCC", "CFGR", "PPRE2", 7);
+  r.set("RCC", "CR", "MSIRGSEL", 1);
+  r.set("RCC", "CR", "MSIRANGE", 11);
+  r.clock("TIM1");
+  r.write("TIM1", "ARR", 99);
+  r.write("TIM1", "EGR", 1);
+  r.write("TIM1", "SR", 0);
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2, 2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | 2u << 10 | extsel(0));
+  r.start(1);
+  r.write("TIM1", "EGR", 1u << 1);
+  auto const held = r.dues();
+  REQUIRE(held.size() == 1);
+  r.run_until(held[0] - 10 * us);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(held[0] + us);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(held[0] + 60 * us);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "ADSTP during an injected group that dropped a regular conversion cancels its resume, JADSTP "
+    "resumes it at once, inferred")
+{
+  for(auto const injected_stop : {false, true})
+  {
+    CAPTURE(injected_stop);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_SMPR1", 7u << 6);
+    r.write("ADC1", "ADC_SQR1", 1u << 6);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
+    r.write("ADC1", "ADC_CR", enabled | adstart);
+    r.run_until(r.now() + 5 * cycle_ps);
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.run_until(r.now() + 20 * cycle_ps);
+    auto const at = r.now();
+    r.write("ADC1", "ADC_CR", enabled | (injected_stop ? jadstp : adstp));
+    if(injected_stop)
+    {
+      CHECK(std::ranges::contains(r.dues(), at + 15 * cycle_ps));
+      r.run_until(at + 14 * cycle_ps);
+      CHECK(r.isr("EOC") == 0);
+      r.run_until(at + 15 * cycle_ps);
+      CHECK(r.isr("EOC") == 1);
+      CHECK(r.isr("JEOC") == 0);
+      continue;
+    }
+    CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+    r.run_until(at + 700 * cycle_ps);
+    CHECK(r.isr("JEOS") == 1);
+    CHECK(r.isr("EOC") == 0);
+  }
+}
+
+TEST_CASE(
+    "a snapshot taken during an injected group that dropped a regular conversion resumes the "
+    "regular rank once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(r.now() + 5 * cycle_ps);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 653) * cycle_ps / 8;
+  r.run_until(at + 100 * cycle_ps);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(injected);
+  CHECK(fresh.isr("JEOS") == 1);
+  fresh.run_until(injected + 15 * cycle_ps);
+  CHECK(fresh.isr("EOC") == 1);
+  CHECK(fresh.cpu_read("ADC1", "ADC_DR") == 2048);
+}
+
+TEST_CASE(
+    "a snapshot taken during an injected group with a regular start latched starts the regular "
+    "sequence at JEOS once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 10 * cycle_ps);
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  auto const injected = at + 653 * cycle_ps;
+  r.run_until(at + 100 * cycle_ps);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(injected);
+  CHECK(fresh.isr("JEOS") == 1);
+  CHECK(std::ranges::contains(fresh.dues(), injected + 15 * cycle_ps));
+  fresh.run_until(injected + 15 * cycle_ps);
+  CHECK(fresh.isr("EOC") == 1);
+  CHECK(fresh.cpu_read("ADC1", "ADC_DR") == 2048);
 }
 
 TEST_CASE("RM0351 18.4.26: ALIGN 1 left-aligns ADC_JDR1, 2048 reads 0x8000")

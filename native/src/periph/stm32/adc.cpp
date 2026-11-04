@@ -703,6 +703,13 @@ struct l4_adc
     constexpr std::array<std::uint32_t, 4> eighths{12, 16, 18, 17};
     return eighths[clock_mode & 3u];
   }
+
+  [[nodiscard]] static constexpr auto injected_abort_latency_eighths(std::uint32_t clock_mode)
+      -> std::uint32_t
+  {
+    constexpr std::array<std::uint32_t, 4> eighths{20, 24, 26, 25};
+    return eighths[clock_mode & 3u];
+  }
 };
 
 struct adc_edge
@@ -764,6 +771,8 @@ struct l4_adc_state
   std::uint64_t                       enable_lock_ps{};
   bool                                injecting{};
   std::uint8_t                        injected_rank{};
+  bool                                regular_resume{};
+  bool                                regular_pending{};
   std::array<adc_edge, 2>             injected_edges{};
   std::uint32_t                       injected_edge_generation{};
 
@@ -1019,6 +1028,7 @@ struct injected_fields
   field_ref                             queue_disable;
   field_ref                             automatic;
   field_ref                             watchdog1;
+  field_ref                             resumed_oversampling;
   field_ref                             end_of_conversion;
   field_ref                             end_of_sequence;
   reg_ref                               sequence_register;
@@ -1224,12 +1234,20 @@ struct adc_clock
  *        model_error under strict_peripherals. A JADSTART write with ADEN 0 or ADDIS 1 is ignored,
  *        logged once, a model_error under strict_peripherals, RM0351 18.7.3. An ADC_JSQR write with
  *        JADSTART 1 and JQDIS 1 applies to the next sequence, logged once, a model_error under
- *        strict_peripherals, RM0351 18.7.16 as corrected by ES0250 2.8.2. These log a warning
- *        once, a model_error under strict_peripherals: an injected start or trigger during a
- *        regular conversion, which converts nothing, a regular start or trigger during the
- *        injected group, which converts nothing and leaves ADSTART as written, JQDIS 0, converted
- *        as JQDIS 1, JAUTO, which converts no injected group, and JOVSE, converted without
- *        oversampling.
+ *        strict_peripherals, RM0351 18.7.16 as corrected by ES0250 2.8.2. An injected start or
+ *        trigger during a regular conversion drops that conversion, RM0351 18.4.19. The group
+ *        starts after tLATRINJ, DS10198 Table 76: at CKMODE 00 the next ADC clock edge then 2.5
+ *        cycles, inside the 2.5 to 3.5 cycles of Table 76, inferred, and at CKMODE 01, 10 and 11
+ *        the 3, 3.25 and 3.125 cycles Table 76 states as maxima. The dropped rank converts again
+ *        from the end of the group, at once, inferred. A regular start with EXTEN 0 or a regular
+ *        trigger during the injected group starts the regular sequence at its end, RM0351
+ *        18.4.19, at once with no tLATR, inferred. ADSTART with EXTEN set arms the trigger. ADSTP
+ *        during the group cancels the resumed rank and the latched start. JADSTP resumes the
+ *        dropped rank at once, inferred.
+ *        These log a warning once, a model_error under strict_peripherals: an injection into a
+ *        ROVSE conversion with ROVSM 0, which converts every sample of the dropped rank again,
+ *        JQDIS 0, converted as JQDIS 1, JAUTO, which converts no injected group, and JOVSE,
+ *        converted without oversampling.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
@@ -1345,9 +1363,12 @@ private:
   void begin_injected(std::uint64_t start_ps);
   void finish_injected();
   void abort_injected();
-  void regular_blocked(std::string_view what);
+  void latch_regular();
+  void preempt(std::uint64_t at_ps);
+  void resume_regular(std::uint64_t at_ps);
   [[nodiscard]] auto aligned(std::uint32_t result) const -> std::uint32_t;
-  [[nodiscard]] auto trigger_latency_ps(std::uint64_t at_ps) -> std::uint64_t;
+  [[nodiscard]] auto trigger_latency_ps(std::uint64_t at_ps, bool aborting = false)
+      -> std::uint64_t;
   void               require_factory_word(std::uint32_t channel) const;
   void               prepare();
   void               begin_sequence(std::uint64_t start_ps);
@@ -1472,8 +1493,7 @@ private:
   bool                                             enable_lost_logged_{};
   std::array<bool, trigger_selections>             injected_unproduced_logged_{};
   bool                                             injected_refused_logged_{};
-  bool                                             injected_preemption_logged_{};
-  bool                                             regular_blocked_logged_{};
+  bool                                             resumed_oversampling_logged_{};
   bool                                             queue_logged_{};
   bool                                             automatic_logged_{};
   bool                                             injected_oversampling_logged_{};
@@ -1630,19 +1650,20 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
   if constexpr(injected_group)
   {
     injected_fields fields{
-        .stop              = field("ADC_CR", "JADSTP"),
-        .length            = field("ADC_JSQR", "JL"),
-        .trigger           = field("ADC_JSQR", "JEXTEN"),
-        .select            = field("ADC_JSQR", "JEXTSEL"),
-        .discontinuous     = field(Traits::config, "JDISCEN"),
-        .queue_disable     = field(Traits::config, "JQDIS"),
-        .automatic         = field(Traits::config, "JAUTO"),
-        .watchdog1         = field(Traits::config, "JAWD1EN"),
-        .end_of_conversion = field("ADC_ISR", "JEOC"),
-        .end_of_sequence   = field("ADC_ISR", "JEOS"),
-        .sequence_register = reg("ADC_JSQR"),
-        .sequence          = {},
-        .data              = {}};
+        .stop                 = field("ADC_CR", "JADSTP"),
+        .length               = field("ADC_JSQR", "JL"),
+        .trigger              = field("ADC_JSQR", "JEXTEN"),
+        .select               = field("ADC_JSQR", "JEXTSEL"),
+        .discontinuous        = field(Traits::config, "JDISCEN"),
+        .queue_disable        = field(Traits::config, "JQDIS"),
+        .automatic            = field(Traits::config, "JAUTO"),
+        .watchdog1            = field(Traits::config, "JAWD1EN"),
+        .resumed_oversampling = field("ADC_CFGR2", "ROVSM"),
+        .end_of_conversion    = field("ADC_ISR", "JEOC"),
+        .end_of_sequence      = field("ADC_ISR", "JEOS"),
+        .sequence_register    = reg("ADC_JSQR"),
+        .sequence             = {},
+        .data                 = {}};
     for(std::size_t rank = 0; rank < injected_ranks; ++rank)
     {
       fields.sequence[rank] = field("ADC_JSQR", std::format("JSQ{}", rank + 1));
@@ -2096,9 +2117,9 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   if(start_.of(now) != 0 and start_.of(old) == 0)
   {
     state_.dma_stopped = false;
-    if(enable_.of(now) != 0 and injecting())
+    if(enable_.of(now) != 0 and injecting() and get(regs_, trigger_) == 0)
     {
-      regular_blocked("ADSTART during the injected group: the regular conversions after it");
+      latch_regular();
     }
     if(enable_.of(now) != 0 and not busy())
     {
@@ -2612,6 +2633,11 @@ template <typename Traits> void adc_model<Traits>::pop()
 
 template <typename Traits> void adc_model<Traits>::abort()
 {
+  if constexpr(injected_group)
+  {
+    state_.regular_resume  = false;
+    state_.regular_pending = false;
+  }
   if(injecting())
   {
     state_.rank          = 0;
@@ -2719,8 +2745,7 @@ void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, tr
   }
   if(busy())
   {
-    regular_blocked(
-        "a regular trigger during the injected group: the regular conversions after it");
+    latch_regular();
     return;
   }
   begin_sequence(at.ps + trigger_latency_ps(at.ps));
@@ -2744,8 +2769,7 @@ template <typename Traits> void adc_model<Traits>::fire_edge(adc_edge& slot)
       return;
     }
     slot.pending = false;
-    regular_blocked(
-        "a regular trigger during the injected group: the regular conversions after it");
+    latch_regular();
     return;
   }
   slot.pending = false;
@@ -2753,7 +2777,7 @@ template <typename Traits> void adc_model<Traits>::fire_edge(adc_edge& slot)
 }
 
 template <typename Traits>
-auto adc_model<Traits>::trigger_latency_ps(std::uint64_t at_ps) -> std::uint64_t
+auto adc_model<Traits>::trigger_latency_ps(std::uint64_t at_ps, bool aborting) -> std::uint64_t
 {
   auto const clock = source();
   if(clock.hz == 0)
@@ -2769,9 +2793,15 @@ auto adc_model<Traits>::trigger_latency_ps(std::uint64_t at_ps) -> std::uint64_t
     auto const index  = (wide{at_ps} * clock.hz + period - 1u) / period;
     edge = static_cast<std::uint64_t>((index * period + clock.hz - 1u) / clock.hz) - at_ps;
   }
-  return edge
-       + cycles_ps(
-             Traits::trigger_latency_eighths(clock.divider, mode), 8, clock.divider, clock.hz);
+  auto eighths = Traits::trigger_latency_eighths(clock.divider, mode);
+  if constexpr(injected_group)
+  {
+    if(aborting)
+    {
+      eighths = Traits::injected_abort_latency_eighths(mode);
+    }
+  }
+  return edge + cycles_ps(eighths, 8, clock.divider, clock.hz);
 }
 
 template <typename Traits>
@@ -3008,9 +3038,7 @@ template <typename Traits> void adc_model<Traits>::start_triggered_injected(std:
   }
   if(busy())
   {
-    unmodelled(
-        injected_preemption_logged_, "ADC_JSQR",
-        "an injected trigger during a regular conversion: injected preemption");
+    preempt(at_ps);
     return;
   }
   begin_injected(at_ps + trigger_latency_ps(at_ps));
@@ -3026,6 +3054,7 @@ void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
       update(regs_, injected_->stop, 0);
       update(regs_, injected_start_, 0);
       abort_injected();
+      resume_regular(ctx_.clock.time().ps);
       signal();
       return;
     }
@@ -3040,10 +3069,7 @@ void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
     }
     if(busy())
     {
-      update(regs_, injected_start_, 0);
-      unmodelled(
-          injected_preemption_logged_, "ADC_CR",
-          "JADSTART during a regular conversion: injected preemption");
+      preempt(ctx_.clock.time().ps);
       return;
     }
     begin_injected(ctx_.clock.time().ps);
@@ -3117,6 +3143,7 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
       {
         update(regs_, injected_start_, 0);
       }
+      resume_regular(end);
     }
     else
     {
@@ -3141,11 +3168,51 @@ template <typename Traits> void adc_model<Traits>::abort_injected()
   }
 }
 
-template <typename Traits> void adc_model<Traits>::regular_blocked(std::string_view what)
+template <typename Traits> void adc_model<Traits>::latch_regular()
 {
-  if(injecting())
+  if constexpr(injected_group)
   {
-    unmodelled(regular_blocked_logged_, "ADC_CR", what);
+    if(state_.injecting)
+    {
+      state_.regular_pending = true;
+    }
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::preempt(std::uint64_t at_ps)
+{
+  if constexpr(injected_group)
+  {
+    if(oversampled() and get(regs_, injected_->resumed_oversampling) == 0)
+    {
+      unmodelled(
+          resumed_oversampling_logged_, "ADC_CFGR2",
+          "ROVSM 0: continued regular oversampling across an injected conversion");
+    }
+    ++state_.generation;
+    state_.converting     = false;
+    state_.waiting_clock  = false;
+    state_.regular_resume = true;
+    begin_injected(at_ps + trigger_latency_ps(at_ps, true));
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::resume_regular(std::uint64_t at_ps)
+{
+  if constexpr(injected_group)
+  {
+    if(std::exchange(state_.regular_resume, false))
+    {
+      state_.regular_pending = false;
+      begin_rank(at_ps);
+      return;
+    }
+    if(std::exchange(state_.regular_pending, false)
+       and get(regs_, enable_) != 0
+       and get(regs_, start_) != 0)
+    {
+      begin_sequence(at_ps);
+    }
   }
 }
 

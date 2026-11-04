@@ -317,10 +317,18 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   once, with JEXTEN set each edge of the JEXTSEL event of RM0351 Table 112 converts them after the
   tLATR of a regular trigger. With JDISCEN and JEXTEN 0 each JADSTART converts the next channel and
   JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
-- These injected settings are logged once, a model_error under strict_peripherals: an injected
-  start or trigger during a regular conversion converts nothing, a regular start or trigger during
-  the injected group converts nothing, JQDIS 0 converts as JQDIS 1, JAUTO converts no injected
-  group and JOVSE converts without oversampling.
+- These injected settings are logged once, a model_error under strict_peripherals: an injection
+  into a ROVSE conversion with ROVSM 0 converts every sample of the dropped rank again, JQDIS 0
+  converts as JQDIS 1, JAUTO converts no injected group and JOVSE converts without oversampling.
+- An injected start or trigger during a regular conversion drops it, and the dropped rank converts
+  again after the group, RM0351 18.4.19, starting at the group's end, inferred. tLATRINJ is the
+  next ADC clock edge then 2.5 cycles at CKMODE 00, inside the 2.5 to 3.5 cycles of DS10198 Table
+  76, inferred. At CKMODE 01, 10 and 11 it is the Table 76 maximum, 3, 3.25 and 3.125 cycles.
+- A regular start with EXTEN 0 or a regular trigger during the injected group starts the regular
+  sequence at the group's end, RM0351 18.4.19, at once with no tLATR, inferred. ADSTART with
+  EXTEN set arms the trigger. ADSTP during the group cancels the dropped rank and the latched
+  start, and the injected group runs on. JADSTP during the group resumes the dropped rank at once,
+  inferred.
 - `JEXTSEL` 8 and 10, TIM1_TRGO2 and TIM8_TRGO2, have no source and are logged once, a
   model_error under strict_peripherals. `JEXTSEL` 6 takes EXTI line 15 from the line input.
 - An `ADC_JSQR` write with JADSTART 1 and JQDIS 1 applies to the next injected sequence and is
