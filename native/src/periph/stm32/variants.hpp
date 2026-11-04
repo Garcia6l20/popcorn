@@ -50,6 +50,12 @@ struct gpio_variant
   bool slew = true;
   /** @brief The port has `GPIOx_BRR`, the bit reset register. */
   bool brr = true;
+  /** @brief The port has `GPIOx_ASCR`, the analog switch control register. */
+  bool analog_switch = false;
+  /** @brief Port whose pins the independent I/O supply VDDIO2 powers, 0 for none. */
+  char supply_port = 0;
+  /** @brief Pins of that port VDDIO2 powers, bit n for pin n. */
+  std::uint16_t supply_pins = 0;
   /** @brief Per-pin field names. */
   gpio_field_names names = {};
 };
@@ -88,6 +94,17 @@ inline constexpr gpio_variant l1_gpio_cat46{
     .slew   = false,
     .brr    = true,
     .names  = l1_gpio_names};
+
+/** @brief STM32L47x and L48x ports, `STM32L47x_gpio_v1_0`, RM0351 8.4: `GPIOx_BRR` and
+ *         `GPIOx_ASCR`, no TrustZone and no HSLV, PG2 to PG15 on VDDIO2, RM0351 5.4.2. */
+inline constexpr gpio_variant l4_gpio{
+    .secure        = false,
+    .slew          = false,
+    .brr           = true,
+    .analog_switch = true,
+    .supply_port   = 'G',
+    .supply_pins   = 0xFFFC,
+    .names         = l1_gpio_names};
 
 /** @brief NVIC line of the classic EXTI and the EXTI lines first to last that raise it. */
 struct exti_line_group

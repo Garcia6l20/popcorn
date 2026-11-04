@@ -102,7 +102,13 @@ l1_env = {
 }
 l4_firmwares = {
     name: firmware("periph", name)
-    for name in ("l476_l4_smoke", "l476_l4_rcc_ll", "l476_l4_pwr_ll", "l476_l4_flash_ll")
+    for name in (
+        "l476_l4_smoke",
+        "l476_l4_rcc_ll",
+        "l476_l4_pwr_ll",
+        "l476_l4_flash_ll",
+        "l476_l4_gpio_ll",
+    )
 }
 l4_env = {
     "POPCORN_L476RC_DESC": str(l476rc),
@@ -263,6 +269,7 @@ for program, source in (
     ("stm32-rcc-l4", "test_rcc_l4.cpp"),
     ("stm32-power-l4", "test_power_l4.cpp"),
     ("stm32-flash-l4", "test_flash_l4.cpp"),
+    ("stm32-gpio-l4", "test_gpio_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

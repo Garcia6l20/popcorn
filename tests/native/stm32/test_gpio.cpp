@@ -1,3 +1,4 @@
+#include "gpio_peers.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -691,4 +692,19 @@ TEST_CASE("a bonded mask naming a pin past the port's pins throws config_error")
   CHECK_THROWS_AS(stm32_fixture(desc, "gpio_ll"), popcorn::config_error);
   found->bonded = 0x0080;
   CHECK_NOTHROW(stm32_fixture(desc, "gpio_ll"));
+}
+
+TEST_CASE("a U5 and an H5 port, without GPIOx_ASCR, keep the analog switch of every pin closed")
+{
+  stm32_fixture const u5{u575(), "gpio_ll"};
+  stm32_fixture const h5{popcorn::testing::h573(), "h573_boot_ll"};
+  for(auto const* f : {&u5, &h5})
+  {
+    auto* const ports = f->model_of<stm32::analog_switch_source>("GPIOA");
+    REQUIRE(ports != nullptr);
+    for(std::uint8_t pin = 0; pin < 16; ++pin)
+    {
+      CHECK(ports->switch_closed(pin));
+    }
+  }
 }

@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "gpio_peers.hpp"
 #include "stm32_fixture.hpp"
 #include "variants.hpp"
 
@@ -136,4 +137,15 @@ TEST_CASE("the L1 GPIO rows serve Cat.3 and Cat.5, a variant the description dis
   auto u5_names  = stm32::l1_gpio_cat46;
   u5_names.names = stm32::gpio_field_names{};
   CHECK_THROWS_AS(attaches(l152re(), u5_names), popcorn::config_error);
+}
+
+TEST_CASE("an L1 port, without GPIOx_ASCR, keeps the analog switch of every pin closed")
+{
+  auto const  f     = parked(l152re());
+  auto* const ports = f.model_of<stm32::analog_switch_source>("GPIOA");
+  REQUIRE(ports != nullptr);
+  for(std::uint8_t pin = 0; pin < 16; ++pin)
+  {
+    CHECK(ports->switch_closed(pin));
+  }
 }

@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "family_names.hpp"
+#include "gpio_peers.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "secure_config.hpp"
@@ -72,6 +73,7 @@ enum class pwr_role : std::uint8_t
   booster_ready,
   regulator_select,
   regulator_status,
+  io_supply_valid,
 };
 
 enum class guard_source : std::uint8_t
@@ -261,12 +263,14 @@ struct pwr_variant
  *        warning, LPMS 000 to 011 Stop 0, Stop 1, Stop 2 and Standby, 1xx Shutdown. A firmware
  *        write that sets LPR, PVDE, a PVMEx, an EWUPx or APC from 0 logs one warning per field
  *        per machine life, and under strict_peripherals raises model_error with the register
- *        kept at its value before the write. DBP, USV, IOSV, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR,
- *        PWR_PUCRx and PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the
- *        wakeup and Standby flags stay 0.
+ *        kept at its value before the write. IOSV is storage the GPIO model reads through
+ *        io_supply_source. DBP, USV, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and PWR_PDCRx
+ *        are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the wakeup and Standby flags
+ *        stay 0.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
+                  public io_supply_source,
                   public trustzone_aware
 {
 public:
@@ -278,6 +282,7 @@ public:
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto active_level() const -> std::uint32_t override;
+  [[nodiscard]] auto io_supply_valid() const -> bool override;
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
   void cr1_written(std::uint32_t old, std::uint32_t now);
@@ -398,6 +403,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
      {pwr_role::booster_ready, {"PWR_VOSR", "BOOSTRDY"}},
      {pwr_role::regulator_select, {"PWR_CR3", "REGSEL"}},
      {pwr_role::regulator_status, {"PWR_SVMSR", "REGS"}},
+     {pwr_role::io_supply_valid, {"", ""}},
      }
 };
 
@@ -416,6 +422,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
      {pwr_role::booster_ready, {"", ""}},
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
+     {pwr_role::io_supply_valid, {"", ""}},
      }
 };
 
@@ -479,6 +486,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l1_names{
      {pwr_role::booster_ready, {"", ""}},
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
+     {pwr_role::io_supply_valid, {"", ""}},
      }
 };
 
@@ -528,6 +536,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l4_names{
      {pwr_role::booster_ready, {"", ""}},
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
+     {pwr_role::io_supply_valid, {"CR2", "IOSV"}},
      }
 };
 
@@ -786,6 +795,12 @@ auto pwr::rule_secure(pwr_rule const& rule) const -> bool
 auto pwr::secure_word() const -> std::uint32_t
 {
   return ctx_.trustzone and secure_ ? regs_.peek(secure_->offset) : 0;
+}
+
+auto pwr::io_supply_valid() const -> bool
+{
+  auto const valid = names_.find(pwr_role::io_supply_valid);
+  return not valid or get(regs_, *valid) != 0;
 }
 
 auto pwr::secure_function() const -> bool

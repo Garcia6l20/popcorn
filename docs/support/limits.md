@@ -350,6 +350,20 @@ Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   firmware store to offset 0x28 is an unmodelled access and changes no pin. The absence on Cat.3
   is inferred from RM0038 7.4.11 and its revision history.
 - STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
+- STM32L4: `GPIOx_ASCR`, RM0351 8.5.12, stores the switch between each pin and its ADC input,
+  which the GPIO model gives its peers. `GPIOx_OSPEEDR` is storage.
+- STM32L4: PG2 to PG15 are powered by VDDIO2, RM0351 5.4.2. A CPU or DMA write that changes a
+  bonded one of these pins while `PWR_CR2.IOSV` is 0 logs one `model_warning` per machine life,
+  and under `strict_peripherals` raises `ModelError` with the register kept. Without strict the
+  register takes the write and the pin behaves as a powered one, where RM0351 5.1.2 isolates the
+  pins until IOSV is set. What the isolated register reads and drives is inferred.
+- STM32L4: port H carries PH0 and PH1, its `GPIOH_MODER` resets to 0x0000000F, RM0351 8.5.1,
+  inferred against Table 42.
+- STM32L4 errata, no register effect: ES0250 2.2.6, the full JTAG configuration without NJTRST
+  pin, ES0250 2.2.16, unbonded WLCSP I/Os stay configurable by software, as the register model
+  does, ES0250 2.2.17, an I/O used as output with VDDA or VDDUSB above VDD + 0.6 V, and ES0250
+  2.2.20, PH0 and PH1 driven by the GPIOH registers while HSE runs, which can stop the HSE
+  oscillator when they leave analog mode.
 
 ## FLASH
 
