@@ -315,6 +315,7 @@ struct u5_adc
   static constexpr bool             low_frequency       = true;
   static constexpr std::string_view align               = {};
   static constexpr std::string_view offset_enable       = {};
+  static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = {};
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
@@ -438,6 +439,7 @@ struct h5_adc
   static constexpr bool             low_frequency       = false;
   static constexpr std::string_view align               = "ALIGN";
   static constexpr std::string_view offset_enable       = "OFFSET_EN";
+  static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = "JOVSE";
   static constexpr std::string_view option_register     = "ADC_OR";
   static constexpr std::string_view option_switch       = "OP0";
@@ -612,6 +614,7 @@ struct l4_adc
   static constexpr bool             low_frequency       = false;
   static constexpr std::string_view align               = "ALIGN";
   static constexpr std::string_view offset_enable       = "OFFSET_EN";
+  static constexpr bool             subtracts_offset    = true;
   static constexpr std::string_view injected_oversample = "JOVSE";
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
@@ -709,6 +712,17 @@ struct l4_adc
   {
     constexpr std::array<std::uint32_t, 4> eighths{20, 24, 26, 25};
     return eighths[clock_mode & 3u];
+  }
+
+  [[nodiscard]] static constexpr auto
+      offset_result(std::uint32_t result, std::uint32_t offset, std::uint32_t resolution, bool left)
+          -> std::uint32_t
+  {
+    auto const shift = 2 * resolution;
+    auto const signed_result =
+        (static_cast<std::int32_t>(result << shift) - static_cast<std::int32_t>(offset)) >> shift;
+    auto const lift = left ? (resolution == 3 ? 1u : 3u + shift) : 0u;
+    return static_cast<std::uint32_t>(signed_result) << lift & result_mask;
   }
 };
 
@@ -1222,7 +1236,15 @@ struct adc_clock
  *        and drops the conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the
  *        ADC clock outside 0.14 to 80 MHz logs a warning. With ROVSE AWD1 compares ADC_DR[15:4],
  *        RM0351 18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB,
- *        SMPTRIG and SMPPLUS do not exist.
+ *        SMPTRIG and SMPPLUS do not exist. An ADC_OFRy with OFFSET_EN set subtracts OFFSET from the
+ *        code of its OFFSET_CH channel, the code left-aligned on 12 bits as RM0351 Table 114 shows,
+ *        the lowest enabled y first, inferred from RM0351 18.7.17, whose lowest-x rule would
+ *        otherwise let a disabled ADC_OFR1 at its reset channel 0 block the others, for ADC_DR and
+ *        ADC_JDRy. The result is signed, sign-extended to 16 bits when right-aligned, Figure 97,
+ *        and one bit below the unsigned position with the sign at bit 15 when left-aligned, Figure
+ *        99. OFFSET bits below the resolution, which Table 114 requires clear, are subtracted too
+ *        and the result keeps its upper bits, inferred. ROVSE and JOVSE ignore OFFSET_EN, RM0351
+ *        18.4.26. The watchdogs compare the raw code, RM0351 18.4.29.
  *
  *        The L4 converts the injected group with JQDIS 1, RM0351 18.4.19. A JADSTART write with
  *        ADEN converts the JL + 1 channels of JSQ1 to JSQ4 into ADC_JDR1 to ADC_JDR4 at once with
@@ -1405,7 +1427,7 @@ private:
   void               check_automatic();
   void               preempt(std::uint64_t at_ps);
   void               resume_regular(std::uint64_t at_ps);
-  [[nodiscard]] auto aligned(std::uint32_t result) const -> std::uint32_t;
+  [[nodiscard]] auto aligned(std::uint32_t channel, std::uint32_t result) const -> std::uint32_t;
   [[nodiscard]] auto trigger_latency_ps(std::uint64_t at_ps, bool aborting = false)
       -> std::uint64_t;
   void               require_factory_word(std::uint32_t channel) const;
@@ -2469,13 +2491,17 @@ template <typename Traits> void adc_model<Traits>::check_unmodelled(std::uint32_
   {
     unmodelled(gain_logged_, "ADC_GCOMP", "GCOMP: gain compensation");
   }
-  for(auto const& offset : offsets_)
+  if constexpr(not Traits::subtracts_offset)
   {
-    auto const active = offset.enable ? get(regs_, *offset.enable) != 0 and not alignment_ignored()
-                                      : get(regs_, offset.value) != 0;
-    if(active and get(regs_, offset.channel) == channel)
+    for(auto const& offset : offsets_)
     {
-      unmodelled(offset_logged_, offset.reg, "OFFSET: offset of the result");
+      auto const active = offset.enable
+                            ? get(regs_, *offset.enable) != 0 and not alignment_ignored()
+                            : get(regs_, offset.value) != 0;
+      if(active and get(regs_, offset.channel) == channel)
+      {
+        unmodelled(offset_logged_, offset.reg, "OFFSET: offset of the result");
+      }
     }
   }
 }
@@ -2586,7 +2612,7 @@ template <typename Traits> void adc_model<Traits>::finish()
     result &= Traits::result_mask;
   }
   watch(channel(), result);
-  land(result);
+  land(aligned(channel(), result));
   auto const last = std::size_t{state_.rank} + 1u >= length();
   if(last)
   {
@@ -2679,8 +2705,22 @@ void adc_model<Traits>::watch(std::uint32_t channel, std::uint32_t result)
 }
 
 template <typename Traits>
-auto adc_model<Traits>::aligned(std::uint32_t result) const -> std::uint32_t
+auto adc_model<Traits>::aligned(std::uint32_t channel, std::uint32_t result) const -> std::uint32_t
 {
+  if constexpr(Traits::subtracts_offset)
+  {
+    if(not alignment_ignored())
+    {
+      auto const applied = std::ranges::find_if(offsets_, [&](offset_fields const& offset) {
+        return get(regs_, *offset.enable) != 0 and get(regs_, offset.channel) == channel;
+      });
+      if(applied != offsets_.end())
+      {
+        return Traits::offset_result(
+            result, get(regs_, applied->value), get(regs_, resolution_), get(regs_, *align_) != 0);
+      }
+    }
+  }
   if constexpr(not Traits::align.empty())
   {
     if(get(regs_, *align_) != 0 and not alignment_ignored())
@@ -2693,7 +2733,6 @@ auto adc_model<Traits>::aligned(std::uint32_t result) const -> std::uint32_t
 
 template <typename Traits> void adc_model<Traits>::land(std::uint32_t result)
 {
-  result = aligned(result);
   if(get(regs_, overrun_mode_) == 0)
   {
     auto const overrun = get(regs_, overrun_) != 0;
@@ -3267,7 +3306,7 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
     auto const result = state_.sum;
     auto const rank   = std::size_t{state_.injected_rank};
     watch(channel(), result);
-    update(regs_, injected_->data[rank], aligned(result));
+    update(regs_, injected_->data[rank], aligned(channel(), result));
     update(regs_, injected_->end_of_conversion, 1);
     auto const last     = rank + 1u >= injected_length();
     auto const software = get(regs_, injected_->trigger) == 0;

@@ -172,6 +172,11 @@ Not modelled, logged once each:
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
 - ADC4 has no model.
 
+On the STM32U5, STM32H5 and STM32L4:
+
+- Writes to `ADC_CFGR`, `ADC_CFGR2`, `ADC_SMPRx`, `ADC_SQRx`, `ADC_OFRy`, `ADC_TRx` and
+  `ADC_AWDxCR` with ADSTART or JADSTART set apply at once.
+
 On the STM32H5, RM0481 section 28:
 
 - The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
@@ -282,6 +287,12 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   26:16, RM0351 18.8.1. ADC3 has no `ADC_CSR` bits.
 - `ADC_DR` holds one result. Under OVRMOD 0 a result that finds EOC set sets OVR and is
   discarded, and so is every result while OVR stays set, RM0351 18.4.26.
+- An `ADC_OFRy` with OFFSET_EN subtracts OFFSET from the code of its channel, left-aligned on 12
+  bits, RM0351 Table 114, the lowest enabled y first, inferred from RM0351 18.7.17, whose lowest-x
+  rule would otherwise let a disabled `ADC_OFR1` at its reset channel 0 block the others, for
+  `ADC_DR` and `ADC_JDRy`, and the result reads signed, RM0351 Figures 97 and 99. ROVSE and JOVSE
+  ignore OFFSET_EN. OFFSET bits below the resolution, which Table 114 requires clear, are subtracted
+  too and the result keeps its upper bits, inferred. The watchdogs compare the raw code.
 - ADRDY sets 15 ADC clock cycles after the ADEN write, the DS10198 Table 76 tSTAB of one
   conversion cycle read as one 12-bit conversion at SMP 000, inferred. The tADCVREG_STUP wait of
   Table 76 is the firmware's.

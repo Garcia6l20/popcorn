@@ -2465,6 +2465,116 @@ TEST_CASE("a snapshot taken during an injected sequence ends it at the same time
   CHECK(fresh.get("ADC1", "ADC_CR", "JADSTART") == 0);
 }
 
+[[nodiscard]] constexpr auto ofr(std::uint32_t channel, std::uint32_t offset, bool on = true)
+    -> std::uint32_t
+{
+  return (on ? 1u << 31 : 0u) | channel << 26 | offset;
+}
+
+TEST_CASE(
+    "RM0351 18.4.26: an enabled offset on the converted channel subtracts from ADC_DR, the result "
+    "signed and sign-extended, Figure 97, nothing logged")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 1'500'000);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 2148));
+  CHECK(r.convert(1) == 0xFF9Cu);
+  CHECK(r.convert(2) == 2048);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 1000));
+  CHECK(r.convert(1) == 1048);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 1000, false));
+  CHECK(r.convert(1) == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 Table 114, Figures 97 and 99: OFFSET 0x800 subtracts at 12-bit scale at every "
+    "resolution, right-aligned sign-extended, left-aligned one bit below the unsigned position")
+{
+  struct row
+  {
+    std::uint32_t resolution;
+    std::uint32_t right_low;
+    std::uint32_t left_low;
+    std::uint32_t right_high;
+    std::uint32_t left_high;
+  };
+  for(auto const& [resolution, right_low, left_low, right_high, left_high] : {
+          row{0, 0xFC00u, 0xE000u, 0x0400u, 0x2000u},
+          row{1, 0xFF00u, 0xE000u, 0x0100u, 0x2000u},
+          row{2, 0xFFC0u, 0xE000u, 0x0040u, 0x2000u},
+          row{3, 0xFFF0u, 0xFFE0u, 0x0010u, 0x0020u},
+  })
+  {
+    CAPTURE(resolution);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 750'000);
+    r.port().drive(2, 2'250'000);
+    r.write("ADC1", "ADC_OFR1", ofr(1, 0x800));
+    r.write("ADC1", "ADC_OFR2", ofr(2, 0x800));
+    r.write("ADC1", "ADC_CFGR", jqdis | resolution << 3);
+    CHECK(r.convert(1) == right_low);
+    CHECK(r.convert(2) == right_high);
+    r.write("ADC1", "ADC_CFGR", jqdis | resolution << 3 | align);
+    CHECK(r.convert(1) == left_low);
+    CHECK(r.convert(2) == left_high);
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.7.17: the offset of the lowest enabled y applies, a disabled OFRy is skipped, "
+    "inferred, ADC_JDR1 takes the offset of its channel")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 300, false));
+  r.write("ADC1", "ADC_OFR2", ofr(1, 100));
+  r.write("ADC1", "ADC_OFR3", ofr(1, 200));
+  CHECK(r.convert(1) == 1948);
+  r.write("ADC1", "ADC_CFGR", jqdis);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1948);
+}
+
+TEST_CASE(
+    "RM0351 18.4.26 note: ROVSE ignores OFFSET_EN for ADC_DR and JOVSE for ADC_JDR1, RM0351 "
+    "18.4.29: AWD1 compares the raw code")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 1500));
+  r.write("ADC1", "ADC_TR1", 1000u << 16);
+  r.write("ADC1", "ADC_CFGR", jqdis | awd1en);
+  CHECK(r.convert(1) == 548);
+  CHECK(r.isr("AWD1") == 1);
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5);
+  CHECK(r.convert(1) == 2048);
+  r.write("ADC1", "ADC_CFGR2", jovse);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+}
+
+TEST_CASE(
+    "RM0351 Table 114: OFFSET bits below a 10-bit resolution subtract at 12-bit scale and the "
+    "result keeps its upper bits, inferred")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 750'000);
+  r.write("ADC1", "ADC_OFR1", ofr(1, 0x801));
+  r.write("ADC1", "ADC_CFGR", jqdis | 1u << 3);
+  CHECK(r.convert(1) == 0xFEFFu);
+}
+
 namespace
 {
 struct firmware_result
