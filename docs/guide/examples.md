@@ -378,6 +378,18 @@ A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HS
 
 --8<-- "stm32l476/tim/README.md:3:13"
 
+### l476 rtc
+
+The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/rtc).
+
+--8<-- "stm32l476/rtc/README.md:3:15"
+
+### l476 lptim
+
+LPTIM1 on the LSE with an autoreload and a compare match, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/lptim).
+
+--8<-- "stm32l476/lptim/README.md:3:13"
+
 ### l476 usb_cdc
 
 CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).
