@@ -13,9 +13,12 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -56,6 +59,18 @@ constexpr std::uint32_t cont     = 1u << 13;
 constexpr std::uint32_t vrefen   = 1u << 22;
 constexpr std::uint32_t ch17sel  = 1u << 23;
 constexpr std::uint32_t ch18sel  = 1u << 24;
+constexpr std::uint32_t jadstart = 1u << 3;
+constexpr std::uint32_t jadstp   = 1u << 5;
+constexpr std::uint32_t jeoc     = 1u << 5;
+constexpr std::uint32_t jeos     = 1u << 6;
+constexpr std::uint32_t align    = 1u << 5;
+constexpr std::uint32_t jdiscen  = 1u << 20;
+constexpr std::uint32_t awd1en   = 1u << 23;
+constexpr std::uint32_t jawd1en  = 1u << 24;
+constexpr std::uint32_t jauto    = 1u << 25;
+constexpr std::uint32_t jqdis    = 1u << 31;
+constexpr std::uint32_t jovse    = 1u << 1;
+constexpr std::uint32_t enabled  = advregen | aden;
 
 constexpr std::uint32_t vdda_mv     = 3000;
 constexpr std::uint32_t ts_cal1     = 1037;
@@ -76,6 +91,21 @@ constexpr std::uint32_t adc3_irq    = 47;
 [[nodiscard]] constexpr auto presc(std::uint32_t code) -> std::uint32_t
 {
   return code << 18;
+}
+
+[[nodiscard]] constexpr auto jsqr(
+    std::initializer_list<std::uint32_t> ranks,
+    std::uint32_t                        jexten  = 0,
+    std::uint32_t                        jextsel = 0) -> std::uint32_t
+{
+  constexpr std::array<unsigned, 4> lsbs{8, 14, 20, 26};
+  auto word = static_cast<std::uint32_t>(ranks.size() - 1) | jextsel << 2 | jexten << 6;
+  auto lsb  = lsbs.begin();
+  for(auto const channel : ranks)
+  {
+    word |= channel << *lsb++;
+  }
+  return word;
 }
 
 struct rig
@@ -241,6 +271,11 @@ struct rig
     auto const word = f->target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
     REQUIRE(word.has_value());
     return (*word >> (irq % 32) & 1u) != 0;
+  }
+
+  void unpend(std::uint32_t irq) const
+  {
+    REQUIRE(f->target->mem().write(0xe000'e280u + 4 * (irq / 32), 4, 1u << (irq % 32)).has_value());
   }
 
   void clock(std::string_view unit) const
@@ -870,6 +905,323 @@ TEST_CASE(
   CHECK(fresh.get("ADC1", "ADC_CR", "ADSTART") == 0);
 }
 
+TEST_CASE(
+    "RM0351 18.4.19 and 18.7.16: JADSTART with JEXTEN 0 converts JSQ1 to JSQ4 into ADC_JDR1 to "
+    "ADC_JDR4, JEOC at each, JEOS and the JADSTART clear at the last")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 375'000);
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 1'125'000);
+  r.port().drive(4, 1'500'000);
+  r.write("ADC1", "ADC_JSQR", jsqr({4, 3, 2, 1}));
+  CHECK(r.get("ADC1", "ADC_JSQR", "JL") == 3);
+  CHECK(r.get("ADC1", "ADC_JSQR", "JSQ1") == 4);
+  CHECK(r.get("ADC1", "ADC_JSQR", "JSQ4") == 1);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 14 * cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(at + 15 * cycle_ps);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+  r.run_until(at + 59 * cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 1);
+  r.run_until(at + 60 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 1536);
+  CHECK(r.read("ADC1", "ADC_JDR3") == 1024);
+  CHECK(r.read("ADC1", "ADC_JDR4") == 512);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.7.1: a CPU read of ADC_JDR1 clears JEOC, a debugger read does not, JEOCIE and "
+    "JEOSIE raise ADC1_2")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_IER", jeoc);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.pending(adc12_irq));
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 2048);
+  CHECK(r.isr("JEOC") == 0);
+  CHECK(r.isr("JEOS") == 1);
+  r.unpend(adc12_irq);
+  CHECK_FALSE(r.pending(adc12_irq));
+  r.write("ADC1", "ADC_IER", jeos);
+  CHECK(r.pending(adc12_irq));
+  r.write("ADC1", "ADC_ISR", jeos);
+  r.unpend(adc12_irq);
+  CHECK_FALSE(r.pending(adc12_irq));
+}
+
+TEST_CASE(
+    "with JDISCEN and JEXTEN 0 each JADSTART converts the next JSQ channel and JADSTART clears "
+    "after it, inferred")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | jdiscen);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 2}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 0);
+  CHECK(r.isr("JEOS") == 0);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 1024);
+  CHECK(r.isr("JEOS") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.7.3: JADSTP drops the injected conversion in progress and clears JADSTART and "
+    "JADSTP, the next JADSTART restarts at JSQ1")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 2}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 20 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+  r.write("ADC1", "ADC_CR", enabled | jadstp);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTP") == 0);
+  r.run_until(at + 40 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 0);
+  CHECK(r.isr("JEOS") == 0);
+  r.port().drive(1, 375'000);
+  auto const again = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(again + 15 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 512);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 0);
+}
+
+TEST_CASE(
+    "RM0351 18.7.3: JADSTART with ADEN 0 is ignored and logged once, a model_error when strict")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  r.write("ADC1", "ADC_CR", advregen | jadstart);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("JADSTART written with ADEN 0 or ADDIS 1"));
+  rig const strict{true};
+  strict.write("ADC1", "ADC_CR", advregen);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, advregen | jadstart)),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "the injected and regular groups overlapping, JEXTEN set, JQDIS 0, JAUTO and JOVSE each "
+    "log once, a model_error when strict")
+{
+  struct leg
+  {
+    std::string_view                    what;
+    std::function_ref<void(rig const&)> setup;
+    std::uint32_t                       cr;
+  };
+  auto const regular = [](rig const& r) {
+    r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.start(1);
+  };
+  auto const injected = [](rig const& r) {
+    r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+  };
+  auto const queue     = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
+  auto const automatic = [](rig const& r) { r.write("ADC1", "ADC_CFGR", jqdis | jauto); };
+  auto const sampled   = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
+  auto const hardware  = [](rig const& r) { r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, 0)); };
+  for(auto const& [what, setup, cr] : {
+          leg{"injected preemption",              regular,   enabled | adstart | jadstart},
+          leg{"the regular conversions after it", injected,  enabled | jadstart | adstart},
+          leg{"JQDIS 0",                          queue,     enabled | jadstart          },
+          leg{"JAUTO",                            automatic, enabled | adstart           },
+          leg{"JOVSE",                            sampled,   enabled | jadstart          },
+          leg{"JEXTEN",                           hardware,  enabled | jadstart          },
+  })
+  {
+    CAPTURE(what);
+    {
+      rig const r;
+      r.enable();
+      setup(r);
+      r.write("ADC1", "ADC_CR", cr);
+      r.write("ADC1", "ADC_CR", cr);
+      auto const logged = r.warnings();
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(what));
+    }
+    rig const strict{true};
+    strict.enable();
+    setup(strict);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, cr)),
+        popcorn::model_error);
+  }
+}
+
+TEST_CASE("RM0351 18.4.26: ALIGN 1 left-aligns ADC_JDR1, 2048 reads 0x8000")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | align);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 0x8000);
+}
+
+TEST_CASE(
+    "RM0351 18.4.31: ROVSE oversamples the regular channels only, an injected conversion takes "
+    "one conversion time and ADC_JDR1 reads the plain code")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | 3u << 2);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 14 * cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(at + 15 * cycle_ps);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+}
+
+TEST_CASE(
+    "ES0250 2.8.2: an ADC_JSQR write with JADSTART 1 and JQDIS 1 logs once, "
+    "a model_error when strict")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig const r{strict};
+    r.enable();
+    r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    if(strict)
+    {
+      CHECK_THROWS_AS(
+          static_cast<void>(r.f->target->mem().write(r.at("ADC1", "ADC_JSQR"), 4, jsqr({2}))),
+          popcorn::model_error);
+      continue;
+    }
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
+    r.write("ADC1", "ADC_JSQR", jsqr({3}));
+    auto const logged = r.warnings();
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("ES0250 2.8.2"));
+    CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 1);
+  }
+}
+
+TEST_CASE("RM0351 18.4.29: JAWD1EN guards the injected results with AWD1, AWD1EN alone does not")
+{
+  for(auto const& [config, flagged] : {
+          std::pair{jqdis | jawd1en, 1u},
+          std::pair{jqdis | awd1en,  0u},
+  })
+  {
+    CAPTURE(config);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_TR1", 1000u << 16);
+    r.write("ADC1", "ADC_CFGR", config);
+    r.write("ADC1", "ADC_JSQR", jsqr({1}));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.settle();
+    CHECK(r.isr("JEOC") == 1);
+    CHECK(r.isr("AWD1") == flagged);
+  }
+}
+
+TEST_CASE(
+    "checklist 31: ADCRST during an injected conversion drops its end, no flag and no "
+    "result past it")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 5 * cycle_ps);
+  popcorn::testing::rcc_reset_pulse(*r.f, "AHB2RSTR", "ADCRST");
+  r.run_until(at + 40 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_ISR") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 0);
+  CHECK(r.read("ADC1", "ADC_DR") == 0);
+}
+
+TEST_CASE("ADDIS during an injected conversion drops it and clears JADSTART, no flag past its end")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 5 * cycle_ps);
+  r.write("ADC1", "ADC_CR", enabled | addis);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  r.run_until(at + 40 * cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  CHECK(r.isr("EOC") == 0);
+}
+
+TEST_CASE("a snapshot taken during an injected sequence ends it at the same time once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 2}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 20 * cycle_ps);
+  auto const saved = r.f->target->snapshot();
+  auto const bytes = core::encode_snapshot(saved.data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(at + 29 * cycle_ps);
+  CHECK(fresh.isr("JEOS") == 0);
+  fresh.run_until(at + 30 * cycle_ps);
+  CHECK(fresh.isr("JEOS") == 1);
+  CHECK(fresh.read("ADC1", "ADC_JDR1") == 2048);
+  CHECK(fresh.read("ADC1", "ADC_JDR2") == 1024);
+  CHECK(fresh.get("ADC1", "ADC_CR", "JADSTART") == 0);
+}
+
 namespace
 {
 struct firmware_result
@@ -927,4 +1279,13 @@ TEST_CASE(
   CHECK(run.log == std::vector<std::uint32_t>{0, 0});
   REQUIRE(run.warnings.size() == 1);
   CHECK(run.warnings[0].message.contains("ES0250 2.8.4"));
+}
+
+TEST_CASE(
+    "LL firmware: LL_ADC_INJ_StartConversion with a software trigger converts PA0 into "
+    "ADC_JDR1, its read clears JEOC and JADSTART is clear")
+{
+  auto const run = run_adc_ll("injected");
+  CHECK(run.log == std::vector<std::uint32_t>{2048, 0, 0});
+  CHECK(run.warnings.empty());
 }

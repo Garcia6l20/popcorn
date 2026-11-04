@@ -1259,3 +1259,20 @@ TEST_CASE(
   CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
   CHECK(popcorn::testing::saved_integer(*r.f->target, "TIM1", "scheduled") == 0);
 }
+
+TEST_CASE("JADSTART logs one warning and clears on the H5, ADC_JDR1 stays 0")
+{
+  constexpr std::uint32_t jadstart = 1u << 3;
+  rig const               r;
+  r.enable();
+  r.port().drive(3, 1'650'000);
+  r.write("ADC1", "ADC_JSQR", 3u << 9);
+  r.write("ADC1", "ADC_CR", advregen | aden | jadstart);
+  r.write("ADC1", "ADC_CR", advregen | aden | jadstart);
+  r.run_until(r.now() + 100 * us);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 0);
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("JADSTART"));
+}
