@@ -27,6 +27,14 @@ l152rba = cached_st_description("STM32L152RBTxA", "POPCORN_L152RBA_DESC")
 l152rca = cached_st_description("STM32L152RCTxA", "POPCORN_L152RCA_DESC")
 l152rd = cached_st_description("STM32L152RDTx", "POPCORN_L152RD_DESC")
 l476rc = cached_st_description("STM32L476RCTx", "POPCORN_L476RC_DESC")
+l4_class = {
+    variable: cached_st_description(part, variable)
+    for part, variable in (
+        ("STM32L471RGTx", "POPCORN_L471RG_DESC"),
+        ("STM32L475RGTx", "POPCORN_L475RG_DESC"),
+        ("STM32L486RGTx", "POPCORN_L486RG_DESC"),
+    )
+}
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -121,6 +129,7 @@ l4_firmwares = {
         "l476_l4_crc_ll",
         "l476_l4_rtc_ll",
         "l476_l4_sai_ll",
+        "l476_l4_spi_ll",
     )
 }
 l4_env = {
@@ -306,6 +315,19 @@ for program, source in (
     for _, target in l4_firmwares.values():
         if target is not None:
             l4_test.depends(target)
+
+spi_l4_class = add_doctest(
+    "stm32-spi-l4-class",
+    [here / "test_spi_l4_class.cpp"],
+    static,
+    env={
+        **{variable: str(path) for variable, path in l4_class.items()},
+        "POPCORN_FW_L476_L4_SPI_LL": str(l4_firmwares["l476_l4_spi_ll"][0]),
+    },
+    register=all(path is not None for path in l4_class.values()),
+)
+if (spi_ll_target := l4_firmwares["l476_l4_spi_ll"][1]) is not None:
+    spi_l4_class.depends(spi_ll_target)
 
 for program, source in (
     ("stm32-rcc-l1", "test_rcc_l1.cpp"),

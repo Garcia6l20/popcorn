@@ -1265,3 +1265,173 @@ TEST_CASE(
   CHECK(r.cpu_read(spi1 + dr, 2) == 0x0201);
   CHECK(r.cpu_read(spi1 + dr, 2) == 0x0403);
 }
+
+namespace
+{
+constexpr std::string_view spi_ll = "l476_l4_spi_ll";
+
+struct firmware_rig
+{
+  std::shared_ptr<wire_target>   device = std::make_shared<wire_target>();
+  std::unique_ptr<stm32_fixture> f;
+
+  explicit firmware_rig(std::string_view entry, part_description const& desc = l476rc())
+  {
+    stm32::board board{};
+    board.spi["SPI1"].push_back({.device = device});
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, desc);
+    f              = std::make_unique<stm32_fixture>(desc, spi_ll, std::move(options));
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(spi_ll, "main")}).reason
+        == stop_reason::address);
+    f->set("pc", sym(spi_ll, entry));
+  }
+
+  [[nodiscard]] auto finish() const -> std::vector<std::uint32_t>
+  {
+    auto const stopped = f->run_to_stop({.max_instructions = icount{1'000'000}});
+    CAPTURE(stopped.detail);
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f->log();
+  }
+
+  [[nodiscard]] auto bits() const -> std::vector<std::uint32_t>
+  {
+    auto out = std::vector<std::uint32_t>{};
+    for(auto const& one : device->frames)
+    {
+      out.push_back(one.bits);
+    }
+    return out;
+  }
+};
+
+auto ascii(std::uint32_t first, std::uint32_t count) -> std::vector<std::uint32_t>
+{
+  auto out = std::vector<std::uint32_t>{};
+  for(std::uint32_t index = 0; index < count; ++index)
+  {
+    out.push_back(first + index);
+  }
+  return out;
+}
+
+auto joined(std::vector<std::uint32_t> head, std::vector<std::uint32_t> const& tail)
+    -> std::vector<std::uint32_t>
+{
+  head.insert(head.end(), tail.begin(), tail.end());
+  return head;
+}
+}
+
+TEST_CASE("RM0351 42.4.9 FRXTH 1: LL full duplex at DS 8 exchanges four frames with a loopback")
+{
+  firmware_rig r{"master8"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44, txe});
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44});
+  CHECK(r.bits() == std::vector<std::uint32_t>(4, 8));
+}
+
+TEST_CASE("RM0351 42.6.2 DS: LL full duplex at DS 16 sends and receives half-words")
+{
+  firmware_rig r{"ds16"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x1234, 0xABCD, txe});
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x1234, 0xABCD});
+  CHECK(r.bits() == std::vector<std::uint32_t>(2, 16));
+}
+
+TEST_CASE("RM0351 42.4.9: LL DS 4 sends the low 4 bits of each byte write, reads them back")
+{
+  firmware_rig r{"ds4"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x3, 0xC, 0x5, txe});
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x3, 0xC, 0x5});
+  CHECK(r.bits() == std::vector<std::uint32_t>(3, 4));
+}
+
+TEST_CASE(
+    "RM0351 42.4.9 Figure 466: LL half-word writes at DS 8 send two frames, FRXTH 0 reads two")
+{
+  firmware_rig r{"packed16"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x2211, 0x4433, txe});
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44});
+  CHECK(r.bits() == std::vector<std::uint32_t>(4, 8));
+}
+
+TEST_CASE("RM0351 42.4.9: LL odd count at DS 8, a half-word then a byte, FRXTH 1 takes the last")
+{
+  firmware_rig r{"odd_packed"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x2211, 0x33, txe});
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22, 0x33});
+}
+
+TEST_CASE("RM0351 42.4.14: LL CRC-8 over 123456789 with CRCPR 7 sends 0xF4, CRC-8/SMBUS")
+{
+  firmware_rig r{"crc8"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xF4, 0xF4, 0xF4, 0, txe});
+  REQUIRE(r.device->frames.size() == 10);
+  CHECK(r.device->outs.back() == 0xF4);
+}
+
+TEST_CASE("RM0351 42.4.14 CRCL 1: LL CRC-16 at DS 8 over 123456789 sends 0x31 0xC3, CRC-16/XMODEM")
+{
+  firmware_rig r{"crc16_ds8"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x31, 0xC3, 0x31C3, 0x31C3, 0, txe});
+  REQUIRE(r.device->frames.size() == 11);
+  CHECK(r.device->outs[9] == 0x31);
+  CHECK(r.device->outs[10] == 0xC3);
+  CHECK(r.bits() == std::vector<std::uint32_t>(11, 8));
+}
+
+TEST_CASE("RM0351 42.4.11: LL overrun at the fifth DS 8 frame keeps the four in the RXFIFO")
+{
+  firmware_rig r{"overrun"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{1, 3u << 9, 0x31, 0x32, 0x33, 0x34, txe});
+  CHECK(r.device->outs == ascii(0x31, 5));
+}
+
+TEST_CASE("RM0351 42.4.9: LL receive-only runs frames back to back, SPE 0 lets the last one land")
+{
+  firmware_rig r{"rx_only"};
+  r.device->replies = {0xC1, 0xC2, 0xC3};
+  auto const logged = r.finish();
+  REQUIRE(logged.size() == 4);
+  CHECK(logged == std::vector<std::uint32_t>{0xC1, 0xC2, 0xC3, 0});
+  REQUIRE(r.device->frames.size() == 3);
+  CHECK(r.device->frames[1].at == r.device->frames[0].at + frame_ps(8));
+  CHECK(r.device->frames[2].at == r.device->frames[1].at + frame_ps(8));
+}
+
+TEST_CASE("RM0351 42.5: LL TXEIE and RXNEIE drive four DS 8 frames from SPI1_IRQn")
+{
+  firmware_rig r{"irq"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x3433'3231, txe});
+  CHECK(r.device->outs == ascii(0x31, 4));
+}
+
+TEST_CASE("HAL_SPI_TransmitReceive polls seven DS 8 bytes through the FIFO with packing")
+{
+  firmware_rig r{"hal_txrx"};
+  CHECK(r.finish() == joined({0, 0}, joined(ascii(0x31, 7), {txe})));
+  CHECK(r.device->outs == ascii(0x31, 7));
+}
+
+TEST_CASE(
+    "RM0351 42.4.9 LDMA_TX and LDMA_RX: HAL DMA of seven bytes at PSIZE 16 through DMA1 "
+    "channels 2 and 3, byte 7 reads 0 inferred")
+{
+  firmware_rig            r{"hal_txrx_dma_odd"};
+  constexpr std::uint32_t cr2_started =
+      ldma_tx | ldma_rx | ds(8) | (1u << 5) | ssoe | txdmaen | rxdmaen;
+  CHECK(r.finish() == joined({0, 0, 0, 0, cr2_started, 0}, joined(ascii(0x31, 7), {0, txe})));
+  CHECK(r.device->outs == ascii(0x31, 7));
+  CHECK(r.bits() == std::vector<std::uint32_t>(7, 8));
+}
+
+TEST_CASE("HAL_SPI_TransmitReceive with CRC over 123456789 checks the CRC-8 frame, no error")
+{
+  firmware_rig r{"hal_crc"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0, 0, 0, 0xF4, 0xF4, txe});
+  REQUIRE(r.device->frames.size() == 10);
+  CHECK(r.device->outs.back() == 0xF4);
+}
