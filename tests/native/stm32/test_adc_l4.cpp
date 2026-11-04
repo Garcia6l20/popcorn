@@ -2575,6 +2575,188 @@ TEST_CASE(
   CHECK(r.convert(1) == 0xFEFFu);
 }
 
+TEST_CASE(
+    "RM0351 18.4.29: AWD1SGL guards the AWD1CH channel only, channel 16 at the top of the 5-bit "
+    "field, AWD1IE raises ADC1_2")
+{
+  constexpr std::uint32_t awd1sgl = 1u << 22;
+  constexpr std::uint32_t awd1ie  = 1u << 7;
+  rig const               r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(16, 1'500'000);
+  r.write("ADC1", "ADC_TR1", 1000u << 16);
+  r.write("ADC1", "ADC_CFGR", jqdis | awd1en | awd1sgl | 16u << 26);
+  static_cast<void>(r.convert(1));
+  CHECK(r.isr("AWD1") == 0);
+  CHECK_FALSE(r.pending(adc12_irq));
+  r.write("ADC1", "ADC_IER", awd1ie);
+  static_cast<void>(r.convert(16));
+  CHECK(r.isr("AWD1") == 1);
+  CHECK(r.pending(adc12_irq));
+  r.write("ADC1", "ADC_ISR", 1u << 7);
+  r.write("ADC1", "ADC_CFGR", jqdis | awd1en);
+  static_cast<void>(r.convert(1));
+  CHECK(r.isr("AWD1") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.29: AWD2 and AWD3 guard their AWDxCH channels up to 18 with the 8 MSBs of the "
+    "code, AWD2IE and AWD3IE raise ADC1_2")
+{
+  for(auto const watchdog : {2u, 3u})
+  {
+    CAPTURE(watchdog);
+    auto const cr   = std::format("ADC_AWD{}CR", watchdog);
+    auto const tr   = std::format("ADC_TR{}", watchdog);
+    auto const flag = std::format("AWD{}", watchdog);
+    rig const  r;
+    r.enable("ADC2");
+    r.port("ADC2").drive(1, 1'500'000);
+    r.write("ADC2", "ADC_IER", 1u << (watchdog + 6));
+    r.write("ADC2", tr, 128u << 16 | 1u);
+    r.write("ADC2", cr, 1u << 1 | 1u << 18);
+    static_cast<void>(r.convert(1, "ADC2"));
+    CHECK(r.isr(flag, "ADC2") == 0);
+    r.write("ADC2", tr, 127u << 16);
+    static_cast<void>(r.convert(1, "ADC2"));
+    CHECK(r.isr(flag, "ADC2") == 1);
+    CHECK(r.pending(adc12_irq));
+    r.write("ADC2", "ADC_ISR", 1u << (watchdog + 6));
+    r.write("ADC2", tr, 128u << 16 | 1u);
+    static_cast<void>(r.convert(18, "ADC2"));
+    CHECK(r.isr(flag, "ADC2") == 1);
+    r.write("ADC2", "ADC_ISR", 1u << (watchdog + 6));
+    r.write("ADC2", cr, 1u << 1);
+    static_cast<void>(r.convert(18, "ADC2"));
+    CHECK(r.isr(flag, "ADC2") == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0351 Table 116: AWD1 compares the code left-aligned on 12 bits at every resolution, HT1 "
+    "2047 flags 1500 mV, HT1 2048 does not")
+{
+  for(auto const resolution : {0u, 1u, 2u, 3u})
+  {
+    CAPTURE(resolution);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_CFGR", jqdis | awd1en | resolution << 3);
+    r.write("ADC1", "ADC_TR1", 2048u << 16);
+    CHECK(r.convert(1) == 2048u >> (2 * resolution));
+    CHECK(r.isr("AWD1") == 0);
+    r.write("ADC1", "ADC_TR1", 2047u << 16);
+    static_cast<void>(r.convert(1));
+    CHECK(r.isr("AWD1") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.4.26 OVRMOD 1: with CONT each result overwrites ADC_DR, and a result that "
+    "finds EOC set sets OVR")
+{
+  constexpr std::uint32_t ovrmod = 1u << 12;
+  rig const               r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | cont | ovrmod);
+  auto const at = r.now();
+  r.start(1);
+  r.run_until(at + 15 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.isr("OVR") == 0);
+  r.port().drive(1, 750'000);
+  r.run_until(at + 30 * cycle_ps);
+  CHECK(r.isr("OVR") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1024);
+}
+
+namespace
+{
+constexpr std::uint32_t dma_buffer = 0x2000'2000;
+
+void arm_dma(rig const& r, std::string_view unit, std::uint32_t channel, std::uint32_t count)
+{
+  r.set("RCC", "AHB1ENR", "DMA1EN", 1);
+  r.write("DMA1", std::format("CCR{}", channel), 0);
+  r.write("DMA1", std::format("CPAR{}", channel), static_cast<std::uint32_t>(r.at(unit, "ADC_DR")));
+  r.write("DMA1", std::format("CMAR{}", channel), dma_buffer);
+  r.write("DMA1", std::format("CNDTR{}", channel), count);
+  r.write("DMA1", std::format("CCR{}", channel), 1u | 1u << 7 | 2u << 8 | 2u << 10);
+}
+
+[[nodiscard]] auto buffered(rig const& r, std::uint32_t index) -> std::uint32_t
+{
+  auto const word = r.f->target->mem().read(dma_buffer + 4 * index, 4);
+  REQUIRE(word.has_value());
+  return static_cast<std::uint32_t>(*word);
+}
+}
+
+TEST_CASE(
+    "RM0351 Table 46: DMAEN 1 DMACFG 1 feeds DMA1 channel 1, 2 and 3 from ADC1, ADC2 and ADC3, "
+    "the ADC converts on past the channel's end, RM0351 18.4.26")
+{
+  for(auto const& [unit, channel] : {
+          std::pair{"ADC1", 1u},
+          std::pair{"ADC2", 2u},
+          std::pair{"ADC3", 3u},
+  })
+  {
+    CAPTURE(unit);
+    rig const r;
+    r.enable(unit);
+    r.port(unit).drive(1, 1'500'000);
+    arm_dma(r, unit, channel, 2);
+    r.write(unit, "ADC_CFGR", jqdis | cont | 1u | 1u << 1);
+    auto const at = r.now();
+    r.start(1, unit);
+    r.run_until(at + 2 * 15 * cycle_ps + us);
+    CHECK(buffered(r, 0) == 2048);
+    CHECK(buffered(r, 1) == 2048);
+    CHECK(r.isr("EOC", unit) == 0);
+    r.run_until(at + 5 * 15 * cycle_ps + us);
+    CHECK(r.isr("EOC", unit) == 1);
+    CHECK(r.isr("OVR", unit) == 1);
+    CHECK(r.get(unit, "ADC_CR", "ADSTART") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.4.26: the one-shot DMA end leaves ADSTART set, RM0351 18.4.15, drops the "
+    "conversion and freezes ADC_DR, ADSTART 0 to 1 re-arms the request, inferred")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  arm_dma(r, "ADC1", 1, 2);
+  r.write("ADC1", "ADC_CFGR", jqdis | cont | 1u);
+  auto const at = r.now();
+  r.start(1);
+  r.run_until(at + 2 * 15 * cycle_ps + us);
+  CHECK(buffered(r, 1) == 2048);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  r.run_until(at + 100 * cycle_ps);
+  CHECK(r.dues().empty());
+  CHECK(r.isr("EOC") == 0);
+  r.port().drive(1, 750'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9) | 1u);
+  auto const trigger = r.timer("TIM1", "");
+  r.run_until(trigger + 100 * us);
+  CHECK(r.isr("EOS") == 1);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.isr("OVR") == 0);
+  r.write("ADC1", "ADC_CR", enabled | adstp);
+  r.run_until(r.now() + 10 * cycle_ps);
+  arm_dma(r, "ADC1", 1, 1);
+  r.write("ADC1", "ADC_CFGR", jqdis | 1u);
+  CHECK(r.convert(1) == 1024);
+  CHECK(buffered(r, 0) == 1024);
+}
+
 namespace
 {
 struct firmware_result

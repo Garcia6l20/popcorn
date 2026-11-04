@@ -289,6 +289,7 @@ struct u5_adc
   static constexpr std::size_t      result_depth        = 8;
   static constexpr bool             overrun_flush       = false;
   static constexpr bool             dma_end_stops       = false;
+  static constexpr bool             dma_end_freezes     = false;
   static constexpr bool             trigger_waits_edge  = false;
   static constexpr ready_pair       ready_cycles        = std::nullopt;
   static constexpr std::uint32_t    result_mask         = 0xFFFF'FFFF;
@@ -406,7 +407,8 @@ struct h5_adc
   /** @brief An overrun under OVRMOD 0 keeps the FIFO head only, measured on an STM32H573. */
   static constexpr bool overrun_flush = true;
   /** @brief The end of a one-shot DMA transfer clears ADSTART, measured on an STM32H573. */
-  static constexpr bool dma_end_stops = true;
+  static constexpr bool dma_end_stops   = true;
+  static constexpr bool dma_end_freezes = false;
   /** @brief A trigger at CKMODE 00 waits for the next ADC clock edge, measured on an STM32H573. */
   static constexpr bool trigger_waits_edge = true;
   /**
@@ -584,6 +586,7 @@ struct l4_adc
   static constexpr std::size_t      result_depth       = 1;
   static constexpr bool             overrun_flush      = false;
   static constexpr bool             dma_end_stops      = false;
+  static constexpr bool             dma_end_freezes    = true;
   /** @brief A trigger at CKMODE 00 waits for the next ADC clock edge, inferred from DS10198. */
   static constexpr bool       trigger_waits_edge = true;
   static constexpr ready_pair ready_cycles       = std::nullopt;
@@ -1233,18 +1236,21 @@ struct adc_clock
  *        cycles, which spans the 1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01,
  *        10 and 11 tLATR is 2, 2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA
  *        transfer leaves ADSTART set, which RM0351 18.4.15 does not list among its hardware clears,
- *        and drops the conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the
- *        ADC clock outside 0.14 to 80 MHz logs a warning. With ROVSE AWD1 compares ADC_DR[15:4],
- *        RM0351 18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB,
- *        SMPTRIG and SMPPLUS do not exist. An ADC_OFRy with OFFSET_EN set subtracts OFFSET from the
- *        code of its OFFSET_CH channel, the code left-aligned on 12 bits as RM0351 Table 114 shows,
- *        the lowest enabled y first, inferred from RM0351 18.7.17, whose lowest-x rule would
- *        otherwise let a disabled ADC_OFR1 at its reset channel 0 block the others, for ADC_DR and
- *        ADC_JDRy. The result is signed, sign-extended to 16 bits when right-aligned, Figure 97,
- *        and one bit below the unsigned position with the sign at bit 15 when left-aligned, Figure
- *        99. OFFSET bits below the resolution, which Table 114 requires clear, are subtracted too
- *        and the result keeps its upper bits, inferred. ROVSE and JOVSE ignore OFFSET_EN, RM0351
- *        18.4.26. The watchdogs compare the raw code, RM0351 18.4.29.
+ *        drops the conversion in progress as on the U5 and freezes ADC_DR, RM0351 18.4.26. A result
+ *        while frozen sets no OVR, RM0351 18.4.26 "This avoids generating an overrun error".
+ *        It leaves EOC unchanged, sets EOS at the end of the sequence and still reaches the
+ *        watchdogs, inferred. ADSTART going from 0 to 1 re-arms the request and ends the freeze,
+ *        inferred. Each ADEN edge with the ADC clock outside 0.14 to 80 MHz logs a warning. With
+ *        ROVSE AWD1 compares ADC_DR[15:4], RM0351 18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the
+ *        H5, inferred. AWDFILT, BULB, SMPTRIG and SMPPLUS do not exist. An ADC_OFRy with OFFSET_EN
+ *        set subtracts OFFSET from the code of its OFFSET_CH channel, the code left-aligned on 12
+ *        bits as RM0351 Table 114 shows, the lowest enabled y first, inferred from RM0351 18.7.17,
+ *        whose lowest-x rule would otherwise let a disabled ADC_OFR1 at its reset channel 0 block
+ *        the others, for ADC_DR and ADC_JDRy. The result is signed, sign-extended to 16 bits when
+ *        right-aligned, Figure 97, and one bit below the unsigned position with the sign at bit 15
+ *        when left-aligned, Figure 99. OFFSET bits below the resolution, which Table 114 requires
+ *        clear, are subtracted too and the result keeps its upper bits, inferred. ROVSE and JOVSE
+ *        ignore OFFSET_EN, RM0351 18.4.26. The watchdogs compare the raw code, RM0351 18.4.29.
  *
  *        The L4 converts the injected group with JQDIS 1, RM0351 18.4.19. A JADSTART write with
  *        ADEN converts the JL + 1 channels of JSQ1 to JSQ4 into ADC_JDR1 to ADC_JDR4 at once with
@@ -2733,6 +2739,13 @@ auto adc_model<Traits>::aligned(std::uint32_t channel, std::uint32_t result) con
 
 template <typename Traits> void adc_model<Traits>::land(std::uint32_t result)
 {
+  if constexpr(Traits::dma_end_freezes)
+  {
+    if(state_.dma_stopped)
+    {
+      return;
+    }
+  }
   if(get(regs_, overrun_mode_) == 0)
   {
     auto const overrun = get(regs_, overrun_) != 0;

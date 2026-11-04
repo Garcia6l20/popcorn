@@ -293,6 +293,13 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   `ADC_DR` and `ADC_JDRy`, and the result reads signed, RM0351 Figures 97 and 99. ROVSE and JOVSE
   ignore OFFSET_EN. OFFSET bits below the resolution, which Table 114 requires clear, are subtracted
   too and the result keeps its upper bits, inferred. The watchdogs compare the raw code.
+- The one-shot DMA end, DMACFG 0, drops the conversion in progress and stops the sequence with
+  ADSTART left set, RM0351 18.4.15, and freezes `ADC_DR`, RM0351 18.4.26. A result while frozen
+  sets no OVR, RM0351 18.4.26 "This avoids generating an overrun error". It leaves EOC
+  unchanged, sets EOS at the end of the sequence and still reaches the watchdogs, inferred. ADSTART
+  going from 0 to 1 re-arms the request and ends the freeze, inferred.
+- ES0250 2.8.8, ADC_AWDy_OUT reset by unguarded channels, has no counterpart: no watchdog output
+  reaches a timer, and the TIM1 and TIM8 `ETR_ADCx_RMP` selections log once, see TIM.
 - ADRDY sets 15 ADC clock cycles after the ADEN write, the DS10198 Table 76 tSTAB of one
   conversion cycle read as one 12-bit conversion at SMP 000, inferred. The tADCVREG_STUP wait of
   Table 76 is the firmware's.
