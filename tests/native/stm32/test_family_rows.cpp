@@ -189,6 +189,21 @@ TEST_CASE("an instance of a known IP version on a part outside every row glob is
   CHECK_THROWS_AS((void)stm32::factories(stm32::board{}, desc), config_error);
 }
 
+TEST_CASE("a CRC of integtest1_v2_0 on a part outside the U5, H5 and L4 rows is refused")
+{
+  auto const u5 = popcorn::testing::description_from("POPCORN_U575_2M_DESC");
+  auto const found =
+      std::ranges::find(u5.peripherals, std::string_view{"CRC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != u5.peripherals.end());
+  REQUIRE(found->ip_version == "integtest1_v2_0");
+  auto with_crc = toy("STM32U575ZITxQ", false);
+  with_crc.peripherals.push_back(*found);
+  CHECK(machine_of(with_crc).model("CRC") != nullptr);
+  auto desc = toy("STM32L152RETx", false);
+  desc.peripherals.push_back(*found);
+  CHECK_THROWS_AS((void)machine_of(desc), config_error);
+}
+
 TEST_CASE("option_bytes.tzen on an STM32L1 part is refused")
 {
   auto       options = popcorn::testing::stm32_options();

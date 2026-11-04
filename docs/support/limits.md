@@ -278,11 +278,12 @@ On the STM32L1, RM0038 section 12:
 
 Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crc.cpp)
 
-- On the STM32U5 and STM32H5 a `CRC_DR` write that is not right-aligned is ignored and logged,
-  RM0456 24.4.
-- An even polynomial, which RM0456 24.3.3 does not support, is computed anyway and logged.
-- A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 `CRC_IDR`, is
-  ignored and logged. Such a read is logged.
+- On the STM32U5, STM32H5 and STM32L4 a `CRC_DR` write that is not right-aligned is ignored and
+  logged, RM0456 24.4, RM0351 15.4.
+- An even polynomial, which RM0456 24.3.3 and RM0351 15.3.3 do not support, is computed anyway and
+  logged.
+- A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 and STM32L4
+  `CRC_IDR`, is ignored and logged. Such a read is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
 - The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from 0xFFFFFFFF,
   with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its byte lanes
@@ -290,8 +291,15 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access size, are
   inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4 HCLK of the
   computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038
-  4.4 asks for words. CRC_IDR takes byte and half-word accesses with no log, as ST's CMSIS header
-  declares it a byte. Under `strict` each logged access raises `ModelError`.
+  4.4 asks for words. RM0038 4.4 says "The CRC registers have to be accessed by words (32 bits)",
+  CRC_IDR included. The model takes byte and half-word CRC_IDR accesses with no log, as ST's CMSIS
+  header declares IDR a byte and LL_CRC_Write_IDR stores one. Under `strict` each logged access
+  raises `ModelError`.
+- The STM32L4 CRC, RM0351 15, is the programmable unit of the STM32U5 with an 8-bit CRC_IDR, RM0351
+  15.4.2. RM0351 15.3.3 and 15.4 allow only 32-bit accesses to registers other than CRC_DR, "For
+  the other registers only 32-bit accesses are allowed". The model takes byte and half-word
+  CRC_IDR accesses with no log, as ST's CMSIS header declares IDR a byte and LL_CRC_Write_IDR
+  stores one.
 
 ## CRS
 

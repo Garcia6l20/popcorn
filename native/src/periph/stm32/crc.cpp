@@ -91,10 +91,17 @@ struct crc_state
  *        feeds 0xB0B0B0B0. For the DMA RM0038 11.3.4 states the repeated lanes, "the data are
  *        duplicated on the unused lanes of the HWDATA[31:0] bus". Inferred: a CPU byte or
  *        half-word store repeats its lanes the same way, and the unit ignores the access size,
- *        RM0038 4.3 "CRC computation is done on the whole 32-bit data word". IDR takes byte and
- *        half-word accesses, as ST's CMSIS header declares it a byte and LL_CRC_Write_IDR stores
- *        one. Deviation: a DR write completes with no stall, where RM0038 4.3 stalls it until the
- *        end of the 4 HCLK computation of 4.2.
+ *        RM0038 4.3 "CRC computation is done on the whole 32-bit data word". Deviation: RM0038 4.4
+ *        has every register accessed by words, CRC_IDR included, and the model takes byte and
+ *        half-word IDR accesses with no log, as ST's CMSIS header declares IDR a byte and
+ *        LL_CRC_Write_IDR stores one. Deviation: a DR write completes with no stall, where
+ *        RM0038 4.3 stalls it until the end of the 4 HCLK computation of 4.2.
+ *        The STM32L4 unit, RM0351 section 15, is the programmable unit with an 8-bit CRC_IDR,
+ *        15.4.2. Deviation: RM0351 15.3.3 and 15.4 allow only 32-bit accesses to registers other
+ *        than CRC_DR, and the model takes byte and half-word IDR accesses with no log as on the
+ *        STM32L1, as ST's CMSIS header declares IDR a byte and LL_CRC_Write_IDR stores one. Its
+ *        log records cite RM0351 15.4 and 15.3.3, `crc_variant::access_rule` and
+ *        `crc_variant::polynomial_rule`.
  */
 class crc final : public dispatch_model<crc, crc_state>, public bus_reset_listener
 {
@@ -234,7 +241,9 @@ auto crc::on_write(
     {
       warn_once_or_refuse(
           even_logged_, "POL", poly_.offset,
-          "even polynomial, which RM0456 24.3.3 does not support, computed anyway");
+          std::format(
+              "even polynomial, which {} does not support, computed anyway",
+              variant_.polynomial_rule));
     }
     feed(width >= 32 ? value : value & ((1u << width) - 1u), width);
     return {};

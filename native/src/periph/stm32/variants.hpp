@@ -1017,6 +1017,8 @@ struct crc_variant
   bool byte_idr = false;
   /** @brief Manual section that states the access rules, named in the log records. */
   std::string_view access_rule = "RM0456 24.4";
+  /** @brief Manual section that leaves even polynomials unsupported, named in the log record. */
+  std::string_view polynomial_rule = "RM0456 24.3.3";
 };
 
 /** @brief STM32U5 and STM32H5 CRC, RM0456 section 24. */
@@ -1028,6 +1030,12 @@ inline constexpr crc_variant l1_crc{
     .word_input   = true,
     .byte_idr     = true,
     .access_rule  = "RM0038 4.4"};
+/** @brief STM32L4 CRC, RM0351 section 15: the programmable unit of the STM32U5 with an 8-bit
+ *         CRC_IDR, which the CMSIS `CRC_TypeDef` declares an `uint8_t`. */
+inline constexpr crc_variant l4_crc{
+    .byte_idr        = true,
+    .access_rule     = "RM0351 15.4",
+    .polynomial_rule = "RM0351 15.3.3"};
 
 /** @brief Differences between the STM32L1 ADC categories the model rows serve, RM0038 12.3.3. */
 struct adc_l1_variant
