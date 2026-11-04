@@ -917,6 +917,12 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   write, the "up to 5" of RM0038 21.4.4 taken as 5, inferred, 6 on the STM32U5 and STM32H5.
 - An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
   starts keeps its flag set until the LSI is ready, inferred.
+- The STM32L4 IWDG, RM0351 36, has KR, PR, RLR, SR with PVU, RVU and WVU, and WINR. PR 110 and 111
+  both divide by 256. RM0351 36.4 says an update "takes up to five LSI/prescaled clock cycles". The
+  model clears PVU, RVU and WVU 5 LSI cycles after the write, whatever the prescaler, inferred. With
+  FLASH_OPTR.IWDG_SW 0 the IWDG starts at every reset without a key, RM0351 36.3.3. RM0351 names
+  power-on only, the start after the other resets is inferred. FLASH_OPTR.IWDG_STOP and IWDG_STDBY
+  are stored: the model runs in Run mode only.
 
 ## LPTIM
 

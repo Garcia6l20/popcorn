@@ -949,6 +949,11 @@ struct iwdg_variant
   /** @brief LSI cycles from a `PR`, `RLR`, `WINR` or `EWCR` write to the fall of its update
    *         flag. */
   std::uint8_t update_cycles = 6;
+  /**
+   * @brief `FLASH` register and field of the hardware watchdog option. At every reset the
+   *        watchdog starts when the field reads 0. Empty: it starts only at `KR` 0xCCCC.
+   */
+  field_name hardware_option = {};
 };
 
 /** @brief STM32U5 and STM32H5 IWDG, RM0456 61.7.2 and Table 623, RM0481 49.7.2. */
@@ -960,6 +965,18 @@ inline constexpr iwdg_variant l1_iwdg{
     .early_wakeup  = false,
     .prescaler_top = 6,
     .update_cycles = 5};
+/**
+ * @brief STM32L4 IWDG, RM0351 36.4: KR, PR, RLR, SR with PVU, RVU and WVU, and WINR, no early
+ *        wake-up, PR 110 and 111 both divide by 256, an update takes up to 5 LSI cycles, the
+ *        hardware watchdog started by FLASH_OPTR.IWDG_SW 0, RM0351 36.3.3.
+ */
+inline constexpr iwdg_variant l4_iwdg{
+    .window          = true,
+    .early_wakeup    = false,
+    .prescaler_top   = 6,
+    .update_cycles   = 5,
+    .hardware_option = {"OPTR", "IWDG_SW"}
+};
 
 /** @brief Differences between the LPTIM peripherals the model rows serve. */
 struct lptim_variant

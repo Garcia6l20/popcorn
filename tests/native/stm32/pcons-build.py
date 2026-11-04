@@ -117,6 +117,7 @@ l4_firmwares = {
         "l476_l4_usart_hal",
         "l476_l4_i2c_ll",
         "l476_l4_i2c_hal",
+        "l476_l4_iwdg_ll",
     )
 }
 l4_env = {
@@ -287,6 +288,7 @@ for program, source in (
     ("stm32-sai-l4", "test_sai_l4.cpp"),
     ("stm32-usart-l4", "test_usart_l4.cpp"),
     ("stm32-i2c-l4", "test_i2c_l4.cpp"),
+    ("stm32-iwdg-l4", "test_iwdg_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

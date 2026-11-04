@@ -11,8 +11,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -28,6 +32,7 @@ constexpr std::uint32_t start_key    = 0xCCCC;
 constexpr std::uint32_t refresh_key  = 0xAAAA;
 constexpr std::uint32_t unlock_key   = 0x5555;
 constexpr std::uint32_t counter_top  = 0xFFF;
+constexpr std::uint32_t option_start = first_update + updates;
 
 enum update_index : std::uint8_t
 {
@@ -59,9 +64,9 @@ struct iwdg_state
 };
 
 /**
- * @brief IWDG of the STM32U5 and STM32H5, RM0456 section 61 "Independent watchdog (IWDG)", and
- *        of the STM32L1, RM0038 section 21, software watchdog mode. The 12-bit down-counter is
- *        derived from the LSI clock and the virtual time of its last reload, never ticked. `KR`
+ * @brief IWDG of the STM32U5 and STM32H5, RM0456 section 61 "Independent watchdog (IWDG)", of the
+ *        STM32L1, RM0038 section 21, and of the STM32L4, RM0351 section 36. The 12-bit down-counter
+ *        is derived from the LSI clock and the virtual time of its last reload, never ticked. `KR`
  *        0xCCCC starts it from 0xFFF and forces the LSI on through the RCC peer, 0xAAAA reloads it
  *        from RL, 0x5555 unlocks PR, RLR, WINR and EWCR until another key. PVU, RVU, WVU and EWU
  *        stay set for the variant's update cycles of the LSI after a write, six on the U5, RM0456
@@ -70,17 +75,20 @@ struct iwdg_state
  *        reaching 0, or a reload while it is above WIN, requests a watchdog reset. EWIF and the
  *        IWDG IRQ follow the counter reaching EWIT - 1 while EWIE is set. The variant says whether
  *        the window and the early wake-up exist, the L1 has neither, and the largest PR with its
- *        own divider.
- *        The kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is kept in
- *        virtual time, re-derived when the LSI rate changes. An LSI rate change keeps the partial
- *        division sequence, a stopped LSI drops it. An update flag falls only while the LSI runs,
- *        inferred. Deviations: the new prescaler restarts the division sequence when PVU falls, an
- *        error under one period of the old prescaled clock, a refresh reloads at the key write
- *        instead of one period later, EWIC acknowledges without the 0x5555 key, as
+ *        own divider. The kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is
+ *        kept in virtual time, re-derived when the LSI rate changes. An LSI rate change keeps the
+ *        partial division sequence, a stopped LSI drops it. An update flag falls only while the LSI
+ *        runs, inferred. Deviations: the new prescaler restarts the division sequence when PVU
+ *        falls, an error under one period of the old prescaled clock, a refresh reloads at the key
+ *        write instead of one period later, EWIC acknowledges without the 0x5555 key, as
  *        LL_IWDG_ClearFlag_EWIF expects, and the watchdog starts only at the first `KR` 0xCCCC
  *        whatever the hardware watchdog option holds, `FLASH_OPTR.IWDG_SW` on the U5,
- *        `FLASH_OPTSR_CUR.IWDG_SW` on the H5 and `FLASH_OBR.IWDG_SW` on the L1, where RM0456
- *        61.4.3 and RM0038 21.3.1 start it at power-on with IWDG_SW 0.
+ *        `FLASH_OPTSR_CUR.IWDG_SW` on the H5 and `FLASH_OBR.IWDG_SW` on the L1, where RM0456 61.4.3
+ *        and RM0038 21.3.1 start it at power-on with IWDG_SW 0. With
+ *        `iwdg_variant::hardware_option`, the STM32L4, the watchdog starts at every reset when
+ *        FLASH_OPTR.IWDG_SW reads 0, RM0351 36.3.3, read once every model has reset, so after the
+ *        option load of that reset. RM0351 names power-on only: the start after the other resets is
+ *        inferred.
  *        Once started it runs until reset. While the machine holds its core with DBGMCU
  *        `DBG_IWDG_STOP` set, the counter, the early wake-up and the register update
  *        synchronisers stop at the time of the hold and resume at the release, their phase kept
@@ -113,6 +121,7 @@ private:
   [[nodiscard]] auto divider() const -> std::uint32_t;
 
   void restart(std::uint32_t value);
+  void start();
   void start_update(update_index which);
   void schedule_update(std::size_t which);
   void schedule_updates();
@@ -140,6 +149,8 @@ private:
   core::clock_domain       lsi_;
   irq_line*                line_          = nullptr;
   bool                     freeze_logged_ = false;
+  std::optional<address>   option_address_;
+  std::uint32_t            option_mask_{};
 };
 
 constexpr std::array<write_entry<iwdg>, 4> iwdg_writes{
@@ -182,6 +193,29 @@ iwdg::iwdg(model_context& ctx, peripheral_desc const& desc, iwdg_variant const& 
     busy_[early_update] = field("SR", "EWU");
     early_register_     = reg("EWCR");
     line_               = &irq("IWDG_IRQn");
+  }
+  if(not variant.hardware_option.reg.empty())
+  {
+    auto const& option = variant.hardware_option;
+    auto const  flash =
+        std::ranges::find(ctx.part.peripherals, std::string_view{"FLASH"}, &peripheral_desc::name);
+    register_desc const* found = nullptr;
+    if(flash != ctx.part.peripherals.end())
+    {
+      found = find_register(*flash, option.reg);
+    }
+    auto const bits = found == nullptr
+                        ? std::vector<field_desc>::const_iterator{}
+                        : std::ranges::find(found->fields, option.field, &field_desc::name);
+    if(found == nullptr or bits == found->fields.end())
+    {
+      throw config_error(
+          ctx.part.part, 0,
+          std::format("peripherals.FLASH.registers.{}.{}", option.reg, option.field),
+          "the hardware watchdog option the IWDG reads at reset");
+    }
+    option_address_ = flash->base + found->offset;
+    option_mask_ = static_cast<std::uint32_t>(((std::uint64_t{1} << bits->width) - 1) << bits->lsb);
   }
 }
 
@@ -404,6 +438,24 @@ void iwdg::reset(register_file& regs, reset_kind)
   {
     line_->lower();
   }
+  if(option_address_)
+  {
+    ctx_.events.schedule_at(ctx_.clock.time(), option_start, 0, ctx_.clock);
+  }
+}
+
+void iwdg::start()
+{
+  state_.running = 1;
+  state_.divider = divider();
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto* const source = dynamic_cast<lsi_source*>(peer))
+    {
+      source->force_lsi();
+    }
+  }
+  restart(counter_top);
 }
 
 void iwdg::key_written(std::uint32_t, std::uint32_t now)
@@ -413,16 +465,7 @@ void iwdg::key_written(std::uint32_t, std::uint32_t now)
   state_.unlocked = key == unlock_key ? 1 : 0;
   if(key == start_key and state_.running == 0)
   {
-    state_.running = 1;
-    state_.divider = divider();
-    for(auto* const peer : ctx_.peers.all())
-    {
-      if(auto* const source = dynamic_cast<lsi_source*>(peer))
-      {
-        source->force_lsi();
-      }
-    }
-    restart(counter_top);
+    start();
   }
   else if(key == refresh_key and state_.running != 0)
   {
@@ -476,6 +519,15 @@ void iwdg::plain_written(std::uint32_t, std::uint32_t)
 
 void iwdg::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == option_start)
+  {
+    auto const word = ctx_.services.read(*option_address_, 4, initiator::debugger);
+    if(word and (*word & option_mask_) == 0 and state_.running == 0)
+    {
+      start();
+    }
+    return;
+  }
   if(kind >= state_.generation.size() or payload != state_.generation[kind])
   {
     return;
