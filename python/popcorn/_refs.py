@@ -1014,6 +1014,31 @@ class PinRefs:
         )
 
     @property
+    def volts(self) -> Ref[float]:
+        """Analog level of the pin in volts. A write drives the board's analog level."""
+        pin = self._pin
+        handle = _handle(self._owner)
+
+        def put(value: float) -> None:
+            pin.volts = value
+
+        def check(value: object) -> None:
+            microvolts_of(value)
+
+        return Ref(
+            self._owner,
+            f"{self._label}.volts",
+            lambda: pin.volts,
+            put,
+            check,
+            read=lambda: handle.op_gpio_volts(pin.port, pin.number),
+            decode=lambda raw: cast(int, raw) / 1e6,
+            write=lambda value: handle.op_gpio_drive_volts(
+                pin.port, pin.number, microvolts_of(value)
+            ),
+        )
+
+    @property
     def mode(self) -> Ref[PinMode]:
         """Mode the firmware configured. Read-only."""
         pin = self._pin
@@ -1060,8 +1085,6 @@ class AnalogRefs:
             analog.volts = value
 
         def check(value: object) -> None:
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise TypeError(f"volts takes a float, not {type(value).__name__}")
             microvolts_of(value)
 
         handle = _handle(self._owner)

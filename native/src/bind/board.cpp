@@ -466,6 +466,19 @@ auto gpio_level_body(periph::stm32::gpio_port& port, std::uint8_t pin)
   return [port = &port, pin](core::machine&) { return port->level(pin); };
 }
 
+auto gpio_drive_volts_body(
+    periph::stm32::gpio_port&    port,
+    std::uint8_t                 pin,
+    std::optional<std::uint32_t> microvolts)
+{
+  return [port = &port, pin, microvolts](core::machine&) { port->drive_analog(pin, microvolts); };
+}
+
+auto gpio_volts_body(periph::stm32::gpio_port& port, std::uint8_t pin)
+{
+  return [port = &port, pin](core::machine&) { return port->analog_level(pin); };
+}
+
 auto gpio_mode_body(periph::stm32::gpio_port& port, std::uint8_t pin)
 {
   return [port = &port, pin](core::machine&) { return port->mode(pin); };
@@ -497,6 +510,37 @@ void machine_handle::gpio_drive(
 {
   access(
       [&](core::machine& target) { gpio_drive_body(gpio(peripheral, pin), pin, level)(target); });
+}
+
+void machine_handle::gpio_drive_volts(
+    std::string const&           peripheral,
+    std::uint8_t                 pin,
+    std::optional<std::uint32_t> microvolts)
+{
+  access([&](core::machine& target) {
+    gpio_drive_volts_body(gpio(peripheral, pin), pin, microvolts)(target);
+  });
+}
+
+auto machine_handle::gpio_volts(std::string const& peripheral, std::uint8_t pin) const
+    -> std::uint32_t
+{
+  return access(
+      [&](core::machine& target) { return gpio_volts_body(gpio(peripheral, pin), pin)(target); });
+}
+
+auto machine_handle::op_gpio_volts(std::string const& peripheral, std::uint8_t pin) const
+    -> access_op
+{
+  return detail::machine_op(gpio_volts_body(gpio(peripheral, pin), pin));
+}
+
+auto machine_handle::op_gpio_drive_volts(
+    std::string const&           peripheral,
+    std::uint8_t                 pin,
+    std::optional<std::uint32_t> microvolts) const -> access_op
+{
+  return detail::machine_op(gpio_drive_volts_body(gpio(peripheral, pin), pin, microvolts));
 }
 
 auto machine_handle::gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool

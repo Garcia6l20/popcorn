@@ -947,6 +947,14 @@ public:
       std::string const&  peripheral,
       std::uint8_t        pin,
       std::optional<bool> level) const -> access_op;
+  /** @brief gpio_volts() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of gpio_volts, in microvolts."}]] [[nodiscard]] auto
+      op_gpio_volts(std::string const& peripheral, std::uint8_t pin) const -> access_op;
+  /** @brief gpio_drive_volts() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of gpio_drive_volts."}]] [[nodiscard]] auto op_gpio_drive_volts(
+      std::string const&           peripheral,
+      std::uint8_t                 pin,
+      std::optional<std::uint32_t> microvolts) const -> access_op;
   /** @brief gpio_mode() as an op of submit_ops(), its value the mode's integer, checked now. */
   [[= py::doc{"Op of gpio_mode, its integer value."}]] [[nodiscard]] auto
       op_gpio_mode(std::string const& peripheral, std::uint8_t pin) const -> access_op;
@@ -1323,6 +1331,33 @@ public:
    */
   [[= py::doc{"Level of a GPIO pin as the input data register reads it."}]] [[nodiscard]] auto
       gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool;
+
+  /**
+   * @brief Drives the analog level of a GPIO pin from outside the MCU, its board slot, or
+   *        releases it.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @param microvolts Level driven, empty to release the board slot.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Drive the analog level of a GPIO pin in microvolts, None to release it."}]] void
+      gpio_drive_volts(
+          std::string const&           peripheral,
+          std::uint8_t                 pin,
+          std::optional<std::uint32_t> microvolts);
+
+  /**
+   * @brief Analog level of a GPIO pin, gpio_port::analog_level(): the chip slot, else the board
+   *        slot, else 0.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @return The level in microvolts.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Analog level of a GPIO pin in microvolts."}]] [[nodiscard]] auto
+      gpio_volts(std::string const& peripheral, std::uint8_t pin) const -> std::uint32_t;
 
   /**
    * @brief Mode of a GPIO pin.

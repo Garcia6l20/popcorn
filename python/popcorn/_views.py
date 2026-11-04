@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import math
+import numbers
 import struct
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -604,6 +605,12 @@ class Pin:
     GPIO port, and ConfigError at the call, parked or running, for a pin the part's package does
     not bond, outside the port's `bonded` mask in the description. The firmware reaches every
     pin through the registers.
+
+    `volts` is the analog level of the pin that an ADC channel on its pad converts: the level a
+    peripheral output such as a DAC drives on it, else the board's analog drive, else 0.0. Setting
+    it drives the board's analog level, in whole microvolts, apart from `level`, and
+    `release_volts` stops that drive. The analog drive is board state as `level` is, and the
+    drive of `m.periph.ADC1.input(n).volts` is the same drive on the channel's pad.
     """
 
     __slots__ = ("_access", "number", "port")
@@ -630,6 +637,30 @@ class Pin:
             MachineRunning: The machine is busy, outside its callbacks.
         """
         self._access.handle.gpio_drive(self.port, self.number, None)
+
+    @property
+    def volts(self) -> float:
+        """Analog level of the pin in volts: a peripheral output's drive, else the board's
+        analog drive, else 0.0.
+
+        Raises:
+            TypeError: A set value is a bool or not a real number.
+            ValueError: A set value is not a voltage from 0 to 4294.967295 V.
+        """
+        return self._access.handle.gpio_volts(self.port, self.number) / 1e6
+
+    @volts.setter
+    def volts(self, value: float) -> None:
+        self._access.handle.gpio_drive_volts(self.port, self.number, microvolts_of(value))
+
+    def release_volts(self) -> None:
+        """Stop the board's analog drive of the pin, its analog level then 0.0 or a peripheral
+        output's drive.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        self._access.handle.gpio_drive_volts(self.port, self.number, None)
 
     def drive_at(self, level: bool, *, at: VirtualTime) -> Pending[VirtualTime]:
         """Drive the pin to `level` at exactly `at`, as `drive_edges([(at, level)])` does.
@@ -716,11 +747,12 @@ class AnalogInput:
     """One external ADC channel, `m.periph.ADC1.input(5)`, or of bank B,
     `m.periph.ADC.input(12, bank="B")`, through the ADC model.
 
-    Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
-    board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
-    in force when it ends: V x 2**N / VDDA at the N bits of the ADC, 14 on the STM32U5 ADC1, 12
-    on the STM32H5 ADC1 and ADC2, and 12, 10, 8 or 6 by RES on the STM32L1 ADC, floored,
-    saturated at VDDA, VDDA from `SupplyOptions`.
+    Setting `volts` drives the channel from outside the MCU, in whole microvolts: the board's
+    analog drive of the channel's pad, `m.periph.GPIOx.pin(n).volts`, seen by every ADC channel
+    on that pad. The drive is board state, kept across an MCU reset and restored by snapshots. A
+    conversion reads the value in force when it ends: V x 2**N / VDDA at the N bits of the ADC,
+    14 on the STM32U5 ADC1, 12 on the STM32H5 ADC1 and ADC2, and 12, 10, 8 or 6 by RES on the
+    STM32L1 ADC, floored, saturated at VDDA, VDDA from `SupplyOptions`.
     While the machine is busy, every access raises MachineRunning outside its callbacks:
     `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary then.
     Every access raises ConfigError at the call, parked or running, for a channel whose pad the
@@ -740,7 +772,12 @@ class AnalogInput:
 
     @property
     def volts(self) -> float:
-        """Voltage driven on the channel, 0.0 when never driven."""
+        """Voltage driven on the channel, 0.0 when never driven.
+
+        Raises:
+            TypeError: A set value is a bool or not a real number.
+            ValueError: A set value is not a voltage from 0 to 4294.967295 V.
+        """
         return self._access.handle.adc_input(self.adc, self.channel, native_bank(self.bank)) / 1e6
 
     @volts.setter
@@ -915,13 +952,17 @@ def _checked_count(name: str, value: object) -> int | None:
     return value
 
 
-def microvolts_of(volts: float) -> int:
+def microvolts_of(volts: object) -> int:
     """`volts` in whole microvolts.
 
     Raises:
+        TypeError: `volts` is a bool or not a real number.
         ValueError: `volts` is not a voltage from 0 to 4294.967295 V.
     """
-    microvolts = round(volts * 1e6) if math.isfinite(volts) else -1
+    if isinstance(volts, bool) or not isinstance(volts, numbers.Real):
+        raise TypeError(f"volts takes a float, not {type(volts).__name__}")
+    value = float(volts)
+    microvolts = round(value * 1e6) if math.isfinite(value) else -1
     if not 0 <= microvolts <= 0xFFFF_FFFF:
         raise ValueError(f"{volts!r} V is not a voltage from 0 to 4294.967295 V")
     return microvolts
