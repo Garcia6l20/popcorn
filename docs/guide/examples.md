@@ -342,11 +342,23 @@ printf banner and line echo on USART2, HAL. [Sources and tests](https://github.c
 
 --8<-- "stm32l476/usart/README.md:3:10"
 
+### l476 iwdg
+
+IWDG refresh, the IWDG_WINR window and a watchdog reset on the 32 kHz LSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/iwdg).
+
+--8<-- "stm32l476/iwdg/README.md:3:12"
+
 ### l476 crc
 
 The programmable CRC unit, three catalogue CRCs and CRC_IDR, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/crc).
 
 --8<-- "stm32l476/crc/README.md:3:12"
+
+### l476 rng
+
+A 64-byte key from the built-in RNG on the MSI CLK48, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/rng).
+
+--8<-- "stm32l476/rng/README.md:3:25"
 
 ### l476 usb_cdc
 
