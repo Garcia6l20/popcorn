@@ -2,6 +2,7 @@
 #include "exti_classic.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "read_protection.hpp"
 #include "rtc_calendar.hpp"
 #include "rtc_core.hpp"
 
@@ -186,12 +187,15 @@ struct unmodelled_entry
  *        after a clear, the end of init mode, a BYPSHAD clear or a system reset, inferred from the
  *        copy every RTCCLK period of RM0351 38.3.4 and 38.3.8, where the BYPSHAD text of 38.6.3
  *        says every two cycles. A brown-out keeps the backup domain, RM0351 6.1.3. The alarm
- *        interrupt drives EXTI line 18, RM0351 Table 62. RTC_TAMPCR and RTC_OR are storage.
+ *        interrupt drives EXTI line 18, RM0351 Table 62. RTC_TAMPCR and RTC_OR are storage. A
+ *        read protection regression from level 1 to level 0, which the STM32L4 FLASH reports,
+ *        writes 0 to every backup register, RM0351 3.5.1.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
                           public backup_domain,
                           public core_hold_listener,
+                          public read_protection_listener,
                           public rtc_core
 {
   friend rtc_core;
@@ -219,6 +223,7 @@ public:
   void on_clock_change() override;
   void backup_reset() override;
   void on_core_hold(bool held) override;
+  void on_read_protection_regression() override;
   void time_written(std::uint32_t old, std::uint32_t now)
   {
     rtc_core::time_written(old, now);
@@ -286,6 +291,7 @@ private:
   std::uint32_t                                      open_flags_{};
   std::uint32_t                                      keyed_flags_{};
   std::vector<std::uint32_t>                         storage_;
+  std::vector<std::uint32_t>                         backups_;
   std::array<classic_alarm, 2>                       alarms_{};
   field_ref                                          wakeup_reload_;
   field_ref                                          wakeup_clock_;
@@ -418,6 +424,7 @@ rtc_classic::rtc_classic(
     if(described.name.starts_with("BKP") and described.name.ends_with("R"))
     {
       named.push_back({described.name, &rtc_classic::plain_written});
+      backups_.push_back(described.offset);
     }
   }
   bind(named);
@@ -885,6 +892,14 @@ void rtc_classic::on_core_hold(bool held)
     return;
   }
   hold_core(held);
+}
+
+void rtc_classic::on_read_protection_regression()
+{
+  for(auto const offset : backups_)
+  {
+    regs_.poke(offset, 0);
+  }
 }
 
 auto rtc_classic::storage_only(std::uint32_t offset) const -> bool

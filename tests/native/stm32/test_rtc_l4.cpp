@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,6 +39,7 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
 constexpr std::string_view idle_image = "l476_l4_exti_ll";
+constexpr std::string_view firmware   = "l476_l4_rtc_ll";
 constexpr std::uint64_t    us         = 1'000'000;
 constexpr std::uint64_t    ms         = 1'000 * us;
 constexpr std::uint64_t    second     = 1'000 * ms;
@@ -192,6 +194,28 @@ struct rig
         std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind));
   }
 };
+
+auto entered(std::string_view entry) -> stm32_fixture
+{
+  stm32_fixture f{l476rc(), firmware};
+  f.set("pc", sym(firmware, entry));
+  return f;
+}
+
+auto run_to_idle(stm32_fixture const& f) -> void
+{
+  auto const stopped = f.run_to_stop({.max_instructions = icount{20'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::idle);
+}
+
+auto finish(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  auto const stopped = f.run_to_stop({.max_instructions = icount{10'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  return f.log();
+}
 
 auto rtc_of(part_description& desc) -> popcorn::peripheral_desc&
 {
@@ -581,4 +605,101 @@ TEST_CASE("checklist 39: the L4 RTC variant refuses a description that disagrees
       static_cast<void>(make_machine(without_field(l476rc(), "TAMPCR", "TAMP3E"))),
       popcorn::config_error);
   CHECK_THROWS_AS(static_cast<void>(make_machine(l476rc(), stm32::l1_rtc)), popcorn::config_error);
+}
+
+TEST_CASE("RM0351 38.3.7: the LL init sets 2026-02-28 23:59:58 and 3 s later reads March 1st")
+{
+  auto f = entered("calendar");
+  run_to_idle(f);
+  auto const log = f.log();
+  REQUIRE(log.size() == 7);
+  CHECK(std::vector(log.begin(), log.begin() + 4) == std::vector<std::uint32_t>{0, 0, 0, 1});
+  CHECK(log[4] <= 255);
+  CHECK(std::vector(log.end() - 2, log.end()) == std::vector<std::uint32_t>{0x23'5958, feb_28});
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000},
+                     .until_time       = vtime{f.target->virtual_clock().time().ps + 3 * second}})
+          .reason
+      == stop_reason::time);
+  f.set("pc", sym(firmware, "read_calendar"));
+  auto const after = finish(f);
+  REQUIRE(after.size() == log.size() + 3);
+  CHECK(
+      std::vector(after.end() - 2, after.end()) == std::vector<std::uint32_t>{0x00'0001, march_1});
+}
+
+TEST_CASE(
+    "RM0351 38.3.8: after a system reset the LL reads reset values until RSF, then the calendar")
+{
+  auto f = entered("calendar");
+  run_to_idle(f);
+  auto const before = f.log().size();
+  f.target->reset(reset_kind::software);
+  f.set("pc", sym(firmware, "read_after_reset"));
+  auto const log  = finish(f);
+  auto const tail = std::vector(log.begin() + static_cast<std::ptrdiff_t>(before), log.end());
+  REQUIRE(tail.size() == 7);
+  CHECK(std::vector(tail.begin(), tail.begin() + 4) == std::vector<std::uint32_t>{0, 0, 0, 0x2101});
+  CHECK(tail[5] == 0x23'5958);
+  CHECK(tail[6] == feb_28);
+}
+
+TEST_CASE(
+    "RM0351 38.6.20 and 6.1.3: BKP0R and BKP31R keep their value through a system reset, "
+    "BDRST clears them")
+{
+  auto f = entered("backup_write");
+  run_to_idle(f);
+  f.target->reset(reset_kind::software);
+  f.set("pc", sym(firmware, "backup_read"));
+  CHECK(finish(f) == std::vector<std::uint32_t>{0xCAFE'1234, 0x5EED'0031});
+  f.set("pc", sym(firmware, "backup_reset"));
+  CHECK(finish(f) == std::vector<std::uint32_t>{0xCAFE'1234, 0x5EED'0031, 0, 0});
+}
+
+namespace
+{
+constexpr std::uint32_t flash_key1  = 0x4567'0123;
+constexpr std::uint32_t flash_key2  = 0xcdef'89ab;
+constexpr std::uint32_t option_key1 = 0x0819'2a3b;
+constexpr std::uint32_t option_key2 = 0x4c5d'6e7f;
+constexpr std::uint32_t optstrt     = 1u << 17;
+
+void program_rdp(rig const& r, std::uint32_t rdp)
+{
+  r.write("KEYR", flash_key1, "FLASH");
+  r.write("KEYR", flash_key2, "FLASH");
+  r.write("OPTKEYR", option_key1, "FLASH");
+  r.write("OPTKEYR", option_key2, "FLASH");
+  REQUIRE(r.f->field("FLASH", "CR", "OPTLOCK") == 0);
+  r.write("OPTR", (r.read("OPTR", "FLASH") & ~0xffu) | rdp, "FLASH");
+  r.write("CR", optstrt, "FLASH");
+  REQUIRE(r.f->field("FLASH", "CR", "OPTSTRT") == 0);
+  r.f->target->reset(reset_kind::option_load);
+  r.idle_again();
+  REQUIRE(r.f->field("FLASH", "OPTR", "RDP") == rdp);
+}
+}
+
+TEST_CASE(
+    "RM0351 3.5.1: the RDP level 1 to level 0 regression erases every backup register, the "
+    "calendar kept")
+{
+  rig r;
+  r.start_clock();
+  r.enter_init();
+  r.write("DR", feb_28);
+  r.write("ISR", 0);
+  r.write("BKP0R", 0x1111'0000);
+  r.write("BKP31R", 0x1111'0031);
+  program_rdp(r, 0xbb);
+  CHECK(r.read("BKP0R") == 0x1111'0000);
+  CHECK(r.read("BKP31R") == 0x1111'0031);
+  program_rdp(r, 0xaa);
+  for(auto index = 0; index < 32; ++index)
+  {
+    CAPTURE(index);
+    CHECK(r.read(std::format("BKP{}R", index)) == 0);
+  }
+  CHECK(r.read("DR") == feb_28);
 }

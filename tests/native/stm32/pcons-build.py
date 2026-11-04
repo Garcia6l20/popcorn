@@ -119,6 +119,7 @@ l4_firmwares = {
         "l476_l4_i2c_hal",
         "l476_l4_iwdg_ll",
         "l476_l4_crc_ll",
+        "l476_l4_rtc_ll",
     )
 }
 l4_env = {

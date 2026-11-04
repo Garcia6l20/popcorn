@@ -607,8 +607,8 @@ On the STM32L47x/L48x, RM0351 section 3:
   below `PCROPx_STRT` (inferred), keeps the pages that hold part of the area and the PCROP words
   keep their programmed values. The other bank is erased, inferred. The OTP area and the
   system memory are kept. The other option words program as written. The SYSCFG model writes 0
-  to the whole SRAM2 at once, inferred, with no SRAM2BSY. The RTC backup registers keep their
-  content. The new level takes effect at the next option byte load.
+  to the whole SRAM2 at once, inferred, with no SRAM2BSY. The RTC model writes 0 to every RTC
+  backup register, RM0351 3.5.1. The new level takes effect at the next option byte load.
 - PCROP, RM0351 3.5.2: the loaded `PCROPx_STRT` and `PCROPx_END` of each bank give an area
   from STRT x 8 to (END + 1) x 8 in the bank. A CPU, DMA or debug port load from it reads 0 and
   sets `RDERR`, 0 is inferred, and `RDERRIE` raises `FLASH_IRQn`, 3.6 Table 16. A debug port
@@ -1397,6 +1397,18 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
 - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: timestamps,
   `CR.ITSE` included, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
   the outputs and the reference clock detection.
+- The 32 backup registers keep their value through a system reset. `RCC_BDCR.BDRST`, a power-on
+  and a read protection regression from level 1 to level 0 clear them, RM0351 38.6.20, 6.1.3 and
+  3.5.1.
+- The model holds no VDD or VBAT supply level, so the missed backup domain power-on reset of
+  ES0250 2.2.13 has no trigger.
+- ES0250 2.19.2: an SSR or TR read always holds TR and DR until DR is read, whatever the APB clock
+  phase against the shadow copy.
+- ES0250 2.19.3: alarm A and alarm B drive one level on EXTI line 18, so a request that sets while
+  the other is still set makes no new edge. An `EXTI_PR1` clear takes effect at the write, with
+  no delay window.
+- ES0250 2.19.4: INITF sets at the second RTCCLK edge after INIT for every INIT entry, a
+  consecutive one included.
 
 ## SAI
 
