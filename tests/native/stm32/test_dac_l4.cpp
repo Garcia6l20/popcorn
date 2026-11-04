@@ -5,10 +5,12 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -51,6 +53,13 @@ constexpr address          mcr       = 0x3C;
 constexpr address          apb1enr1  = 0x4002'1058;
 constexpr address          apb1rstr1 = 0x4002'1038;
 constexpr address          rcc_cfgr  = 0x4002'1008;
+constexpr address          ahb2enr   = 0x4002'104C;
+constexpr address          apb2enr   = 0x4002'1060;
+constexpr address          gpioa     = 0x4800'0000;
+constexpr address          tim_cr1   = 0x00;
+constexpr address          tim_cr2   = 0x04;
+constexpr address          tim_egr   = 0x14;
+constexpr address          tim_arr   = 0x2C;
 constexpr std::uint32_t    dac1en    = 1u << 29;
 constexpr std::uint32_t    ten1      = 1u << 2;
 constexpr std::uint32_t    software1 = 7u << 3;
@@ -66,6 +75,9 @@ constexpr std::uint32_t    cal_flag2 = 1u << 30;
 constexpr std::uint32_t    dmaudr1   = 1u << 13;
 constexpr std::uint32_t    dmaudr2   = 1u << 29;
 constexpr std::uint32_t    trim      = 16;
+
+constexpr std::array<address, 6> trigger_timers{0x4000'1000, 0x4001'3400, 0x4000'1400,
+                                                0x4000'0C00, 0x4000'0000, 0x4000'0800};
 
 struct rig
 {
@@ -137,6 +149,32 @@ struct rig
       }
     }
     return dues;
+  }
+
+  void sources() const
+  {
+    write(apb1enr1, read(apb1enr1) | 0x3Du);
+    write(apb2enr, read(apb2enr) | 1u << 13);
+    write(ahb2enr, read(ahb2enr) | 1u);
+    write(gpioa, read(gpioa) & ~(3u << 18));
+    exti9_pin().drive(9, false);
+  }
+
+  [[nodiscard]] auto exti9_pin() const -> stm32::gpio_port&
+  {
+    auto* const port = f->model_of<stm32::gpio_port>("GPIOA");
+    REQUIRE(port != nullptr);
+    return *port;
+  }
+
+  void fire(std::uint32_t select) const
+  {
+    if(select < trigger_timers.size())
+    {
+      write(trigger_timers[select] + tim_egr, 1);
+      return;
+    }
+    exti9_pin().drive(9, true);
   }
 
   [[nodiscard]] auto encoded() const -> std::vector<std::byte>
@@ -275,8 +313,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "WAVE, DMAEN, DMAUDRIE and a hardware TSEL with TEN each log once as not modelled, a "
-    "model_error when strict that leaves DAC_CR as before the write")
+    "WAVE, DMAEN and DMAUDRIE each log once as not modelled, a model_error when strict that "
+    "leaves DAC_CR as before the write")
 {
   struct leg
   {
@@ -284,12 +322,10 @@ TEST_CASE(
     std::uint32_t    word;
   };
   for(auto const& [what, word] : {
-          leg{"WAVE",     1u << 6        },
-          leg{"WAVE",     1u << 22       },
-          leg{"DMAEN",    1u << 12       },
-          leg{"DMAUDRIE", 1u << 29       },
-          leg{"TEN with", ten1           },
-          leg{"TEN with", ten2 | 3u << 19},
+          leg{"WAVE",     1u << 6 },
+          leg{"WAVE",     1u << 22},
+          leg{"DMAEN",    1u << 12},
+          leg{"DMAUDRIE", 1u << 29},
   })
   {
     CAPTURE(what);
@@ -310,6 +346,7 @@ TEST_CASE(
     CHECK(strict.read(dac1 + cr) == 1u);
   }
   rig const quiet{true};
+  quiet.write(dac1 + cr, ten1 | ten2 | 6u << 19);
   quiet.write(dac1 + cr, 1u | ten1 | software1 | 1u << 16 | ten2 | software2);
   CHECK(quiet.logged.empty());
 }
@@ -554,4 +591,158 @@ TEST_CASE(
   CHECK(r.read(dac1 + sr) == cal_flag1);
   r.write(dac1 + sr, 0);
   CHECK(r.read(dac1 + sr) == cal_flag1);
+}
+
+TEST_CASE(
+    "RM0351 19.4.4 and 19.4.6: a TIM6 TRGO rising edge loads DOR1 three APB1 cycles later at the "
+    "prescalers 1, 2 and 16, with the load pending then, none for the falling edge or TEN1 0")
+{
+  for(auto const& [ppre1, cycles] : {
+          std::pair{div1,  1u },
+          std::pair{div2,  2u },
+          std::pair{div16, 16u},
+  })
+  {
+    CAPTURE(cycles);
+    rig const r;
+    r.sources();
+    r.apb1_divider(ppre1);
+    r.fire(0);
+    CHECK(r.pending(0).empty());
+    r.write(dac1 + cr, ten1);
+    r.write(dac1 + dhr12r1, 0xABC);
+    CHECK(r.pending(0).empty());
+    auto const at  = r.now_ps();
+    auto const due = at + 3 * cycles * cycle;
+    r.fire(0);
+    CHECK(r.pending(0) == std::vector<std::uint64_t>{due});
+    r.idle_to(due - cycle);
+    CHECK(r.read(dac1 + dor1) == 0);
+    r.idle_to(due);
+    CHECK(r.read(dac1 + dor1) == 0xABC);
+    CHECK(r.pending(0).empty());
+    CHECK(r.pending(1).empty());
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0351 Table 128: each TSEL below 111 loads on its own source only, TIM6, TIM8, TIM7, TIM5, "
+    "TIM2, TIM4 TRGO and EXTI9, on both channels")
+{
+  for(std::uint32_t select = 0; select < 7; ++select)
+  {
+    CAPTURE(select);
+    auto const other = (select + 1) % 7;
+    rig const  r;
+    r.sources();
+    r.write(dac1 + cr, ten1 | select << 3 | ten2 | other << 19);
+    r.write(dac1 + dhr12rd, 0x0123'0ABC);
+    for(std::uint32_t source = 0; source < 7; ++source)
+    {
+      CAPTURE(source);
+      r.fire(source);
+      CHECK(r.pending(0).size() == (source == select ? 1u : 0u));
+      CHECK(r.pending(1).size() == (source == other ? 1u : 0u));
+      r.idle_to(r.now_ps() + 3 * cycle);
+      CHECK(r.pending(0).empty());
+      CHECK(r.pending(1).empty());
+    }
+    CHECK(r.read(dac1 + dor1) == 0xABC);
+    CHECK(r.read(dac1 + dor2) == 0x123);
+    r.exti9_pin().drive(9, false);
+    CHECK(r.pending(0).empty());
+    CHECK(r.pending(1).empty());
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "two trigger edges before a load give two loads in order, each taking DHR1 at its own load, "
+    "and a third replaces the second's load, inferred")
+{
+  constexpr auto apb = 16 * cycle;
+  for(auto const third : {false, true})
+  {
+    CAPTURE(third);
+    rig const r;
+    r.sources();
+    r.apb1_divider(div16);
+    r.write(dac1 + cr, ten1);
+    r.write(dac1 + dhr12r1, 0x111);
+    auto const at = r.now_ps();
+    r.fire(0);
+    r.idle_to(at + apb);
+    r.fire(0);
+    if(third)
+    {
+      r.idle_to(at + 2 * apb);
+      r.fire(0);
+    }
+    CHECK(r.pending(0) == std::vector<std::uint64_t>{at + 3 * apb});
+    r.idle_to(at + 3 * apb);
+    CHECK(r.read(dac1 + dor1) == 0x111);
+    auto const second = at + (third ? 5 : 4) * apb;
+    CHECK(r.pending(0) == std::vector<std::uint64_t>{second});
+    r.write(dac1 + dhr12r1, 0x222);
+    r.idle_to(second - cycle);
+    CHECK(r.read(dac1 + dor1) == 0x111);
+    r.idle_to(second);
+    CHECK(r.read(dac1 + dor1) == 0x222);
+    CHECK(r.pending(0).empty());
+  }
+}
+
+TEST_CASE(
+    "a counting TIM6 with MMS 010 loads DOR1 at each update after TEN1 selects it, none from "
+    "before, and stops once TSEL1 selects TIM7")
+{
+  rig const r;
+  r.sources();
+  auto const tim6 = trigger_timers[0];
+  r.write(tim6 + tim_arr, 99);
+  r.write(tim6 + tim_cr2, 2u << 4);
+  r.write(tim6 + tim_cr1, 1);
+  r.idle_to(r.now_ps() + 250 * cycle);
+  r.write(dac1 + cr, ten1);
+  CHECK(r.pending(0).empty());
+  r.write(dac1 + dhr12r1, 0x111);
+  r.idle_to(r.now_ps() + 3 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0);
+  r.idle_to(r.now_ps() + 100 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0x111);
+  r.write(dac1 + dhr12r1, 0x222);
+  r.idle_to(r.now_ps() + 100 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0x222);
+  r.write(dac1 + cr, ten1 | 2u << 3);
+  r.idle_to(r.now_ps() + 3 * cycle);
+  r.write(dac1 + dhr12r1, 0x333);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0x222);
+}
+
+TEST_CASE(
+    "a snapshot with two trigger loads pending restores both at their own times, each taking "
+    "DHR1 at its load")
+{
+  constexpr auto apb = 16 * cycle;
+  rig const      r;
+  r.sources();
+  r.apb1_divider(div16);
+  r.write(dac1 + cr, ten1);
+  r.write(dac1 + dhr12r1, 0x111);
+  auto const at = r.now_ps();
+  r.fire(0);
+  r.idle_to(at + apb);
+  r.fire(0);
+  auto const bytes = r.encoded();
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.pending(0) == std::vector<std::uint64_t>{at + 3 * apb});
+  fresh.idle_to(at + 3 * apb);
+  CHECK(fresh.read(dac1 + dor1) == 0x111);
+  CHECK(fresh.pending(0) == std::vector<std::uint64_t>{at + 4 * apb});
+  fresh.write(dac1 + dhr12r1, 0x222);
+  fresh.idle_to(at + 4 * apb);
+  CHECK(fresh.read(dac1 + dor1) == 0x222);
 }

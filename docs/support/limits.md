@@ -467,7 +467,13 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   111, each SWTRIGx write loads `DAC_DORx` one APB1 cycle later, RM0351 19.4.6. SWTRIGx follows
   the `w` access of RM0351 19.7.2 and reads 0, inferred against the 19.4.6 text of a bit reset by
   hardware at the load. Written with TENx 0 or another TSELx, it loads nothing, inferred. Loads
-  run with ENx 0, RM0351 19.4.2 note.
+  and triggers run with ENx 0, RM0351 19.4.2 note.
+- With TENx 1 and TSELx below 111, each rising edge of the RM0351 Table 128 source loads
+  `DAC_DORx` three APB1 cycles after the edge, RM0351 19.4.4 and 19.4.6: `tim6_trgo`,
+  `tim8_trgo`, `tim7_trgo`, `tim5_trgo`, `tim2_trgo`, `tim4_trgo` and `exti9`. A falling edge
+  loads nothing. Each load takes DHRx as it is at the load, inferred. Two edges before a load give
+  two loads in order, and a third edge before the first load replaces the second's load by its
+  own, inferred.
 - Popcorn charges no APB wait states, so writes closer than one APB1 cycle happen only in the
   model. In that window a load takes DHRx as it is at the load, and a write while a load is
   pending moves the next load to its own due, so of three such writes the second loses its own
@@ -481,7 +487,7 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   the buffer, RM0351 19.4.11. It sets at the `DAC_CCR` write, with no tTRIM delay. With a buffer-off
   MODEx it reads 0, and with CENx 0 it keeps its value, inferred. The factory trim is 16 on both
   channels, inferred, as RM0351 19.7.15 gives 0x00XX 00XX. `DAC_CCR` resets to it.
-- WAVEx other than 00, DMAENx, DMAUDRIEx, and TENx 1 with TSELx below 111 are not modelled. A
+- WAVEx other than 00, DMAENx and DMAUDRIEx are not modelled. A
   `DAC_CR` write that sets one logs one `model_warning` per function. MODEx 1xx, the sample and
   hold mode, is not modelled the same way on `DAC_MCR`. Under strict_peripherals each raises
   `ModelError` and leaves the register as before the write. The sample and hold registers
