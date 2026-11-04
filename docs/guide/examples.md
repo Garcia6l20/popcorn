@@ -312,3 +312,14 @@ The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [So
 CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usb_cdc).
 
 --8<-- "stm32l152/usb_cdc/README.md:3:13"
+
+## STM32L476
+
+The same layout on the STM32L476, a Cortex-M4F without TrustZone, from
+`examples/stm32l476/<name>`.
+
+### l476 usb_cdc
+
+CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).
+
+--8<-- "stm32l476/usb_cdc/README.md:3:15"
