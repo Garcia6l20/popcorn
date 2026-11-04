@@ -187,8 +187,10 @@ struct unmodelled_entry
  *        after a clear, the end of init mode, a BYPSHAD clear or a system reset, inferred from the
  *        copy every RTCCLK period of RM0351 38.3.4 and 38.3.8, where the BYPSHAD text of 38.6.3
  *        says every two cycles. A brown-out keeps the backup domain, RM0351 6.1.3. The alarm
- *        interrupt drives EXTI line 18, RM0351 Table 62. RTC_TAMPCR and RTC_OR are storage. A
- *        read protection regression from level 1 to level 0, which the STM32L4 FLASH reports,
+ *        interrupt drives EXTI line 18, RM0351 Table 62, the flag gated by its interrupt enable
+ *        inferred from Table 230. ALRAWF and ALRBWF read 1 as on Cat.2 to Cat.6, inferred:
+ *        RM0351 38.3.7 programs the alarm with no ALRxWF poll. RTC_TAMPCR and RTC_OR are storage.
+ *        A read protection regression from level 1 to level 0, which the STM32L4 FLASH reports,
  *        writes 0 to every backup register, RM0351 3.5.1.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,

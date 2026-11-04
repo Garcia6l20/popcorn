@@ -16,6 +16,8 @@ add_ll_firmware(
         "backup_write",
         "backup_read",
         "backup_reset",
+        "alarm",
+        "wakeup",
     ],
     chipset=STM32L476XX,
 )

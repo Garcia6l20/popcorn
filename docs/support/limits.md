@@ -1392,8 +1392,13 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
 - `RTC_TAMPCR` and `RTC_OR` are storage: coverage reports them `storage_only`. `RTC_ISR.ITSF`,
   bit 17 in RM0351 38.6.4, is not in the description and reads 0.
 - A brown-out keeps the calendar and the backup registers, RM0351 6.1.3.
-- The alarm interrupt drives EXTI line 18 and RTC_Alarm, RM0351 Table 62, the wakeup interrupt
-  EXTI line 20 and RTC_WKUP.
+- The alarm interrupt, ALRxF with ALRxIE, drives EXTI line 18 and RTC_Alarm, RM0351 Table 62,
+  and WUTF with WUTIE drives EXTI line 20 and RTC_WKUP. The flag gated by its interrupt enable is
+  inferred from RM0351 Table 230.
+- ALRAWF and ALRBWF read 1, so `RTC_ALRMxR` takes writes while its alarm is enabled, inferred:
+  RM0351 38.3.7 programs the alarm with no ALRxWF poll, where RM0038 20.3.5 skips the poll on the
+  STM32L1 Cat.2 to Cat.6, whose flags are always set. `RTC_ALRMxSSR` takes writes with ALRxE clear
+  or in init mode, RM0351 38.6.17 and 38.6.18.
 - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: timestamps,
   `CR.ITSE` included, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
   the outputs and the reference clock detection.
