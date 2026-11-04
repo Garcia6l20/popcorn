@@ -1,0 +1,48 @@
+{
+    "pcons.variants": [
+        "debug",
+        "release",
+        "asan"
+    ],
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": [
+        "--ignore=${workspaceFolder}/third_party",
+        "--ignore=${workspaceFolder}/local",
+        "--ignore=${workspaceFolder}/build",
+        "--ignore-glob=${workspaceFolder}/build-*"
+    ],
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.codeActionsOnSave": {
+            "source.organizeImports.ruff": "explicit"
+        }
+    },
+    "[cpp]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+    "[c]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--header-insertion=never"
+    ],
+    "editor.rulers": [100],
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "search.exclude": {
+        "build": true,
+        "build-*": true,
+        "site": true,
+        ".venv": true,
+        ".ruff_cache": true
+    },
+    "files.watcherExclude": {
+        "**/build/**": true,
+        "**/build-*/**": true,
+        "**/.venv/**": true
+    }
+}
