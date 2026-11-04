@@ -1016,6 +1016,9 @@ struct dac_variant
 {
   /** @brief DAC_CR.TSELx value that selects the software trigger SWTRIGx. */
   std::uint32_t software_trigger = 0b111;
+  /** @brief Factory OTRIMx of each channel, the DAC_CCR reset value. RM0351 19.7.15 gives
+   *         0x00XX 00XX, so the value is a mid-range code, inferred. */
+  std::array<std::uint32_t, 2> factory_trim{16, 16};
 };
 
 /** @brief STM32L4 DAC1, RM0351 section 19, SWTRIG at TSELx 111 of RM0351 Table 128. */

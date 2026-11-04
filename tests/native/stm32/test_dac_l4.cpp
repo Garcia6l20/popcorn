@@ -45,6 +45,8 @@ constexpr address          dhr12ld   = 0x24;
 constexpr address          dhr8rd    = 0x28;
 constexpr address          dor1      = 0x2C;
 constexpr address          dor2      = 0x30;
+constexpr address          sr        = 0x34;
+constexpr address          ccr       = 0x38;
 constexpr address          mcr       = 0x3C;
 constexpr address          apb1enr1  = 0x4002'1058;
 constexpr address          apb1rstr1 = 0x4002'1038;
@@ -55,6 +57,15 @@ constexpr std::uint32_t    software1 = 7u << 3;
 constexpr std::uint32_t    ten2      = 1u << 18;
 constexpr std::uint32_t    software2 = 7u << 19;
 constexpr std::uint64_t    cycle     = 250'000;
+constexpr std::uint32_t    en1       = 1u << 0;
+constexpr std::uint32_t    cen1      = 1u << 14;
+constexpr std::uint32_t    en2       = 1u << 16;
+constexpr std::uint32_t    cen2      = 1u << 30;
+constexpr std::uint32_t    cal_flag1 = 1u << 14;
+constexpr std::uint32_t    cal_flag2 = 1u << 30;
+constexpr std::uint32_t    dmaudr1   = 1u << 13;
+constexpr std::uint32_t    dmaudr2   = 1u << 29;
+constexpr std::uint32_t    trim      = 16;
 
 struct rig
 {
@@ -264,7 +275,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "WAVE, DMAEN, DMAUDRIE, CEN and a hardware TSEL with TEN each log once as not modelled, a "
+    "WAVE, DMAEN, DMAUDRIE and a hardware TSEL with TEN each log once as not modelled, a "
     "model_error when strict that leaves DAC_CR as before the write")
 {
   struct leg
@@ -277,7 +288,6 @@ TEST_CASE(
           leg{"WAVE",     1u << 22       },
           leg{"DMAEN",    1u << 12       },
           leg{"DMAUDRIE", 1u << 29       },
-          leg{"CEN",      1u << 14       },
           leg{"TEN with", ten1           },
           leg{"TEN with", ten2 | 3u << 19},
   })
@@ -367,4 +377,181 @@ TEST_CASE("a machine reset restores DAC_CR and the holding registers and drops a
   r.idle_to(r.now_ps() + 20 * cycle);
   CHECK(r.read(dac1 + dor1) == 0);
   CHECK(r.read(dac1 + mcr) == 0);
+}
+
+TEST_CASE(
+    "while EN is 1 a TSEL, MAMP or CEN write keeps the old value, RM0351 19.4.6 note, 19.4.9 and "
+    "19.7.1, logged once per rule, a model_error when strict that leaves DAC_CR")
+{
+  struct leg
+  {
+    std::string_view what;
+    std::uint32_t    before;
+    std::uint32_t    written;
+  };
+  for(auto const& [what, before, written] : {
+          leg{"TSEL1", en1, en1 | 3u << 3 },
+          leg{"TSEL2", en2, en2 | 3u << 19},
+          leg{"MAMP1", en1, en1 | 5u << 8 },
+          leg{"MAMP2", en2, en2 | 5u << 24},
+          leg{"CEN1",  en1, en1 | cen1    },
+          leg{"CEN2",  en2, en2 | cen2    },
+  })
+  {
+    CAPTURE(what);
+    {
+      rig const r;
+      r.write(dac1 + cr, before);
+      r.write(dac1 + cr, written);
+      r.write(dac1 + cr, written);
+      CHECK(r.read(dac1 + cr) == before);
+      REQUIRE(r.logged.size() == 1);
+      CHECK(r.logged[0].message.contains(what));
+      r.write(dac1 + cr, 0);
+      r.write(dac1 + cr, written & ~(en1 | en2));
+      CHECK(r.read(dac1 + cr) == (written & ~(en1 | en2)));
+      CHECK(r.logged.size() == 1);
+    }
+    rig const strict{true};
+    strict.write(dac1 + cr, before);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(dac1 + cr, 4, written)),
+        popcorn::model_error);
+    CHECK(strict.read(dac1 + cr) == before);
+  }
+}
+
+TEST_CASE(
+    "EN set while CEN is 1, RM0351 19.4.11, and WAVE 11, reserved by RM0351 19.7.1, log once, a "
+    "model_error when strict that leaves DAC_CR")
+{
+  struct leg
+  {
+    std::string_view what;
+    std::uint32_t    before;
+    std::uint32_t    written;
+  };
+  for(auto const& [what, before, written] : {
+          leg{"EN1 set while CEN1", cen1, cen1 | en1},
+          leg{"EN1 set while CEN1", 0,    cen1 | en1},
+          leg{"EN2 set while CEN2", cen2, cen2 | en2},
+          leg{"WAVE1 11",           0,    3u << 6   },
+          leg{"WAVE2 11",           0,    3u << 22  },
+  })
+  {
+    CAPTURE(what);
+    CAPTURE(before);
+    {
+      rig const r;
+      r.write(dac1 + cr, before);
+      r.write(dac1 + cr, written);
+      r.write(dac1 + cr, before);
+      r.write(dac1 + cr, written);
+      CHECK(r.read(dac1 + cr) == written);
+      CHECK(
+          std::ranges::count_if(
+              r.logged, [&](auto const& record) { return record.message.contains(what); })
+          == 1);
+    }
+    rig const strict{true};
+    strict.write(dac1 + cr, before);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(dac1 + cr, 4, written)),
+        popcorn::model_error);
+    CHECK(strict.read(dac1 + cr) == before);
+  }
+}
+
+TEST_CASE(
+    "RM0351 19.7.16: a DAC_MCR write while EN or CEN is 1 keeps the old MODE, logged once, a "
+    "model_error when strict that leaves DAC_MCR, MODE 1xx logs once as not modelled")
+{
+  for(auto const control : {en1, cen1})
+  {
+    CAPTURE(control);
+    {
+      rig const r;
+      r.write(dac1 + mcr, 2);
+      r.write(dac1 + cr, control);
+      r.write(dac1 + mcr, 3);
+      r.write(dac1 + mcr, 1);
+      CHECK(r.read(dac1 + mcr) == 2);
+      REQUIRE(r.logged.size() == 1);
+      CHECK(r.logged[0].message.contains("MODE1 written while EN1 or CEN1"));
+      r.write(dac1 + mcr, 2u | 3u << 16);
+      CHECK(r.read(dac1 + mcr) == (2u | 3u << 16));
+    }
+    rig const strict{true};
+    strict.write(dac1 + mcr, 2);
+    strict.write(dac1 + cr, control);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(dac1 + mcr, 4, 3)), popcorn::model_error);
+    CHECK(strict.read(dac1 + mcr) == 2);
+  }
+  {
+    rig const r;
+    r.write(dac1 + mcr, 4);
+    r.write(dac1 + mcr, 5u << 16);
+    CHECK(r.read(dac1 + mcr) == 5u << 16);
+    REQUIRE(r.logged.size() == 1);
+    CHECK(r.logged[0].message.contains("sample and hold"));
+  }
+  rig const strict{true};
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(dac1 + mcr, 4, 4)), popcorn::model_error);
+  CHECK(strict.read(dac1 + mcr) == 0);
+}
+
+TEST_CASE(
+    "RM0351 19.4.11: with CEN 1 CAL_FLAG reads 1 from OTRIM at the factory trim with the buffer "
+    "on, 0 with MODE 010, and keeps its value with CEN 0, the trim and the MODE rule inferred")
+{
+  rig const r;
+  CHECK(r.read(dac1 + ccr) == (trim | trim << 16));
+  r.write(dac1 + cr, cen1 | cen2);
+  for(std::uint32_t code = 0; code < 32; ++code)
+  {
+    CAPTURE(code);
+    r.write(dac1 + ccr, code | (31 - code) << 16);
+    auto const status = r.read(dac1 + sr);
+    CHECK(((status & cal_flag1) != 0) == (code >= trim));
+    CHECK(((status & cal_flag2) != 0) == (31 - code >= trim));
+  }
+  r.write(dac1 + ccr, 31);
+  CHECK((r.read(dac1 + sr) & cal_flag1) != 0);
+  r.write(dac1 + cr, 0);
+  r.write(dac1 + ccr, 0);
+  CHECK((r.read(dac1 + sr) & cal_flag1) != 0);
+  r.write(dac1 + mcr, 2);
+  r.write(dac1 + cr, cen1);
+  r.write(dac1 + ccr, 31);
+  CHECK((r.read(dac1 + sr) & cal_flag1) == 0);
+  r.write(dac1 + cr, 0);
+  r.write(dac1 + mcr, 1);
+  r.write(dac1 + cr, cen1);
+  CHECK((r.read(dac1 + sr) & cal_flag1) != 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "DAC_CCR resets to the factory trim at DAC1RST and at a machine reset, DMAUDR clears on a "
+    "write of 1 and CAL_FLAG is read only")
+{
+  rig const r;
+  r.write(dac1 + ccr, 3u | 5u << 16);
+  r.write(apb1rstr1, dac1en);
+  r.write(apb1rstr1, 0);
+  CHECK(r.read(dac1 + ccr) == (trim | trim << 16));
+  r.write(dac1 + ccr, 3u);
+  r.f->target->reset();
+  r.f->set("pc", sym(firmware, "idle"));
+  r.write(apb1enr1, dac1en);
+  CHECK(r.read(dac1 + ccr) == (trim | trim << 16));
+  r.f->target->peripheral("DAC1").poke(sr, dmaudr1 | dmaudr2 | cal_flag1);
+  r.write(dac1 + sr, dmaudr1 | cal_flag2);
+  CHECK(r.read(dac1 + sr) == (dmaudr2 | cal_flag1));
+  r.write(dac1 + sr, dmaudr2);
+  CHECK(r.read(dac1 + sr) == cal_flag1);
+  r.write(dac1 + sr, 0);
+  CHECK(r.read(dac1 + sr) == cal_flag1);
 }

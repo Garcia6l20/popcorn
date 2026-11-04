@@ -472,10 +472,23 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   model. In that window a load takes DHRx as it is at the load, and a write while a load is
   pending moves the next load to its own due, so of three such writes the second loses its own
   load.
-- WAVEx other than 00, DMAENx, DMAUDRIEx, CENx, and TENx 1 with TSELx below 111 are not modelled.
-  A `DAC_CR` write that sets one logs one `model_warning` per function. Under strict_peripherals it
-  raises `ModelError` and leaves `DAC_CR` as before the write. `DAC_SR`, `DAC_CCR`, `DAC_MCR` and
-  the sample and hold registers are not modelled: their accesses report as unmodelled registers.
+- While ENx is 1, a `DAC_CR` write keeps the old TSELx, RM0351 19.4.6 note, the old MAMPx, RM0351
+  19.4.9, and the old CENx, RM0351 19.7.1. `DAC_MCR` keeps the old MODEx while ENx or CENx is 1,
+  RM0351 19.7.16. ENx set while CENx is 1, which RM0351 19.4.11 does not allow, and WAVEx 11,
+  reserved by RM0351 19.7.1, keep the write. Each logs one `model_warning` per rule. Under
+  strict_peripherals it raises `ModelError` and leaves the register as before the write.
+- With CENx 1, CAL_FLAGx reads 1 once OTRIMx is at or above the factory trim and MODEx enables
+  the buffer, RM0351 19.4.11. It sets at the `DAC_CCR` write, with no tTRIM delay. With a buffer-off
+  MODEx it reads 0, and with CENx 0 it keeps its value, inferred. The factory trim is 16 on both
+  channels, inferred, as RM0351 19.7.15 gives 0x00XX 00XX. `DAC_CCR` resets to it.
+- WAVEx other than 00, DMAENx, DMAUDRIEx, and TENx 1 with TSELx below 111 are not modelled. A
+  `DAC_CR` write that sets one logs one `model_warning` per function. MODEx 1xx, the sample and
+  hold mode, is not modelled the same way on `DAC_MCR`. Under strict_peripherals each raises
+  `ModelError` and leaves the register as before the write. The sample and hold registers
+  `DAC_SHSRx`, `DAC_SHHR` and `DAC_SHRR` report as unmodelled registers.
+- The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
+  asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
+  for a peripheral to see.
 - The output is `DAC_DORx` only. No pin or ADC channel sees it.
 
 ## DBGMCU

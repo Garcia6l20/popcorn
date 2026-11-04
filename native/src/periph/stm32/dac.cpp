@@ -45,18 +45,29 @@ struct dac_state
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
 
+enum class rule : std::uint8_t
+{
+  trigger_locked,
+  amplitude_locked,
+  calibration_locked,
+  calibration_enable,
+  wave_reserved,
+  mode_locked,
+  sample_hold,
+  count,
+};
+
 struct unmodelled_use
 {
   std::string_view field;
   std::string_view what;
 };
 
-constexpr std::array<unmodelled_use, 5> unmodelled_table{
+constexpr std::array<unmodelled_use, 4> unmodelled_table{
     {
      {"WAVE", "WAVE, the noise and triangle waves"},
      {"DMAEN", "DMAEN, the DMA requests"},
      {"DMAUDRIE", "DMAUDRIE, the DMA underrun interrupt"},
-     {"CEN", "CEN, the buffer calibration"},
      {"TSEL", "TEN with a hardware trigger in TSEL"},
      }
 };
@@ -77,9 +88,25 @@ constexpr std::array<unmodelled_use, 5> unmodelled_table{
  *        and moves the next one to the last write's due, so of three such writes the second
  *        loses its own load. DAC_DORx is read only. The digital interface works with ENx 0,
  *        RM0351 19.4.2 note, so loads do not depend on ENx.
- *        WAVEx other than 00, DMAENx, DMAUDRIEx, CENx and TENx 1 with a TSELx below 111 are
- *        not modelled: a DAC_CR write that sets one logs one model_warning per function, and
- *        under strict_peripherals raises model_error and leaves DAC_CR as before the write.
+ *        While ENx is 1 a DAC_CR write keeps the old TSELx, RM0351 19.4.6 note, the old MAMPx,
+ *        RM0351 19.4.9, and the old CENx, RM0351 19.7.1, and DAC_MCR keeps the old MODEx while
+ *        ENx or CENx is 1, RM0351 19.7.16. ENx set while CENx is 1, which RM0351 19.4.11 does
+ *        not allow, and WAVEx 11, reserved by RM0351 19.7.1, keep the write. Each of these logs
+ *        one model_warning per rule, and under strict_peripherals raises model_error and leaves
+ *        the register as before the write.
+ *        With CENx 1 CAL_FLAGx reads 1 when OTRIMx is at or above the variant's factory trim and
+ *        MODEx enables the buffer, 000, 001, 100 or 101, RM0351 19.4.11 and 19.7.14, at once
+ *        with no tTRIM delay. Otherwise it reads 0 with a buffer-off MODEx and keeps its value
+ *        with CENx 0, inferred. The factory trim is the variant's value for each channel,
+ *        inferred, as RM0351 19.7.15 gives 0x00XX 00XX. DAC_CCR resets to it. DMAUDRx clears
+ *        on a write of 1. CAL_FLAGx and BWSTx are read only.
+ *        WAVEx other than 00, DMAENx, DMAUDRIEx and TENx 1 with a TSELx below 111 are not
+ *        modelled: a DAC_CR write that sets one logs one model_warning per function, and under
+ *        strict_peripherals raises model_error and leaves DAC_CR as before the write. MODEx
+ *        1xx, the sample and hold mode, is not modelled the same way on DAC_MCR. The output is
+ *        DAC_DORx only, no pin or ADC channel sees it, so MODEx selects nothing else.
+ *        A Stop 2 entry with ENx 1, which RM0351 19.5 Table 131 forbids, reaches the model as
+ *        nothing: the PWR model has no Stop entry for a peripheral to see.
  *        DAC1RST and a machine reset restore the claimed registers and drop the pending loads.
  */
 class dac final : public dispatch_model<dac, dac_state>, public bus_reset_listener
@@ -94,16 +121,27 @@ public:
       -> std::expected<std::uint32_t, bus_error> override;
 
   void                          control_written(std::uint32_t old, std::uint32_t now);
+  void                          mode_written(std::uint32_t old, std::uint32_t now);
+  void                          trim_written(std::uint32_t old, std::uint32_t now);
+  void                          status_written(std::uint32_t old, std::uint32_t now);
   void                          trigger_written(std::uint32_t old, std::uint32_t now);
   template <holding Which> void holding_written(std::uint32_t old, std::uint32_t now);
 
 private:
   struct channel_fields
   {
+    field_ref enable;
     field_ref trigger_enable;
     field_ref trigger_select;
+    field_ref amplitude;
+    field_ref wave;
+    field_ref calibration;
     field_ref software;
     reg_ref   output;
+    field_ref mode;
+    field_ref trim;
+    field_ref flag;
+    field_ref underrun;
   };
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -114,20 +152,30 @@ private:
   void               request(std::size_t channel);
   void               catch_up(std::size_t channel, std::uint64_t ps);
   void               restore_reset_values();
+  void               refresh_flags();
+  void               restore_trim();
+  void
+      refuse(rule which, std::string_view name, reg_ref at, std::uint32_t old, std::string message);
 
-  dac_variant                               variant_;
-  register_file&                            regs_;
-  reg_ref                                   control_;
-  std::array<reg_ref, 9>                    holding_;
-  std::array<channel_fields, 2>             channel_;
-  std::array<field_ref, 10>                 unmodelled_fields_;
-  core::clock_domain                        bus_;
-  std::array<bool, unmodelled_table.size()> unmodelled_logged_{};
+  dac_variant                                       variant_;
+  register_file&                                    regs_;
+  reg_ref                                           control_;
+  reg_ref                                           mode_;
+  reg_ref                                           status_;
+  std::array<reg_ref, 9>                            holding_;
+  std::array<channel_fields, 2>                     channel_;
+  std::array<field_ref, 8>                          unmodelled_fields_;
+  core::clock_domain                                bus_;
+  std::array<bool, unmodelled_table.size()>         unmodelled_logged_{};
+  std::array<bool, std::to_underlying(rule::count)> rule_logged_{};
 };
 
-constexpr std::array<write_entry<dac>, 13> dac_writes{
+constexpr std::array<write_entry<dac>, 16> dac_writes{
     {
      {"CR", &dac::control_written},
+     {"MCR", &dac::mode_written},
+     {"CCR", &dac::trim_written},
+     {"SR", &dac::status_written},
      {"SWTRGR", &dac::trigger_written},
      {"DHR12R1", &dac::holding_written<holding::right12_1>},
      {"DHR12L1", &dac::holding_written<holding::left12_1>},
@@ -144,21 +192,35 @@ constexpr std::array<write_entry<dac>, 13> dac_writes{
 };
 
 dac::dac(model_context& ctx, peripheral_desc const& desc, dac_variant const& variant)
-    : dispatch_model{
-          ctx, desc, "DAC", dac_writes
-},
-      variant_{variant}, regs_{ctx.regs}, control_{reg("CR")},
+    : dispatch_model{ctx, desc, "DAC", dac_writes}, variant_{variant}, regs_{ctx.regs},
+      control_{reg("CR")}, mode_{reg("MCR")}, status_{reg("SR")},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
-      channel_{
-          {{field("CR", "TEN1"), field("CR", "TSEL1"), field("SWTRGR", "SWTRIG1"), reg("DOR1")},
-           {field("CR", "TEN2"), field("CR", "TSEL2"), field("SWTRGR", "SWTRIG2"), reg("DOR2")}}},
       unmodelled_fields_{field("CR", "WAVE1"),  field("CR", "WAVE2"),     field("CR", "DMAEN1"),
                          field("CR", "DMAEN2"), field("CR", "DMAUDRIE1"), field("CR", "DMAUDRIE2"),
-                         field("CR", "CEN1"),   field("CR", "CEN2"),      field("CR", "TEN1"),
-                         field("CR", "TEN2")},
+                         field("CR", "TEN1"),   field("CR", "TEN2")},
       bus_{ctx.clock.domain("pclk1")}
-{}
+{
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const n    = index + 1;
+    channel_[index] = {
+        .enable         = field("CR", std::format("EN{}", n)),
+        .trigger_enable = field("CR", std::format("TEN{}", n)),
+        .trigger_select = field("CR", std::format("TSEL{}", n)),
+        .amplitude      = field("CR", std::format("MAMP{}", n)),
+        .wave           = field("CR", std::format("WAVE{}", n)),
+        .calibration    = field("CR", std::format("CEN{}", n)),
+        .software       = field("SWTRGR", std::format("SWTRIG{}", n)),
+        .output         = reg(std::format("DOR{}", n)),
+        .mode           = field("MCR", std::format("MODE{}", n)),
+        .trim           = field("CCR", std::format("OTRIM{}", n)),
+        .flag           = field("SR", std::format("CAL_FLAG{}", n)),
+        .underrun       = field("SR", std::format("DMAUDR{}", n)),
+    };
+  }
+  restore_trim();
+}
 
 auto dac::now_ps() const -> std::uint64_t
 {
@@ -176,15 +238,74 @@ auto dac::software_selected(std::size_t channel) const -> bool
   return get(regs_, channel_[channel].trigger_select) == variant_.software_trigger;
 }
 
+void dac::refuse(
+    rule             which,
+    std::string_view name,
+    reg_ref          at,
+    std::uint32_t    old,
+    std::string      message)
+{
+  if(ctx_.strict_peripherals)
+  {
+    regs_.poke(at.offset, old);
+  }
+  warn_once_or_refuse(rule_logged_[std::to_underlying(which)], name, at.offset, std::move(message));
+}
+
 void dac::control_written(std::uint32_t old, std::uint32_t now)
 {
+  auto       word = now;
+  auto const keep = [&](field_ref const& bits, rule which, std::string message) {
+    if(bits.of(word) == bits.of(old))
+    {
+      return;
+    }
+    word = bits.with(word, bits.of(old));
+    regs_.poke(control_.offset, word);
+    refuse(which, "CR", control_, old, std::move(message));
+  };
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    auto const  n    = index + 1;
+    if(unit.enable.of(old) == 0)
+    {
+      continue;
+    }
+    keep(
+        unit.trigger_select, rule::trigger_locked,
+        std::format("TSEL{0} written while EN{0} is 1, RM0351 19.4.6: the old TSEL{0} kept", n));
+    keep(
+        unit.amplitude, rule::amplitude_locked,
+        std::format("MAMP{0} written while EN{0} is 1, RM0351 19.4.9: the old MAMP{0} kept", n));
+    keep(
+        unit.calibration, rule::calibration_locked,
+        std::format("CEN{0} written while EN{0} is 1, ignored by RM0351 19.7.1", n));
+  }
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    auto const  n    = index + 1;
+    if(unit.calibration.of(word) != 0 and unit.enable.of(word) != 0 and unit.enable.of(old) == 0)
+    {
+      refuse(
+          rule::calibration_enable, "CR", control_, old,
+          std::format("EN{0} set while CEN{0} is 1, not allowed by RM0351 19.4.11", n));
+    }
+    if(unit.wave.of(word) == 3)
+    {
+      refuse(
+          rule::wave_reserved, "CR", control_, old,
+          std::format("WAVE{} 11, reserved by RM0351 19.7.1", n));
+    }
+  }
   for(std::size_t use = 0; use < unmodelled_table.size(); ++use)
   {
     auto used = false;
     for(std::size_t channel = 0; channel < channels; ++channel)
     {
       auto const& bits = unmodelled_fields_[2 * use + channel];
-      if(bits.of(now) == 0)
+      if(bits.of(word) == 0)
       {
         continue;
       }
@@ -200,6 +321,77 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
           unmodelled_logged_[use], "CR", control_.offset,
           std::format("{} is not modelled", unmodelled_table[use].what));
     }
+  }
+  refresh_flags();
+}
+
+void dac::mode_written(std::uint32_t old, std::uint32_t now)
+{
+  auto word = now;
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    auto const  n    = index + 1;
+    if(unit.mode.of(word) != unit.mode.of(old)
+       and (get(regs_, unit.enable) != 0 or get(regs_, unit.calibration) != 0))
+    {
+      word = unit.mode.with(word, unit.mode.of(old));
+      regs_.poke(mode_.offset, word);
+      refuse(
+          rule::mode_locked, "MCR", mode_, old,
+          std::format("MODE{0} written while EN{0} or CEN{0} is 1, ignored by RM0351 19.7.16", n));
+    }
+  }
+  for(auto const& unit : channel_)
+  {
+    if(unit.mode.of(word) >= 4)
+    {
+      refuse(
+          rule::sample_hold, "MCR", mode_, old,
+          "MODE 1xx, the sample and hold mode, is not modelled");
+    }
+  }
+  refresh_flags();
+}
+
+void dac::trim_written(std::uint32_t, std::uint32_t)
+{
+  refresh_flags();
+}
+
+void dac::status_written(std::uint32_t old, std::uint32_t now)
+{
+  auto word = old;
+  for(auto const& unit : channel_)
+  {
+    if(unit.underrun.of(now) != 0)
+    {
+      word = unit.underrun.with(word, 0);
+    }
+  }
+  regs_.poke(status_.offset, word);
+}
+
+void dac::refresh_flags()
+{
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    if(get(regs_, unit.calibration) == 0)
+    {
+      continue;
+    }
+    auto const buffered = (get(regs_, unit.mode) & 2u) == 0;
+    auto const reached  = get(regs_, unit.trim) >= variant_.factory_trim[index];
+    update(regs_, unit.flag, buffered and reached ? 1u : 0u);
+  }
+}
+
+void dac::restore_trim()
+{
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    update(regs_, channel_[index].trim, variant_.factory_trim[index]);
   }
 }
 
@@ -351,6 +543,7 @@ void dac::restore_reset_values()
   auto const generation = state_.generation + 1;
   state_                = {};
   state_.generation     = generation;
+  restore_trim();
 }
 }
 
