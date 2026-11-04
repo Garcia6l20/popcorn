@@ -31,6 +31,14 @@ constexpr std::size_t   depth     = 3;
 constexpr std::uint32_t data_mask = 0xFFF;
 constexpr std::uint16_t lfsr_seed = 0xAAA;
 
+enum class sample_phase : std::uint8_t
+{
+  off,
+  sample,
+  hold,
+  refresh,
+};
+
 enum class load_kind : std::uint8_t
 {
   write,
@@ -62,6 +70,9 @@ struct dac_state
   std::array<std::uint16_t, channels>         triangle{};
   std::array<std::uint8_t, channels>          falling{};
   std::array<std::uint64_t, channels>         busy_ps{};
+  std::array<std::uint8_t, channels>          phase{};
+  std::array<std::uint64_t, channels>         phase_ps{};
+  std::array<std::uint64_t, channels>         phase_event{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -154,8 +165,18 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        leaves the register as before the write. The LSI stopping while a MODEx is 1xx logs the
  *        same rule's warning once, under strict_peripherals too, as the stop comes from an RCC
  *        write whose clock change every other listener also sees. A sample and hold channel
- *        loads DAC_DORx as a normal one does. The output is DAC_DORx only, no pin or ADC channel
- *        sees it, so MODEx selects nothing else.
+ *        loads DAC_DORx as a normal one does, and runs the phases of RM0351 19.4.10 in LSI
+ *        periods: a sample phase of TSAMPLEx + 1, RM0351 19.7.17, then hold phases of THOLDx and
+ *        refresh phases of TREFRESHx in turn, RM0351 19.7.19 and 19.7.20, the alternation
+ *        inferred from RM0351 19.4.10. The sample phase starts at ENx set, at each DHRx change,
+ *        RM0351 19.4.10 "any change in DAC_DHRx immediately triggers a new sample phase", and at
+ *        each DAC_DORx load. A write of the value DHRx already holds is no change, inferred, and
+ *        the restart at the load is inferred from RM0351 19.4.10 "the DAC core converts data on a
+ *        triggered conversion". Each phase length is counted from the end of the one before. A
+ *        phase of length 0 is skipped, and with THOLDx and TREFRESHx both 0 the channel stays in
+ *        refresh with no further phase. While the LSI is off the phase in progress holds, and it
+ *        restarts at its full length when the LSI starts, inferred. ENx 0 stops the phases. The
+ *        output is DAC_DORx only, no pin or ADC channel sees it, so MODEx selects nothing else.
  *        A Stop 2 entry with ENx 1, which RM0351 19.5 Table 131 forbids, reaches the model as
  *        nothing: the PWR model has no Stop entry for a peripheral to see.
  *        DAC1RST and a machine reset restore the claimed registers, drop the pending loads and
@@ -239,6 +260,14 @@ private:
   void               refresh_line();
   void               start_busy(std::size_t channel);
   void               settle_busy(std::size_t channel, std::uint64_t ps);
+  [[nodiscard]] auto lsi_periods_ps(std::uint64_t periods) const -> std::uint64_t;
+  [[nodiscard]] auto phase_periods(std::size_t channel, sample_phase which) const -> std::uint64_t;
+  void               start_sample(std::size_t channel);
+  void               advance_phase(std::size_t channel, std::uint64_t ps);
+  void               schedule_phase(std::size_t channel);
+  void               hold_phase(std::size_t channel);
+  void               resume_phase(std::size_t channel);
+  void               cancel_phase(std::size_t channel);
   void               keep_locked(
       field_ref const& bits,
       std::string_view name,
@@ -515,6 +544,20 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
+    auto const& unit = channel_[channel];
+    if(get(regs_, unit.enable) == 0)
+    {
+      cancel_phase(channel);
+      state_.phase[channel]    = std::to_underlying(sample_phase::off);
+      state_.phase_ps[channel] = 0;
+    }
+    else if(unit.enable.of(old) == 0 and get(regs_, unit.mode) >= 4)
+    {
+      start_sample(channel);
+    }
+  }
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
     if(get(regs_, channel_[channel].dma) == 0)
     {
       release(channel);
@@ -659,12 +702,16 @@ void dac::on_clock_change()
   {
     for(std::size_t channel = 0; channel < channels; ++channel)
     {
+      if(get(regs_, channel_[channel].busy) != 0)
+      {
+        state_.busy_ps[channel] = 0;
+      }
+      hold_phase(channel);
       if(get(regs_, channel_[channel].mode) < 4)
       {
         continue;
       }
-      state_.busy_ps[channel] = 0;
-      auto& logged            = rule_logged_[std::to_underlying(rule::sample_hold_lsi)];
+      auto& logged = rule_logged_[std::to_underlying(rule::sample_hold_lsi)];
       if(not std::exchange(logged, true))
       {
         warn(
@@ -681,6 +728,7 @@ void dac::on_clock_change()
     {
       start_busy(channel);
     }
+    resume_phase(channel);
   }
 }
 
@@ -793,9 +841,15 @@ template <holding Which> void dac::holding_written(std::uint32_t, std::uint32_t 
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    if(data[channel])
+    if(not data[channel])
     {
-      store(channel, *data[channel]);
+      continue;
+    }
+    auto const changed = *data[channel] != state_.dhr[channel];
+    store(channel, *data[channel]);
+    if(changed and state_.phase[channel] != std::to_underlying(sample_phase::off))
+    {
+      start_sample(channel);
     }
   }
   mirror();
@@ -908,6 +962,10 @@ void dac::transfer(std::size_t channel, load_kind kind)
   auto const& unit = channel_[channel];
   auto const  term = kind == load_kind::write ? 0u : wave_term(channel);
   regs_.poke(unit.output.offset, std::min(data_mask, std::uint32_t{state_.dhr[channel]} + term));
+  if(state_.phase[channel] != std::to_underlying(sample_phase::off))
+  {
+    start_sample(channel);
+  }
   if(kind != load_kind::hardware or get(regs_, unit.dma) == 0)
   {
     return;
@@ -975,6 +1033,123 @@ void dac::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     settle_busy(kind - channels, now_ps());
   }
+  else if(kind < 3 * channels)
+  {
+    advance_phase(kind - 2 * channels, now_ps());
+  }
+}
+
+auto dac::lsi_periods_ps(std::uint64_t periods) const -> std::uint64_t
+{
+  auto const hz = ctx_.clock.hz(lsi_);
+  return hz == 0 ? 0 : (periods * ps_per_second + hz - 1) / hz;
+}
+
+auto dac::phase_periods(std::size_t channel, sample_phase which) const -> std::uint64_t
+{
+  auto const& unit = channel_[channel];
+  switch(which)
+  {
+    case sample_phase::sample:
+      return std::uint64_t{regs_.peek(unit.sample.offset) & 0x3FFu} + 1;
+    case sample_phase::hold:
+      return get(regs_, unit.hold);
+    case sample_phase::refresh:
+      return get(regs_, unit.refresh);
+    case sample_phase::off:
+      break;
+  }
+  return 0;
+}
+
+void dac::start_sample(std::size_t channel)
+{
+  cancel_phase(channel);
+  state_.phase[channel]    = std::to_underlying(sample_phase::sample);
+  state_.phase_ps[channel] = 0;
+  if(auto const span = lsi_periods_ps(phase_periods(channel, sample_phase::sample)); span != 0)
+  {
+    state_.phase_ps[channel] = now_ps() + span;
+    schedule_phase(channel);
+  }
+}
+
+void dac::advance_phase(std::size_t channel, std::uint64_t ps)
+{
+  auto moved = false;
+  while(state_.phase_ps[channel] != 0 and state_.phase_ps[channel] <= ps)
+  {
+    auto const current = static_cast<sample_phase>(state_.phase[channel]);
+    auto       next    = current == sample_phase::hold ? sample_phase::refresh : sample_phase::hold;
+    auto       periods = phase_periods(channel, next);
+    if(periods == 0)
+    {
+      next    = next == sample_phase::hold ? sample_phase::refresh : sample_phase::hold;
+      periods = phase_periods(channel, next);
+    }
+    auto const span       = lsi_periods_ps(periods);
+    state_.phase[channel] = std::to_underlying(next);
+    if(span == 0)
+    {
+      state_.phase_ps[channel]    = 0;
+      state_.phase_event[channel] = 0;
+      return;
+    }
+    state_.phase_ps[channel] += span;
+    moved = true;
+  }
+  if(moved)
+  {
+    schedule_phase(channel);
+  }
+}
+
+void dac::hold_phase(std::size_t channel)
+{
+  if(state_.phase_ps[channel] == 0)
+  {
+    return;
+  }
+  cancel_phase(channel);
+  advance_phase(channel, now_ps());
+  cancel_phase(channel);
+  state_.phase_ps[channel] = 0;
+}
+
+void dac::resume_phase(std::size_t channel)
+{
+  auto const current = static_cast<sample_phase>(state_.phase[channel]);
+  if(current == sample_phase::off or state_.phase_ps[channel] != 0)
+  {
+    return;
+  }
+  if(current == sample_phase::sample)
+  {
+    start_sample(channel);
+    return;
+  }
+  if(auto const span = lsi_periods_ps(phase_periods(channel, current)); span != 0)
+  {
+    state_.phase_ps[channel] = now_ps() + span;
+    schedule_phase(channel);
+  }
+}
+
+void dac::schedule_phase(std::size_t channel)
+{
+  state_.phase_event[channel] =
+      ctx_.events.schedule_at(
+          vtime{state_.phase_ps[channel]}, static_cast<std::uint32_t>(2 * channels + channel),
+          state_.generation, ctx_.clock)
+      + 1;
+}
+
+void dac::cancel_phase(std::size_t channel)
+{
+  if(auto const seq = std::exchange(state_.phase_event[channel], 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+  }
 }
 
 auto dac::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
@@ -1010,6 +1185,7 @@ void dac::restore_reset_values()
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
     release(channel);
+    cancel_phase(channel);
   }
   auto const generation = state_.generation + 1;
   state_                = {};

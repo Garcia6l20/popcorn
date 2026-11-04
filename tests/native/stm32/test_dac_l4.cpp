@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -82,6 +83,7 @@ constexpr address          shrr      = 0x4C;
 constexpr std::uint32_t    bwst1     = 1u << 15;
 constexpr std::uint32_t    bwst2     = 1u << 31;
 constexpr std::uint64_t    lsi3      = 93'750'000;
+constexpr std::uint64_t    lsi       = 31'250'000;
 constexpr std::uint32_t    dac1en    = 1u << 29;
 constexpr std::uint32_t    ten1      = 1u << 2;
 constexpr std::uint32_t    software1 = 7u << 3;
@@ -1353,7 +1355,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the LSI stopping with MODE 1xx holds a running BWST count and logs once, also under strict, "
+    "the LSI stopping holds a running BWST count, with MODE 1xx it logs once, also under strict, "
     "and BWST clears 3 LSI periods after the LSI starts again")
 {
   rig const r{true};
@@ -1374,6 +1376,20 @@ TEST_CASE(
   r.idle_to(dues.back());
   CHECK((r.read(dac1 + sr) & bwst1) == 0);
   CHECK(r.logged.size() == 1);
+  rig const normal{true};
+  normal.lsi_on();
+  auto const from = normal.now_ps();
+  normal.write(dac1 + shsr1, 11);
+  normal.idle_to(from + lsi3 / 2);
+  normal.write(rcc_csr, normal.read(rcc_csr) & ~1u);
+  normal.idle_to(from + 2 * lsi3);
+  CHECK((normal.read(dac1 + sr) & bwst1) != 0);
+  CHECK(normal.logged.empty());
+  normal.lsi_on();
+  auto const restart = normal.pending(2);
+  REQUIRE_FALSE(restart.empty());
+  normal.idle_to(restart.back());
+  CHECK((normal.read(dac1 + sr) & bwst1) == 0);
 }
 
 TEST_CASE(
@@ -1484,4 +1500,296 @@ TEST_CASE("a snapshot with BWST1 set restores it and clears it at its own time")
   CHECK((fresh.read(dac1 + sr) & bwst1) != 0);
   fresh.idle_to(at + lsi3);
   CHECK((fresh.read(dac1 + sr) & bwst1) == 0);
+}
+
+namespace
+{
+void sample_and_hold(rig const& r, std::uint32_t hold, std::uint32_t refresh)
+{
+  r.lsi_on();
+  r.write(dac1 + mcr, 4);
+  r.write(dac1 + shsr1, 10);
+  r.write(dac1 + shhr, hold);
+  r.write(dac1 + shrr, refresh);
+}
+}
+
+TEST_CASE(
+    "RM0351 19.4.10: EN1 in MODE 1xx starts a sample phase of TSAMPLE1 + 1 LSI periods, then hold "
+    "phases of THOLD1 and refresh phases of TREFRESH1 in turn, the alternation inferred")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  CHECK(r.pending(4).empty());
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  auto due = at + 11 * lsi;
+  for(auto const span : {20u, 5u, 20u, 5u})
+  {
+    CAPTURE(span);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{due});
+    r.idle_to(due);
+    due += span * lsi;
+  }
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{due});
+  r.write(dac1 + cr, 0);
+  CHECK(r.pending(4).empty());
+  r.idle_to(due);
+  CHECK(r.pending(4).empty());
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "with TEN1 0 a DAC_DHR1 change restarts the sample phase, RM0351 19.4.10, its DAC_DOR1 load "
+    "restarts it again, inferred, and 1000 loads keep one phase event pending")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 21 * lsi);
+  r.write(dac1 + dhr12r1, 0x123);
+  auto const load = r.now_ps() + cycle;
+  r.idle_to(load);
+  CHECK(r.read(dac1 + dor1) == 0x123);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{load + 11 * lsi});
+  for(std::uint32_t index = 0; index < 1000; ++index)
+  {
+    r.write(dac1 + dhr12r1, index);
+    r.idle_to(r.now_ps() + cycle);
+  }
+  auto const last = r.now_ps();
+  auto const dues = r.pending(4);
+  REQUIRE(dues.size() == 1);
+  CHECK(dues[0] <= last + 11 * lsi);
+  CHECK(dues[0] + cycle >= last + 11 * lsi);
+}
+
+TEST_CASE(
+    "RM0351 19.4.10: with TEN1 1 a DAC_DHR1 change between triggers restarts the sample phase with "
+    "no load, a write of the same value restarts nothing, inferred, and a SWTRIG1 load "
+    "restarts it, inferred")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1 | ten1 | software1);
+  r.idle_to(at + 21 * lsi);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 31 * lsi});
+  auto const changed = r.now_ps();
+  r.write(dac1 + dhr12r1, 0x123);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{changed + 11 * lsi});
+  r.idle_to(changed + 5 * lsi);
+  CHECK(r.read(dac1 + dor1) == 0);
+  r.write(dac1 + dhr12r1, 0x123);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{changed + 11 * lsi});
+  r.write(dac1 + dhr12rd, 0x456'0123);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{changed + 11 * lsi});
+  r.idle_to(changed + 6 * lsi);
+  auto const triggered = r.now_ps();
+  r.write(dac1 + swtrgr, 1);
+  r.idle_to(triggered + cycle);
+  CHECK(r.read(dac1 + dor1) == 0x123);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{triggered + cycle + 11 * lsi});
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "the LSI stopping holds the phase in progress, and the phase restarts at its full length when "
+    "the LSI starts, inferred")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 15 * lsi);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 31 * lsi});
+  r.write(rcc_csr, r.read(rcc_csr) & ~1u);
+  CHECK(r.pending(4).empty());
+  r.idle_to(at + 60 * lsi);
+  CHECK(r.pending(4).empty());
+  auto const from = r.now_ps();
+  r.lsi_on();
+  auto const ready = r.now_ps();
+  REQUIRE(ready - from < 9 * lsi);
+  auto const dues = r.pending(4);
+  REQUIRE(dues.size() == 1);
+  CHECK(dues[0] >= from + 20 * lsi);
+  CHECK(dues[0] <= ready + 20 * lsi);
+  r.idle_to(dues[0]);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{dues[0] + 5 * lsi});
+}
+
+TEST_CASE(
+    "the LSI stopping at the instant a phase ends holds the next phase, and the LSI start restarts "
+    "that phase at its full length, inferred")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 11 * lsi);
+  r.write(rcc_csr, r.read(rcc_csr) & ~1u);
+  CHECK(r.pending(4).empty());
+  r.idle_to(at + 60 * lsi);
+  auto const from = r.now_ps();
+  r.lsi_on();
+  auto const ready = r.now_ps();
+  REQUIRE(ready - from < 9 * lsi);
+  auto const dues = r.pending(4);
+  REQUIRE(dues.size() == 1);
+  CHECK(dues[0] >= from + 20 * lsi);
+  CHECK(dues[0] <= ready + 20 * lsi);
+  r.idle_to(dues[0]);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{dues[0] + 5 * lsi});
+}
+
+TEST_CASE(
+    "EN1 in MODE 1xx with the LSI off holds the sample phase until the LSI starts, inferred, and "
+    "a clock change in the permanent refresh starts no phase")
+{
+  {
+    rig const r;
+    r.write(dac1 + mcr, 4);
+    r.write(dac1 + shsr1, 10);
+    r.write(dac1 + cr, en1);
+    CHECK(r.pending(4).empty());
+    auto const from = r.now_ps();
+    r.lsi_on();
+    auto const ready = r.now_ps();
+    REQUIRE(ready - from < 9 * lsi);
+    auto const dues = r.pending(4);
+    REQUIRE(dues.size() == 1);
+    CHECK(dues[0] >= from + 11 * lsi);
+    CHECK(dues[0] <= ready + 11 * lsi);
+  }
+  rig const r;
+  sample_and_hold(r, 0, 0);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 11 * lsi);
+  CHECK(r.pending(4).empty());
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | 4u << 8);
+  CHECK(r.pending(4).empty());
+  r.write(rcc_csr, r.read(rcc_csr) & ~1u);
+  r.lsi_on();
+  CHECK(r.pending(4).empty());
+}
+
+TEST_CASE(
+    "a phase of length 0 is skipped, and THOLD and TREFRESH both 0 leave the channel in refresh "
+    "with no further phase")
+{
+  {
+    rig const r;
+    sample_and_hold(r, 0, 5);
+    auto const at = r.now_ps();
+    r.write(dac1 + cr, en1);
+    r.idle_to(at + 11 * lsi);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 16 * lsi});
+    r.idle_to(at + 16 * lsi);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 21 * lsi});
+  }
+  {
+    rig const r;
+    sample_and_hold(r, 7, 0);
+    auto const at = r.now_ps();
+    r.write(dac1 + cr, en1);
+    r.idle_to(at + 11 * lsi);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 18 * lsi});
+    r.idle_to(at + 18 * lsi);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 25 * lsi});
+  }
+  rig const r;
+  sample_and_hold(r, 0, 0);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  CHECK(r.pending(4) == std::vector<std::uint64_t>{at + 11 * lsi});
+  r.idle_to(at + 11 * lsi);
+  CHECK(r.pending(4).empty());
+  r.idle_to(at + 40 * lsi);
+  CHECK(r.pending(4).empty());
+}
+
+TEST_CASE(
+    "a normal MODE runs no phase, and DAC1RST mid-phase drops the chain while a snapshot keeps it")
+{
+  {
+    rig const r;
+    r.lsi_on();
+    r.write(dac1 + cr, en1);
+    CHECK(r.pending(4).empty());
+  }
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 15 * lsi);
+  auto const bytes = r.encoded();
+  r.write(apb1rstr1, dac1en);
+  r.write(apb1rstr1, 0);
+  CHECK(r.pending(4).empty());
+  rig const fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.pending(4) == std::vector<std::uint64_t>{at + 31 * lsi});
+  fresh.idle_to(at + 31 * lsi);
+  CHECK(fresh.pending(4) == std::vector<std::uint64_t>{at + 36 * lsi});
+}
+
+TEST_CASE(
+    "checklist 72: a snapshot restored into a machine never reset keeps the TIM6 trigger with DMA "
+    "service, the BWST clear and the LSI-stop log")
+{
+  rig const r;
+  r.sources();
+  r.lsi_on();
+  r.dma_channel3({0x222});
+  r.write(dac1 + mcr, 4);
+  r.write(dac1 + cr, ten1 | dmaen1);
+  r.write(dac1 + dhr12r1, 0x111);
+  auto const at = r.now_ps();
+  r.write(dac1 + shsr1, 11);
+  auto const bytes = r.encoded();
+
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(stm32::board{}, l476rc());
+  stm32::register_builtin_models();
+  core::machine fresh{l476rc(), popcorn::arch::armv8m::factory(), std::move(options)};
+  fresh.load(popcorn::testing::elf(firmware));
+  std::vector<core::log_record> logged;
+  auto const sink = fresh.add_log_sink([&logged](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      logged.push_back(record);
+    }
+  });
+  fresh.restore(core::snapshot{core::decode_snapshot(bytes)});
+  auto const write = [&fresh](address where, std::uint32_t value) {
+    REQUIRE(fresh.mem().write(where, 4, value).has_value());
+  };
+  auto const read = [&fresh](address where) {
+    auto const value = fresh.mem().read(where, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  };
+  auto const idle_to = [&fresh](std::uint64_t ps) {
+    REQUIRE(fresh
+                .run_slice(
+                    {.max_instructions = icount{1'000'000},
+                     .wall_budget      = std::chrono::seconds{60},
+                     .until_time       = vtime{ps}})
+                .stopped.has_value());
+  };
+  write(trigger_timers[0] + tim_egr, 1);
+  idle_to(fresh.virtual_clock().time().ps + 10 * cycle);
+  CHECK(read(dac1 + dor1) == 0x111);
+  CHECK(read(dac1 + dhr12r1) == 0x222);
+  CHECK(read(dma1 + cndtr3) == 0);
+  CHECK((read(dac1 + sr) & bwst1) != 0);
+  idle_to(at + lsi3);
+  CHECK((read(dac1 + sr) & bwst1) == 0);
+  CHECK(logged.empty());
+  write(rcc_csr, read(rcc_csr) & ~1u);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("the LSI stopped with MODE1 1xx"));
 }

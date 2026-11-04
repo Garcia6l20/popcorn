@@ -523,7 +523,14 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   raises `ModelError` and leaves the register as before the write. The LSI stopping while a MODEx
   is 1xx logs the same warning once, under strict_peripherals too, since the stop comes from an RCC
   write whose clock change every other listener also sees.
-- A sample and hold channel loads `DAC_DORx` as a normal one does.
+- A sample and hold channel loads `DAC_DORx` as a normal one does, and runs the phases of RM0351
+  19.4.10 in LSI periods: a sample phase of TSAMPLEx + 1, RM0351 19.7.17, then hold phases of
+  THOLDx and refresh phases of TREFRESHx in turn, the alternation inferred. The sample phase starts
+  at ENx set, at each DHRx change, RM0351 19.4.10, and at each `DAC_DORx` load, inferred. A write
+  of the value DHRx already holds is no change, inferred. Each phase length counts from the end of
+  the one before. A phase of length 0 is skipped, and with THOLDx and TREFRESHx both 0 the channel
+  stays in refresh with no further phase. While the LSI is off the phase in progress holds, and it
+  restarts at its full length when the LSI starts, inferred. ENx 0 stops the phases.
 - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
   for a peripheral to see.
