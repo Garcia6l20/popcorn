@@ -74,6 +74,14 @@ constexpr address          samples   = 0x2000'2000;
 constexpr address          rcc_cr    = 0x4002'1000;
 constexpr address          pllcfgr   = 0x4002'100C;
 constexpr address          flash_acr = 0x4002'2000;
+constexpr address          rcc_csr   = 0x4002'1094;
+constexpr address          shsr1     = 0x40;
+constexpr address          shsr2     = 0x44;
+constexpr address          shhr      = 0x48;
+constexpr address          shrr      = 0x4C;
+constexpr std::uint32_t    bwst1     = 1u << 15;
+constexpr std::uint32_t    bwst2     = 1u << 31;
+constexpr std::uint64_t    lsi3      = 93'750'000;
 constexpr std::uint32_t    dac1en    = 1u << 29;
 constexpr std::uint32_t    ten1      = 1u << 2;
 constexpr std::uint32_t    software1 = 7u << 3;
@@ -209,6 +217,16 @@ struct rig
   void clear_pending(std::uint32_t irq) const
   {
     write(0xE000'E280u + 4 * (irq / 32), 1u << (irq % 32));
+  }
+
+  void lsi_on() const
+  {
+    write(rcc_csr, read(rcc_csr) | 1u);
+    for(int step = 0; step < 1000 and (read(rcc_csr) & 2u) == 0; ++step)
+    {
+      idle_to(now_ps() + 10'000'000);
+    }
+    REQUIRE((read(rcc_csr) & 2u) != 0);
   }
 
   void pll_72mhz() const
@@ -545,8 +563,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0351 19.7.16: a DAC_MCR write while EN or CEN is 1 keeps the old MODE, logged once, a "
-    "model_error when strict that leaves DAC_MCR, MODE 1xx logs once as not modelled")
+    "RM0351 19.7.16 and 19.4.10: a DAC_MCR write of MODE while EN or CEN is 1, or of MODE 1xx "
+    "with the LSI off, logs once, a model_error when strict that leaves DAC_MCR")
 {
   for(auto const control : {en1, cen1})
   {
@@ -576,7 +594,7 @@ TEST_CASE(
     r.write(dac1 + mcr, 5u << 16);
     CHECK(r.read(dac1 + mcr) == 5u << 16);
     REQUIRE(r.logged.size() == 1);
-    CHECK(r.logged[0].message.contains("sample and hold"));
+    CHECK(r.logged[0].message.contains("with the LSI off"));
   }
   rig const strict{true};
   CHECK_THROWS_AS(
@@ -1278,4 +1296,192 @@ TEST_CASE("a snapshot mid-wave restores the LFSR and the triangle counter and di
   fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
   CHECK(software_loads(fresh, 1, 1) == std::vector<std::uint32_t>{0xF55});
   CHECK(software_loads(fresh, 2, 2) == std::vector<std::uint32_t>{2, 1});
+}
+
+TEST_CASE(
+    "RM0351 19.7.14 and 19.7.17: a DAC_SHSR1 write sets BWST1 until 3 LSI periods later, the 3 "
+    "inferred, and with EN1 1 a write while BWST1 is 1 is ignored, a model_error when strict")
+{
+  {
+    rig const r;
+    r.lsi_on();
+    auto const at = r.now_ps();
+    r.write(dac1 + shsr1, 11);
+    CHECK((r.read(dac1 + sr) & bwst1) != 0);
+    CHECK(r.pending(2) == std::vector<std::uint64_t>{at + lsi3});
+    r.idle_to(at + lsi3 / 2);
+    auto const again = r.now_ps();
+    r.write(dac1 + shsr1, 22);
+    CHECK(r.read(dac1 + shsr1) == 22);
+    CHECK(r.pending(2).back() == again + lsi3);
+    r.idle_to(at + lsi3);
+    CHECK((r.read(dac1 + sr) & bwst1) != 0);
+    r.idle_to(again + lsi3);
+    CHECK((r.read(dac1 + sr) & bwst1) == 0);
+    CHECK(r.logged.empty());
+  }
+  {
+    rig const r;
+    r.lsi_on();
+    r.write(dac1 + cr, en1);
+    auto const at = r.now_ps();
+    r.write(dac1 + shsr1, 11);
+    CHECK((r.read(dac1 + sr) & bwst1) != 0);
+    r.write(dac1 + shsr1, 22);
+    CHECK(r.read(dac1 + shsr1) == 11);
+    REQUIRE(r.logged.size() == 1);
+    CHECK(r.logged[0].message.contains("SHSR1 written while EN1 and BWST1"));
+    r.write(dac1 + shsr2, 5);
+    CHECK(r.read(dac1 + shsr2) == 5);
+    CHECK((r.read(dac1 + sr) & bwst2) != 0);
+    r.idle_to(at + lsi3 - cycle);
+    CHECK((r.read(dac1 + sr) & bwst1) != 0);
+    r.idle_to(at + lsi3);
+    CHECK((r.read(dac1 + sr) & bwst1) == 0);
+    r.write(dac1 + shsr1, 22);
+    CHECK(r.read(dac1 + shsr1) == 22);
+    CHECK((r.read(dac1 + sr) & bwst1) != 0);
+    CHECK(r.logged.size() == 1);
+  }
+  rig const strict{true};
+  strict.lsi_on();
+  strict.write(dac1 + cr, en1);
+  strict.write(dac1 + shsr1, 11);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(dac1 + shsr1, 4, 22)), popcorn::model_error);
+  CHECK(strict.read(dac1 + shsr1) == 11);
+}
+
+TEST_CASE(
+    "the LSI stopping with MODE 1xx holds a running BWST count and logs once, also under strict, "
+    "and BWST clears 3 LSI periods after the LSI starts again")
+{
+  rig const r{true};
+  r.lsi_on();
+  auto const at = r.now_ps();
+  r.write(dac1 + mcr, 4);
+  r.idle_to(at + lsi3 / 2);
+  r.write(rcc_csr, r.read(rcc_csr) & ~1u);
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].message.contains("the LSI stopped with MODE1 1xx"));
+  r.idle_to(at + 2 * lsi3);
+  CHECK((r.read(dac1 + sr) & bwst1) != 0);
+  r.lsi_on();
+  auto const dues = r.pending(2);
+  REQUIRE_FALSE(dues.empty());
+  r.idle_to(dues.back() - cycle);
+  CHECK((r.read(dac1 + sr) & bwst1) != 0);
+  r.idle_to(dues.back());
+  CHECK((r.read(dac1 + sr) & bwst1) == 0);
+  CHECK(r.logged.size() == 1);
+}
+
+TEST_CASE(
+    "RM0351 19.7.14: MODE 1xx sets BWST until 3 LSI periods later, and with the LSI off BWST "
+    "clears 3 LSI periods after the LSI starts")
+{
+  {
+    rig const r;
+    r.lsi_on();
+    auto const at = r.now_ps();
+    r.write(dac1 + mcr, 4u | 5u << 16);
+    CHECK((r.read(dac1 + sr) & (bwst1 | bwst2)) == (bwst1 | bwst2));
+    CHECK(r.pending(2) == std::vector<std::uint64_t>{at + lsi3});
+    CHECK(r.pending(3) == std::vector<std::uint64_t>{at + lsi3});
+    r.write(dac1 + mcr, 5u | 5u << 16);
+    CHECK(r.pending(2) == std::vector<std::uint64_t>{at + lsi3});
+    r.idle_to(at + lsi3);
+    CHECK((r.read(dac1 + sr) & (bwst1 | bwst2)) == 0);
+    CHECK(r.logged.empty());
+  }
+  rig const r;
+  r.write(dac1 + mcr, 4);
+  CHECK((r.read(dac1 + sr) & bwst1) != 0);
+  CHECK(r.pending(2).empty());
+  r.idle_to(r.now_ps() + 2 * lsi3);
+  CHECK((r.read(dac1 + sr) & bwst1) != 0);
+  r.lsi_on();
+  auto const dues = r.pending(2);
+  REQUIRE(dues.size() == 1);
+  CHECK(dues[0] <= r.now_ps() + lsi3);
+  CHECK(dues[0] + 10'000'000 > r.now_ps() + lsi3);
+  r.idle_to(dues[0]);
+  CHECK((r.read(dac1 + sr) & bwst1) == 0);
+}
+
+TEST_CASE(
+    "RM0351 19.7.19 and 19.7.20: THOLD and TREFRESH writes while EN or CEN is 1 keep the old "
+    "field, per channel, logged once per register, a model_error when strict")
+{
+  struct leg
+  {
+    address       at;
+    std::uint32_t reset;
+    std::uint32_t mask;
+  };
+  for(auto const& [at, reset, mask] : {
+          leg{shhr, 0x0001'0001, 0x3FF},
+          leg{shrr, 0x0001'0001, 0xFF },
+  })
+  {
+    CAPTURE(at);
+    for(auto const control : {en1, cen1, en2, cen2})
+    {
+      CAPTURE(control);
+      auto const second = control == en2 or control == cen2;
+      auto const kept   = second ? mask << 16 : mask;
+      {
+        rig const r;
+        CHECK(r.read(dac1 + at) == reset);
+        r.write(dac1 + cr, control);
+        r.write(dac1 + at, 0x0005'0006);
+        r.write(dac1 + at, 0x0005'0006);
+        CHECK(r.read(dac1 + at) == ((reset & kept) | (0x0005'0006u & ~kept)));
+        CHECK(r.logged.size() == 1);
+      }
+      rig const strict{true};
+      strict.write(dac1 + cr, control);
+      CHECK_THROWS_AS(
+          static_cast<void>(strict.f->target->mem().write(dac1 + at, 4, 0x0005'0006)),
+          popcorn::model_error);
+      CHECK(strict.read(dac1 + at) == reset);
+    }
+  }
+}
+
+TEST_CASE(
+    "checklist 31: DAC1RST with BWST1 set clears it, and a DAC_SHSR1 write after the pulse holds "
+    "BWST1 3 LSI periods from its own write")
+{
+  rig const r;
+  r.lsi_on();
+  auto const at = r.now_ps();
+  r.write(dac1 + shsr1, 11);
+  r.idle_to(at + lsi3 / 2);
+  r.write(apb1rstr1, dac1en);
+  r.write(apb1rstr1, 0);
+  CHECK(r.read(dac1 + sr) == 0);
+  CHECK(r.read(dac1 + shsr1) == 0);
+  auto const again = r.now_ps();
+  r.write(dac1 + shsr1, 12);
+  r.idle_to(at + lsi3);
+  CHECK((r.read(dac1 + sr) & bwst1) != 0);
+  r.idle_to(again + lsi3);
+  CHECK((r.read(dac1 + sr) & bwst1) == 0);
+}
+
+TEST_CASE("a snapshot with BWST1 set restores it and clears it at its own time")
+{
+  rig const r;
+  r.lsi_on();
+  auto const at = r.now_ps();
+  r.write(dac1 + shsr1, 11);
+  auto const bytes = r.encoded();
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.pending(2) == std::vector<std::uint64_t>{at + lsi3});
+  fresh.idle_to(at + lsi3 - cycle);
+  CHECK((fresh.read(dac1 + sr) & bwst1) != 0);
+  fresh.idle_to(at + lsi3);
+  CHECK((fresh.read(dac1 + sr) & bwst1) == 0);
 }

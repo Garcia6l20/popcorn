@@ -61,6 +61,7 @@ struct dac_state
   std::array<std::uint16_t, channels>         lfsr{lfsr_seed, lfsr_seed};
   std::array<std::uint16_t, channels>         triangle{};
   std::array<std::uint8_t, channels>          falling{};
+  std::array<std::uint64_t, channels>         busy_ps{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -73,7 +74,10 @@ enum class rule : std::uint8_t
   calibration_enable,
   wave_reserved,
   mode_locked,
-  sample_hold,
+  sample_hold_lsi,
+  sample_busy,
+  hold_locked,
+  refresh_locked,
   wave_untriggered,
   count,
 };
@@ -137,10 +141,21 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        loads DHRx with no wave, the load inferred, and under strict_peripherals raises
  *        model_error and leaves the holding registers as before the write. A DAC_CR write that
  *        sets WAVEx with TENx 0 is accepted, as LL_DAC_Init writes WAVEx before
- *        LL_DAC_EnableTrigger sets TENx. MODEx 1xx, the sample and hold mode, is not modelled:
- *        a DAC_MCR write that sets it logs one model_warning, and under strict_peripherals
- *        raises model_error and leaves DAC_MCR as before the write. The output is DAC_DORx only,
- *        no pin or ADC channel sees it, so MODEx selects nothing else.
+ *        LL_DAC_EnableTrigger sets TENx.
+ *        Each accepted DAC_SHSRx write sets BWSTx, RM0351 19.7.14, and so does a DAC_MCR write
+ *        that sets MODEx 1xx, the sample and hold mode, which RM0351 19.7.14 places "just after
+ *        sample and hold mode enable", the MCR write inferred. BWSTx clears 3 LSI periods later,
+ *        RM0351 19.7.14 "about 3 LSI periods", the 3 inferred. While the LSI is off BWSTx stays
+ *        set, a count already running included, and it clears 3 LSI periods after the LSI
+ *        starts. A DAC_SHSRx write while ENx and BWSTx are both 1 is ignored, RM0351 19.7.17. A
+ *        THOLDx or TREFRESHx write while ENx or CENx is 1 is ignored, RM0351 19.7.19 and
+ *        19.7.20. MODEx 1xx set with the LSI off is not allowed, RM0351 19.4.10. Each of these
+ *        logs one model_warning per rule, and under strict_peripherals raises model_error and
+ *        leaves the register as before the write. The LSI stopping while a MODEx is 1xx logs the
+ *        same rule's warning once, under strict_peripherals too, as the stop comes from an RCC
+ *        write whose clock change every other listener also sees. A sample and hold channel
+ *        loads DAC_DORx as a normal one does. The output is DAC_DORx only, no pin or ADC channel
+ *        sees it, so MODEx selects nothing else.
  *        A Stop 2 entry with ENx 1, which RM0351 19.5 Table 131 forbids, reaches the model as
  *        nothing: the PWR model has no Stop entry for a peripheral to see.
  *        DAC1RST and a machine reset restore the claimed registers, drop the pending loads and
@@ -149,7 +164,8 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
 class dac final : public dispatch_model<dac, dac_state>,
                   public bus_reset_listener,
                   public trigger_sink,
-                  public dma_requester
+                  public dma_requester,
+                  public clock_listener
 {
 public:
   dac(model_context& ctx, peripheral_desc const& desc, dac_variant const& variant);
@@ -171,13 +187,17 @@ public:
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
+  void on_clock_change() override;
 
-  void                          control_written(std::uint32_t old, std::uint32_t now);
-  void                          mode_written(std::uint32_t old, std::uint32_t now);
-  void                          trim_written(std::uint32_t old, std::uint32_t now);
-  void                          status_written(std::uint32_t old, std::uint32_t now);
-  void                          trigger_written(std::uint32_t old, std::uint32_t now);
-  template <holding Which> void holding_written(std::uint32_t old, std::uint32_t now);
+  void                                control_written(std::uint32_t old, std::uint32_t now);
+  void                                mode_written(std::uint32_t old, std::uint32_t now);
+  void                                trim_written(std::uint32_t old, std::uint32_t now);
+  void                                status_written(std::uint32_t old, std::uint32_t now);
+  void                                hold_written(std::uint32_t old, std::uint32_t now);
+  void                                refresh_written(std::uint32_t old, std::uint32_t now);
+  template <std::size_t Channel> void sample_written(std::uint32_t old, std::uint32_t now);
+  void                                trigger_written(std::uint32_t old, std::uint32_t now);
+  template <holding Which> void       holding_written(std::uint32_t old, std::uint32_t now);
 
 private:
   struct channel_fields
@@ -196,6 +216,10 @@ private:
     field_ref underrun;
     field_ref dma;
     field_ref underrun_interrupt;
+    field_ref busy;
+    reg_ref   sample;
+    field_ref hold;
+    field_ref refresh;
   };
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -213,9 +237,17 @@ private:
   [[nodiscard]] auto wave_term(std::size_t channel) -> std::uint32_t;
   void               release(std::size_t channel);
   void               refresh_line();
-  void               restore_reset_values();
-  void               refresh_flags();
-  void               restore_trim();
+  void               start_busy(std::size_t channel);
+  void               settle_busy(std::size_t channel, std::uint64_t ps);
+  void               keep_locked(
+      field_ref const& bits,
+      std::string_view name,
+      rule             which,
+      std::uint32_t    old,
+      std::string      message);
+  void restore_reset_values();
+  void refresh_flags();
+  void restore_trim();
   void
       refuse(rule which, std::string_view name, reg_ref at, std::uint32_t old, std::string message);
 
@@ -227,12 +259,13 @@ private:
   std::array<reg_ref, 9>                            holding_;
   std::array<channel_fields, 2>                     channel_;
   core::clock_domain                                bus_;
+  core::clock_domain                                lsi_;
   irq_line*                                         line_;
   std::array<dma_signal, channels>                  requests_;
   std::array<bool, std::to_underlying(rule::count)> rule_logged_{};
 };
 
-constexpr std::array<write_entry<dac>, 16> dac_writes{
+constexpr std::array<write_entry<dac>, 20> dac_writes{
     {
      {"CR", &dac::control_written},
      {"MCR", &dac::mode_written},
@@ -250,6 +283,10 @@ constexpr std::array<write_entry<dac>, 16> dac_writes{
      {"DHR8RD", &dac::holding_written<holding::right8_dual>},
      {"DOR1", nullptr},
      {"DOR2", nullptr},
+     {"SHSR1", &dac::sample_written<0>},
+     {"SHSR2", &dac::sample_written<1>},
+     {"SHHR", &dac::hold_written},
+     {"SHRR", &dac::refresh_written},
      }
 };
 
@@ -261,7 +298,7 @@ dac::dac(model_context& ctx, peripheral_desc const& desc, dac_variant const& var
       status_{reg("SR")},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
-      bus_{ctx.clock.domain("pclk1")}, line_{&irq("TIM6_DAC_IRQn")},
+      bus_{ctx.clock.domain("pclk1")}, lsi_{ctx.clock.domain("lsi")}, line_{&irq("TIM6_DAC_IRQn")},
       requests_{
           dma_signal{ctx.peers, lower(desc.name) + "_ch1_dma"},
           dma_signal{ctx.peers, lower(desc.name) + "_ch2_dma"}}
@@ -284,6 +321,10 @@ dac::dac(model_context& ctx, peripheral_desc const& desc, dac_variant const& var
         .underrun           = field("SR", std::format("DMAUDR{}", n)),
         .dma                = field("CR", std::format("DMAEN{}", n)),
         .underrun_interrupt = field("CR", std::format("DMAUDRIE{}", n)),
+        .busy               = field("SR", std::format("BWST{}", n)),
+        .sample             = reg(std::format("SHSR{}", n)),
+        .hold               = field("SHHR", std::format("THOLD{}", n)),
+        .refresh            = field("SHRR", std::format("TREFRESH{}", n)),
     };
   }
   restore_trim();
@@ -500,16 +541,147 @@ void dac::mode_written(std::uint32_t old, std::uint32_t now)
           std::format("MODE{0} written while EN{0} or CEN{0} is 1, ignored by RM0351 19.7.16", n));
     }
   }
-  for(auto const& unit : channel_)
+  for(std::size_t index = 0; index < channels; ++index)
   {
-    if(unit.mode.of(word) >= 4)
+    auto const& unit = channel_[index];
+    if(unit.mode.of(word) >= 4 and unit.mode.of(old) < 4 and ctx_.clock.hz(lsi_) == 0)
     {
       refuse(
-          rule::sample_hold, "MCR", mode_, old,
-          "MODE 1xx, the sample and hold mode, is not modelled");
+          rule::sample_hold_lsi, "MCR", mode_, old,
+          std::format(
+              "MODE{} 1xx with the LSI off, which RM0351 19.4.10 does not allow", index + 1));
+    }
+  }
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    if(get(regs_, unit.mode) >= 4 and unit.mode.of(old) < 4)
+    {
+      start_busy(index);
     }
   }
   refresh_flags();
+}
+
+void dac::keep_locked(
+    field_ref const& bits,
+    std::string_view name,
+    rule             which,
+    std::uint32_t    old,
+    std::string      message)
+{
+  auto const at   = reg(name);
+  auto const word = regs_.peek(at.offset);
+  if(bits.of(word) == bits.of(old))
+  {
+    return;
+  }
+  regs_.poke(at.offset, bits.with(word, bits.of(old)));
+  refuse(which, name, at, old, std::move(message));
+}
+
+void dac::hold_written(std::uint32_t old, std::uint32_t)
+{
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    if(get(regs_, unit.enable) != 0 or get(regs_, unit.calibration) != 0)
+    {
+      keep_locked(
+          unit.hold, "SHHR", rule::hold_locked, old,
+          std::format(
+              "THOLD{0} written while EN{0} or CEN{0} is 1, ignored by RM0351 19.7.19", index + 1));
+    }
+  }
+}
+
+void dac::refresh_written(std::uint32_t old, std::uint32_t)
+{
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    if(get(regs_, unit.enable) != 0 or get(regs_, unit.calibration) != 0)
+    {
+      keep_locked(
+          unit.refresh, "SHRR", rule::refresh_locked, old,
+          std::format(
+              "TREFRESH{0} written while EN{0} or CEN{0} is 1, ignored by RM0351 19.7.20",
+              index + 1));
+    }
+  }
+}
+
+template <std::size_t Channel> void dac::sample_written(std::uint32_t old, std::uint32_t)
+{
+  auto const& unit = channel_[Channel];
+  settle_busy(Channel, now_ps());
+  if(get(regs_, unit.enable) != 0 and get(regs_, unit.busy) != 0)
+  {
+    regs_.poke(unit.sample.offset, old);
+    refuse(
+        rule::sample_busy, std::format("SHSR{}", Channel + 1), unit.sample, old,
+        std::format(
+            "SHSR{0} written while EN{0} and BWST{0} are 1, ignored by RM0351 19.7.17",
+            Channel + 1));
+    return;
+  }
+  start_busy(Channel);
+}
+
+void dac::start_busy(std::size_t channel)
+{
+  auto const& unit = channel_[channel];
+  update(regs_, unit.busy, 1);
+  auto const hz = ctx_.clock.hz(lsi_);
+  if(hz == 0)
+  {
+    state_.busy_ps[channel] = 0;
+    return;
+  }
+  state_.busy_ps[channel] = now_ps() + (3 * ps_per_second + hz - 1) / hz;
+  ctx_.events.schedule_at(
+      vtime{state_.busy_ps[channel]}, static_cast<std::uint32_t>(channels + channel),
+      state_.generation, ctx_.clock);
+}
+
+void dac::settle_busy(std::size_t channel, std::uint64_t ps)
+{
+  if(state_.busy_ps[channel] != 0 and state_.busy_ps[channel] <= ps)
+  {
+    state_.busy_ps[channel] = 0;
+    update(regs_, channel_[channel].busy, 0);
+  }
+}
+
+void dac::on_clock_change()
+{
+  if(ctx_.clock.hz(lsi_) == 0)
+  {
+    for(std::size_t channel = 0; channel < channels; ++channel)
+    {
+      if(get(regs_, channel_[channel].mode) < 4)
+      {
+        continue;
+      }
+      state_.busy_ps[channel] = 0;
+      auto& logged            = rule_logged_[std::to_underlying(rule::sample_hold_lsi)];
+      if(not std::exchange(logged, true))
+      {
+        warn(
+            "MCR", std::format(
+                       "the LSI stopped with MODE{} 1xx, which RM0351 19.4.10 does not allow",
+                       channel + 1));
+      }
+    }
+    return;
+  }
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
+    if(get(regs_, channel_[channel].busy) != 0 and state_.busy_ps[channel] == 0)
+    {
+      start_busy(channel);
+    }
+  }
 }
 
 void dac::trim_written(std::uint32_t, std::uint32_t)
@@ -791,11 +963,18 @@ void dac::refresh_line()
 
 void dac::on_event(std::uint32_t kind, std::uint64_t payload)
 {
-  if(kind >= channels or payload != state_.generation)
+  if(payload != state_.generation)
   {
     return;
   }
-  catch_up(kind, now_ps());
+  if(kind < channels)
+  {
+    catch_up(kind, now_ps());
+  }
+  else if(kind < 2 * channels)
+  {
+    settle_busy(kind - channels, now_ps());
+  }
 }
 
 auto dac::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
@@ -804,6 +983,7 @@ auto dac::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
     catch_up(channel, now_ps());
+    settle_busy(channel, now_ps());
   }
   return dispatch_model::on_read(regs, offset, size, access);
 }

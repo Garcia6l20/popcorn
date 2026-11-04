@@ -512,10 +512,18 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   strict_peripherals it raises `ModelError` and leaves the holding registers as before the write.
   A `DAC_CR` write that sets WAVEx with TENx 0 is accepted, as `LL_DAC_Init` writes WAVEx before
   `LL_DAC_EnableTrigger` sets TENx.
-- MODEx 1xx, the sample and hold mode, is not modelled. A `DAC_MCR` write that sets it logs one
-  `model_warning`, and under strict_peripherals raises `ModelError` and leaves the register as
-  before the write. The sample and hold registers
-  `DAC_SHSRx`, `DAC_SHHR` and `DAC_SHRR` report as unmodelled registers.
+- Each accepted `DAC_SHSRx` write sets BWSTx, RM0351 19.7.14, and so does a `DAC_MCR` write that
+  sets MODEx 1xx, the sample and hold mode, the MCR write as the instant inferred. BWSTx clears 3
+  LSI periods later, RM0351 19.7.14 "about 3 LSI periods", the 3 inferred. While the LSI is off
+  BWSTx stays set, a count already running included, and it clears 3 LSI periods after the LSI
+  starts.
+- A `DAC_SHSRx` write while ENx and BWSTx are both 1 is ignored, RM0351 19.7.17. A THOLDx or TREFRESHx write
+  while ENx or CENx is 1 is ignored, RM0351 19.7.19 and 19.7.20. MODEx 1xx set with the LSI off is
+  not allowed, RM0351 19.4.10. Each logs one `model_warning` per rule. Under strict_peripherals it
+  raises `ModelError` and leaves the register as before the write. The LSI stopping while a MODEx
+  is 1xx logs the same warning once, under strict_peripherals too, since the stop comes from an RCC
+  write whose clock change every other listener also sees.
+- A sample and hold channel loads `DAC_DORx` as a normal one does.
 - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
   for a peripheral to see.
