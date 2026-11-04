@@ -454,6 +454,30 @@ Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - `TRIM` keeps what the firmware wrote, with or without `AUTOTRIMEN`, and `TRIMOVF` stays 0.
   The RCC clock enable of the CRS gates nothing.
 
+## DAC
+
+Source: [dac.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dac.cpp)
+
+STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
+
+- A holding register write stores DHR1 and DHR2 by the shifts of RM0351 19.4.3. Every holding
+  register reads its view of DHR1 and DHR2, inferred.
+- With TENx 0, DHRx loads into `DAC_DORx` one APB1 cycle after the write, RM0351 19.4.4. The
+  cycle counts from the access time at the APB1 rate of the write, inferred. With TENx 1 and TSELx
+  111, each SWTRIGx write loads `DAC_DORx` one APB1 cycle later, RM0351 19.4.6. SWTRIGx follows
+  the `w` access of RM0351 19.7.2 and reads 0, inferred against the 19.4.6 text of a bit reset by
+  hardware at the load. Written with TENx 0 or another TSELx, it loads nothing, inferred. Loads
+  run with ENx 0, RM0351 19.4.2 note.
+- Popcorn charges no APB wait states, so writes closer than one APB1 cycle happen only in the
+  model. In that window a load takes DHRx as it is at the load, and a write while a load is
+  pending moves the next load to its own due, so of three such writes the second loses its own
+  load.
+- WAVEx other than 00, DMAENx, DMAUDRIEx, CENx, and TENx 1 with TSELx below 111 are not modelled.
+  A `DAC_CR` write that sets one logs one `model_warning` per function. Under strict_peripherals it
+  raises `ModelError` and leaves `DAC_CR` as before the write. `DAC_SR`, `DAC_CCR`, `DAC_MCR` and
+  the sample and hold registers are not modelled: their accesses report as unmodelled registers.
+- The output is `DAC_DORx` only. No pin or ADC channel sees it.
+
 ## DBGMCU
 
 Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dbgmcu.cpp)

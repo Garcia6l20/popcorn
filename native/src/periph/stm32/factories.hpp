@@ -173,6 +173,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto iwdg_factory(iwdg_variant variant) -> model_factory;
 
 /**
+ * @brief Factory of the DAC model, RM0351 section 19.
+ * @param variant What differs between the DAC of the family the row serves.
+ */
+[[nodiscard]] auto dac_factory(dac_variant variant) -> model_factory;
+
+/**
  * @brief Factory of the LPTIM model, RM0351 section 34.
  * @param variant What differs between the LPTIM instances the row serves.
  */

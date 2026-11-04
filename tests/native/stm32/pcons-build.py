@@ -300,6 +300,7 @@ for program, source in (
     ("stm32-tim-l4", "test_tim_l4.cpp"),
     ("stm32-spi-l4", "test_spi_l4.cpp"),
     ("stm32-lptim-l4", "test_lptim_l4.cpp"),
+    ("stm32-dac-l4", "test_dac_l4.cpp"),
     ("stm32-sai-l4", "test_sai_l4.cpp"),
     ("stm32-usart-l4", "test_usart_l4.cpp"),
     ("stm32-i2c-l4", "test_i2c_l4.cpp"),

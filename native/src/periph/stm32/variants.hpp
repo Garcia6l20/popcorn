@@ -1011,6 +1011,16 @@ inline constexpr lptim_variant l4_lptim1{.event_delay_cycles = 1};
 /** @brief STM32L4 LPTIM2: LPTIM1 without the encoder mode, RM0351 34.3 Table 216. */
 inline constexpr lptim_variant l4_lptim2{.encoder = false, .event_delay_cycles = 1};
 
+/** @brief Differences between the DAC peripherals the model rows serve. */
+struct dac_variant
+{
+  /** @brief DAC_CR.TSELx value that selects the software trigger SWTRIGx. */
+  std::uint32_t software_trigger = 0b111;
+};
+
+/** @brief STM32L4 DAC1, RM0351 section 19, SWTRIG at TSELx 111 of RM0351 Table 128. */
+inline constexpr dac_variant l4_dac{};
+
 /** @brief Differences between the CRC peripherals the model rows serve. */
 struct crc_variant
 {

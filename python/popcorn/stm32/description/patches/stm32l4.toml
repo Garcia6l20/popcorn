@@ -308,6 +308,11 @@ renames = { ISR = "ADC_ISR", IER = "ADC_IER", CR = "ADC_CR", CFGR = "ADC_CFGR", 
 source = "RM0351 Rev 11, 18.7 ADC registers: the manual names each register with the ADC_ prefix, ADC_ISR to ADC_CALFACT. The four SVDs drop it. The builder strips the prefix again and keeps ADC_ISR and the others as aliases, as the U5 and H5 SVD names give"
 
 [[register_renames]]
+peripherals = ["DAC1"]
+renames = { SWTRIGR = "SWTRGR" }
+source = "RM0351 Rev 11, 19.7.2 DAC software trigger register (DAC_SWTRGR). The four SVDs and the STM32L4x5 SVD spell it SWTRIGR"
+
+[[register_renames]]
 peripherals = ["ADC_Common"]
 renames = { CSR = "ADC_CSR", CCR = "ADC_CCR", CDR = "ADC_CDR" }
 source = "RM0351 Rev 11, 18.8 ADC common registers: ADC_CSR, ADC_CCR and ADC_CDR. The four SVDs drop the ADC_ prefix"
