@@ -1380,6 +1380,24 @@ The STM32L1 RTC:
   RTC_CALIB and RTC_ALARM outputs and the reference clock detection. A debugger write stores
   them with neither.
 
+The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own register set:
+
+- `RTC_TAMPCR` at 0x40 in place of `RTC_TAFCR`, `RTC_OR` at 0x4C, no `RTC_CALIBR` and no
+  `CR.DCE`.
+- RSF sets at the first RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+  system reset, inferred from the copy every RTCCLK period of RM0351 38.3.4 and 38.3.8, where the
+  BYPSHAD text of 38.6.3 says every two RTCCLK cycles.
+- The `RTC_WPR` key leaves `RTC_ISR[31:8]`, `RTC_TAMPCR`, `RTC_OR` and the backup registers open,
+  RM0351 38.3.7: ALRAF to TAMP3F clear by a 0 without it.
+- `RTC_TAMPCR` and `RTC_OR` are storage: coverage reports them `storage_only`. `RTC_ISR.ITSF`,
+  bit 17 in RM0351 38.6.4, is not in the description and reads 0.
+- A brown-out keeps the calendar and the backup registers, RM0351 6.1.3.
+- The alarm interrupt drives EXTI line 18 and RTC_Alarm, RM0351 Table 62, the wakeup interrupt
+  EXTI line 20 and RTC_WKUP.
+- Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: timestamps,
+  `CR.ITSE` included, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
+  the outputs and the reference clock detection.
+
 ## SAI
 
 Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sai.cpp)

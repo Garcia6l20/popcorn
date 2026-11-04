@@ -1096,6 +1096,22 @@ struct rtc_classic_variant
    *         set up to 2 RTCCLK cycles after the alarm is disabled, RM0038 20.3.5 on Cat.1. Without
    *         it they read 1. */
   bool alarm_write_wait = false;
+  /** @brief Name of the tamper control register: RTC_TAFCR on the STM32L1, RM0038 20.6.17,
+   *         RTC_TAMPCR on the STM32L4, RM0351 38.6.16. */
+  std::string_view tamper_register = "TAFCR";
+  /** @brief Whether the RTC has coarse digital calibration: RTC_CALIBR and RTC_CR.DCE, RM0038
+   *         20.6.7. */
+  bool coarse_calibration = true;
+  /** @brief Whether the RTC has RTC_OR with RTC_ALARM_TYPE and RTC_OUT_RMP, RM0351 38.6.19. */
+  bool option_register = false;
+  /** @brief Whether RTC_CR has ITSE, the timestamp on an internal event, RM0351 38.6.3. */
+  bool internal_timestamp = false;
+  /** @brief Whether TAMP2F and TAMP3F clear by a 0 under the RTC_WPR key only. RM0038 20.3.5
+   *         exempts RTC_ISR[13:8] from the key, RM0351 38.3.7 exempts RTC_ISR[31:8]. */
+  bool keyed_tamper_flags = true;
+  /** @brief RTCCLK cycles from a shadow copy restart to the copy that sets RSF: every two RTCCLK
+   *         periods in RM0038 20.3.2, every RTCCLK period in RM0351 38.3.4 and 38.3.8. */
+  std::uint8_t shadow_copy_cycles = 2;
   /** @brief EXTI line of the alarm interrupt, RM0038 20.5. */
   std::uint8_t alarm_line = 17;
   /** @brief EXTI line of the wakeup interrupt, RM0038 20.5. */
@@ -1113,6 +1129,19 @@ inline constexpr rtc_classic_variant l1_cat1_rtc{
     .three_tampers      = false,
     .debug_freeze       = false,
     .alarm_write_wait   = true};
+/** @brief STM32L4 RTC, `rtc2_v2_4_Cube`, RM0351 section 38: RTC_TAMPCR and RTC_OR, no
+ *         RTC_CALIBR and no CR.DCE, CR.ITSE, RTC_ISR[31:8] outside the key, a shadow copy every
+ *         RTCCLK period, a backup domain a brown-out keeps, RM0351 6.1.3, and the alarm interrupt
+ *         on EXTI line 18, RM0351 Table 62. */
+inline constexpr rtc_classic_variant l4_rtc{
+    .brown_out_resets   = false,
+    .tamper_register    = "TAMPCR",
+    .coarse_calibration = false,
+    .option_register    = true,
+    .internal_timestamp = true,
+    .keyed_tamper_flags = false,
+    .shadow_copy_cycles = 1,
+    .alarm_line         = 18};
 
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant

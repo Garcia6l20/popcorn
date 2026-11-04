@@ -33,7 +33,7 @@ using rtc_calendar::first_key;
 using rtc_calendar::init_cycles;
 using rtc_calendar::second_key;
 
-constexpr std::uint64_t shadow_cycles = 2;
+constexpr std::uint64_t sync_cycles = 2;
 
 enum classic_event : std::uint8_t
 {
@@ -131,7 +131,8 @@ struct unmodelled_entry
 };
 
 /**
- * @brief Classic RTC of the STM32L1, RM0038 section 20, BCD calendar. The calendar is derived from
+ * @brief Classic RTC of the STM32L1, RM0038 section 20, and the STM32L4, RM0351 section 38, BCD
+ *        calendar, described for the STM32L1 first. The calendar is derived from
  *        the `rtc` clock domain and the virtual time of its last start, never ticked: the
  *        asynchronous and synchronous prescalers, SSR on Cat.2 to Cat.6, TR and DR in 24 or 12-hour
  *        format, days in month and leap years for 2000 to 2099, the weekday counted from the one
@@ -178,6 +179,14 @@ struct unmodelled_entry
  *        TSTR, TSDR, TSSSR, CALIBR, CALR, SHIFTR and TAFCR are storage the model claims for the key
  *        and the read-only rules, `storage_only` to coverage and host views. PWR_CR.DBP gates no
  *        write.
+ *        The STM32L4 RTC runs the same rules on its own register set: RTC_TAMPCR in place of
+ *        RTC_TAFCR, RTC_OR, no RTC_CALIBR and no CR.DCE, and CR.ITSE logged with the timestamps.
+ *        Its key leaves RTC_ISR[31:8], RTC_TAMPCR, RTC_OR and the backup registers open, RM0351
+ *        38.3.7, so TAMP2F and TAMP3F clear by a 0 without it. RSF sets at the first RTCCLK edge
+ *        after a clear, the end of init mode, a BYPSHAD clear or a system reset, inferred from the
+ *        copy every RTCCLK period of RM0351 38.3.4 and 38.3.8, where the BYPSHAD text of 38.6.3
+ *        says every two cycles. A brown-out keeps the backup domain, RM0351 6.1.3. The alarm
+ *        interrupt drives EXTI line 18, RM0351 Table 62. RTC_TAMPCR and RTC_OR are storage.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
@@ -292,7 +301,7 @@ private:
   bool                                               debugger_write_ = false;
 };
 
-constexpr std::array<write_entry<rtc_classic>, 13> classic_writes{
+constexpr std::array<write_entry<rtc_classic>, 11> classic_writes{
     {
      {"TR", &rtc_classic::time_written},
      {"DR", &rtc_classic::date_written},
@@ -300,13 +309,11 @@ constexpr std::array<write_entry<rtc_classic>, 13> classic_writes{
      {"ISR", &rtc_classic::status_written},
      {"PRER", &rtc_classic::prescaler_written},
      {"WUTR", &rtc_classic::locked_written<0>},
-     {"CALIBR", &rtc_classic::coarse_written},
      {"ALRMAR", &rtc_classic::locked_written<1>},
      {"ALRMBR", &rtc_classic::locked_written<2>},
      {"WPR", &rtc_classic::key_written},
      {"TSTR", &rtc_classic::read_only_written<1>},
      {"TSDR", &rtc_classic::read_only_written<2>},
-     {"TAFCR", &rtc_classic::tamper_written},
      }
 };
 
@@ -322,6 +329,12 @@ constexpr std::array<write_entry<rtc_classic>, 5> subsecond_writes{
 
 constexpr std::array<write_entry<rtc_classic>, 1> smooth_writes{
     {{"CALR", &rtc_classic::smooth_written}}};
+
+constexpr std::array<write_entry<rtc_classic>, 1> coarse_writes{
+    {{"CALIBR", &rtc_classic::coarse_written}}};
+
+constexpr std::array<write_entry<rtc_classic>, 1> option_writes{
+    {{"OR", &rtc_classic::plain_written}}};
 
 rtc_classic::rtc_classic(
     model_context&                          ctx,
@@ -373,8 +386,12 @@ rtc_classic::rtc_classic(
   }
   for(auto const& name : {"TAMP2E", "TAMP3E"})
   {
-    expect_field("TAFCR", name, variant.three_tampers);
+    expect_field(variant.tamper_register, name, variant.three_tampers);
   }
+  expect_register("CALIBR", variant.coarse_calibration);
+  expect_field("CR", "DCE", variant.coarse_calibration);
+  expect_register("OR", variant.option_register);
+  expect_field("CR", "ITSE", variant.internal_timestamp);
   if(variant.subseconds)
   {
     bind(subsecond_writes);
@@ -385,25 +402,39 @@ rtc_classic::rtc_classic(
   {
     bind(smooth_writes);
   }
-  std::vector<write_entry<rtc_classic>> backups;
+  if(variant.coarse_calibration)
+  {
+    bind(coarse_writes);
+  }
+  if(variant.option_register)
+  {
+    bind(option_writes);
+  }
+  std::vector<write_entry<rtc_classic>> named{
+      {variant.tamper_register, &rtc_classic::tamper_written}
+  };
   for(auto const& described : desc.registers)
   {
     if(described.name.starts_with("BKP") and described.name.ends_with("R"))
     {
-      backups.push_back({described.name, &rtc_classic::plain_written});
+      named.push_back({described.name, &rtc_classic::plain_written});
     }
   }
-  bind(backups);
-  for(auto const& name : {"TSTR", "TSDR", "TSSSR", "CALIBR", "CALR", "SHIFTR", "TAFCR"})
+  bind(named);
+  for(auto const& name :
+      {std::string_view{"TSTR"}, std::string_view{"TSDR"}, std::string_view{"TSSSR"},
+       std::string_view{"CALIBR"}, std::string_view{"CALR"}, std::string_view{"SHIFTR"},
+       variant.tamper_register, std::string_view{"OR"}})
   {
     if(has_register(name))
     {
       storage_.push_back(reg(name).offset);
     }
   }
-  for(auto const& name : {"FMT", "DCE", "REFCKON"})
+  init_only_ = field("CR", "FMT").mask() | field("CR", "REFCKON").mask();
+  if(variant.coarse_calibration)
   {
-    init_only_ |= field("CR", name).mask();
+    init_only_ |= field("CR", "DCE").mask();
   }
   for(auto const& name : {"ALRAF", "ALRBF", "WUTF", "TSF", "TSOVF", "TAMP1F"})
   {
@@ -412,7 +443,8 @@ rtc_classic::rtc_classic(
   keyed_flags_ = shadow_flag_.mask();
   if(variant.three_tampers)
   {
-    keyed_flags_ |= field("ISR", "TAMP2F").mask() | field("ISR", "TAMP3F").mask();
+    auto const later = field("ISR", "TAMP2F").mask() | field("ISR", "TAMP3F").mask();
+    (variant.keyed_tamper_flags ? keyed_flags_ : open_flags_) |= later;
   }
   auto const bits = [&](std::string_view r, std::initializer_list<std::string_view> names) {
     auto mask = std::uint32_t{};
@@ -422,17 +454,24 @@ rtc_classic::rtc_classic(
     }
     return mask;
   };
-  auto tampers = bits("TAFCR", {"TAMP1E"});
+  auto tampers = bits(variant.tamper_register, {"TAMP1E"});
   if(variant.three_tampers)
   {
-    tampers |= bits("TAFCR", {"TAMP2E", "TAMP3E"});
+    tampers |= bits(variant.tamper_register, {"TAMP2E", "TAMP3E"});
   }
-  unmodelled_[timestamp_function] = {"CR", "timestamps", bits("CR", {"TSE"})};
-  unmodelled_[tamper_function]    = {"TAFCR", "tamper detection", tampers};
-  unmodelled_[coarse_function]    = {"CR", "coarse digital calibration", bits("CR", {"DCE"})};
-  unmodelled_[smooth_function]    = {"CALR", "smooth digital calibration", ~std::uint32_t{}};
-  unmodelled_[shift_function]     = {"SHIFTR", "the shift control", ~std::uint32_t{}};
-  unmodelled_[output_function]    = {
+  auto stamps = bits("CR", {"TSE"});
+  if(variant.internal_timestamp)
+  {
+    stamps |= bits("CR", {"ITSE"});
+  }
+  unmodelled_[timestamp_function] = {"CR", "timestamps", stamps};
+  unmodelled_[tamper_function]    = {variant.tamper_register, "tamper detection", tampers};
+  unmodelled_[coarse_function]    = {
+      "CR", "coarse digital calibration",
+      variant.coarse_calibration ? bits("CR", {"DCE"}) : std::uint32_t{}};
+  unmodelled_[smooth_function] = {"CALR", "smooth digital calibration", ~std::uint32_t{}};
+  unmodelled_[shift_function]  = {"SHIFTR", "the shift control", ~std::uint32_t{}};
+  unmodelled_[output_function] = {
       "CR", "the RTC_CALIB and RTC_ALARM outputs", bits("CR", {"COE", "OSEL"})};
   unmodelled_[reference_function] = {
       "CR", "the reference clock detection", bits("CR", {"REFCKON"})};
@@ -643,7 +682,7 @@ void rtc_classic::alarm_enables_changed(std::uint32_t old, std::uint32_t now, st
     }
     else if(a.enable.of(old) != 0 and a.enable.of(now) == 0 and get(regs_, init_) == 0)
     {
-      arm(kind, cycle + shadow_cycles);
+      arm(kind, cycle + sync_cycles);
     }
   }
 }
@@ -652,7 +691,7 @@ void rtc_classic::restart_timers(std::uint64_t cycle)
 {
   if(not bypassed())
   {
-    arm(shadow_ready, cycle + shadow_cycles);
+    arm(shadow_ready, cycle + variant_.shadow_copy_cycles);
   }
   plan_all();
   schedule_all();
@@ -897,7 +936,7 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
     update(regs_, shadow_flag_, 0);
     if(not bypassed())
     {
-      arm(shadow_ready, state_.start + shadow_cycles);
+      arm(shadow_ready, state_.start + variant_.shadow_copy_cycles);
     }
     if(variant_.alarm_write_wait)
     {
@@ -920,7 +959,7 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
      and init_.of(word) == 0
      and not bypassed())
   {
-    arm(shadow_ready, std::max(cycle, state_.start) + shadow_cycles);
+    arm(shadow_ready, std::max(cycle, state_.start) + variant_.shadow_copy_cycles);
   }
   update_lines();
 }
@@ -948,7 +987,7 @@ void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
   count_.shift_hour(cycle, add_hour_.of(now) != 0, sub_hour_.of(now) != 0);
   if(wakeup_enable_.of(old) != wakeup_enable_.of(word))
   {
-    arm(wakeup_ready, cycle + shadow_cycles);
+    arm(wakeup_ready, cycle + sync_cycles);
     if(wakeup_enable_.of(word) != 0)
     {
       auto const spre     = rtc_calendar::wakeup_on_spre(wakeup_clock_.of(word));
@@ -973,7 +1012,7 @@ void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
   }
   else if(was and not is and get(regs_, init_) == 0)
   {
-    arm(shadow_ready, cycle + shadow_cycles);
+    arm(shadow_ready, cycle + variant_.shadow_copy_cycles);
   }
 }
 
@@ -1007,7 +1046,7 @@ void rtc_classic::shift_written(std::uint32_t old, std::uint32_t now)
 
 void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
 {
-  refuse_unmodelled("TAFCR", old, now);
+  refuse_unmodelled(variant_.tamper_register, old, now);
 }
 
 template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old, std::uint32_t)

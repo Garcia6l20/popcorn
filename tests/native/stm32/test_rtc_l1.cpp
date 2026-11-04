@@ -297,7 +297,7 @@ TEST_CASE("RM0038 20.3.5: TR, DR, PRER, CALIBR and CR.FMT take writes under the 
   CHECK(r.read("PRER") == 0x7F'00FF);
   CHECK(r.read("CR") == 0);
   r.unlock();
-  r.write("CR", 1u << 6);
+  r.write("CR", 3u << 6);
   r.write("CALIBR", 0x85);
   CHECK(r.read("CR") == 0);
   CHECK(r.read("CALIBR") == 0);
@@ -586,6 +586,18 @@ TEST_CASE("checklist 39: each RTC variant refuses a description that disagrees w
       popcorn::config_error);
   CHECK_THROWS_AS(
       static_cast<void>(make_machine(with_version(l152rb(), "rtc2_v2_5_Cube"))),
+      popcorn::config_error);
+}
+
+TEST_CASE("checklist 39: the STM32L4 RTC variant refuses the L152RE RTC, its TAFCR and CALIBR")
+{
+  stm32::register_builtin_models();
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories({}, l152re());
+  options.models.insert_or_assign("RTC", stm32::rtc_classic_factory(std::nullopt, stm32::l4_rtc));
+  CHECK_THROWS_AS(
+      static_cast<void>(std::make_unique<core::machine>(
+          l152re(), popcorn::arch::armv8m::factory(), std::move(options))),
       popcorn::config_error);
 }
 
