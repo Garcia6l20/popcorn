@@ -807,7 +807,7 @@ TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, ra
           {cfgr,   1u << 23 | 3u << 1 },
           {cfgr,   1u | 2u << 1       },
           {cfgr,   1u << 23 | 1u << 3 },
-          {cfgr,   1u << 24           },
+          {cfgr,   1u << 24 | 1u      },
           {option, 1u << 0            }
   })
   {
@@ -1996,4 +1996,186 @@ TEST_CASE("RM0351 34.4.5: with CKSEL 1 and PRESC 2 the counter counts every four
   CHECK(r.read(lptim1 + cnt) == 1);
   r.idle_to(rises[16] + cycle);
   CHECK(r.read(lptim1 + cnt) == 3);
+}
+
+namespace
+{
+constexpr std::uint32_t enc    = 1u << 24;
+constexpr std::uint32_t up_bit = 1u << 5;
+constexpr std::uint32_t down_b = 1u << 6;
+
+struct encoder_pins
+{
+  stm32::gpio_port& in1;
+  stm32::gpio_port& in2;
+  bool              a{};
+  bool              b{};
+  std::uint64_t     at{};
+
+  void edge(bool first, bool level)
+  {
+    at += 5 * cycle;
+    (first ? in1 : in2).drive_at(first ? 5 : 7, level, vtime{at});
+    (first ? a : b) = level;
+  }
+
+  void forward(std::uint32_t cycles)
+  {
+    for(std::uint32_t index = 0; index < cycles; ++index)
+    {
+      edge(true, true);
+      edge(false, true);
+      edge(true, false);
+      edge(false, false);
+    }
+  }
+
+  void backward(std::uint32_t cycles)
+  {
+    for(std::uint32_t index = 0; index < cycles; ++index)
+    {
+      edge(false, true);
+      edge(true, true);
+      edge(false, false);
+      edge(true, false);
+    }
+  }
+};
+
+auto encoder_rig(rig const& r, std::uint64_t from) -> encoder_pins
+{
+  auto& in1 = etr_pin(r, "GPIOB", 5, 1);
+  auto& in2 = etr_pin(r, "GPIOB", 7, 1);
+  return encoder_pins{.in1 = in1, .in2 = in2, .at = from};
+}
+}
+
+TEST_CASE("RM0351 34.4.13 Table 220: both edges count 4 per encoder cycle, DOWN at the reversal")
+{
+  rig        r;
+  auto const t    = r.started(60, 100, cntstrt, enc | 2u << 1);
+  auto       pins = encoder_rig(r, t + 20 * cycle);
+  pins.forward(2);
+  r.idle_to(pins.at + cycle);
+  CHECK(r.read(lptim1 + cnt) == 8);
+  CHECK((r.read(lptim1 + isr) & (up_bit | down_b)) == 0);
+  pins.backward(1);
+  r.idle_to(pins.at + cycle);
+  CHECK(r.read(lptim1 + cnt) == 4);
+  CHECK((r.read(lptim1 + isr) & (up_bit | down_b)) == down_b);
+  pins.forward(1);
+  r.idle_to(pins.at + cycle);
+  CHECK(r.read(lptim1 + cnt) == 8);
+  CHECK((r.read(lptim1 + isr) & up_bit) == up_bit);
+}
+
+TEST_CASE("RM0351 34.4.13 Table 220: rising edges only and falling edges only count 2 per cycle")
+{
+  for(std::uint32_t polarity : {0u, 1u})
+  {
+    CAPTURE(polarity);
+    rig        r;
+    auto const t    = r.started(60, 100, cntstrt, enc | polarity << 1);
+    auto       pins = encoder_rig(r, t + 20 * cycle);
+    pins.forward(3);
+    r.idle_to(pins.at + cycle);
+    CHECK(r.read(lptim1 + cnt) == 6);
+    pins.backward(2);
+    r.idle_to(pins.at + cycle);
+    CHECK(r.read(lptim1 + cnt) == 2);
+    CHECK((r.read(lptim1 + isr) & down_b) == down_b);
+  }
+}
+
+TEST_CASE("RM0351 34.4.13: counting down from 0 wraps to ARR and sets ARRM, inferred")
+{
+  rig        r;
+  auto const t    = r.started(60, 10, cntstrt, enc | 2u << 1);
+  auto       pins = encoder_rig(r, t + 20 * cycle);
+  pins.edge(false, true);
+  r.idle_to(pins.at + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 10);
+  CHECK((r.read(lptim1 + isr) & (arrm | down_b)) == (arrm | down_b));
+}
+
+TEST_CASE("inferred: counting down onto CMP sets CMPM one kernel clock after the edge")
+{
+  rig        r;
+  auto const t    = r.started(5, 100, cntstrt, enc | 2u << 1, cmpm);
+  auto       pins = encoder_rig(r, t + 20 * cycle);
+  pins.forward(2);
+  r.idle_to(pins.at + cycle);
+  r.write(lptim1 + icr, cmpm);
+  pins.edge(false, true);
+  pins.edge(true, true);
+  pins.edge(false, false);
+  r.idle_to(pins.at);
+  CHECK(r.read(lptim1 + cnt) == 5);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  CHECK(r.pending() == pins.at + cycle);
+  r.idle_to(pins.at + cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("RM0351 34.6: DOWNIE raises LPTIM1_IRQn at the direction change")
+{
+  rig        r;
+  auto const t    = r.started(60, 100, cntstrt, enc | 2u << 1, down_b);
+  auto       pins = encoder_rig(r, t + 20 * cycle);
+  pins.forward(1);
+  r.idle_to(pins.at + cycle);
+  CHECK((r.read(ispr2) & lptim1_irq) == 0);
+  pins.edge(false, true);
+  r.idle_to(pins.at);
+  CHECK((r.read(ispr2) & lptim1_irq) == lptim1_irq);
+}
+
+TEST_CASE("an LPTIM1RST pulse with PB7 high keeps the IN2 level, an IN1 rise then counts down")
+{
+  rig  r;
+  auto pins = encoder_rig(r, 0);
+  pins.in2.drive(7, true);
+  r.write(apb1rstr1, 1u << 31);
+  r.write(apb1rstr1, 0);
+  auto const t = r.started(60, 10, cntstrt, enc | 2u << 1);
+  pins.at      = t + 20 * cycle;
+  pins.edge(true, true);
+  r.idle_to(pins.at + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 10);
+  CHECK((r.read(lptim1 + isr) & down_b) == down_b);
+}
+
+TEST_CASE("checklist 53: SNGSTRT with ENC 1 logs once, raises under strict, RM0351 34.4.13")
+{
+  rig r;
+  r.write(lptim1 + cfgr, enc);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + cr, enable | sngstrt);
+  r.write(lptim1 + cr, enable | sngstrt);
+  CHECK(r.warnings("SNGSTRT with ENC 1") == 1);
+  rig strict{true};
+  strict.write(lptim1 + cfgr, enc);
+  strict.write(lptim1 + cr, enable);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | sngstrt)),
+      popcorn::model_error);
+  CHECK(strict.read(lptim1 + cr) == enable);
+  auto const logged = strict.warnings("SNGSTRT with ENC 1");
+  strict.write(lptim1 + cr, enable | cntstrt);
+  CHECK(strict.warnings("SNGSTRT with ENC 1") == logged);
+}
+
+TEST_CASE("inferred: with PRELOAD 1 the down wrap from 0 applies a pending ARR and loads it")
+{
+  rig        r;
+  auto const t    = r.started(60, 10, cntstrt, enc | 2u << 1 | preload);
+  auto       pins = encoder_rig(r, t + 20 * cycle);
+  r.write(lptim1 + arr, 5);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  REQUIRE((r.read(lptim1 + isr) & arrok) == arrok);
+  pins.at = r.now_ps();
+  pins.edge(false, true);
+  r.idle_to(pins.at + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 5);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
 }

@@ -30,12 +30,14 @@ constexpr std::uint32_t reload_match     = 1u << 1;
 constexpr std::uint32_t compare_ok       = 1u << 3;
 constexpr std::uint32_t external_trigger = 1u << 2;
 constexpr std::uint32_t reload_ok        = 1u << 4;
+constexpr std::uint32_t counting_up      = 1u << 5;
+constexpr std::uint32_t counting_down    = 1u << 6;
 constexpr std::uint32_t counter_top      = 0xFFFF;
 constexpr std::uint32_t enable_bit       = 1u << 0;
 constexpr std::uint32_t single_start     = 1u << 1;
 constexpr std::uint32_t continuous_run   = 1u << 2;
 constexpr std::uint32_t tick_event       = 0;
-constexpr std::size_t   unmodelled_uses  = 2;
+constexpr std::size_t   unmodelled_uses  = 1;
 constexpr std::uint8_t  compare_loaded   = 1u << 0;
 constexpr std::uint8_t  reload_loaded    = 1u << 1;
 
@@ -101,6 +103,9 @@ struct lptim_state
   std::uint8_t  trigger_rising{};
   std::uint8_t  divided{};
   std::uint16_t enable_left{};
+  std::uint8_t  in1_level{};
+  std::uint8_t  in2_level{};
+  std::uint8_t  down{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -114,7 +119,6 @@ struct unmodelled_use
 
 constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
     {
-     {"CFGR", "ENC", "ENC 1, the encoder mode"},
      {"OR", "", "OR_0 or OR_1, the COMP1 and COMP2 inputs"},
      }
 };
@@ -158,10 +162,10 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        same mode written again while the counter runs is discarded, inferred. A second
  *        CNTSTRT or SNGSTRT before the first reaches the counter replaces it, logs one
  *        model_warning and raises model_error under strict_peripherals, inferred. A start with
- *        a CFGR or OR function the model lacks, the encoder, the COMP inputs, the RTC and COMP
- *        triggers of TRIGSEL above 0, a PRESC above 0 with COUNTMODE 1, which RM0351 34.4.11
- *        forbids, and with CKSEL 1 or COUNTMODE 1 CKPOL 11, CKPOL 10 with CKSEL 1 or a CKFLT
- *        above 0, logs once each and raises under
+ *        a CFGR or OR function the model lacks, the COMP inputs, the RTC and COMP triggers of
+ *        TRIGSEL above 0, a PRESC above 0 with COUNTMODE 1 or ENC 1, which RM0351 34.4.11 and
+ *        34.4.13 forbid, ENC 1 with CKSEL 1, and with CKSEL 1, COUNTMODE 1 or ENC 1 CKPOL 11,
+ *        CKPOL 10 with CKSEL 1 or a CKFLT above 0, logs once each and raises under
  *        strict_peripherals: the counter then counts the kernel clock, or input 1 edges as
  *        configured. With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL
  *        selects on the `<instance>_in1` pin signal instead of the kernel clock, RM0351 34.4.11.
@@ -174,7 +178,19 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        COUNTMODE 1 every edge counts and a flag sets the variant's event delay after the edge,
  *        the sampling on the kernel clock taken as the edge itself, inferred, and an edge with
  *        the kernel clock stopped is dropped, inferred. An edge during a debug hold is dropped
- *        and the output follows CNT at each edge, inferred.
+ *        and the output follows CNT at each edge, inferred. With ENC 1, on LPTIM1 only, RM0351
+ *        34.3, the counter counts the `<instance>_in1` and `<instance>_in2` edges CKPOL selects
+ *        up or down by the level of the other input, RM0351 34.4.13 Table 220, between 0 and
+ *        ARR: counting down from 0 gives ARR. A change of direction sets DOWN or UP, RM0351
+ *        34.7.1, at the edge, and the count starts upwards, inferred. CMPM and ARRM set the
+ *        variant's event delay after the edge that reaches CMP or ARR in either direction, the
+ *        sampling taken as the edge itself, inferred. An edge during a debug hold or with the
+ *        kernel clock stopped is dropped, inferred. LPTIMxRST takes the input pins' levels.
+ *        With PRELOAD 1 a pending CMP or ARR applies at a down wrap from 0 as at an up wrap,
+ *        and that wrap loads the new ARR, inferred: RM0351 34.4.10 names only the end of the
+ *        period. SNGSTRT with ENC 1 logs one model_warning and raises model_error under
+ *        strict_peripherals, RM0351 34.4.13 asking for continuous mode, and the one-shot stop
+ *        then applies at an up wrap.
  *        With TRIGEN not 00 and TRIGSEL 0 the `<instance>_etr` pin signal starts the counter on
  *        the edges TRIGEN selects, RM0351 34.4.6: CNTSTRT or SNGSTRT arm the start and its mode,
  *        EXTTRIG sets at the edge and the count starts two prescaled clocks later. With TRGFLT
@@ -280,11 +296,13 @@ private:
   void               raise_flag(std::uint32_t flag);
   [[nodiscard]] auto preload() const -> bool;
   [[nodiscard]] auto trigger_mode() const -> bool;
-  [[nodiscard]] auto etr_level() const -> bool;
+  [[nodiscard]] auto pin_level(std::string_view signal) const -> bool;
   [[nodiscard]] auto external() const -> bool;
   void               input_edge(std::uint64_t ps, bool rising);
   void               clock_edge(std::uint64_t ps);
-  void               count_edge(std::uint64_t ps, bool sampled);
+  void               count_edge(std::uint64_t ps, bool sampled, bool up = true);
+  [[nodiscard]] auto encoder() const -> bool;
+  void               encoder_edge(std::uint64_t ps, bool second, bool rising);
   void               edge_start(std::uint64_t units, bool single);
   void               refuse_clock();
   void               start(std::uint64_t ps, bool single);
@@ -313,6 +331,7 @@ private:
   field_ref                         count_mode_;
   field_ref                         clock_polarity_;
   field_ref                         clock_filter_;
+  field_ref                         encoder_;
   field_ref                         preload_;
   field_ref                         wave_;
   field_ref                         polarity_;
@@ -325,14 +344,16 @@ private:
   trigger_output                    out_;
   std::string                       etr_;
   std::string                       in1_;
+  std::string                       in2_;
   std::array<bool, unmodelled_uses> unmodelled_logged_{};
   std::array<bool, 3>               locked_logged_{};
   bool                              value_logged_   = false;
   bool                              pending_logged_ = false;
   bool                              switch_logged_  = false;
+  bool                              single_logged_  = false;
   bool                              freeze_logged_  = false;
   bool                              select_logged_  = false;
-  std::array<bool, 4>               clock_logged_{};
+  std::array<bool, 5>               clock_logged_{};
   std::optional<bool>               listened_;
 };
 
@@ -358,12 +379,14 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
       clock_select_{field("CFGR", "CKSEL")}, count_mode_{field("CFGR", "COUNTMODE")},
       clock_polarity_{field("CFGR", "CKPOL")}, clock_filter_{field("CFGR", "CKFLT")},
+      encoder_{variant.encoder ? field("CFGR", "ENC") : field_ref{}},
       preload_{field("CFGR", "PRELOAD")}, wave_{field("CFGR", "WAVE")},
       polarity_{field("CFGR", "WAVPOL")}, trigger_enable_{field("CFGR", "TRIGEN")},
       trigger_select_{field("CFGR", "TRIGSEL")}, trigger_filter_{field("CFGR", "TRGFLT")},
       timeout_{field("CFGR", "TIMOUT")}, kernel_{ctx.clock.domain(lower(desc.name))},
       line_{&irq(desc.name + "_IRQn")}, out_{ctx.peers, lower(desc.name) + "_out"},
-      etr_{lower(desc.name) + "_etr"}, in1_{lower(desc.name) + "_in1"}
+      etr_{lower(desc.name) + "_etr"}, in1_{lower(desc.name) + "_in1"},
+      in2_{variant.encoder ? lower(desc.name) + "_in2" : std::string{}}
 {
   expect_register("OR", variant.option_register);
   expect_field("CFGR", "ENC", variant.encoder);
@@ -985,7 +1008,9 @@ void lptim::on_bus_reset()
   restore_reset_values();
   state_.held          = held;
   state_.hz            = kernel_hz();
-  state_.trigger_level = etr_level() ? 1 : 0;
+  state_.trigger_level = pin_level(etr_) ? 1 : 0;
+  state_.in1_level     = pin_level(in1_) ? 1 : 0;
+  state_.in2_level     = pin_level(in2_) ? 1 : 0;
 }
 
 void lptim::restore_reset_values()
@@ -1121,12 +1146,17 @@ auto lptim::can_listen(std::string_view) const -> bool
 
 auto lptim::takes_pin(std::string_view signal) const -> bool
 {
-  return signal == etr_ or signal == in1_;
+  return signal == etr_ or signal == in1_ or (not in2_.empty() and signal == in2_);
 }
 
 auto lptim::external() const -> bool
 {
-  return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0;
+  return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0 or encoder();
+}
+
+auto lptim::encoder() const -> bool
+{
+  return variant_.encoder and get(regs_, encoder_) != 0;
 }
 
 void lptim::refuse_clock()
@@ -1136,14 +1166,15 @@ void lptim::refuse_clock()
     return;
   }
   auto const polarity = get(regs_, clock_polarity_);
-  auto const refusals = std::array<std::pair<bool, std::string_view>, 4>{
+  auto const refusals = std::array<std::pair<bool, std::string_view>, 5>{
       {
        {get(regs_, prescaler_) != 0 and get(regs_, clock_select_) == 0,
-           "PRESC not 0 with COUNTMODE 1, which RM0351 34.4.11 forbids"},
+           "PRESC not 0 with COUNTMODE 1 or ENC 1, which RM0351 34.4.11 and 34.4.13 forbid"},
        {polarity == 3, "CKPOL 11, a reserved polarity"},
        {get(regs_, clock_select_) != 0 and polarity == 2,
            "CKPOL 10 with CKSEL 1, both edges of an external clock"},
        {get(regs_, clock_filter_) != 0, "CKFLT not 0, the input 1 filter"},
+       {encoder() and get(regs_, clock_select_) != 0, "ENC 1 with CKSEL 1"},
        }
   };
   for(std::size_t index = 0; index < refusals.size(); ++index)
@@ -1159,10 +1190,35 @@ void lptim::refuse_clock()
   }
 }
 
-void lptim::count_edge(std::uint64_t ps, bool sampled)
+void lptim::encoder_edge(std::uint64_t ps, bool second, bool rising)
+{
+  auto const polarity = get(regs_, clock_polarity_);
+  if((polarity == 0 and not rising)
+     or (polarity == 1 and rising)
+     or state_.held != 0
+     or state_.hz == 0)
+  {
+    return;
+  }
+  catch_up(ps);
+  if(state_.running == 0 or ps < state_.anchor_ps)
+  {
+    return;
+  }
+  auto const opposite = (second ? state_.in1_level : state_.in2_level) != 0;
+  auto const up       = second ? rising == opposite : rising != opposite;
+  if(up != (state_.down == 0))
+  {
+    state_.down = up ? 0 : 1;
+    raise_flag(up ? counting_up : counting_down);
+  }
+  count_edge(ps, true, up);
+}
+
+void lptim::count_edge(std::uint64_t ps, bool sampled, bool up)
 {
   auto const count = state_.anchor_count;
-  auto const wrap  = count == state_.reload or count == counter_top;
+  auto const wrap  = up ? count == state_.reload or count == counter_top : count == 0;
   if(wrap and state_.single != 0)
   {
     stop();
@@ -1172,7 +1228,7 @@ void lptim::count_edge(std::uint64_t ps, bool sampled)
   {
     transfer_preloaded();
   }
-  auto const next     = wrap ? 0u : count + 1u;
+  auto const next     = wrap ? (up ? 0u : state_.reload) : (up ? count + 1u : count - 1u);
   state_.anchor_count = next;
   auto const reached  = [&](std::uint32_t flag, std::uint64_t& held) {
     if((state_.isr & flag) != 0)
@@ -1277,26 +1333,37 @@ auto lptim::trigger_mode() const -> bool
   return get(regs_, trigger_enable_) != 0;
 }
 
-auto lptim::etr_level() const -> bool
+auto lptim::pin_level(std::string_view signal) const -> bool
 {
-  return std::ranges::any_of(ctx_.peers.all(), [this](model const* peer) {
+  return not signal.empty() and std::ranges::any_of(ctx_.peers.all(), [&](model const* peer) {
     auto const* const port = dynamic_cast<gpio_port const*>(peer);
-    return port != nullptr and port->signal_level(etr_).value_or(false);
+    return port != nullptr and port->signal_level(signal).value_or(false);
   });
 }
 
 void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
-  if(signal == in1_)
+  if(signal == in1_ or (not in2_.empty() and signal == in2_))
   {
+    auto const second = signal == in2_;
+    auto const rising = edge == trigger_edge::rising;
     if(enabled() and external())
     {
-      auto const t = now_ps();
-      input_edge(std::min(at.ps, t), edge == trigger_edge::rising);
+      auto const t  = now_ps();
+      auto const ps = std::min(at.ps, t);
+      if(encoder())
+      {
+        encoder_edge(ps, second, rising);
+      }
+      else if(not second)
+      {
+        input_edge(ps, rising);
+      }
       catch_up(t);
       refresh();
       reschedule();
     }
+    (second ? state_.in2_level : state_.in1_level) = rising ? 1 : 0;
     return;
   }
   if(signal != etr_)
@@ -1391,6 +1458,18 @@ template <locked Which> void lptim::locked_written(std::uint32_t old, std::uint3
 
 void lptim::control_written(std::uint32_t old, std::uint32_t now)
 {
+  if((old & now & enable_bit) != 0
+     and (now & single_start) != 0
+     and (now & continuous_run) == 0
+     and encoder())
+  {
+    regs_.poke(cr_.offset, old & enable_bit);
+    warn_once_or_refuse(
+        single_logged_, "CR", cr_.offset,
+        "SNGSTRT with ENC 1, which RM0351 34.4.13 runs in continuous mode only: the one-shot "
+        "stop applies at an up wrap");
+    regs_.poke(cr_.offset, now);
+  }
   auto const t = now_ps();
   catch_up(t);
   regs_.poke(cr_.offset, now & enable_bit);

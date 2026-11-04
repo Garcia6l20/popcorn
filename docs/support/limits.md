@@ -969,9 +969,9 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
   `strict`. The register keeps its value, except the second write, whose value replaces the
   pending one, inferred.
-- A start with ENC 1, OR_0 or OR_1 set, TRIGSEL not 0 with TRIGEN not 00, PRESC above 0 with
-  COUNTMODE 1, which RM0351 34.4.11 forbids, or with CKSEL 1 or COUNTMODE 1 CKPOL 11, CKPOL 10
-  with CKSEL 1 or a CKFLT above 0, logs one
+- A start with OR_0 or OR_1 set, TRIGSEL not 0 with TRIGEN not 00, PRESC above 0 with
+  COUNTMODE 1 or ENC 1, which RM0351 34.4.11 and 34.4.13 forbid, ENC 1 with CKSEL 1, or with
+  CKSEL 1, COUNTMODE 1 or ENC 1 CKPOL 11, CKPOL 10 with CKSEL 1 or a CKFLT above 0, logs one
   `model_warning` each and raises `ModelError` under `strict`. The counter then counts the
   kernel clock, or input 1 edges as configured, and with TRIGSEL not 0 no trigger starts it.
 - With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on the
@@ -985,6 +985,17 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   set one kernel clock after it, the kernel clock sampling taken as the edge itself, inferred, and
   an edge with the kernel clock stopped is dropped, inferred. An edge during a debug hold is
   dropped, and `lptim1_out` follows CNT at each edge, inferred.
+- With ENC 1, LPTIM1 only, RM0351 34.3 Table 216, the counter counts the `lptim1_in1` and
+  `lptim1_in2` edges CKPOL selects, PB5 or PC0 and PB7 or PC2 AF1 on the L476, up or down by the
+  level of the other input, RM0351 34.4.13 Table 220, between 0 and ARR: counting down from 0
+  gives ARR. A change of direction sets DOWN or UP, RM0351 34.7.1, at the edge, and the count
+  starts upwards, inferred. CMPM and ARRM set one kernel clock after the edge that reaches CMP or
+  ARR in either direction, inferred. An edge during a debug hold or with the kernel clock
+  stopped is dropped, inferred. LPTIMxRST takes the input pins' levels. With PRELOAD 1 a pending
+  CMP or ARR applies at a down wrap from 0 as at an up wrap, and that wrap loads the new ARR,
+  inferred: RM0351 34.4.10 names only the end of the period. SNGSTRT with ENC 1 logs one
+  `model_warning` and raises `ModelError` under `strict`, RM0351 34.4.13 asking for continuous
+  mode, and the one-shot stop then applies at an up wrap.
 - With TRIGEN not 00 and TRIGSEL 0, the `lptim1_etr` and `lptim2_etr` pin signals, PB6 or PC3 AF1
   and PA5 or PC3 AF14 on the L476, start the counter on the edge TRIGEN selects, RM0351 34.4.6 and
   34.7.4. CNTSTRT or SNGSTRT arm the start and choose the mode. EXTTRIG sets at the edge, and the
