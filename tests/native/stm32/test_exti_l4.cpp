@@ -1,11 +1,14 @@
+#include "debug_freeze.hpp"
 #include "exti_classic.hpp"
 #include "factories.hpp"
+#include "read_protection.hpp"
 #include "stm32_fixture.hpp"
 #include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 
@@ -14,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -23,6 +27,7 @@ namespace
 {
 namespace core  = popcorn::core;
 namespace stm32 = popcorn::periph::stm32;
+using popcorn::address;
 using popcorn::icount;
 using popcorn::part_description;
 using popcorn::stop_reason;
@@ -45,7 +50,14 @@ constexpr std::uint32_t pr2       = exti + 0x34;
 constexpr std::uint32_t syscfg    = 0x4001'0000;
 constexpr std::uint32_t memrmp    = syscfg + 0x00;
 constexpr std::uint32_t exticr1   = syscfg + 0x08;
+constexpr std::uint32_t cfgr1     = syscfg + 0x04;
+constexpr std::uint32_t exticr4   = syscfg + 0x14;
+constexpr std::uint32_t scsr      = syscfg + 0x18;
+constexpr std::uint32_t cfgr2     = syscfg + 0x1C;
+constexpr std::uint32_t swpr      = syscfg + 0x20;
 constexpr std::uint32_t skr       = syscfg + 0x24;
+constexpr std::uint32_t rcc_cfgr  = 0x4002'1000 + 0x08;
+constexpr std::uint32_t dbgmcu    = 0xE004'2000;
 constexpr std::uint32_t apb2rstr  = 0x4002'1000 + 0x40;
 constexpr std::uint32_t syscfgrst = 1u << 0;
 constexpr std::uint32_t exti0     = 6;
@@ -316,32 +328,294 @@ TEST_CASE("a description whose edge register has a direct line's bit, or lacks a
 }
 
 TEST_CASE(
-    "RM0351 9.2: the L4 SYSCFG registers outside EXTICR are storage, one warning each, "
-    "model_error under strict, SYSCFGRST keeps MEMRMP")
+    "RM0351 9.2: the L4 SYSCFG MEMRMP, CFGR1, CFGR2 and SWPR are storage, one warning each, "
+    "FB_MODE raises under strict, SYSCFGRST keeps MEMRMP, SCSR, CFGR2 and SWPR inferred")
 {
   {
     auto const                    f = parked();
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
-    REQUIRE(cpu_store(f, skr, 0xca).reason == stop_reason::user);
-    REQUIRE(cpu_store(f, skr, 0x53).reason == stop_reason::user);
+    REQUIRE(cpu_store(f, cfgr1, 0x7c00'0101u).reason == stop_reason::user);
+    REQUIRE(cpu_store(f, cfgr1, 0x7c00'0001u).reason == stop_reason::user);
     REQUIRE(cpu_store(f, memrmp, 0x1).reason == stop_reason::user);
+    REQUIRE(cpu_store(f, cfgr2, 0x1).reason == stop_reason::user);
+    REQUIRE(cpu_store(f, swpr, 0x8000'0001u).reason == stop_reason::user);
     REQUIRE(cpu_store(f, exticr1, 0x2).reason == stop_reason::user);
-    REQUIRE(logged.size() == 2);
-    CHECK(logged[0].reg == "SKR");
-    CHECK(logged[1].reg == "MEMRMP");
-    CHECK(logged[1].kind == core::log_kind::model_warning);
+    std::vector<std::string_view> regs;
+    for(auto const& record : logged)
+    {
+      CHECK(record.kind == core::log_kind::model_warning);
+      regs.push_back(record.reg);
+    }
+    CHECK(regs == std::vector<std::string_view>{"CFGR1", "MEMRMP", "CFGR2", "SWPR"});
+    auto& unit = f.target->peripheral("SYSCFG");
+    unit.poke(0x18, 0x3);
     write(f, apb2rstr, syscfgrst);
     write(f, apb2rstr, 0);
     CHECK(read(f, exticr1) == 0);
-    CHECK(f.target->peripheral("SYSCFG").peek(0) == 0x1u);
+    CHECK(unit.peek(0x00) == 0x1u);
+    CHECK(unit.peek(0x04) == 0x7c00'0001u);
+    CHECK(unit.peek(0x18) == 0x3u);
+    CHECK(unit.peek(0x1c) == 0x1u);
+    CHECK(unit.peek(0x20) == 0x8000'0001u);
   }
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
   auto const f               = parked(l476rc(), std::move(options));
-  CHECK_THROWS_AS((void)cpu_store(f, skr, 0xca), popcorn::model_error);
-  CHECK(f.target->peripheral("SYSCFG").peek(0x24) == 0);
+  CHECK_THROWS_AS((void)cpu_store(f, memrmp, 0x100), popcorn::model_error);
+  CHECK(f.target->peripheral("SYSCFG").peek(0) == 0);
+}
+
+namespace
+{
+constexpr address sram2      = 0x1000'0000;
+constexpr address sram2_last = sram2 + 0x7ffc;
+constexpr address sram1_mark = 0x2001'0000;
+
+void unlock(stm32_fixture const& f, std::initializer_list<std::uint32_t> keys = {0xca, 0x53})
+{
+  for(auto const key : keys)
+  {
+    REQUIRE(cpu_store(f, skr, key).reason == stop_reason::user);
+  }
+}
+
+void mark(stm32_fixture const& f)
+{
+  for(auto const at : {sram2, sram2_last})
+  {
+    write(f, at, 0x5a5a'0000u | (at & 0xffffu));
+  }
+  write(f, sram1_mark, 0xa5a5'0003u);
+}
+
+auto now(stm32_fixture const& f) -> std::uint64_t
+{
+  return f.target->virtual_clock().time().ps;
+}
+
+auto syscfg_events(stm32_fixture const& f) -> std::vector<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"SYSCFG"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  std::vector<std::uint64_t> out;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner)
+    {
+      out.push_back(event.due_ps);
+    }
+  }
+  return out;
+}
+
+void run_until(stm32_fixture const& f, std::uint64_t ps)
+{
+  f.set("pc", popcorn::testing::sym(firmware, "idle"));
+  f.run_to_stop({.max_instructions = icount{100'000}, .until_time = popcorn::vtime{ps}});
+}
+
+auto erased(stm32_fixture const& f) -> bool
+{
+  return read(f, sram2) == 0 and read(f, sram2_last) == 0;
+}
+}
+
+TEST_CASE(
+    "RM0351 9.2.7: HAL_SYSCFG_SRAM2Erase sets SRAM2BSY at the next instruction, clears it after "
+    "the erase, SRAM2 reads 0 and SRAM1 is kept, inferred")
+{
+  stm32_fixture f{l476rc(), "l476_l4_syscfg_hal"};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{200'000}}).reason == stop_reason::user);
+  CHECK(f.log() == std::vector<std::uint32_t>{0x3, 0x5a5a'0001u, 1, 0, 0, 0, 0xa5a5'0003u});
+}
+
+TEST_CASE(
+    "RM0351 9.2.7: the erase ends 8192 HCLK periods after the SRAM2ER write at the write's HCLK, "
+    "inferred, a later HCLK change keeps the due time")
+{
+  for(auto const& [hpre, hz] : {
+          std::pair{0x0u, 4'000'000u},
+          std::pair{0x8u, 2'000'000u}
+  })
+  {
+    CAPTURE(hpre);
+    auto const f = parked();
+    write(f, rcc_cfgr, hpre << 4);
+    mark(f);
+    unlock(f);
+    CHECK(syscfg_events(f).empty());
+    REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+    auto const at  = now(f);
+    auto const due = at + (8192ull * 1'000'000'000'000ull + hz - 1) / hz;
+    CHECK(read(f, scsr) == 0x3u);
+    CHECK(syscfg_events(f) == std::vector<std::uint64_t>{due});
+    write(f, rcc_cfgr, 0);
+    CHECK(syscfg_events(f) == std::vector<std::uint64_t>{due});
+    run_until(f, due - 1'000'000'000'000ull / hz);
+    CHECK(read(f, scsr) == 0x3u);
+    CHECK_FALSE(erased(f));
+    run_until(f, due + 1);
+    CHECK(read(f, scsr) == 0);
+    CHECK(erased(f));
+    CHECK(read(f, sram1_mark) == 0xa5a5'0003u);
+  }
+}
+
+TEST_CASE(
+    "RM0351 9.2.10: SRAM2ER sets only after 0xCA then 0x53 in SKR, a wrong key locks it again, "
+    "one key sequence starts one erase")
+{
+  for(auto const keys : {
+          std::initializer_list<std::uint32_t>{},
+          std::initializer_list<std::uint32_t>{0xca},
+          std::initializer_list<std::uint32_t>{0x53},
+          std::initializer_list<std::uint32_t>{0xca, 0x00, 0x53},
+          std::initializer_list<std::uint32_t>{0xca, 0x53, 0x53}
+  })
+  {
+    CAPTURE(keys.size());
+    auto const f = parked();
+    mark(f);
+    unlock(f, keys);
+    CHECK(read(f, skr) == 0);
+    REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+    CHECK(read(f, scsr) == 0);
+    CHECK(syscfg_events(f).empty());
+    run_until(f, now(f) + 10'000'000'000ull);
+    CHECK_FALSE(erased(f));
+  }
+  auto const f = parked();
+  mark(f);
+  unlock(f);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  REQUIRE(cpu_store(f, scsr, 0).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0x3u);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(syscfg_events(f).size() == 1);
+  run_until(f, now(f) + 10'000'000'000ull);
+  CHECK(erased(f));
+  mark(f);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0);
+  CHECK(syscfg_events(f).empty());
+}
+
+TEST_CASE(
+    "a CPU write to SRAM2 during the erase lands and is zeroed at its end, a SYSCFGRST pulse "
+    "keeps the running erase and locks the key, inferred")
+{
+  auto const f = parked();
+  mark(f);
+  unlock(f);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  REQUIRE(cpu_store(f, sram2 + 0x100, 0x1234'5678u).reason == stop_reason::user);
+  CHECK(read(f, sram2 + 0x100) == 0x1234'5678u);
+  auto const due = syscfg_events(f);
+  REQUIRE(due.size() == 1);
+  write(f, exticr1, 0x2);
+  unlock(f, {0xca});
+  write(f, apb2rstr, syscfgrst);
+  write(f, apb2rstr, 0);
+  CHECK(read(f, scsr) == 0x3u);
+  CHECK(read(f, exticr1) == 0);
+  CHECK(syscfg_events(f) == due);
+  run_until(f, due.front() + 1);
+  CHECK(read(f, scsr) == 0);
+  CHECK(erased(f));
+  CHECK(read(f, sram2 + 0x100) == 0);
+  mark(f);
+  unlock(f, {0x53});
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0);
+  unlock(f);
+  write(f, apb2rstr, syscfgrst);
+  write(f, apb2rstr, 0);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0);
+  unlock(f);
+  f.target->reset(popcorn::reset_kind::software);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0);
+}
+
+TEST_CASE("an L4 SYSCFG snapshot saves the key stage and a running erase, the restore completes it")
+{
+  auto const f = parked();
+  CHECK_FALSE(f.target->model("SYSCFG")->stateless());
+  mark(f);
+  unlock(f);
+  auto const keyed = f.target->snapshot();
+  CHECK(
+      std::ranges::contains(
+          keyed.data().models, std::string_view{"SYSCFG"}, &popcorn::core::snapshot_part::owner));
+  f.target->reset(popcorn::reset_kind::power_on);
+  f.target->restore(keyed);
+  REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
+  CHECK(read(f, scsr) == 0x3u);
+  auto const running = f.target->snapshot();
+  auto const due     = syscfg_events(f);
+  REQUIRE(due.size() == 1);
+  run_until(f, due.front() + 1);
+  REQUIRE(erased(f));
+  f.target->restore(running);
+  CHECK(read(f, scsr) == 0x3u);
+  CHECK_FALSE(erased(f));
+  CHECK(syscfg_events(f) == due);
+  run_until(f, due.front() + 1);
+  CHECK(read(f, scsr) == 0);
+  CHECK(erased(f));
+}
+
+TEST_CASE("RM0351 3.5.1: a read protection regression writes 0 to SRAM2 at once, inferred")
+{
+  auto const f = parked();
+  mark(f);
+  auto* const listener = f.model_of<stm32::read_protection_listener>("SYSCFG");
+  REQUIRE(listener != nullptr);
+  listener->on_read_protection_regression();
+  CHECK(erased(f));
+  CHECK(read(f, scsr) == 0);
+  CHECK(read(f, sram1_mark) == 0xa5a5'0003u);
+}
+
+TEST_CASE("RM0351 9.2.6: EXTICR4 moves line 13 from PA13 to PC13 on the L4")
+{
+  auto const f = parked();
+  write(f, 0x4800'0800, 0);
+  write(f, imr1, 0xff82'0000u | (1u << 13));
+  write(f, ftsr1, 1u << 13);
+  port(f, "GPIOC").drive(13, true);
+  port(f, "GPIOC").drive(13, false);
+  CHECK(read(f, pr1) == 0);
+  write(f, exticr4, 2u << 4);
+  write(f, pr1, 1u << 13);
+  port(f, "GPIOC").drive(13, true);
+  port(f, "GPIOC").drive(13, false);
+  CHECK(read(f, pr1) == 1u << 13);
+}
+
+TEST_CASE(
+    "RM0351 48.16: the L4 DBGMCU IDCODE reads 0x10076415, DBG_TIM2_STOP freezes TIM2, the "
+    "freeze registers keep to a power-on reset")
+{
+  auto const f = parked();
+  CHECK(read(f, dbgmcu) == 0x1007'6415u);
+  auto const* const freeze = f.model_of<stm32::debug_freeze>("DBGMCU");
+  REQUIRE(freeze != nullptr);
+  CHECK(freeze->frozen("DBG_TIM2_STOP") == std::optional<bool>{false});
+  write(f, dbgmcu + 0x08, 1u);
+  CHECK(freeze->frozen("DBG_TIM2_STOP") == std::optional<bool>{true});
+  CHECK(freeze->frozen("DBG_TIM3_STOP") == std::optional<bool>{false});
+  write(f, dbgmcu + 0x10, 1u << 11);
+  CHECK(freeze->frozen("DBG_TIM1_STOP") == std::optional<bool>{true});
+  f.target->reset(popcorn::reset_kind::software);
+  CHECK(freeze->frozen("DBG_TIM2_STOP") == std::optional<bool>{true});
+  f.target->reset(popcorn::reset_kind::power_on);
+  CHECK(freeze->frozen("DBG_TIM2_STOP") == std::optional<bool>{false});
 }
 
 TEST_CASE("the L4 EXTI row serves the L476, the L1 variant does not attach to its description")

@@ -1671,6 +1671,20 @@ TEST_CASE(
   CHECK(count == 1);
 }
 
+TEST_CASE("RM0351 3.5.1: the level 1 to level 0 regression erases SRAM2 through SYSCFG, SRAM1 kept")
+{
+  rig r{popcorn::testing::stm32_options()};
+  for(auto const at : {sram2, sram2 + 0x7ffc, sram1 + 0x1'0000})
+  {
+    REQUIRE(r.f.target->mem().write(at, 4, 0x1234'5678u).has_value());
+  }
+  program_rdp(r, 0xbb);
+  program_rdp(r, 0xaa);
+  CHECK(r.f.target->mem().read(sram2, 4) == 0u);
+  CHECK(r.f.target->mem().read(sram2 + 0x7ffc, 4) == 0u);
+  CHECK(r.f.target->mem().read(sram1 + 0x1'0000, 4) == 0x1234'5678u);
+}
+
 TEST_CASE(
     "RM0351 3.5.1 and 3.5.2: with PCROP_RDP clear the level 1 to level 0 regression keeps the "
     "pages of the bank 1 PCROP area and its PCROP words, and erases the rest of both banks")

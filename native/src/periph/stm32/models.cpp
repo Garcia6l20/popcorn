@@ -28,8 +28,8 @@ constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
 constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
 constexpr auto l4_parts    = std::to_array<std::string_view>({"STM32L4*"});
 constexpr auto u5_h5_parts = std::to_array<std::string_view>({"STM32U5*", "STM32H5*"});
-constexpr auto u5_h5_l1_parts =
-    std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*"});
+constexpr auto u5_h5_l1_l4_parts =
+    std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*", "STM32L4*"});
 constexpr auto u5_smps_parts       = std::to_array<std::string_view>({"STM32U5*Q"});
 constexpr auto u5_flash_5bit_parts = std::to_array<std::string_view>({"STM32U535*", "STM32U545*"});
 constexpr auto u5_flash_8bit_parts =
@@ -378,11 +378,7 @@ constexpr auto builtins = std::to_array<builtin>({
     {.ip              = "DBGMCU",
      .ip_version_glob = "",
      .make            = [](board const&) { return dbgmcu_factory(); },
-     .part_globs      = u5_h5_l1_parts},
-    {.ip              = "DBGMCU",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return model_factory{}; },
-     .part_globs      = l4_parts},
+     .part_globs      = u5_h5_l1_l4_parts},
     {.ip              = "DBG",
      .ip_version_glob = "",
      .make            = [](board const&) { return dbgmcu_factory(); },

@@ -113,7 +113,6 @@ struct l4_storage
 constexpr auto l4_storage_rows = std::to_array<l4_storage>({
     {.name = "UART4",   .ip = "UART",   .version = "sci2_v2_1_Cube", .base = 0x4000'4C00},
     {.name = "LPUART1", .ip = "LPUART", .version = "sci3_v1_1_Cube", .base = 0x4000'8000},
-    {.name = "DBGMCU",  .ip = "DBGMCU", .version = "",               .base = 0xE004'2000},
 });
 
 auto toy_l4(std::span<l4_storage const> rows) -> part_description
@@ -133,6 +132,10 @@ auto toy_l4(std::span<l4_storage const> rows) -> part_description
   }
   return desc;
 }
+
+constexpr auto l4_dbgmcu = std::to_array<l4_storage>({
+    {.name = "DBGMCU", .ip = "DBGMCU", .version = "", .base = 0xE004'2000},
+});
 
 auto storage_row(std::string_view name) -> std::span<l4_storage const>
 {
@@ -236,11 +239,6 @@ TEST_CASE("an STM32L4 LPUART1 of sci3_v1_1_Cube attaches as storage")
   CHECK(machine_of(toy_l4(storage_row("LPUART1"))).model("LPUART1") == nullptr);
 }
 
-TEST_CASE("an STM32L4 DBGMCU of no IP version attaches as storage")
-{
-  CHECK(machine_of(toy_l4(storage_row("DBGMCU"))).model("DBGMCU") == nullptr);
-}
-
 TEST_CASE("an STM32L4 CRS is refused, the L4 descriptions carry none")
 {
   constexpr auto crs = std::to_array<l4_storage>({
@@ -262,7 +260,7 @@ TEST_CASE("factories() of an STM32L4 part holds none of the storage instances")
 
 TEST_CASE("RM0351 48.6.4, 48.15.3 and 48.17.9: the L4 TPIU, ETM and ROM table are RAZ/WI")
 {
-  auto const desc   = toy_l4(storage_row("DBGMCU"));
+  auto const desc   = toy_l4(l4_dbgmcu);
   auto const blocks = stm32::raz_wi_map(desc);
   REQUIRE(blocks.size() == 3);
   CHECK(blocks[0].start == 0xE004'0000u);
@@ -279,7 +277,7 @@ TEST_CASE("RM0351 48.6.4, 48.15.3 and 48.17.9: the L4 TPIU, ETM and ROM table ar
 
 TEST_CASE("without the L4 RAZ/WI map a CPU load of the L4 TPIU faults")
 {
-  auto target = machine_of(toy_l4(storage_row("DBGMCU")));
+  auto target = machine_of(toy_l4(l4_dbgmcu));
   CHECK_FALSE(cpu_load(target, 0xE004'0004u).has_value());
 }
 

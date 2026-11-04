@@ -317,6 +317,9 @@ Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 
 - A freeze bit written while the core is held takes effect at the next hold or release. On
   silicon it takes effect at once.
+- STM32L4: the U5 and L1 model, RM0351 48.16. `DBGMCU_IDCODE` reads 0x10076415, `DBGMCU_CR` is
+  storage, and the freeze fields carry the RM0351 names, `DBG_TIM2_STOP` and others. A power-on
+  reset clears the registers, a system reset keeps them, 48.16.3 to 48.16.6.
 - STM32L1: `DBGMCU_CR` is storage, as on the STM32U5. `DBGMCU_IDCODE` reads the description's
   value of the category. REV_ID is 0x1000 on every category, the revision A of RM0038 30.6.1,
   and the choice of one revision is inferred.
@@ -595,8 +598,9 @@ On the STM32L47x/L48x, RM0351 section 3:
   their production values. With `PCROP_RDP` clear, a bank with a PCROP area, `PCROPx_END` not
   below `PCROPx_STRT` (inferred), keeps the pages that hold part of the area and the PCROP words
   keep their programmed values. The other bank is erased, inferred. The OTP area and the
-  system memory are kept. The other option words program as written. SRAM2 and the RTC backup registers
-  keep their content. The new level takes effect at the next option byte load.
+  system memory are kept. The other option words program as written. The SYSCFG model writes 0
+  to the whole SRAM2 at once, inferred, with no SRAM2BSY. The RTC backup registers keep their
+  content. The new level takes effect at the next option byte load.
 - PCROP, RM0351 3.5.2: the loaded `PCROPx_STRT` and `PCROPx_END` of each bank give an area
   from STRT x 8 to (END + 1) x 8 in the bank. A CPU, DMA or debug port load from it reads 0 and
   sets `RDERR`, 0 is inferred, and `RDERRIE` raises `FLASH_IRQn`, 3.6 Table 16. A debug port
@@ -1386,10 +1390,25 @@ Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
   MEM_MODE read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write
   logs one `model_warning`. Under `strict` it raises `ModelError` before the store.
 - STM32L4: `SYSCFG_EXTICR1` to `EXTICR4` select PA to PG on every line and PH on lines 0 and 1,
-  code 7, RM0351 9.2.3 to 9.2.6. `SYSCFG_MEMRMP`, `CFGR1`, `SCSR`, `CFGR2`, `SWPR` and `SKR` are
-  storage: a firmware write logs one `model_warning` per register, and under `strict` raises
-  `ModelError` before the store. A SYSCFGRST pulse resets the EXTI selection and keeps
-  `SYSCFG_MEMRMP`, inferred.
+  code 7, RM0351 9.2.3 to 9.2.6. `SYSCFG_MEMRMP` with FB_MODE, `CFGR1` with BOOSTEN and the
+  I2C fast-mode plus bits, `CFGR2` with its parity flag and locks, and `SWPR` are storage: a
+  firmware write logs one `model_warning` per register, and under `strict` raises `ModelError`
+  before the store. SRAM2 takes every write whatever `SWPR` holds.
+- STM32L4: the SRAM2 erase, RM0351 9.2.7 and 9.2.10. `SYSCFG_SKR` written 0xCA then 0x53
+  unlocks `SCSR.SRAM2ER`, another value locks it, SKR reads 0. A write of SRAM2ER 1 while
+  unlocked sets SRAM2ER and SRAM2BSY at once and locks SRAM2ER again, inferred. The erase takes
+  8192 HCLK periods at the HCLK of the write, one word per cycle, inferred, then SRAM2 reads 0 and
+  both bits clear. A write to SCSR during the erase changes nothing. A CPU or DMA write to SRAM2
+  during the erase lands and is zeroed at its end, inferred.
+- STM32L4: ES0250 2.2.19, an SRAM2 read during the hardware erase: the read returns the current
+  content, with no stall.
+- STM32L4: a SYSCFGRST pulse resets the EXTI selection, `CFGR1` and the key, and keeps
+  `SYSCFG_MEMRMP`, `SCSR`, `CFGR2` and `SWPR` with a running erase, inferred from their "System
+  reset value" in RM0351 9.2.
+- STM32L4: SRAM2 keeps its content across a system reset, whatever the `SRAM2_RST` option bit
+  holds, RM0351 2.4.4.
+- STM32L4: ES0250 2.2.7, the analog switch booster current injection, is electrical: `CFGR1`
+  BOOSTEN stays storage. ES0250 2.2.12, the SRAM write error at a reset, has no register effect.
 - STM32L1: `SYSCFG_PMC.USB_PU` drives the USB D+ pull-up. `LCD_CAPA` is storage: a firmware
   write that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError`
   before the store.

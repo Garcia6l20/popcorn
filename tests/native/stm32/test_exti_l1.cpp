@@ -358,6 +358,7 @@ TEST_CASE("an EXTI and SYSCFG snapshot restores the selection, the masks and the
     CHECK_FALSE(
         std::ranges::contains(
             saved.data().models, std::string_view{owner}, &popcorn::core::snapshot_part::owner));
+    CHECK(f.target->model(owner)->stateless());
   }
   f.target->reset(reset_kind::power_on);
   f.set("pc", popcorn::testing::sym(firmware, "idle"));

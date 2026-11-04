@@ -20,19 +20,20 @@ struct dbgmcu_state
 };
 
 /**
- * @brief DBGMCU of the STM32U5, RM0456 section 75.12, and of the STM32L1, RM0038 section 30.16,
- *        with its IDCODE, CR, APB1_FZ and APB2_FZ. DBGMCU_IDCODE reads the description's
- *        reset value, read-only, reserved bits 15:12 included, as RM0456 gives it as
- *        0xXXXX6XXX. ST's HAL reads it to pick the ADC calibration sequence. The base read
- *        handler of a dispatch_model returns only the bits that fields cover, and the fields
- *        of DBGMCU_IDCODE are DEV_ID and REV_ID, so `on_read` returns the whole reset value.
- *        The freeze fields, `DBG_<peripheral>_STOP` in the freeze registers, are read by the
- *        models that freeze while the machine holds its core, through debug_freeze, at each
- *        hold and release. Deviation: a freeze write while the core is held takes effect at the
- *        next hold or release, on silicon at once. DBGMCU_CR is storage: no low-power debug or
+ * @brief DBGMCU of the STM32U5, RM0456 section 75.12, of the STM32L1, RM0038 section 30.16, and of
+ *        the STM32L47x/L48x, RM0351 section 48.16, with its IDCODE, CR, APB1_FZ and APB2_FZ.
+ *        DBGMCU_IDCODE reads the description's reset value, read-only, reserved bits 15:12
+ *        included, as RM0456 gives it as 0xXXXX6XXX. ST's HAL reads it to pick the ADC calibration
+ *        sequence. The base read handler of a dispatch_model returns only the bits that fields
+ *        cover, and the fields of DBGMCU_IDCODE are DEV_ID and REV_ID, so `on_read` returns the
+ *        whole reset value. The freeze fields, `DBG_<peripheral>_STOP` in the freeze registers, are
+ *        read by the models that freeze while the machine holds its core, through debug_freeze, at
+ *        each hold and release. Deviation: a freeze write while the core is held takes effect at
+ *        the next hold or release, on silicon at once. DBGMCU_CR is storage: no low-power debug or
  *        trace behaviour follows it. The registers are "not reset by a system reset, only by a
- *        power-on reset", RM0456 75.12, "not reset by system reset", RM0038 30.16.3 and
- *        30.16.4: a power-on or brown-out reset restores them, other resets keep them.
+ *        power-on reset", RM0456 75.12, "not reset by system reset", RM0038 30.16.3 and 30.16.4,
+ *        "System reset: not affected", RM0351 48.16.3 to 48.16.6: a power-on or brown-out reset
+ *        restores them, other resets keep them.
  */
 class dbgmcu final : public dispatch_model<dbgmcu, dbgmcu_state>, public debug_freeze
 {
