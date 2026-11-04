@@ -1417,9 +1417,9 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
 - TAMPxMF masks TAMPxF and the erase. The tamper trigger to the LPTIM is not connected. A TAMPIE
   or TAMPxIE write with a TAMPxMF set is stored as written. With TAMPxMF an event is lost during
   the latency only, where RM0351 38.3.14 adds 2.5 ck_rtc cycles to that window.
-- TAMPTS stamps the calendar of the tamper event as a timestamp does. TSF sets with TAMPxF, and
-  TSOVF at once when a stamp is set or pending, RM0351 38.3.13. TAMPIE, or TAMPxIE, with TAMPxF
-  drives EXTI line 19.
+- TAMPTS stamps the calendar of the tamper event as a timestamp does, at the board time of an
+  edge. TSF sets with TAMPxF, and TSOVF at once when a stamp is set or pending, RM0351 38.3.13.
+  TAMPIE, or TAMPxIE, with TAMPxF drives EXTI line 19.
 - ES0250 2.19.1 is modelled: clearing TAMPxE of a falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1,
   while its input is high is a tamper event. It erases unless TAMPxNOERASE was set by an earlier
   write.
@@ -1430,7 +1430,8 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
 - ES0250 2.19.7: Stop 2 is not modelled, and RTC_REFIN and RTC_OUT on PB2 are outputs and inputs
   the model does not drive.
 - Timestamps, RM0351 38.3.13: with `CR.TSE` an edge of RTC_TS on PC13, rising with TSEDGE 0 and
-  falling with 1, captures the calendar of the edge into `RTC_TSTR`, `RTC_TSDR` and `RTC_TSSSR`
+  falling with 1, captures the calendar at the board time of the edge, also when the GPIO applies
+  it at a later block boundary, into `RTC_TSTR`, `RTC_TSDR` and `RTC_TSSSR`
   and sets TSF 2 x (PREDIV_A + 1) RTCCLK cycles later, the "2 ck_apre cycles" of 38.3.13 counted
   from the edge, inferred. An edge while TSF is set or still pending sets TSOVF at once and keeps
   the stamp, the 38.3.13 note "TSOVF can be seen as '1' while TSF is still '0'". A TSF clear

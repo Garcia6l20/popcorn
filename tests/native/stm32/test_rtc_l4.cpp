@@ -63,11 +63,12 @@ public:
 
 struct rig
 {
+  std::string                    elf;
   std::unique_ptr<stm32_fixture> f;
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
-  explicit rig(bool strict = false)
+  explicit rig(bool strict = false, std::string_view image = idle_image) : elf{image}
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories({}, l476rc());
@@ -76,8 +77,8 @@ struct rig
         "DAC1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
           return std::make_shared<bus_probe>(ctx);
         });
-    f = std::make_unique<stm32_fixture>(l476rc(), idle_image, std::move(options));
-    f->set("pc", sym(idle_image, "idle"));
+    f = std::make_unique<stm32_fixture>(l476rc(), elf, std::move(options));
+    f->set("pc", sym(elf, "idle"));
     sink = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
   }
@@ -157,7 +158,7 @@ struct rig
 
   void idle_again() const
   {
-    f->set("pc", sym(idle_image, "idle"));
+    f->set("pc", sym(elf, "idle"));
   }
 
   void start_clock() const
@@ -1398,7 +1399,7 @@ TEST_CASE(
 
 TEST_CASE(
     "checklist 66: a snapshot inside the TAMPTS latency restores the pending tamper and stamp, "
-    "TSF and TAMP2F at the same cycle")
+    "a second edge is lost, TSF and TAMP2F at the same cycle")
 {
   rig r;
   running_at_midnight(r);
@@ -1409,11 +1410,95 @@ TEST_CASE(
   pa(r).drive(0, true);
   r.run_until(edge + 100 * rtc_cycle);
   auto const copy = restored(r);
+  pa(*copy).drive(0, false);
+  pa(*copy).drive(0, true);
   copy->run_until(edge + (tamper_delay - 1) * rtc_cycle - us);
-  CHECK((copy->read("ISR") & (tsf | tamp2f)) == 0);
+  CHECK((copy->read("ISR") & (tsf | tsovf | tamp2f)) == 0);
   CHECK(backups_kept(*copy));
   copy->run_until(edge + tamper_delay * rtc_cycle + us);
   CHECK((copy->read("ISR") & (tsf | tamp2f)) == (tsf | tamp2f));
   CHECK(copy->read("TSSSR") == subsecond);
   CHECK(copy->read("BKP0R") == 0);
+}
+
+TEST_CASE(
+    "RM0351 38.3.13 and 38.3.14: a PC13 or PA0 edge applied at the end of a long block at MSI "
+    "100 kHz stamps the calendar of its board time")
+{
+  constexpr std::uint32_t msi_100khz = 1u << 3;
+  rig                     run{false, "l476_l4_rtc_ll"};
+  rig                     twin{false, "l476_l4_rtc_ll"};
+  for(auto* const r : {&run, &twin})
+  {
+    running_at_midnight(*r);
+    r->write("CR", tse);
+    r->write("CR", (r->read("CR", "RCC") & ~0xF0u) | msi_100khz, "RCC");
+    REQUIRE(r->f->target->virtual_clock().core_hz() == 100'000);
+  }
+  run.f->set("pc", sym(run.elf, "nops"));
+  run.write("MODER", run.read("MODER", "GPIOA") & ~3u, "GPIOA");
+  run.write("MODER", run.read("MODER", "GPIOC") & ~(3u << 26), "GPIOC");
+  std::optional<std::uint64_t> applied;
+  auto const                   on_pa      = pa(run).on_change([&](std::uint8_t pin, bool level) {
+    if(pin == 0 and level)
+    {
+      applied = run.now();
+    }
+  });
+  auto const                   on_pc      = pc(run).on_change([&](std::uint8_t pin, bool level) {
+    if(pin == 13 and level)
+    {
+      applied = run.now();
+    }
+  });
+  auto                         mismatched = 0;
+  auto                         latest     = std::uint64_t{};
+  auto                         inside     = 0;
+  for(int n = 0; n < 4; ++n)
+  {
+    CAPTURE(n);
+    auto const from = run.now();
+    REQUIRE(twin.now() == from);
+    auto const at     = from + 50 * us + static_cast<std::uint64_t>(n) * 977 * us;
+    auto const tamper = n % 2 != 0;
+    applied.reset();
+    if(tamper)
+    {
+      run.write("TAMPCR", tamp2e | tamp2noerase | tampts);
+      twin.write("TAMPCR", tamp2e | tamp2noerase | tampts);
+      pa(run).drive_at(0, true, vtime{at});
+      run.run_until(at + tamper_delay * rtc_cycle + us);
+      REQUIRE(applied.has_value());
+      inside += run.now() < *applied + tamper_delay * rtc_cycle ? 1 : 0;
+      CHECK((run.read("ISR") & (tsf | tamp2f)) == (tsf | tamp2f));
+    }
+    else
+    {
+      pc(run).drive_at(13, true, vtime{at});
+    }
+    run.run_until(from + 40 * ms);
+    REQUIRE(applied.has_value());
+    latest = std::max(latest, *applied - at);
+    twin.run_until(at);
+    auto const expected = twin.read("SSR");
+    twin.run_until(run.now());
+    REQUIRE((run.read("ISR") & tsf) == tsf);
+    CHECK(run.read("TSSSR") == expected);
+    mismatched += run.read("TSSSR") == expected ? 0 : 1;
+    if(tamper)
+    {
+      pa(run).drive(0, false);
+      run.write("TAMPCR", 0);
+      twin.write("TAMPCR", 0);
+      run.write("ISR", ~(tsf | tamp2f) & ~init_bit);
+    }
+    else
+    {
+      pc(run).drive(13, false);
+      run.write("ISR", ~tsf & ~init_bit);
+    }
+  }
+  CHECK(mismatched == 0);
+  CHECK(inside > 0);
+  CHECK(latest > 128 * rtc_cycle);
 }

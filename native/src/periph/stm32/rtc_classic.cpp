@@ -6,6 +6,7 @@
 #include "read_protection.hpp"
 #include "rtc_calendar.hpp"
 #include "rtc_core.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
@@ -210,7 +211,8 @@ struct unmodelled_entry
  *        writes 0 to every backup register, RM0351 3.5.1.
  *        Timestamps, RM0351 38.3.13, with `rtc_classic_variant::timestamps`: with CR.TSE set, an
  *        edge of the RTC_TS input, rising with CR.TSEDGE 0 and falling with 1, captures TR, DR
- *        bits 15:0 without the year and SSR into RTC_TSTR, RTC_TSDR and RTC_TSSSR at the edge,
+ *        bits 15:0 without the year and SSR into RTC_TSTR, RTC_TSDR and RTC_TSSSR at the board
+ *        time of the edge, `pin_edge_clock::edge_ps`, also when the GPIO applies it later,
  *        and sets TSF 2 ck_apre cycles later, 2 x (PREDIV_A + 1) RTCCLK cycles, inferred. An edge
  *        while TSF is set or that set is pending sets TSOVF at once and keeps the stamp, the
  *        pending case from the TSOVF note of 38.3.13. A TSF clear writes 0 to the three
@@ -226,9 +228,9 @@ struct unmodelled_entry
  *        the count restart after an event inferred. A sample of an undriven input reads high
  *        with TAMPPUDIS 0, the precharge, else its PUPDR pull-up. An event while TAMPxF is set
  *        with TAMPxMF 0, or while one is pending, is lost. TAMPxF sets at the event with
- *        TAMPFLT 0 and TAMPTS 0, else 3 ck_apre cycles later, and the backup registers are
- *        erased then unless TAMPxNOERASE, inferred. With TAMPxMF set no flag sets and nothing is
- *        erased.
+ *        TAMPFLT 0 and TAMPTS 0, else 3 ck_apre cycles after the board time of the event, and
+ *        the backup registers are erased then unless TAMPxNOERASE, inferred. With TAMPxMF set
+ *        no flag sets and nothing is erased.
  *        TAMPTS stamps the calendar of the event as a timestamp does, TSF with TAMPxF. A tamper
  *        flag with TAMPIE or its TAMPxIE drives the tamper EXTI line. ES0250 2.19.1: clearing
  *        TAMPxE of an enabled falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1, while its input is
@@ -312,11 +314,11 @@ private:
   void alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle);
   void settle(std::uint64_t cycle);
   void refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now);
-  void stamp(std::uint64_t delay);
+  void stamp(std::uint64_t delay, std::uint64_t at_ps);
   [[nodiscard]] auto tamper_count() const -> std::size_t;
   [[nodiscard]] auto tamper_input(std::size_t which, bool precharged) const -> std::optional<bool>;
   [[nodiscard]] auto tamper_raised() const -> bool;
-  void               detect(std::size_t which);
+  void               detect(std::size_t which, std::uint64_t at_ps);
   void               tamper_fire(std::size_t which);
   void               raise_tamper(std::size_t which, bool erase);
   void               sample_tampers();
@@ -1035,7 +1037,12 @@ void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, b
   {
     return;
   }
-  settle(count_.cycle_at(now_ps()));
+  auto const now = now_ps();
+  settle(count_.cycle_at(now));
+  auto const* const clock = dynamic_cast<pin_edge_clock const*>(ctx_.peers.find(port));
+  auto const        time  = ctx_.clock.time().ps;
+  auto const        late  = clock != nullptr ? time - std::min(clock->edge_ps(), time) : 0;
+  auto const        at    = now - std::min(late, now);
   if(variant_.tampers and get(regs_, tamper_filter_) == 0)
   {
     for(std::size_t which = 0; which < tamper_count(); ++which)
@@ -1046,7 +1053,7 @@ void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, b
          and get(regs_, t.enable) != 0
          and level != (get(regs_, t.trigger) != 0))
       {
-        detect(which);
+        detect(which, at);
       }
     }
   }
@@ -1056,7 +1063,7 @@ void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, b
      and get(regs_, stamp_enable_) != 0
      and level != (get(regs_, stamp_edge_) != 0))
   {
-    stamp(stamp_apre_cycles);
+    stamp(stamp_apre_cycles, at);
   }
   update_lines();
 }
@@ -1101,7 +1108,7 @@ auto rtc_classic::tamper_raised() const -> bool
   return false;
 }
 
-void rtc_classic::detect(std::size_t which)
+void rtc_classic::detect(std::size_t which, std::uint64_t at_ps)
 {
   auto const& t   = tamper_[which];
   auto const  bit = static_cast<std::uint8_t>(1u << which);
@@ -1113,7 +1120,7 @@ void rtc_classic::detect(std::size_t which)
   auto const stamped  = get(regs_, tamper_stamp_) != 0;
   if(stamped)
   {
-    stamp(tamper_apre_cycles);
+    stamp(tamper_apre_cycles, at_ps);
   }
   if(not filtered and not stamped)
   {
@@ -1122,7 +1129,7 @@ void rtc_classic::detect(std::size_t which)
   }
   state_.tamper_pending |= bit;
   arm(static_cast<classic_event>(tamper1_ready + which),
-      count_.cycle_at(now_ps()) + tamper_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
+      count_.cycle_at(at_ps) + tamper_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
 }
 
 void rtc_classic::tamper_fire(std::size_t which)
@@ -1165,7 +1172,7 @@ void rtc_classic::sample_tampers()
     if(count >= needed)
     {
       count = 0;
-      detect(which);
+      detect(which, now_ps());
     }
   }
 }
@@ -1192,14 +1199,14 @@ void rtc_classic::plan_samples()
   arm(tamper_sample, (cycle / period + 1) * period);
 }
 
-void rtc_classic::stamp(std::uint64_t delay)
+void rtc_classic::stamp(std::uint64_t delay, std::uint64_t at_ps)
 {
   if(get(regs_, stamp_flag_) != 0 or state_.stamp_pending != 0)
   {
     update(regs_, stamp_overflow_, 1);
     return;
   }
-  auto const cycle       = count_.cycle_at(now_ps());
+  auto const cycle       = count_.cycle_at(at_ps);
   auto const position    = count_.position_at(cycle);
   state_.stamp_time      = count_.time_register(position);
   state_.stamp_date      = count_.date_register(position);

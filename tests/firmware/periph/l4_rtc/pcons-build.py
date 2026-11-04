@@ -10,6 +10,7 @@ add_ll_firmware(
     ["rtc"],
     entries=[
         "idle",
+        "nops",
         "calendar",
         "read_calendar",
         "read_after_reset",

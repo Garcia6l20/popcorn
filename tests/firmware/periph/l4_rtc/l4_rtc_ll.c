@@ -17,6 +17,7 @@ void TAMP_STAMP_IRQHandler(void);
 void timestamp(void);
 void tamper(void);
 void idle(void);
+void nops(void);
 void alarm(void);
 void wakeup(void);
 void calendar(void);
@@ -31,6 +32,14 @@ void idle(void)
   for(;;)
   {
     __WFI();
+  }
+}
+
+void nops(void)
+{
+  for(;;)
+  {
+    __asm__ volatile(".rept 2000\n\tnop\n\t.endr");
   }
 }
 
