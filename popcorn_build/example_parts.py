@@ -428,6 +428,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
     "stm32l476/spi": ExampleParts(
         "STM32L476RCTx", (), pins=("PA5", "PA6", "PA7", "PB6"), adc_channels=(), flash_kib=None
     ),
+    "stm32l476/tim": ExampleParts(
+        "STM32L476RCTx", (), pins=("PA5", "PA6"), adc_channels=(), flash_kib=None
+    ),
     "stm32l476/usart": ExampleParts(
         "STM32L476RCTx", (), pins=("PA2", "PA3"), adc_channels=(), flash_kib=None
     ),

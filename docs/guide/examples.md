@@ -372,6 +372,12 @@ A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://
 
 --8<-- "stm32l476/i2c/README.md:3:16"
 
+### l476 tim
+
+A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/tim).
+
+--8<-- "stm32l476/tim/README.md:3:13"
+
 ### l476 usb_cdc
 
 CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).
