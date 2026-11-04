@@ -110,10 +110,6 @@ struct l4_storage
   std::uint32_t    base;
 };
 
-constexpr auto l4_storage_rows = std::to_array<l4_storage>({
-    {.name = "LPUART1", .ip = "LPUART", .version = "sci3_v1_1_Cube", .base = 0x4000'8000},
-});
-
 auto toy_l4(std::span<l4_storage const> rows) -> part_description
 {
   auto desc                = popcorn::testing::m33();
@@ -135,13 +131,6 @@ auto toy_l4(std::span<l4_storage const> rows) -> part_description
 constexpr auto l4_dbgmcu = std::to_array<l4_storage>({
     {.name = "DBGMCU", .ip = "DBGMCU", .version = "", .base = 0xE004'2000},
 });
-
-auto storage_row(std::string_view name) -> std::span<l4_storage const>
-{
-  auto const found = std::ranges::find(l4_storage_rows, name, &l4_storage::name);
-  REQUIRE(found != l4_storage_rows.end());
-  return {found, 1};
-}
 
 auto cpu_load(core::machine& target, std::uint32_t at) -> std::optional<std::uint64_t>
 {
@@ -228,28 +217,12 @@ TEST_CASE("the shipped U5 and H5 parts attach the scoped models")
       {"EXTI", "DBGMCU", "CRS", "ADCC", "UART4"});
 }
 
-TEST_CASE("an STM32L4 LPUART1 of sci3_v1_1_Cube attaches as storage")
-{
-  CHECK(machine_of(toy_l4(storage_row("LPUART1"))).model("LPUART1") == nullptr);
-}
-
 TEST_CASE("an STM32L4 CRS is refused, the L4 descriptions carry none")
 {
   constexpr auto crs = std::to_array<l4_storage>({
       {.name = "CRS", .ip = "CRS", .version = "", .base = 0x4000'6000}
   });
   CHECK_THROWS_AS((void)machine_of(toy_l4(crs)), config_error);
-}
-
-TEST_CASE("factories() of an STM32L4 part holds none of the storage instances")
-{
-  stm32::register_builtin_models();
-  auto const all = stm32::factories(stm32::board{}, toy_l4(l4_storage_rows));
-  for(auto const& row : l4_storage_rows)
-  {
-    CAPTURE(row.name);
-    CHECK_FALSE(all.contains(std::string{row.name}));
-  }
 }
 
 TEST_CASE("RM0351 48.6.4, 48.15.3 and 48.17.9: the L4 TPIU, ETM and ROM table are RAZ/WI")
@@ -278,8 +251,7 @@ TEST_CASE("without the L4 RAZ/WI map a CPU load of the L4 TPIU faults")
 TEST_CASE("option_bytes.tzen on an STM32L4 part is refused")
 {
   auto       options = popcorn::testing::stm32_options();
-  auto const refused =
-      stm32::configure_option_bytes(toy_l4(l4_storage_rows), {.tzen = true}, options);
+  auto const refused = stm32::configure_option_bytes(toy_l4(l4_dbgmcu), {.tzen = true}, options);
   REQUIRE_FALSE(refused.has_value());
   CHECK(refused.error().key == "option_bytes.tzen");
 }

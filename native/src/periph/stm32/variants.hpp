@@ -795,6 +795,28 @@ inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci
      {usart_role::noise_clear, {"ICR", "NCF"}}}
 };
 
+/** @brief sci3 names of the STM32L4 LPUART1, RM0351 41.7: the USART names with no RQR.TXFRQ. */
+inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci3_lpuart_names{
+    {{usart_role::tx_not_full, {"ISR", "TXE"}},
+     {usart_role::rx_not_empty, {"ISR", "RXNE"}},
+     {usart_role::noise, {"ISR", "NF"}},
+     {usart_role::tx_not_full_ie, {"CR1", "TXEIE"}},
+     {usart_role::rx_not_empty_ie, {"CR1", "RXNEIE"}},
+     {usart_role::tx_empty, {"", ""}},
+     {usart_role::rx_full, {"", ""}},
+     {usart_role::tx_empty_ie, {"", ""}},
+     {usart_role::rx_full_ie, {"", ""}},
+     {usart_role::tx_threshold, {"", ""}},
+     {usart_role::rx_threshold, {"", ""}},
+     {usart_role::tx_threshold_ie, {"", ""}},
+     {usart_role::rx_threshold_ie, {"", ""}},
+     {usart_role::tx_threshold_flag, {"", ""}},
+     {usart_role::rx_threshold_flag, {"", ""}},
+     {usart_role::flush_tx, {"", ""}},
+     {usart_role::prescaler, {"", ""}},
+     {usart_role::noise_clear, {"ICR", "NCF"}}}
+};
+
 /** @brief sci2 names, RM0038 27.6: `ISR` stands for SR. */
 inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci2_names{
     {{usart_role::tx_not_full, {"ISR", "TXE"}},
@@ -847,6 +869,12 @@ struct usart_variant
   /** @brief Names of the fields that differ between register sets, checked by
    *         names_every_role() and, against `fifo`, by flag_matches_roles(). */
   std::span<named_field<usart_role> const> names = sci3_fifo_names;
+  /**
+   * @brief A break requested while a data frame shifts with CTSE 1 keeps TC 0 at that frame's
+   *        end when CTS is deasserted then, ES0250 2.21.2 and 2.22.1. Without it a break that CTS
+   *        holds leaves TC to rise at the end of the data frame, RM0456 66.8.10.
+   */
+  bool break_keeps_tc_low = false;
 };
 
 /** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
@@ -878,7 +906,20 @@ inline constexpr usart_variant l1_uart{
  *        sci3 registers with one data register each way and no PRESC. Every instance has flow
  *        control, RM0351 Table 251. The kernel clock is the CCIPR selection of the instance.
  */
-inline constexpr usart_variant l4_usart{.mode_views = false, .fifo = false, .names = sci3_names};
+inline constexpr usart_variant l4_usart{
+    .mode_views         = false,
+    .fifo               = false,
+    .names              = sci3_names,
+    .break_keeps_tc_low = true};
+/**
+ * @brief STM32L4 LPUART1, RM0351 41.7: the L4 USART registers with BRR[19:0], no OVER8 and no
+ *        RQR.TXFRQ, the kernel clock the CCIPR.LPUART1SEL selection.
+ */
+inline constexpr usart_variant l4_lpuart{
+    .mode_views         = false,
+    .fifo               = false,
+    .names              = sci3_lpuart_names,
+    .break_keeps_tc_low = true};
 
 /** @brief Differences between the IWDG peripherals the model rows serve. */
 struct iwdg_variant

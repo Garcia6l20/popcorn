@@ -114,6 +114,7 @@ l4_firmwares = {
         "l476_l4_tim_ll",
         "l476_l4_lptim_ll",
         "l476_l4_usart_ll",
+        "l476_l4_usart_hal",
     )
 }
 l4_env = {

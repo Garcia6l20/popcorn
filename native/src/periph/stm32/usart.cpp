@@ -302,23 +302,25 @@ struct lock
  *        RS232 flow control, RM0456 66.5.21: with CR3.CTSE a frame, a break included, starts only
  *        while the nCTS input the far end drives, `uart_port::set_cts`, says ready, a frame in
  *        flight completes, and a held frame starts at the change to ready, a break's 2-bit hold
- *        kept. TC stays 0 while a frame is held. Changes apply through events on
+ *        kept. TC stays 0 while a data frame is held. A break held alone lets TC rise at the end
+ *        of the data frame before it, RM0456 66.8.10, on the STM32L1 inferred from RM0038 27.6.1,
+ *        and keeps it 0 with `usart_variant::break_keeps_tc_low`, the STM32L4 ES0250 2.21.2 and
+ *        2.22.1: a break requested while a data frame shifts with CTSE 1 and CTS deasserted at
+ *        its end leaves TC 0 until the break has run, inferred. Changes apply through events on
  *        core::host_lane at their own time, kept in the state with their board time and
  *        rescheduled at every reset at the same instant. A frame starting at the instant of a
- *        change to not ready is not held, whatever the event order of that instant. A change
- *        runs at the first block boundary at or after its time: a frame a TDR or SBKRQ write
- *        queued in that block, after the change, starts at the change, up to one block before
- *        the write. Each change of the input with CTSE sets ISR.CTSIF, raising the IRQ with
- *        CTSIE, ICR.CTSCF clears it. ISR.CTS reads the input while CTSE is 1 and 0 while it is
- *        0: an unrouted CTS input reads 0, the reset value of USART_ISR and LPUART_ISR in
- *        RM0456 66.8.10 and 67.7.8, and CTSE stands for the pin being routed as CTS. With
- *        CR3.RTSE and DEM 0, RTS
- *        says not ready while RDR is full, or the RX FIFO in FIFO mode,
- *        `uart_port::ready_to_receive`: the next host frame waits before its start bit and
- *        starts at the RDR read or the RXFRQ flush that frees space, so host frames never
- *        overrun. With DEM the pin carries DE and the host is not held. Frames from another
- *        machine are not held: the wire carries no flow control and they overrun as without
- *        RTSE. At most max_pending_cts CTS changes wait at once.
+ *        change to not ready is not held, whatever the event order of that instant. A change runs
+ *        at the first block boundary at or after its time: a frame a TDR or SBKRQ write queued in
+ *        that block, after the change, starts at the change, up to one block before the write.
+ *        Each change of the input with CTSE sets ISR.CTSIF, raising the IRQ with CTSIE, ICR.CTSCF
+ *        clears it. ISR.CTS reads the input while CTSE is 1 and 0 while it is 0: an unrouted CTS
+ *        input reads 0, the reset value of USART_ISR and LPUART_ISR in RM0456 66.8.10 and 67.7.8,
+ *        and CTSE stands for the pin being routed as CTS. With CR3.RTSE and DEM 0, RTS says not
+ *        ready while RDR is full, or the RX FIFO in FIFO mode, `uart_port::ready_to_receive`: the
+ *        next host frame waits before its start bit and starts at the RDR read or the RXFRQ flush
+ *        that frees space, so host frames never overrun. With DEM the pin carries DE and the host
+ *        is not held. Frames from another machine are not held: the wire carries no flow control
+ *        and they overrun as without RTSE. At most max_pending_cts CTS changes wait at once.
  *
  *        A line held low by a link, `hold_line` to `release_line`, RM0456 66.5.4, 66.5.7 "Break
  *        character" and "Framing error", and the same for the LPUART, 67.4.4 and 67.4.7: the
@@ -344,14 +346,14 @@ struct lock
  *        reset ends every hold: nothing after it, and a later release is ignored. Host frames
  *        keep their own path during a hold, a linked UART takes none.
  *
- *        The STM32L4 USART and UART, RM0351 40.8, run the sci3 registers in single-register mode:
- *        ISR.TXE, RXNE and NF and CR1.TXEIE and RXNEIE take the bits of TXFNF, RXFNE, NE,
- *        TXFNFIE and RXFNEIE, ICR.NCF clears NF, the kernel clock is the instance's CCIPR
- *        selection, and the part has no PRESC, so the kernel clock divided by BRR gives the
- *        baud. `usart_variant::names` maps the field names of each family. On every family,
- *        a CPU or DMA write that sets a bit of CR1.UESM, CR3.UCESM, WUFIE or WUS logs one
- *        warning and raises model_error under strict peripherals before the store: the model
- *        runs in Run mode only and WUF stays 0.
+ *        The STM32L4 USART, UART and LPUART, RM0351 40.8 and 41.7, run the sci3 registers in
+ *        single-register mode: ISR.TXE, RXNE and NF and CR1.TXEIE and RXNEIE take the bits of
+ *        TXFNF, RXFNE, NE, TXFNFIE and RXFNEIE, ICR.NCF clears NF, the kernel clock is the
+ *        instance's CCIPR selection, and the part has no PRESC, so the kernel clock divided by BRR
+ *        gives the baud, 256 times it on LPUART1. `usart_variant::names` maps the field names of
+ *        each family. On every family, a CPU or DMA write that sets a bit of CR1.UESM, CR3.UCESM,
+ *        WUFIE or WUS logs one warning and raises model_error under strict peripherals before the
+ *        store: the model runs in Run mode only and WUF stays 0.
  *
  *        The `sci2` register set of the STM32L1 USART and UART, RM0038 27.6, drives the same
  *        frame engine with one data word each way: SR holds TXE for an empty TDR, TC, RXNE, IDLE,
@@ -537,6 +539,7 @@ private:
   std::uint32_t                                status_clears_{};
   std::uint32_t                                break_stop_half_bits_;
   bool                                         flow_control_;
+  bool                                         break_keeps_tc_low_;
   bool                                         flow_logged_{};
   std::uint32_t                                read_clears_{};
   std::uint32_t                                write_clears_{};
@@ -549,6 +552,7 @@ private:
 static_assert(names_every_role(sci3_fifo_names));
 static_assert(names_every_role(sci3_names));
 static_assert(names_every_role(sci2_names));
+static_assert(names_every_role(sci3_lpuart_names));
 
 consteval auto fifo_named(usart_variant const& variant) -> bool
 {
@@ -567,6 +571,7 @@ static_assert(fifo_named(h5_lpuart));
 static_assert(fifo_named(l1_usart));
 static_assert(fifo_named(l1_uart));
 static_assert(fifo_named(l4_usart));
+static_assert(fifo_named(l4_lpuart));
 
 constexpr auto has_prescaler(usart_variant const& variant) -> bool
 {
@@ -722,7 +727,8 @@ usart::usart(
               ? std::optional{field("CR3", "ONEBIT")}
               : std::nullopt},
       kernel_{ctx.clock.domain(kernel_name(desc, variant))}, line_{irq(line_name(desc, variant))},
-      break_stop_half_bits_{variant.break_stop_half_bits}, flow_control_{variant.flow_control}
+      break_stop_half_bits_{variant.break_stop_half_bits}, flow_control_{variant.flow_control},
+      break_keeps_tc_low_{variant.break_keeps_tc_low}
 {
   expect_register("CR1_enabled", variant.mode_views);
   expect_field(cr1_, "FIFOEN", variant.fifo);
@@ -1532,7 +1538,8 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
       state_.tx_end_ps = next;
     }
     start_frame(next);
-    auto const held = state_.break_pending or not state_.tx_fifo.empty();
+    auto const held =
+        (state_.break_pending and (brk or break_keeps_tc_low_)) or not state_.tx_fifo.empty();
     if(not state_.shifting and not(held and not clear_to_send(next)))
     {
       update(regs_, complete_, 1);

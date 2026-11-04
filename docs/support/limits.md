@@ -1735,12 +1735,24 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   set after the SR read stays set, and a DR write with no SR read since TC rose sends the word
   and leaves TC set, RM0038 27.6.1.
 - STM32L1 EIE raises the interrupt on ORE, NF or FE only while DMAR is 1, RM0038 27.6.6.
-- STM32L4 USART1 to USART3, UART4 and UART5, RM0351 section 40, run the sci3 frame engine with
-  one data word each way: ISR.TXE, RXNE and NF, CR1.TXEIE and RXNEIE, ICR.NCF clears NF. The
-  kernel clock is the instance's `RCC_CCIPR` selection, BRR alone divides it, the L4 has no
-  PRESC. Every instance has CTS and RTS flow control, RM0351 Table 251. USART_ISR reads
-  0x000000C0 after reset, TXE and TC, bit 25 0, inferred: RM0351 40.8.8 gives 0x020000C0 with
-  TCBGT, which the Table 251 note gives to the L49x and L4Ax only.
+- STM32L4 USART1 to USART3, UART4, UART5 and LPUART1, RM0351 sections 40 and 41, run the sci3 frame
+  engine with one data word each way: ISR.TXE, RXNE and NF, CR1.TXEIE and RXNEIE, ICR.NCF clears NF.
+  The kernel clock is the instance's `RCC_CCIPR` selection, BRR alone divides it, the L4 has no
+  PRESC. Every instance has CTS and RTS flow control, RM0351 Table 251. USART_ISR reads 0x000000C0
+  after reset, TXE and TC, bit 25 0, inferred: RM0351 40.8.8 gives 0x020000C0 with TCBGT, which the
+  Table 251 note gives to the L49x and L4Ax only.
+- A break that CTS holds after a data frame lets TC rise at that frame's end on the STM32U5, STM32H5
+  and STM32L1, RM0456 66.8.10 and 67.7.8, RM0481 56.8 and 57.7, RM0038 27.6.1, on the STM32L1
+  inferred. A held data frame keeps TC 0 on every family.
+- STM32L4 ES0250 2.21.2 and 2.22.1 are modelled: a break requested while a data frame shifts with
+  CTSE 1 and CTS deasserted at its end keeps TC 0 until the break has run, inferred.
+- STM32L4 ES0250 2.21.3 and 2.22.2: with RTSE 1 the receiver reads ready to the host while UE or RE
+  is 0, as the erratum describes.
+- STM32L4 LPUART1, RM0351 section 41: 256 times the kernel clock over BRR[19:0] gives the baud,
+  and a BRR below 0x300 sends and receives nothing, RM0351 41.4.4. The kernel clock is the
+  `RCC_CCIPR` LPUART1SEL selection. RQR has no TXFRQ, a write of bit 4 does nothing.
+- STM32L4 ES0250 2.22.3, LPUART transmitter jitter at a low BRR, and 2.22.4, LPUART1 outputs not
+  open-drain, are pin-level effects the frame engine leaves out.
 - STM32L4 ES0250 2.21.1, NACK sampling in smartcard mode, follows smartcard: logged as not
   modelled. ES0250 2.21.4, the receiver timeout start with two stop bits, follows RTOEN: logged
   as not modelled. ES0250 2.21.5, data corruption on a noisy receive line, and 2.21.6, data
