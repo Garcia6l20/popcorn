@@ -360,6 +360,18 @@ A 64-byte key from the built-in RNG on the MSI CLK48, LL. [Sources and tests](ht
 
 --8<-- "stm32l476/rng/README.md:3:25"
 
+### l476 spi
+
+A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/spi).
+
+--8<-- "stm32l476/spi/README.md:3:19"
+
+### l476 i2c
+
+A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/i2c).
+
+--8<-- "stm32l476/i2c/README.md:3:16"
+
 ### l476 usb_cdc
 
 CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).
