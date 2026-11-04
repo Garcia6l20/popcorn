@@ -55,6 +55,7 @@ constexpr address          apb1enr2   = 0x4002'105C;
 constexpr address          apb1rstr1  = 0x4002'1038;
 constexpr address          apb1rstr2  = 0x4002'103C;
 constexpr address          rcc_cfgr   = 0x4002'1008;
+constexpr address          rcc_ccipr  = 0x4002'1088;
 constexpr address          ispr2      = 0xE000'E208;
 constexpr std::uint32_t    cmpm       = 1u << 0;
 constexpr std::uint32_t    arrm       = 1u << 1;
@@ -802,8 +803,10 @@ TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, ra
   for(auto const& [at, bits] : std::vector<std::pair<address, std::uint32_t>>{
           {cfgr,   1u << 17 | 1u << 13},
           {cfgr,   1u << 17 | 7u << 13},
-          {cfgr,   1u << 0            },
-          {cfgr,   1u << 23           },
+          {cfgr,   1u << 23 | presc(1)},
+          {cfgr,   1u << 23 | 3u << 1 },
+          {cfgr,   1u | 2u << 1       },
+          {cfgr,   1u << 23 | 1u << 3 },
           {cfgr,   1u << 24           },
           {option, 1u << 0            }
   })
@@ -1753,4 +1756,244 @@ TEST_CASE("an LPTIM1RST pulse with PB6 high keeps the ETR level, TRIGEN 10 start
     CHECK((r.read(lptim1 + isr) & exttrig) == (high ? exttrig : 0u));
     CHECK(r.read(lptim1 + cnt) == (high ? 10u : 0u));
   }
+}
+
+namespace
+{
+constexpr std::uint32_t cksel     = 1u << 0;
+constexpr std::uint32_t countmode = 1u << 23;
+
+auto lptim1_in1(rig const& r) -> stm32::gpio_port&
+{
+  return etr_pin(r, "GPIOB", 5, 1);
+}
+
+auto pulses(stm32::gpio_port& port, std::uint8_t pin, std::uint64_t from, std::uint32_t count)
+    -> std::vector<std::uint64_t>
+{
+  auto rises = std::vector<std::uint64_t>{};
+  for(std::uint32_t index = 0; index < count; ++index)
+  {
+    auto const at = from + index * 10 * cycle;
+    port.drive_at(pin, true, vtime{at});
+    port.drive_at(pin, false, vtime{at + 5 * cycle});
+    rises.push_back(at);
+  }
+  return rises;
+}
+}
+
+TEST_CASE(
+    "RM0351 34.4.11 CKSEL 1: the first five PB5 edges after ENABLE are lost, then each counts")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(6, 100, cntstrt, cksel, cmpm);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 12);
+  r.idle_to(rises[4] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(rises[5] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 1);
+  r.idle_to(rises[10] - cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(rises[10]);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  CHECK((r.read(ispr2) & lptim1_irq) == lptim1_irq);
+  r.idle_to(rises[11] + 200 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 7);
+}
+
+TEST_CASE("RM0351 34.7.4 CKPOL 01: CKSEL 1 counts falling PB5 edges only")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, cksel | 1u << 1);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 8);
+  r.idle_to(rises[7] + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+  r.idle_to(rises[7] + 6 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+}
+
+TEST_CASE("RM0351 34.4.11 COUNTMODE 1: every PB5 edge counts, CMPM one kernel clock after the edge")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(3, 100, cntstrt, countmode, cmpm);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 4);
+  r.idle_to(rises[0]);
+  CHECK(r.read(lptim1 + cnt) == 1);
+  r.idle_to(rises[2]);
+  CHECK(r.read(lptim1 + cnt) == 3);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  CHECK(r.pending() == rises[2] + cycle);
+  r.idle_to(rises[2] + cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  r.idle_to(rises[3] + 100 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 4);
+}
+
+TEST_CASE("RM0351 34.7.4 CKPOL 10: COUNTMODE 1 counts both PB5 edges")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, countmode | 2u << 1);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 3);
+  r.idle_to(rises[2] + 6 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 6);
+}
+
+TEST_CASE("RM0351 34.4.7: with COUNTMODE 1 the counter wraps after ARR, ARRM at ARR, ARR 3")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 3, cntstrt, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 5);
+  r.idle_to(rises[2] + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+  r.idle_to(rises[3] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(rises[4] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 1);
+}
+
+TEST_CASE("RM0351 34.4.7: SNGSTRT with COUNTMODE 1 counts to ARR, stops at 0 on the next edge")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 3, sngstrt, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 7);
+  r.idle_to(rises[2] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+  r.idle_to(rises[6] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+}
+
+TEST_CASE("RM0351 34.4.11: ENABLE 0 then 1 loses the first five CKSEL 1 edges again")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, cksel);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 7);
+  r.idle_to(rises[6] + cycle);
+  REQUIRE(r.read(lptim1 + cnt) == 2);
+  r.write(lptim1 + cr, 0);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  r.settle_values(60, 100);
+  r.write(lptim1 + cr, enable | cntstrt);
+  auto const more = pulses(pins, 5, r.now_ps() + 20 * cycle, 6);
+  r.idle_to(more[5] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 1);
+}
+
+TEST_CASE("inferred: COUNTMODE 1 drops PB5 edges while DBG_LPTIM1_STOP holds the core")
+{
+  rig        r;
+  auto&      pins = lptim1_in1(r);
+  auto const t    = r.started(60, 100, cntstrt, countmode);
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 3);
+  r.idle_to(rises[2] + 6 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.f->target->hold_core(false);
+  auto const more = pulses(pins, 5, r.now_ps() + 2 * cycle, 2);
+  r.idle_to(more[1] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+}
+
+TEST_CASE("RM0351 34.4.11: LPTIM2 counts PB1 LPTIM2_IN1 edges with COUNTMODE 1, LPTIM1 does not")
+{
+  rig   r;
+  auto& pins = etr_pin(r, "GPIOB", 1, 14);
+  for(auto const base : {lptim1, lptim2})
+  {
+    r.write(base + cfgr, countmode);
+    r.write(base + cr, enable);
+  }
+  r.idle_to(r.now_ps() + 300 * cycle);
+  for(auto const base : {lptim1, lptim2})
+  {
+    r.write(base + arr, 100);
+    r.idle_to(r.now_ps() + 4 * cycle);
+    r.write(base + cr, enable | cntstrt);
+  }
+  auto const rises = pulses(pins, 1, r.now_ps() + 20 * cycle, 4);
+  r.idle_to(rises[3] + cycle);
+  CHECK(r.read(lptim2 + cnt) == 4);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("inferred: CKSEL 1 drops PB5 edges while DBG_LPTIM1_STOP holds the core")
+{
+  rig        r;
+  auto&      pins = lptim1_in1(r);
+  auto const t    = r.started(60, 100, cntstrt, cksel);
+  auto const lost = pulses(pins, 5, t + 20 * cycle, 5);
+  r.idle_to(lost[4] + 6 * cycle);
+  REQUIRE(r.read(lptim1 + cnt) == 0);
+  set_debug_freeze(*r.f, "DBG_LPTIM1_STOP", true);
+  r.f->target->hold_core(true);
+  auto const held = pulses(pins, 5, r.now_ps() + 2 * cycle, 3);
+  r.idle_to(held[2] + 6 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.f->target->hold_core(false);
+  auto const more = pulses(pins, 5, r.now_ps() + 2 * cycle, 2);
+  r.idle_to(more[1] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+}
+
+TEST_CASE("RM0351 34.4.11: with CKSEL 1 and LSE off, PB5 edges clock ARROK and the start")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(rcc_ccipr, r.read(rcc_ccipr) | 3u << 18);
+  r.write(lptim1 + cfgr, cksel);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 100);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 4);
+  r.idle_to(rises[3] + cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == 0);
+  auto const fifth = pulses(pins, 5, rises[3] + 10 * cycle, 1);
+  r.idle_to(fifth[0] + cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == arrok);
+  r.write(lptim1 + cr, enable | cntstrt);
+  auto const more = pulses(pins, 5, fifth[0] + 10 * cycle, 7);
+  r.idle_to(more[2] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(more[6] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 4);
+}
+
+TEST_CASE("RM0351 34.4.11: with CKSEL 1 and no PB5 edge, PCLK1 sets no ARROK and starts nothing")
+{
+  rig r;
+  r.write(lptim1 + cfgr, cksel);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 100);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(r.now_ps() + 500 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrok) == 0);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.pending() == std::nullopt);
+}
+
+TEST_CASE("RM0351 34.4.5: with CKSEL 1 and PRESC 2 the counter counts every fourth PB5 edge")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(lptim1 + cfgr, cksel | presc(2));
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 100);
+  r.write(lptim1 + cr, enable | cntstrt);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 23);
+  r.idle_to(rises[7] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(rises[8] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 1);
+  r.idle_to(rises[16] + cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
 }

@@ -35,7 +35,7 @@ constexpr std::uint32_t enable_bit       = 1u << 0;
 constexpr std::uint32_t single_start     = 1u << 1;
 constexpr std::uint32_t continuous_run   = 1u << 2;
 constexpr std::uint32_t tick_event       = 0;
-constexpr std::size_t   unmodelled_uses  = 4;
+constexpr std::size_t   unmodelled_uses  = 2;
 constexpr std::uint8_t  compare_loaded   = 1u << 0;
 constexpr std::uint8_t  reload_loaded    = 1u << 1;
 
@@ -99,6 +99,8 @@ struct lptim_state
   std::uint8_t  armed_mode{};
   std::uint8_t  trigger_level{};
   std::uint8_t  trigger_rising{};
+  std::uint8_t  divided{};
+  std::uint16_t enable_left{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -112,8 +114,6 @@ struct unmodelled_use
 
 constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
     {
-     {"CFGR", "CKSEL", "CKSEL 1, the clock from input 1"},
-     {"CFGR", "COUNTMODE", "COUNTMODE 1, the count of input 1 edges"},
      {"CFGR", "ENC", "ENC 1, the encoder mode"},
      {"OR", "", "OR_0 or OR_1, the COMP1 and COMP2 inputs"},
      }
@@ -158,9 +158,23 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        same mode written again while the counter runs is discarded, inferred. A second
  *        CNTSTRT or SNGSTRT before the first reaches the counter replaces it, logs one
  *        model_warning and raises model_error under strict_peripherals, inferred. A start with
- *        a CFGR or OR function the model lacks, the external clock, the input count, the
- *        encoder, the COMP inputs and the RTC and COMP triggers of TRIGSEL above 0, logs once
- *        each and raises under strict_peripherals: the counter then counts the kernel clock.
+ *        a CFGR or OR function the model lacks, the encoder, the COMP inputs, the RTC and COMP
+ *        triggers of TRIGSEL above 0, a PRESC above 0 with COUNTMODE 1, which RM0351 34.4.11
+ *        forbids, and with CKSEL 1 or COUNTMODE 1 CKPOL 11, CKPOL 10 with CKSEL 1 or a CKFLT
+ *        above 0, logs once each and raises under
+ *        strict_peripherals: the counter then counts the kernel clock, or input 1 edges as
+ *        configured. With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL
+ *        selects on the `<instance>_in1` pin signal instead of the kernel clock, RM0351 34.4.11.
+ *        With CKSEL 1 the active edges of input 1 clock the kernel logic, RM0351 34.4.3 and
+ *        34.4.11: CMPOK, ARROK, the start, a mode switch and the trigger filter and start count
+ *        input 1 edges, the ENABLE latency 2 edges, the OK and start latencies 3 edges and a
+ *        trigger start 2 counter clocks, inferred counts that give the five lost edges of RM0351
+ *        34.4.11 after an ENABLE and a CNTSTRT for every PRESC. PRESC divides the edges before
+ *        the counter, RM0351 34.4.5. A flag sets at the edge, inferred. With
+ *        COUNTMODE 1 every edge counts and a flag sets the variant's event delay after the edge,
+ *        the sampling on the kernel clock taken as the edge itself, inferred, and an edge with
+ *        the kernel clock stopped is dropped, inferred. An edge during a debug hold is dropped
+ *        and the output follows CNT at each edge, inferred.
  *        With TRIGEN not 00 and TRIGSEL 0 the `<instance>_etr` pin signal starts the counter on
  *        the edges TRIGEN selects, RM0351 34.4.6: CNTSTRT or SNGSTRT arm the start and its mode,
  *        EXTTRIG sets at the edge and the count starts two prescaled clocks later. With TRGFLT
@@ -267,6 +281,12 @@ private:
   [[nodiscard]] auto preload() const -> bool;
   [[nodiscard]] auto trigger_mode() const -> bool;
   [[nodiscard]] auto etr_level() const -> bool;
+  [[nodiscard]] auto external() const -> bool;
+  void               input_edge(std::uint64_t ps, bool rising);
+  void               clock_edge(std::uint64_t ps);
+  void               count_edge(std::uint64_t ps, bool sampled);
+  void               edge_start(std::uint64_t units, bool single);
+  void               refuse_clock();
   void               start(std::uint64_t ps, bool single);
   void               begin(wide at, std::uint64_t ps, bool single);
   void               switch_mode(std::uint64_t ps, bool single);
@@ -289,6 +309,10 @@ private:
   reg_ref                           arr_;
   reg_ref                           cnt_;
   field_ref                         prescaler_;
+  field_ref                         clock_select_;
+  field_ref                         count_mode_;
+  field_ref                         clock_polarity_;
+  field_ref                         clock_filter_;
   field_ref                         preload_;
   field_ref                         wave_;
   field_ref                         polarity_;
@@ -300,6 +324,7 @@ private:
   irq_line*                         line_ = nullptr;
   trigger_output                    out_;
   std::string                       etr_;
+  std::string                       in1_;
   std::array<bool, unmodelled_uses> unmodelled_logged_{};
   std::array<bool, 3>               locked_logged_{};
   bool                              value_logged_   = false;
@@ -307,6 +332,7 @@ private:
   bool                              switch_logged_  = false;
   bool                              freeze_logged_  = false;
   bool                              select_logged_  = false;
+  std::array<bool, 4>               clock_logged_{};
   std::optional<bool>               listened_;
 };
 
@@ -330,12 +356,14 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
     : dispatch_model{ctx, desc, "LPTIM", lptim_writes}, variant_{variant}, regs_{ctx.regs},
       isr_{reg("ISR")}, ier_{reg("IER")}, cfgr_{reg("CFGR")}, cr_{reg("CR")}, cmp_{reg("CMP")},
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
+      clock_select_{field("CFGR", "CKSEL")}, count_mode_{field("CFGR", "COUNTMODE")},
+      clock_polarity_{field("CFGR", "CKPOL")}, clock_filter_{field("CFGR", "CKFLT")},
       preload_{field("CFGR", "PRELOAD")}, wave_{field("CFGR", "WAVE")},
       polarity_{field("CFGR", "WAVPOL")}, trigger_enable_{field("CFGR", "TRIGEN")},
       trigger_select_{field("CFGR", "TRIGSEL")}, trigger_filter_{field("CFGR", "TRGFLT")},
       timeout_{field("CFGR", "TIMOUT")}, kernel_{ctx.clock.domain(lower(desc.name))},
       line_{&irq(desc.name + "_IRQn")}, out_{ctx.peers, lower(desc.name) + "_out"},
-      etr_{lower(desc.name) + "_etr"}
+      etr_{lower(desc.name) + "_etr"}, in1_{lower(desc.name) + "_in1"}
 {
   expect_register("OR", variant.option_register);
   expect_field("CFGR", "ENC", variant.encoder);
@@ -360,7 +388,7 @@ auto lptim::now_ps() const -> std::uint64_t
 
 auto lptim::kernel_hz() const -> std::uint64_t
 {
-  return state_.held != 0 ? 0 : ctx_.clock.hz(kernel_);
+  return state_.held != 0 or get(regs_, clock_select_) != 0 ? 0 : ctx_.clock.hz(kernel_);
 }
 
 auto lptim::enabled() const -> bool
@@ -403,7 +431,7 @@ auto lptim::position(std::uint64_t ticks) const -> std::uint32_t
 auto lptim::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
 {
   auto const at = wide{ps} * state_.hz;
-  if(state_.running == 0 or state_.hz == 0 or at < anchor())
+  if(state_.running == 0 or state_.hz == 0 or external() or at < anchor())
   {
     return std::nullopt;
   }
@@ -431,7 +459,7 @@ auto lptim::ticks_to(std::uint32_t value) const -> std::uint64_t
 
 auto lptim::match_at(std::uint32_t value) const -> std::optional<wide>
 {
-  if(state_.running == 0 or state_.hz == 0 or value > state_.reload)
+  if(state_.running == 0 or state_.hz == 0 or external() or value > state_.reload)
   {
     return std::nullopt;
   }
@@ -478,6 +506,10 @@ auto lptim::raw_at(std::uint64_t ps) const -> bool
   {
     return false;
   }
+  if(external())
+  {
+    return state_.compare <= state_.anchor_count and state_.anchor_count < state_.reload;
+  }
   if(state_.hz == 0)
   {
     return (state_.out ^ state_.polarity) != 0;
@@ -497,7 +529,10 @@ auto lptim::raw_at(std::uint64_t ps) const -> bool
 
 auto lptim::out_due() const -> std::optional<std::uint64_t>
 {
-  if(state_.running == 0 or state_.latched != 0 or not(listened_.value_or(false) or wave()))
+  if(state_.running == 0
+     or state_.latched != 0
+     or external()
+     or not(listened_.value_or(false) or wave()))
   {
     return std::nullopt;
   }
@@ -564,7 +599,7 @@ auto lptim::next_term() const -> std::optional<due_term>
   {
     offer(match_due(state_.reload, state_.reload_held), term::reload);
   }
-  if(state_.running != 0 and (state_.single != 0 or state_.preloaded != 0))
+  if(state_.running != 0 and not external() and (state_.single != 0 or state_.preloaded != 0))
   {
     offer(
         state_.wrap_held != 0 ? state_.wrap_held
@@ -628,7 +663,17 @@ void lptim::apply(due_term const& next)
     {
       return;
     }
-    auto const at = wide{next.due} * state_.hz + 2 * tick_unit();
+    auto const at      = wide{next.due} * state_.hz + 2 * tick_unit();
+    auto const restart = [&](bool single) {
+      if(state_.hz == 0)
+      {
+        edge_start(static_cast<std::uint64_t>(2 * tick_unit()), single);
+      }
+      else
+      {
+        begin(at, next.due, single);
+      }
+    };
     if(state_.running != 0)
     {
       if(get(regs_, timeout_) == 0)
@@ -637,7 +682,7 @@ void lptim::apply(due_term const& next)
       }
       raise_flag(external_trigger);
       hold_in_flight(next.due);
-      begin(at, next.due, state_.single != 0);
+      restart(state_.single != 0);
       return;
     }
     if(state_.armed_mode == 0 or (wave() and state_.started_once != 0))
@@ -645,7 +690,7 @@ void lptim::apply(due_term const& next)
       return;
     }
     raise_flag(external_trigger);
-    begin(at, next.due, state_.armed_mode == 2);
+    restart(state_.armed_mode == 2);
     state_.started_once = 1;
     return;
   }
@@ -685,7 +730,14 @@ void lptim::apply(due_term const& next)
     {
       if(not(wave() and state_.started_once != 0))
       {
-        begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+        if(state_.hz == 0)
+        {
+          edge_start(0, state_.switch_single != 0);
+        }
+        else
+        {
+          begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+        }
       }
     }
     return;
@@ -849,6 +901,7 @@ void lptim::stop()
 
 void lptim::refuse_unmodelled()
 {
+  refuse_clock();
   if(trigger_mode() and get(regs_, trigger_select_) != 0)
   {
     warn_once_or_refuse(
@@ -969,14 +1022,15 @@ void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
     }
     state_.paused_counting = 0;
     state_.paused_units    = 0;
-    if(state_.running != 0 and at >= anchor())
+    auto const counting    = state_.running != 0 and not external();
+    if(counting and at >= anchor())
     {
       auto const since       = at - anchor();
       state_.anchor_count    = position(static_cast<std::uint64_t>(since / tick_unit()));
       state_.paused_counting = 1;
       state_.paused_units    = static_cast<std::uint64_t>(since % tick_unit());
     }
-    else if(state_.running != 0)
+    else if(counting)
     {
       state_.paused_units = static_cast<std::uint64_t>(anchor() - at);
     }
@@ -994,7 +1048,7 @@ void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
       *due = std::max<std::uint64_t>(ceil_ps(at + *due), ps + 1);
     }
   }
-  if(state_.running != 0)
+  if(state_.running != 0 and not external())
   {
     auto const units = wide{state_.paused_units};
     set_anchor(state_.paused_counting != 0 ? (at > units ? at - units : 0) : at + units);
@@ -1067,7 +1121,155 @@ auto lptim::can_listen(std::string_view) const -> bool
 
 auto lptim::takes_pin(std::string_view signal) const -> bool
 {
-  return signal == etr_;
+  return signal == etr_ or signal == in1_;
+}
+
+auto lptim::external() const -> bool
+{
+  return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0;
+}
+
+void lptim::refuse_clock()
+{
+  if(not external())
+  {
+    return;
+  }
+  auto const polarity = get(regs_, clock_polarity_);
+  auto const refusals = std::array<std::pair<bool, std::string_view>, 4>{
+      {
+       {get(regs_, prescaler_) != 0 and get(regs_, clock_select_) == 0,
+           "PRESC not 0 with COUNTMODE 1, which RM0351 34.4.11 forbids"},
+       {polarity == 3, "CKPOL 11, a reserved polarity"},
+       {get(regs_, clock_select_) != 0 and polarity == 2,
+           "CKPOL 10 with CKSEL 1, both edges of an external clock"},
+       {get(regs_, clock_filter_) != 0, "CKFLT not 0, the input 1 filter"},
+       }
+  };
+  for(std::size_t index = 0; index < refusals.size(); ++index)
+  {
+    if(refusals[index].first)
+    {
+      warn_once_or_refuse(
+          clock_logged_[index], "CFGR", cfgr_.offset,
+          std::format(
+              "{} at a counter start: not modelled, input 1 edges count as configured",
+              refusals[index].second));
+    }
+  }
+}
+
+void lptim::count_edge(std::uint64_t ps, bool sampled)
+{
+  auto const count = state_.anchor_count;
+  auto const wrap  = count == state_.reload or count == counter_top;
+  if(wrap and state_.single != 0)
+  {
+    stop();
+    return;
+  }
+  if(wrap)
+  {
+    transfer_preloaded();
+  }
+  auto const next     = wrap ? 0u : count + 1u;
+  state_.anchor_count = next;
+  auto const reached  = [&](std::uint32_t flag, std::uint64_t& held) {
+    if((state_.isr & flag) != 0)
+    {
+      return;
+    }
+    if(not sampled)
+    {
+      raise_flag(flag);
+      return;
+    }
+    held = ceil_ps(wide{ps} * state_.hz + wide{variant_.event_delay_cycles} * ps_per_second);
+  };
+  if(next == state_.compare and state_.compare <= state_.reload)
+  {
+    reached(compare_match, state_.compare_held);
+  }
+  if(next == state_.reload)
+  {
+    reached(reload_match, state_.reload_held);
+  }
+}
+
+void lptim::edge_start(std::uint64_t units, bool single)
+{
+  state_.running         = 1;
+  state_.single          = single ? 1 : 0;
+  state_.anchor_count    = 0;
+  state_.paused_counting = 0;
+  state_.paused_units    = units;
+  state_.divided         = 0;
+}
+
+void lptim::clock_edge(std::uint64_t ps)
+{
+  if(state_.enable_left != 0)
+  {
+    --state_.enable_left;
+    return;
+  }
+  auto const dues = std::array<std::pair<std::uint64_t*, term>, 4>{
+      {{&state_.compare_due, term::compare_written},
+       {&state_.reload_due, term::reload_written},
+       {&state_.switch_due, term::mode_switch},
+       {&state_.trigger_due, term::trigger}}
+  };
+  auto ready = std::array<bool, 4>{};
+  for(std::size_t index = 0; index < dues.size(); ++index)
+  {
+    auto& due = *dues[index].first;
+    if(due != 0)
+    {
+      due -= std::min<std::uint64_t>(due, ps_per_second);
+      ready[index] = due == 0;
+    }
+  }
+  if(state_.running != 0 and state_.paused_units != 0)
+  {
+    state_.paused_units -= std::min<std::uint64_t>(state_.paused_units, ps_per_second);
+  }
+  else if(state_.running != 0 and ++state_.divided >= (1u << get(regs_, prescaler_)))
+  {
+    state_.divided = 0;
+    count_edge(ps, false);
+  }
+  for(std::size_t index = 0; index < dues.size(); ++index)
+  {
+    if(ready[index])
+    {
+      apply(due_term{ps, dues[index].second});
+    }
+  }
+}
+
+void lptim::input_edge(std::uint64_t ps, bool rising)
+{
+  auto const polarity = get(regs_, clock_polarity_);
+  if((polarity == 0 and not rising) or (polarity == 1 and rising) or state_.held != 0)
+  {
+    return;
+  }
+  auto const sampled = get(regs_, clock_select_) == 0;
+  if(sampled and state_.hz == 0)
+  {
+    return;
+  }
+  catch_up(ps);
+  if(not sampled)
+  {
+    clock_edge(ps);
+    return;
+  }
+  if(state_.running == 0 or ps < state_.anchor_ps)
+  {
+    return;
+  }
+  count_edge(ps, true);
 }
 
 auto lptim::trigger_mode() const -> bool
@@ -1085,6 +1287,18 @@ auto lptim::etr_level() const -> bool
 
 void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
+  if(signal == in1_)
+  {
+    if(enabled() and external())
+    {
+      auto const t = now_ps();
+      input_edge(std::min(at.ps, t), edge == trigger_edge::rising);
+      catch_up(t);
+      refresh();
+      reschedule();
+    }
+    return;
+  }
   if(signal != etr_)
   {
     return;
@@ -1092,7 +1306,8 @@ void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time a
   auto const rising = edge == trigger_edge::rising;
   auto const t      = now_ps();
   catch_up(std::min(at.ps, t));
-  if(not trigger_mode() or not enabled() or get(regs_, trigger_select_) != 0 or state_.hz == 0)
+  auto const frozen = state_.hz == 0 and (get(regs_, clock_select_) == 0 or state_.held != 0);
+  if(not trigger_mode() or not enabled() or get(regs_, trigger_select_) != 0 or frozen)
   {
     state_.trigger_level = rising ? 1 : 0;
     state_.trigger_due   = 0;
@@ -1104,8 +1319,19 @@ void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time a
     auto const code       = get(regs_, trigger_filter_);
     auto const samples    = code == 0 ? 0u : 1u << code;
     state_.trigger_rising = rising ? 1 : 0;
-    state_.trigger_due    = std::max(
-        ceil_ps(wide{at.ps} * state_.hz + wide{samples} * ps_per_second), state_.settled_ps);
+    if(state_.hz != 0)
+    {
+      state_.trigger_due = std::max(
+          ceil_ps(wide{at.ps} * state_.hz + wide{samples} * ps_per_second), state_.settled_ps);
+    }
+    else if(samples != 0)
+    {
+      state_.trigger_due = std::uint64_t{samples} * ps_per_second;
+    }
+    else
+    {
+      apply(due_term{std::min(at.ps, t), term::trigger});
+    }
   }
   catch_up(t);
   refresh();
@@ -1138,8 +1364,13 @@ template <locked Which> void lptim::locked_written(std::uint32_t old, std::uint3
 {
   if(Which == locked::configuration and not enabled())
   {
-    catch_up(now_ps());
+    auto const t = now_ps();
+    catch_up(t);
     state_.polarity = static_cast<std::uint8_t>(get(regs_, polarity_));
+    if(auto const hz = kernel_hz(); hz != state_.hz)
+    {
+      rebase(t, hz);
+    }
     refresh();
     reschedule();
     return;
@@ -1167,7 +1398,8 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
   auto const is_on  = (now & enable_bit) != 0;
   if(not was_on and is_on)
   {
-    state_.enable_ps = t;
+    state_.enable_ps   = t;
+    state_.enable_left = 2;
   }
   else if(was_on and not is_on)
   {

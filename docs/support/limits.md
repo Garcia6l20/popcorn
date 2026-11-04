@@ -969,9 +969,22 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
   `strict`. The register keeps its value, except the second write, whose value replaces the
   pending one, inferred.
-- A start with CKSEL 1, COUNTMODE 1, ENC 1, OR_0 or OR_1 set, or TRIGSEL not 0 with TRIGEN not
-  00 logs one `model_warning` each and raises `ModelError` under `strict`. The counter then
-  counts the kernel clock, and with TRIGSEL not 0 no trigger starts it.
+- A start with ENC 1, OR_0 or OR_1 set, TRIGSEL not 0 with TRIGEN not 00, PRESC above 0 with
+  COUNTMODE 1, which RM0351 34.4.11 forbids, or with CKSEL 1 or COUNTMODE 1 CKPOL 11, CKPOL 10
+  with CKSEL 1 or a CKFLT above 0, logs one
+  `model_warning` each and raises `ModelError` under `strict`. The counter then counts the
+  kernel clock, or input 1 edges as configured, and with TRIGSEL not 0 no trigger starts it.
+- With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on the
+  `lptim1_in1` and `lptim2_in1` pin signals, PB5 or PC0 AF1 and PB1 or PC0 AF14 on the L476,
+  RM0351 34.4.11 and 34.7.4. With CKSEL 1 the input 1 edges clock the kernel logic, RM0351
+  34.4.3 and 34.4.11, so CMPOK, ARROK, the start, a mode switch and a trigger count edges and no
+  internal clock: the ENABLE latency 2 edges, the OK and start latencies 3 edges and a trigger
+  start 2 counter clocks, inferred counts that give the five lost edges of RM0351 34.4.11 after
+  an ENABLE and a CNTSTRT for every PRESC. PRESC divides the edges before the counter, RM0351 34.4.5, and
+  CMPM and ARRM set at the edge, inferred. With COUNTMODE 1 every active edge counts and the flags
+  set one kernel clock after it, the kernel clock sampling taken as the edge itself, inferred, and
+  an edge with the kernel clock stopped is dropped, inferred. An edge during a debug hold is
+  dropped, and `lptim1_out` follows CNT at each edge, inferred.
 - With TRIGEN not 00 and TRIGSEL 0, the `lptim1_etr` and `lptim2_etr` pin signals, PB6 or PC3 AF1
   and PA5 or PC3 AF14 on the L476, start the counter on the edge TRIGEN selects, RM0351 34.4.6 and
   34.7.4. CNTSTRT or SNGSTRT arm the start and choose the mode. EXTTRIG sets at the edge, and the
