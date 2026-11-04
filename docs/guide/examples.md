@@ -378,6 +378,12 @@ A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HS
 
 --8<-- "stm32l476/tim/README.md:3:13"
 
+### l476 adc
+
+The ADC1 internal channels and PA0 through its analog switch against VDDA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/adc).
+
+--8<-- "stm32l476/adc/README.md:3:17"
+
 ### l476 rtc
 
 The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/rtc).
