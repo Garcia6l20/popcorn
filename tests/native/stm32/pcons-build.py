@@ -115,6 +115,8 @@ l4_firmwares = {
         "l476_l4_lptim_ll",
         "l476_l4_usart_ll",
         "l476_l4_usart_hal",
+        "l476_l4_i2c_ll",
+        "l476_l4_i2c_hal",
     )
 }
 l4_env = {
@@ -284,11 +286,12 @@ for program, source in (
     ("stm32-lptim-l4", "test_lptim_l4.cpp"),
     ("stm32-sai-l4", "test_sai_l4.cpp"),
     ("stm32-usart-l4", "test_usart_l4.cpp"),
+    ("stm32-i2c-l4", "test_i2c_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,
         [here / source],
-        static,
+        static_with_devices if program == "stm32-i2c-l4" else static,
         env=l4_env,
         register=l476rc is not None,
     )

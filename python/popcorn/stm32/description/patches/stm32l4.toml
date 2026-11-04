@@ -1098,6 +1098,14 @@ effect = "clear"
 pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", MSIRDYC = "MSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", PLLRDYC = "PLLRDYF", PLLSAI1RDYC = "PLLSAI1RDYF", PLLSAI2RDYC = "PLLSAI2RDYF", CSSC = "CSSF", LSECSSC = "LSECSSF" }
 source = "RM0351 Rev 11, 6.4.8 RCC_CIFR and 6.4.9 RCC_CICR: a write of 1 to xxxRDYC clears xxxRDYF, CSSC clears CSSF and LSECSSC clears LSECSSF"
 
+[[cross]]
+ip = "I2C"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { ALERTCF = "ALERT", TIMOUTCF = "TIMEOUT", PECCF = "PECERR", OVRCF = "OVR", ARLOCF = "ARLO", BERRCF = "BERR", STOPCF = "STOPF", NACKCF = "NACKF", ADDRCF = "ADDR" }
+source = "RM0351 Rev 11, 39.9.7 I2C_ISR and 39.9.8 I2C_ICR: writing 1 to each xxxCF bit clears its flag in I2C_ISR"
+
 [[fields]]
 instances = ["RCC"]
 registers = ["AHB1RSTR"]

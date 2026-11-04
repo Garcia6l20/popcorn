@@ -2,7 +2,7 @@
   "counts": {
     "aliases": 0,
     "alternates": 335,
-    "cross_rules": 10,
+    "cross_rules": 37,
     "fields": 9695,
     "irqs": 81,
     "patched_fields": 52,

@@ -399,6 +399,14 @@ struct i2c_state
  *        TIMEOUTA and TIDLE, and while TEXTEN is set it keeps TIMEOUTB, RM0456 65.9.6, RM0481
  *        53.9.6: one warning per instance, model_error under strict_peripherals. The timer state is
  *        saved with the model.
+ *
+ *        An address matched in target mode clears CR2.START, RM0456 65.9.2, RM0481 53.9.2. With
+ *        `i2c_variant::start_cleared_by_address_clear`, the STM32L4, the match leaves START and a
+ *        write of ICR.ADDRCF clears it, RM0351 39.9.2 and 39.9.8 as corrected by ES0250 2.20.7.
+ *        Without `i2c_variant::clear_on_ack`, the STM32L4, CR1 has no ADDRACLR and STOPFACLR: ADDR
+ *        and STOPF set at every match and STOP, RM0351 39.9.1. The STM32L4 kernel clock is the
+ *        CCIPR I2CxSEL selection of the instance, and the Fast-mode Plus drive is
+ *        SYSCFG_CFGR1.I2Cx_FMP, which the model stores.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
@@ -609,8 +617,10 @@ private:
   field_ref                                    own2_mask_;
   field_ref                                    own2_enable_;
   field_ref                                    general_call_;
-  field_ref                                    address_auto_clear_;
-  field_ref                                    stop_auto_clear_;
+  std::optional<field_ref>                     address_auto_clear_;
+  std::optional<field_ref>                     stop_auto_clear_;
+  field_ref                                    address_clear_;
+  bool                                         start_by_address_clear_;
   field_ref                                    nack_;
   field_ref                                    no_stretch_;
   field_ref                                    byte_control_;
@@ -702,12 +712,17 @@ i2c::i2c(
       own1_mode_{field("OAR1", "OA1MODE")}, own1_enable_{field("OAR1", "OA1EN")},
       own2_{field("OAR2", "OA2")}, own2_mask_{field("OAR2", "OA2MSK")},
       own2_enable_{field("OAR2", "OA2EN")}, general_call_{field("CR1", "GCEN")},
-      address_auto_clear_{field("CR1", "ADDRACLR")}, stop_auto_clear_{field("CR1", "STOPFACLR")},
-      nack_{field("CR2", "NACK")}, no_stretch_{field("CR1", "NOSTRETCH")},
-      byte_control_{field("CR1", "SBC")}, timeout_a_{field("TIMEOUTR", "TIMEOUTA")},
-      idle_mode_{field("TIMEOUTR", "TIDLE")}, timeout_enable_{field("TIMEOUTR", "TIMOUTEN")},
-      timeout_b_{field("TIMEOUTR", "TIMEOUTB")}, extend_enable_{field("TIMEOUTR", "TEXTEN")},
-      timeout_flag_{field("ISR", "TIMEOUT")}, control_{reg("CR1")},
+      address_auto_clear_{
+          variant.clear_on_ack ? std::optional{field("CR1", "ADDRACLR")} : std::nullopt},
+      stop_auto_clear_{
+          variant.clear_on_ack ? std::optional{field("CR1", "STOPFACLR")} : std::nullopt},
+      address_clear_{field("ICR", "ADDRCF")},
+      start_by_address_clear_{variant.start_cleared_by_address_clear}, nack_{field("CR2", "NACK")},
+      no_stretch_{field("CR1", "NOSTRETCH")}, byte_control_{field("CR1", "SBC")},
+      timeout_a_{field("TIMEOUTR", "TIMEOUTA")}, idle_mode_{field("TIMEOUTR", "TIDLE")},
+      timeout_enable_{field("TIMEOUTR", "TIMOUTEN")}, timeout_b_{field("TIMEOUTR", "TIMEOUTB")},
+      extend_enable_{field("TIMEOUTR", "TEXTEN")}, timeout_flag_{field("ISR", "TIMEOUT")},
+      control_{reg("CR1")},
       fixed_while_enabled_{
           field("CR1", "NOSTRETCH").mask()
           | field("CR1", "ANFOFF").mask()
@@ -731,6 +746,8 @@ i2c::i2c(
         "an I2C controller alone on the instance, no target next to it");
   }
   expect_register("I2C_AUTOCR", variant.autocr);
+  expect_field("CR1", "ADDRACLR", variant.clear_on_ack);
+  expect_field("CR1", "STOPFACLR", variant.clear_on_ack);
   for(auto const name : {"START", "STOP", "NACK", "PECBYTE"})
   {
     command_set_only_ |= field("CR2", name).mask();
@@ -1354,7 +1371,7 @@ auto i2c::bus_taken() const -> bool
 
 void i2c::stop_flag()
 {
-  if(get(regs_, stop_auto_clear_) == 0)
+  if(not stop_auto_clear_ or get(regs_, *stop_auto_clear_) == 0)
   {
     update(regs_, stop_detected_, 1);
   }
@@ -1713,6 +1730,10 @@ void i2c::clear_written(std::uint32_t, std::uint32_t now)
       update(regs_, flag, 0);
     }
   }
+  if(start_by_address_clear_ and address_clear_.of(now) != 0)
+  {
+    update(regs_, start_, 0);
+  }
   regs_.poke(clear_.offset, 0);
   if(get(regs_, address_matched_) == 0)
   {
@@ -1952,7 +1973,11 @@ auto i2c::phase_ended(i2c_port_entry const& entry) -> std::optional<i2c_answer>
       update(regs_, address_code_, address);
       update(regs_, target_direction_, read);
       update(regs_, nack_, 0);
-      if(get(regs_, address_auto_clear_) == 0)
+      if(not start_by_address_clear_)
+      {
+        update(regs_, start_, 0);
+      }
+      if(not address_auto_clear_ or get(regs_, *address_auto_clear_) == 0)
       {
         update(regs_, address_matched_, 1);
       }

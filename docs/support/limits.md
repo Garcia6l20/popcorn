@@ -804,6 +804,20 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - PE set during a bus hold reads BUSY 1 at once. Silicon waits for the next START.
 - A transfer that meets a hold waits. On silicon it would lose arbitration. A target's ARLO reply
   models that case.
+- An address matched in target mode clears a pending CR2.START on the STM32U5 and STM32H5,
+  RM0456 65.9.2 and RM0481 53.9.2. On the STM32L4 the match leaves START set and a write of
+  ICR.ADDRCF clears it, RM0351 39.9.2 and 39.9.8 as corrected by ES0250 2.20.7.
+- STM32L4 I2C1 to I2C3, RM0351 section 39, run the I2C model without I2C_AUTOCR and without
+  CR1.ADDRACLR and STOPFACLR: ADDR and STOPF set at every match and STOP. The kernel clock is the
+  instance's `RCC_CCIPR` I2CxSEL selection. The Fast-mode Plus drive bits I2Cx_FMP of SYSCFG_CFGR1
+  are stored, the bus timing follows TIMINGR alone.
+- STM32L4 ES0250 2.20.2, the Stop-mode behaviour with WUPEN 0, corrects RM0351 for Stop mode, which
+  the model leaves out. ES0250 2.20.1 (10-bit controller restart), 2.20.3 (SDA setup shorter than a
+  kernel period), 2.20.4 (spurious BERR), 2.20.5 and 2.20.13 (last byte lost in reload mode), 2.20.6
+  (spurious controller transfer after a match with START pending), 2.20.8 (OVR not set on underrun
+  with NOSTRETCH), 2.20.9 (stall after the first byte), 2.20.10 (SDA held low at an SMBus timeout),
+  2.20.11 (Fast-mode Plus not on every pin) and 2.20.12 (I2C3 analog filter needs PC0 and PC1) are
+  silicon effects the model leaves out.
 - STM32L1 I2C1 and I2C2, RM0038 section 26, run as a 7-bit controller transmitter and receiver
   on board targets. The SCL period is Thigh + Tlow from CCR and PCLK1, RM0038 26.6.8, without the
   rise time and the noise filter delay: a START takes 1 period, a byte 9, a STOP 1. FREQ, CCR,

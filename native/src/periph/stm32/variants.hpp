@@ -690,12 +690,25 @@ struct i2c_variant
 {
   /** @brief The peripheral has the `I2C_AUTOCR` register and its trigger and DMA fields. */
   bool autocr = true;
+  /** @brief CR1 has ADDRACLR and STOPFACLR, which keep ADDR and STOPF clear. */
+  bool clear_on_ack = true;
+  /**
+   * @brief A write of ICR.ADDRCF clears CR2.START, RM0351 39.9.2 and 39.9.8 as corrected by
+   *        ES0250 2.20.7. Otherwise an address matched in target mode clears it, RM0456 65.9.2.
+   */
+  bool start_cleared_by_address_clear = false;
 };
 
 /** @brief STM32U5 I2C, RM0456 65.7.14. */
 inline constexpr i2c_variant u5_i2c{};
 /** @brief STM32H5 I2C, RM0481 has no `I2C_AUTOCR`. */
 inline constexpr i2c_variant h5_i2c{.autocr = false};
+/** @brief STM32L4 I2C1 to I2C3, RM0351 39.9: no `I2C_AUTOCR`, no ADDRACLR and STOPFACLR, the
+ *         kernel clock the CCIPR I2CxSEL selection. */
+inline constexpr i2c_variant l4_i2c{
+    .autocr                         = false,
+    .clear_on_ack                   = false,
+    .start_cleared_by_address_clear = true};
 
 /** @brief Differences between the I2C peripherals of RM0038 section 26 the model rows serve. */
 struct i2c_v1_variant

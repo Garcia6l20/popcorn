@@ -3106,7 +3106,7 @@ TEST_CASE("a START the firmware requests during the controller's transfer is sen
     auto const base = r.now() + us;
     r.start(own, false, base, 1);
     r.stop(base + target_ps + 20 * us, 2);
-    r.run_until(base + target_ps / 2);
+    r.run_until(base + target_ps + 5 * us);
     b.command(0x38, 0, false, true);
     CHECK(due_of_kind(*r.f, "I2C1", 0) == std::nullopt);
     r.run_until(base + target_ps + 10 * us);
@@ -3117,6 +3117,26 @@ TEST_CASE("a START the firmware requests during the controller's transfer is sen
     REQUIRE(due.has_value());
     CHECK(*due > base + target_ps + 20 * us);
     CHECK(r.get("ISR", "BUSY") == 1);
+  }
+}
+
+TEST_CASE("RM0456 65.9.2 and RM0481 53.9.2: a target address match clears a pending START")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen(own, true);
+    write_timing(b);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.run_until(base + target_ps / 2);
+    b.command(0x38, 0, false, true);
+    CHECK(r.get("CR2", "START") == 1);
+    r.run_until(base + target_ps + r.period());
+    CHECK(r.get("ISR", "ADDR") == 1);
+    CHECK(r.get("CR2", "START") == 0);
   }
 }
 
