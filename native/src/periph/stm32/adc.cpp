@@ -157,6 +157,9 @@ struct adc_inputs
   std::string_view             instance;
   std::optional<std::uint32_t> vrefint;
   std::optional<std::uint32_t> sensor;
+  std::string_view             irq{};
+  std::uint32_t                externals{};
+  std::string_view             external_names{};
 };
 
 struct threshold_names
@@ -235,6 +238,10 @@ struct u5_adc
   static constexpr address          vrefint_cal_address = 0x0BFA'07A5;
   static constexpr std::uint32_t    factory_vdda_mv     = 3000;
   static constexpr std::string_view externals           = "from 1 to 17";
+  static constexpr std::size_t      channel_count       = 20;
+  static constexpr bool             bulb                = true;
+  static constexpr bool             sampling_trigger    = true;
+  static constexpr std::string_view differential        = "DIFSEL";
   static constexpr std::string_view sampling_plus       = {};
   static constexpr std::string_view ratio_field         = "OSR";
   static constexpr std::string_view filter_register     = "ADC_HTR1";
@@ -296,10 +303,10 @@ struct u5_adc
     return std::uint64_t{result} << (2 * resolution);
   }
 
-  [[nodiscard]] static constexpr auto trigger_latency_quarters(std::uint32_t divider, std::uint32_t)
+  [[nodiscard]] static constexpr auto trigger_latency_eighths(std::uint32_t divider, std::uint32_t)
       -> std::uint32_t
   {
-    return 4u * (divider == 1 ? 3u : 3u * divider + 1u);
+    return 8u * (divider == 1 ? 3u : 3u * divider + 1u);
   }
 };
 
@@ -348,6 +355,10 @@ struct h5_adc
   static constexpr address          vrefint_cal_address = 0x08FF'F810;
   static constexpr std::uint32_t    factory_vdda_mv     = 3300;
   static constexpr std::string_view externals           = "0 to 15, 18 or 19";
+  static constexpr std::size_t      channel_count       = 20;
+  static constexpr bool             bulb                = true;
+  static constexpr bool             sampling_trigger    = true;
+  static constexpr std::string_view differential        = "DIFSEL";
   static constexpr std::string_view sampling_plus       = "SMPPLUS";
   static constexpr std::uint32_t    sampling_plus_half  = 7;
   static constexpr std::string_view ratio_field         = "OVSR";
@@ -431,10 +442,10 @@ struct h5_adc
   }
 
   [[nodiscard]] static constexpr auto
-      trigger_latency_quarters(std::uint32_t, std::uint32_t clock_mode) -> std::uint32_t
+      trigger_latency_eighths(std::uint32_t, std::uint32_t clock_mode) -> std::uint32_t
   {
-    constexpr std::array<std::uint32_t, 4> quarters{18, 10, 10, 9};
-    return quarters[clock_mode & 3u];
+    constexpr std::array<std::uint32_t, 4> eighths{36, 20, 20, 18};
+    return eighths[clock_mode & 3u];
   }
 };
 
@@ -911,6 +922,7 @@ private:
   [[nodiscard]] auto length() const -> std::size_t;
   [[nodiscard]] auto busy() const -> bool;
   [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
+  [[nodiscard]] auto is_external(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto sample(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto dma() const -> dma_mode;
@@ -990,17 +1002,18 @@ private:
   std::optional<field_ref>                         injected_oversampling_;
   std::optional<field_ref>                         sampling_plus_;
   std::optional<field_ref>                         option_switch_;
-  field_ref                                        bulb_;
-  field_ref                                        sampling_trigger_;
+  std::optional<field_ref>                         bulb_;
+  std::optional<field_ref>                         sampling_trigger_;
   field_ref                                        triggered_oversampling_;
-  field_ref                                        differential_;
+  reg_ref                                          differential_;
+  std::optional<field_ref>                         differential_field_;
   std::array<field_ref, channels>                  sampling_;
   std::array<offset_fields, offsets>               offsets_;
   std::optional<std::array<field_ref, channels>>   preselection_;
   field_ref                                        watchdog1_;
   field_ref                                        watchdog1_single_;
   field_ref                                        watchdog1_channel_;
-  field_ref                                        watchdog1_filter_;
+  std::optional<field_ref>                         watchdog1_filter_;
   std::array<field_ref, watchdogs>                 watchdog_flags_;
   std::array<field_ref, watchdogs>                 watchdog_low_;
   std::array<field_ref, watchdogs>                 watchdog_high_;
@@ -1048,8 +1061,9 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
     : base{ctx, desc, Traits::unit_name, adc_writes<Traits>}, regs_{ctx.regs}, supply_{supply},
       inputs_{wiring<Traits>(desc.name)}, kernel_{ctx.clock.domain(lower(desc.name))},
       hclk_{ctx.clock.domain("hclk")}, sysclk_{ctx.clock.domain("sysclk")},
-      line_{irq(desc.name + "_IRQn")}, request_{ctx.peers, lower(desc.name) + "_dma"},
-      isr_{reg("ADC_ISR")}, enable_{field("ADC_CR", "ADEN")}, disable_{field("ADC_CR", "ADDIS")},
+      line_{irq(inputs_.irq.empty() ? desc.name + "_IRQn" : std::string{inputs_.irq})},
+      request_{ctx.peers, lower(desc.name) + "_dma"}, isr_{reg("ADC_ISR")},
+      enable_{field("ADC_CR", "ADEN")}, disable_{field("ADC_CR", "ADDIS")},
       start_{field("ADC_CR", "ADSTART")}, stop_{field("ADC_CR", "ADSTP")},
       injected_start_{field("ADC_CR", "JADSTART")}, regulator_{field("ADC_CR", "ADVREGEN")},
       deep_power_down_{field("ADC_CR", "DEEPPWD")}, calibrate_{field("ADC_CR", "ADCAL")},
@@ -1081,12 +1095,17 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
           not Traits::option_switch.empty(),
           Traits::option_register,
           Traits::option_switch)},
-      bulb_{field("ADC_CFGR2", "BULB")}, sampling_trigger_{field("ADC_CFGR2", "SMPTRIG")},
-      triggered_oversampling_{field("ADC_CFGR2", "TROVS")},
-      differential_{field("ADC_DIFSEL", "DIFSEL")}, watchdog1_{field(Traits::config, "AWD1EN")},
+      bulb_{optional_field(Traits::bulb, "ADC_CFGR2", "BULB")},
+      sampling_trigger_{optional_field(Traits::sampling_trigger, "ADC_CFGR2", "SMPTRIG")},
+      triggered_oversampling_{field("ADC_CFGR2", "TROVS")}, differential_{reg("ADC_DIFSEL")},
+      differential_field_{
+          optional_field(not Traits::differential.empty(), "ADC_DIFSEL", Traits::differential)},
+      watchdog1_{field(Traits::config, "AWD1EN")},
       watchdog1_single_{field(Traits::config, "AWD1SGL")},
-      watchdog1_channel_{field(Traits::config, "AWD1CH")},
-      watchdog1_filter_{field(Traits::filter_register, Traits::filter_field)}
+      watchdog1_channel_{field(Traits::config, "AWD1CH")}, watchdog1_filter_{optional_field(
+                                                               not Traits::filter_field.empty(),
+                                                               Traits::filter_register,
+                                                               Traits::filter_field)}
 {
   bonded_channels_ = desc.bonded_channels.value_or(external_channels(analog_bank::a));
   if((bonded_channels_ & ~external_channels(analog_bank::a)) != 0)
@@ -1118,7 +1137,7 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
   {
     preselection_.emplace();
   }
-  for(std::size_t index = 0; index < channels; ++index)
+  for(std::size_t index = 0; index < Traits::channel_count; ++index)
   {
     if(preselection_)
     {
@@ -1216,7 +1235,7 @@ template <typename Traits> auto adc_model<Traits>::flags() const -> std::uint32_
 template <typename Traits> auto adc_model<Traits>::sampling() const -> std::uint32_t
 {
   auto const which = channel();
-  auto const code  = which < channels ? get(regs_, sampling_[which]) : 0u;
+  auto const code  = which < Traits::channel_count ? get(regs_, sampling_[which]) : 0u;
   if constexpr(not Traits::sampling_plus.empty())
   {
     if(code == 0 and get(regs_, *sampling_plus_) != 0)
@@ -1289,11 +1308,14 @@ auto adc_model<Traits>::external(analog_channel channel) const -> std::size_t
         desc_.name, 0, "bank",
         std::format("bank A, the ADC has one bank, not channel {}b", channel.number));
   }
-  if(not Traits::external(channel.number))
+  if(not is_external(channel.number))
   {
     throw config_error(
         desc_.name, 0, "channel",
-        std::format("an external channel {}, not {}", Traits::externals, channel.number));
+        std::format(
+            "an external channel {}, not {}",
+            inputs_.external_names.empty() ? Traits::externals : inputs_.external_names,
+            channel.number));
   }
   return channel.number;
 }
@@ -1329,7 +1351,20 @@ auto adc_model<Traits>::external_channels(analog_bank bank) const -> std::uint32
     }
     return bits;
   }();
-  return bank == analog_bank::a ? mask : 0;
+  if(bank != analog_bank::a)
+  {
+    return 0;
+  }
+  return inputs_.externals != 0 ? inputs_.externals : mask;
+}
+
+template <typename Traits> auto adc_model<Traits>::is_external(std::uint32_t channel) const -> bool
+{
+  if(inputs_.externals != 0)
+  {
+    return channel < channels and (inputs_.externals >> channel & 1u) != 0;
+  }
+  return Traits::external(channel);
 }
 
 template <typename Traits> auto adc_model<Traits>::vdda_mv() const -> std::uint32_t
@@ -1551,11 +1586,11 @@ template <typename Traits> void adc_model<Traits>::prepare()
   {
     unmodelled(auto_delay_logged_, Traits::config, "AUTDLY: auto-delayed conversions");
   }
-  if(get(regs_, bulb_) != 0)
+  if(bulb_ and get(regs_, *bulb_) != 0)
   {
     unmodelled(bulb_logged_, "ADC_CFGR2", "BULB: bulb sampling mode");
   }
-  if(get(regs_, sampling_trigger_) != 0)
+  if(sampling_trigger_ and get(regs_, *sampling_trigger_) != 0)
   {
     unmodelled(
         sampling_trigger_logged_, "ADC_CFGR2", "SMPTRIG: sampling time control trigger mode");
@@ -1573,14 +1608,16 @@ template <typename Traits> void adc_model<Traits>::prepare()
   {
     unmodelled(mdf_logged_, Traits::config, "DMNGT 10: the MDF data path");
   }
-  if(Traits::filter_gates_dma
-     and get(regs_, watchdog1_) != 0
-     and get(regs_, watchdog1_filter_) != 0
-     and dma() != dma_mode::off)
+  if constexpr(Traits::filter_gates_dma)
   {
-    unmodelled(
-        watchdog_filter_dma_logged_, "ADC_HTR1",
-        "AWDFILT1 with DMNGT: DMA requests gated by the AWD1 window");
+    if(get(regs_, watchdog1_) != 0
+       and get(regs_, *watchdog1_filter_) != 0
+       and dma() != dma_mode::off)
+    {
+      unmodelled(
+          watchdog_filter_dma_logged_, "ADC_HTR1",
+          "AWDFILT1 with DMNGT: DMA requests gated by the AWD1 window");
+    }
   }
   for(std::size_t rank = 0; rank < length(); ++rank)
   {
@@ -1618,7 +1655,9 @@ template <typename Traits> void adc_model<Traits>::begin_rank(std::uint64_t star
 
 template <typename Traits> void adc_model<Traits>::check_unmodelled(std::uint32_t channel)
 {
-  if(channel < channels and (get(regs_, differential_) >> channel & 1u) != 0)
+  auto const differential =
+      differential_field_ ? get(regs_, *differential_field_) : regs_.peek(differential_.offset);
+  if(channel < channels and (differential >> channel & 1u) != 0)
   {
     unmodelled(differential_logged_, "ADC_DIFSEL", "DIFSEL: differential conversion");
   }
@@ -1801,7 +1840,7 @@ void adc_model<Traits>::watch(std::uint32_t channel, std::uint32_t result)
     {
       state_.filter_count =
           out ? std::min<std::uint8_t>(state_.filter_count + 1u, max_filter_count) : 0;
-      out = state_.filter_count > get(regs_, watchdog1_filter_);
+      out = state_.filter_count > (watchdog1_filter_ ? get(regs_, *watchdog1_filter_) : 0u);
     }
     if(out)
     {
@@ -1996,7 +2035,7 @@ auto adc_model<Traits>::trigger_latency_ps(std::uint64_t at_ps) -> std::uint64_t
   }
   return edge
        + cycles_ps(
-             Traits::trigger_latency_quarters(clock.divider, mode), 4, clock.divider, clock.hz);
+             Traits::trigger_latency_eighths(clock.divider, mode), 8, clock.divider, clock.hz);
 }
 
 template <typename Traits>
@@ -2164,7 +2203,7 @@ auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
              ? at_vdda<Traits>(calibration(Traits::ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
              : 0u;
   }
-  if(Traits::external(channel) and not option_open(channel))
+  if(is_external(channel) and not option_open(channel))
   {
     return code_of<Traits>(state_.input_uv[channel], supply_.vdda_mv);
   }

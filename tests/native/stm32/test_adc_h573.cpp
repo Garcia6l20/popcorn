@@ -365,6 +365,15 @@ TEST_CASE("a conversion takes (SMP + TSAR) ADC clock cycles, SMPPLUS makes SMP 0
   }
 }
 
+TEST_CASE("channel 19 samples for its ADC_SMPR2.SMP19 time, 6.5 cycles at code 001")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(19, 1'000'000);
+  r.write("ADC1", "ADC_SMPR2", 1u << 27);
+  r.ends_at(r.start(19) + 19 * cycle_ps);
+}
+
 TEST_CASE("H573 board: ADRDY sets 35 cycles after ADEN with ADVREGEN, 45 without")
 {
   for(auto const& [regulator, cycles] : {
