@@ -3,9 +3,10 @@
 The gate runs every example on its `conftest.py` part, then once more on each extra part of
 `EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped U5 and
 H5 parts, and of the STM32L1 parts of `L1_GROUP_A`, under at least one example. The other shipped
-STM32L1 names, every order code of the line, carry attach and reach evidence only, the shipped
-STM32L4 parts attach evidence only. An extra run moves every machine of the example onto its
-part, so each of the example's ELFs fits each extra part.
+STM32L1 names, every order code of the line, carry attach and reach evidence only. The shipped
+STM32L4 parts carry attach evidence only, apart from STM32L476RCTx, the `stm32l476/usb_cdc`
+part. An extra run moves every machine of the example onto its part, so each of the example's
+ELFs fits each extra part.
 `python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>` line per
 extra run.
 """
@@ -403,6 +404,13 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         "STM32L152RETx",
         _L1_XE_EXTRA,
         pins=("PA11", "PA12", "PH0"),
+        adc_channels=(),
+        flash_kib=None,
+    ),
+    "stm32l476/usb_cdc": ExampleParts(
+        "STM32L476RCTx",
+        (),
+        pins=("PA11", "PA12"),
         adc_channels=(),
         flash_kib=None,
     ),

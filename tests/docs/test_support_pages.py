@@ -191,7 +191,8 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert len(by_state["examples"] & set(L1_NAMES)) == 3
     assert len(by_state["class"] & set(L1_NAMES)) == L1_CLASS
     assert len(by_state["attaches"] & set(L1_NAMES)) == L1_ATTACHES
-    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES)
+    assert by_state["tested"] & set(L4_NAMES) == {"STM32L476RCTx"}
+    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES) - {"STM32L476RCTx"}
 
 
 @pytest.mark.timeout(60)
@@ -299,7 +300,13 @@ def test_a_part_that_only_the_flash_geometry_cases_run_is_never_tested(generated
 
 
 def test_the_tested_parts_are_the_conftest_parts_of_the_examples() -> None:
-    assert {"STM32U575QGIx", "STM32H573AIIx", "STM32L152RETx", "STM32L152RBTx"} == TESTED_PARTS
+    assert {
+        "STM32U575QGIx",
+        "STM32H573AIIx",
+        "STM32L152RETx",
+        "STM32L152RBTx",
+        "STM32L476RCTx",
+    } == TESTED_PARTS
     assert {
         part for row in EXAMPLE_PARTS.values() for part in (row.conftest, *row.also)
     } == TESTED_PARTS
@@ -355,7 +362,9 @@ def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated:
     assert {cells[name][1] for name in L1_NAMES} == {"STM32L1"}
     families = {cells[name][1] for name in cells if name not in L1_NAMES}
     assert families == {"STM32U5", "STM32H5", "STM32L4"}
-    assert [cells[name][8] for name in L4_NAMES] == ["attaches"] * len(L4_NAMES)
+    assert [cells[name][8] for name in L4_NAMES] == [
+        "tested" if name == "STM32L476RCTx" else "attaches" for name in L4_NAMES
+    ]
     assert cells["STM32L152RETx"][8] == "tested"
     assert cells["STM32L152RCTxA"][8].startswith("examples: ")
 

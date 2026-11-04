@@ -11,9 +11,11 @@ from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import (
     CPU_FLAGS,
     CPU_FLAGS_M3,
+    CPU_FLAGS_M4F,
     add_c_flags,
     checked_program,
     cortex_m3,
+    cortex_m4f,
     cortex_m33,
     prebuilt_only,
     toolchain_found,
@@ -71,10 +73,12 @@ cortex_m33_newlib_softfp = _newlib_preset(
     "cortex-m33-none-eabi-newlib-softfp", cortex_m33, SECURE_CPU_FLAGS
 )
 cortex_m3_newlib = _newlib_preset("cortex-m3-none-eabi-newlib", cortex_m3, CPU_FLAGS_M3)
+cortex_m4f_newlib = _newlib_preset("cortex-m4f-none-eabi-newlib", cortex_m4f, CPU_FLAGS_M4F)
 
 _NEWLIB_PRESETS = {
     cortex_m33.name: ("examples", cortex_m33_newlib, EXAMPLES_PREFIX),
     cortex_m3.name: ("examples-m3", cortex_m3_newlib, f"{EXAMPLES_PREFIX}-m3"),
+    cortex_m4f.name: ("examples-m4f", cortex_m4f_newlib, f"{EXAMPLES_PREFIX}-m4f"),
 }
 
 _envs: dict[str, Environment] = {}
@@ -97,9 +101,9 @@ def example_env(preset: CrossPreset = cortex_m33) -> Environment | None:
     None without the cross toolchain.
 
     The Cortex-M33 environment builds under `example-firmware`, the Cortex-M3 one under
-    `example-firmware-m3`.
+    `example-firmware-m3`, the Cortex-M4F one under `example-firmware-m4f`.
 
-    @throws SystemExit @p preset is neither cortex_m33 nor cortex_m3.
+    @throws SystemExit @p preset is not one of cortex_m33, cortex_m3 and cortex_m4f.
     """
     entry = _NEWLIB_PRESETS.get(preset.name)
     if entry is None:

@@ -140,11 +140,17 @@ def test_the_example_presets_link_newlib_nano_for_their_cpu() -> None:
     assert "-mcpu=cortex-m3" in examples.cortex_m3_newlib.extra_compile_flags
     assert "-specs=nano.specs" in examples.cortex_m3_newlib.extra_link_flags
     assert "-mfloat-abi=soft" in examples.cortex_m3_newlib.extra_link_flags
+    assert examples.cortex_m4f_newlib.arch == "armv7e-m"
+    assert "-mcpu=cortex-m4" in examples.cortex_m4f_newlib.extra_compile_flags
+    assert "-mfpu=fpv4-sp-d16" in examples.cortex_m4f_newlib.extra_compile_flags
+    assert "-mfloat-abi=hard" in examples.cortex_m4f_newlib.extra_compile_flags
+    assert "-specs=nano.specs" in examples.cortex_m4f_newlib.extra_link_flags
+    assert "-mfloat-abi=hard" in examples.cortex_m4f_newlib.extra_link_flags
 
 
-def test_an_example_preset_other_than_the_m33_and_m3_is_refused() -> None:
-    with pytest.raises(SystemExit, match="no example environment for the preset cortex-m4f"):
-        examples.example_env(firmware.cortex_m4f)
+def test_an_example_preset_other_than_the_m33_m3_and_m4f_is_refused() -> None:
+    with pytest.raises(SystemExit, match="no example environment for the preset other"):
+        examples.example_env(replace(firmware.cortex_m3, name="other"))
 
 
 def test_a_preset_without_a_build_prefix_is_refused() -> None:
