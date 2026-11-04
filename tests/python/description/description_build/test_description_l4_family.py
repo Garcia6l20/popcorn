@@ -1120,3 +1120,50 @@ def test_spi_cr1_bit_11_is_crcl(name: str) -> None:
         registers = _registers(description, unit)
         cr1 = {f.name: (f.lsb, f.width) for f in registers["CR1"].fields}
         assert cr1["CRCL"] == (11, 1) and "DFF" not in cr1
+
+
+ADC_ALIASES = {
+    "ISR": "ADC_ISR",
+    "CFGR": "ADC_CFGR",
+    "SMPR1": "ADC_SMPR1",
+    "OFR4": "ADC_OFR4",
+    "JDR1": "ADC_JDR1",
+    "DIFSEL": "ADC_DIFSEL",
+}
+"""RM0351 18.7: register names the H5 ADC model looks up by their ADC_ spelling."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_adcs_take_the_rm0351_18_7_and_18_8_names_and_fields(name: str) -> None:
+    description = _description(name)
+    for unit in ("ADC1", "ADC2", "ADC3"):
+        registers = _registers(description, unit)
+        assert {n: registers[n].aliases for n in ADC_ALIASES} == {
+            n: [alias] for n, alias in ADC_ALIASES.items()
+        }
+        assert {f.on_write for f in registers["ISR"].fields} == {WriteEffect.ONE_TO_CLEAR}
+        assert len(registers["ISR"].fields) == 11
+        cfgr = {f.name: (f.lsb, f.width) for f in registers["CFGR"].fields}
+        assert cfgr["AWD1CH"] == (26, 5) and cfgr["EXTSEL"] == (6, 4)
+        assert not {"AWDCH1CH", "DFSDMCFG"} & set(cfgr)
+        assert "SMPPLUS" not in {f.name for f in registers["SMPR1"].fields}
+        for n in range(1, 5):
+            assert {f.name for f in registers[f"OFR{n}"].fields} == {
+                "OFFSET",
+                "OFFSET_CH",
+                "OFFSET_EN",
+            }
+            assert [f.name for f in registers[f"JDR{n}"].fields] == ["JDATA"]
+        difsel = {f.name: f.acc for f in registers["DIFSEL"].fields}
+        assert difsel["DIFSEL_0"] == Access.READ_ONLY
+        assert difsel["DIFSEL_16_18"] == Access.READ_WRITE
+    common = _registers(description, "ADC_Common")
+    assert {n: common[n].aliases for n in ("CSR", "CCR", "CDR")} == {
+        "CSR": ["ADC_CSR"],
+        "CCR": ["ADC_CCR"],
+        "CDR": ["ADC_CDR"],
+    }
+    assert common["CSR"].fields[0].name == "ADRDY_MST"
+    irqs = {unit: _peripheral(description, unit).irqs for unit in ("ADC1", "ADC2", "ADC3")}
+    assert irqs == {"ADC1": [18], "ADC2": [18], "ADC3": [47]}

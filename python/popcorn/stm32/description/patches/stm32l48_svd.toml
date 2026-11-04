@@ -1,5 +1,5 @@
 format = 1
-source = "ST's STM32L486 SVD against RM0351 Rev 11: the SVD describes the STM32L4A6 superset, the STM32L485 and L486 lines take it without the STM32L49x/L4Ax blocks. RM0351 Rev 11, 13.3 Table 61: position 79 is the AES global interrupt on STM32L48x, CMSIS stm32l485xx.h and stm32l486xx.h define AES_IRQn = 79, and the SVD gives the AES block no interrupt, so [irqs] adds it"
+source = "ST's STM32L486 SVD against RM0351 Rev 11: the SVD describes the STM32L4A6 superset, the STM32L485 and L486 lines take it without the STM32L49x/L4Ax blocks. RM0351 Rev 11, 13.3 Table 61: position 79 is the AES global interrupt on STM32L48x, CMSIS stm32l485xx.h and stm32l486xx.h define AES_IRQn = 79, and the SVD gives the AES block no interrupt, so [irqs] adds it. Table 61 position 18 is the ADC1 and ADC2 global interrupt and 47 the ADC3 global interrupt, the SVD gives both to each of ADC1, ADC2 and ADC3, so [irqs] drops them and adds 18 to ADC1 and ADC2, 47 to ADC3"
 
 [match]
 parts = ["STM32L48*"]
@@ -10,5 +10,10 @@ drop = ["CAN2", "CRS", "DCMI", "DMA2D", "GPIOI", "HASH", "I2C4"]
 source = "RM0351 Rev 11, 2.2.2 Table 1: CAN2, CRS, DCMI, DMA2D, GPIOI, HASH and I2C4 are STM32L49x/L4Ax blocks, absent on STM32L47x/L48x. DS10199 Rev 8 Table 2 gives STM32L486 one CAN, three I2C, no camera interface, no Chrom-ART and no HASH. CMSIS stm32l485xx.h and stm32l486xx.h define none of them and stop at FPU_IRQn = 81. The SVD gives the blocks IRQs 82 to 90, which [irqs] drops"
 
 [irqs]
-drop = ["CRS", "I2C4_EV", "I2C4_ER", "DCMI", "CAN2_TX", "CAN2_RX0", "CAN2_RX1", "CAN2_SCE", "DMA2D"]
-add = [{ number = 79, name = "AES", peripheral = "AES" }]
+drop = ["CRS", "I2C4_EV", "I2C4_ER", "DCMI", "CAN2_TX", "CAN2_RX0", "CAN2_RX1", "CAN2_SCE", "DMA2D", "ADC1_2", "ADC3"]
+add = [
+  { number = 79, name = "AES", peripheral = "AES" },
+  { number = 18, name = "ADC1_2", peripheral = "ADC1" },
+  { number = 47, name = "ADC3", peripheral = "ADC3" },
+]
+share = [{ name = "ADC1_2", peripheral = "ADC2" }]

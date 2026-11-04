@@ -303,6 +303,7 @@ for program, source in (
     ("stm32-iwdg-l4", "test_iwdg_l4.cpp"),
     ("stm32-crc-l4", "test_crc_l4.cpp"),
     ("stm32-rtc-l4", "test_rtc_l4.cpp"),
+    ("stm32-adc-l4", "test_adc_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

@@ -285,6 +285,15 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto adc_common_h5_factory() -> model_factory;
 
 /**
+ * @brief Factory of the STM32L47x and STM32L48x ADC1, ADC2 and ADC3 model, RM0351 section 18.
+ * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
+ */
+[[nodiscard]] auto adc_l4_factory(supply_options supply) -> model_factory;
+
+/** @brief Factory of the STM32L4 ADC_Common register model, RM0351 section 18.8. */
+[[nodiscard]] auto adc_common_l4_factory() -> model_factory;
+
+/**
  * @brief Factory of the STM32L1 ADC model, RM0038 section 12.
  * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
  * @param variant What differs between the ADC of the categories the row serves.

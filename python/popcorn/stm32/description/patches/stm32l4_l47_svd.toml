@@ -1,5 +1,5 @@
 format = 1
-source = "ST's STM32L471, L475 and L476 SVDs against RM0351 Rev 11: blocks the SVDs list that no STM32L47x carries"
+source = "ST's STM32L471, L475 and L476 SVDs against RM0351 Rev 11: blocks the SVDs list that no STM32L47x carries, and the ADC1_2 interrupt, position 18 of 13.3 Table 61, ADC1 and ADC2 global interrupt, which the SVDs give to ADC_Common only, so [irqs] shares it with ADC1 and ADC2"
 
 [match]
 parts = ["STM32L47*"]
@@ -11,3 +11,7 @@ source = "RM0351 Rev 11, 2.2.2 Table 1: 0x4000 6000 is reserved and no DCMI is a
 
 [irqs]
 drop = ["CRS"]
+share = [
+  { name = "ADC1_2", peripheral = "ADC1" },
+  { name = "ADC1_2", peripheral = "ADC2" },
+]

@@ -274,6 +274,32 @@ On the STM32L1, RM0038 section 12:
   derived from two typicals, inferred. The L100 parts carry the words though their datasheets
   give no TS_CAL, inferred.
 
+On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 model:
+
+- The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once, a model_error under
+  strict_peripherals. ADC1, ADC2 and ADC3 convert independently. `ADC_CDR` is storage.
+  `ADC_CSR` reads the `ADC_ISR` bits 10:0 of ADC1 at its bits 10:0 and of ADC2 at its bits
+  26:16, RM0351 18.8.1. ADC3 has no `ADC_CSR` bits.
+- `ADC_DR` holds one result. Under OVRMOD 0 a result that finds EOC set sets OVR and is
+  discarded, and so is every result while OVR stays set, RM0351 18.4.26.
+- ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD clear.
+- VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`. The ADC2 channels 17 and 18
+  and the ADC3 channels 14 and 15, the DAC1 outputs, read 0.
+- The trigger from EXTI line 11 reaches the ADC whatever the EXTI interrupt configuration, ES0250
+  2.8.13 requires the line enabled as an interrupt and its pending bit cleared.
+- LDM, STM, LDRD and STRD accesses to the ADC registers complete as single accesses, ES0250 2.8.3
+  and 2.8.15 list them as not supported.
+- ES0250 2.8.10, the slave data shift in dual regular simultaneous mode, has no counterpart: the
+  dual modes are not modelled.
+- `EXTSEL` 8 and 10, TIM8_TRGO2 and TIM1_TRGO2, have no source and are logged once, a model_error
+  under strict_peripherals. `EXTSEL` 6 takes EXTI line 11 from the line input, a pin edge
+  counting at its own time.
+- At CKMODE 00 a trigger waits for the next ADC clock edge, counted from virtual time 0, then
+  tLATR is 1.5 ADC clock cycles, so it lies in the 1.5 to 2.5 cycles of DS10198 Table 76, inferred.
+  At CKMODE 01, 10 and 11 tLATR is the Table 76 maximum, 2, 2.25 and 2.125 cycles.
+- The factory TS_CAL1 and VREFINT_CAL words are the datasheet typical values of the L4 patch,
+  inferred.
+
 ## CRC
 
 Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crc.cpp)

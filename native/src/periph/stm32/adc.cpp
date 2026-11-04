@@ -99,6 +99,26 @@ enum class h5_regular_trigger : std::uint8_t
   lptim2_ch1 = 19,
 };
 
+enum class l4_regular_trigger : std::uint8_t
+{
+  tim1_oc1   = 0,
+  tim1_oc2   = 1,
+  tim1_oc3   = 2,
+  tim2_oc2   = 3,
+  tim3_trgo  = 4,
+  tim4_oc4   = 5,
+  exti11     = 6,
+  tim8_trgo  = 7,
+  tim8_trgo2 = 8,
+  tim1_trgo  = 9,
+  tim1_trgo2 = 10,
+  tim2_trgo  = 11,
+  tim4_trgo  = 12,
+  tim6_trgo  = 13,
+  tim15_trgo = 14,
+  tim3_oc4   = 15,
+};
+
 using wide = unsigned __int128;
 
 [[nodiscard]] constexpr auto
@@ -449,6 +469,144 @@ struct h5_adc
   }
 };
 
+/**
+ * @brief Family traits of the STM32L47x and STM32L48x ADC1, ADC2 and ADC3, `aditf5_v2_0_Cube`,
+ *        RM0351 section 18: register names, 12-bit codes, the sampling times of RM0351 18.4.12
+ *        and the SAR times of Table 113 in half ADC clock cycles, the EXTSEL map of Table 111,
+ *        tLATR and the ADC clock range of DS10198 Table 76, the factory words of DS10198 Tables 8
+ *        and 9, the ADC_Common block with CKMODE, CH17SEL and CH18SEL, and a single ADC_DR.
+ */
+struct l4_adc
+{
+  using sequence     = rank_sequence;
+  using trigger_enum = l4_regular_trigger;
+
+  static constexpr std::string_view unit_name          = "ADC";
+  static constexpr std::string_view config             = "ADC_CFGR";
+  static constexpr std::string_view common_unit        = "ADC_Common";
+  static constexpr std::string_view common_register    = "ADC_CCR";
+  static constexpr std::string_view common_vrefint     = "VREFEN";
+  static constexpr std::string_view common_sensor      = "CH17SEL";
+  static constexpr std::string_view common_prescaler   = "PRESC";
+  static constexpr std::string_view common_clock_mode  = "CKMODE";
+  static constexpr std::string_view common_dual        = "DUAL";
+  static constexpr std::string_view common_status      = "ADC_CSR";
+  static constexpr std::string_view status_master      = "ADC1";
+  static constexpr std::string_view status_slave       = "ADC2";
+  static constexpr std::uint32_t    status_flags       = 0x7FF;
+  static constexpr unsigned         status_slave_shift = 16;
+  static constexpr bool             regulator_flag     = false;
+  static constexpr std::size_t      result_depth       = 1;
+  static constexpr bool             overrun_flush      = false;
+  static constexpr bool             dma_end_stops      = false;
+  /** @brief A trigger at CKMODE 00 waits for the next ADC clock edge, inferred from DS10198. */
+  static constexpr bool             trigger_waits_edge  = true;
+  static constexpr ready_pair       ready_cycles        = std::nullopt;
+  static constexpr std::uint32_t    result_mask         = 0xFFFF;
+  static constexpr unsigned         bits                = 12;
+  static constexpr address          ts_cal1_address     = 0x1FFF'75A8;
+  static constexpr address          vrefint_cal_address = 0x1FFF'75AA;
+  static constexpr std::uint32_t    factory_vdda_mv     = 3000;
+  static constexpr std::string_view externals           = "1 to 16";
+  static constexpr std::size_t      channel_count       = 19;
+  static constexpr bool             bulb                = false;
+  static constexpr bool             sampling_trigger    = false;
+  static constexpr std::string_view differential        = {};
+  static constexpr std::string_view sampling_plus       = {};
+  static constexpr std::string_view ratio_field         = "OVSR";
+  static constexpr std::string_view filter_register     = {};
+  static constexpr std::string_view filter_field        = {};
+  static constexpr bool             filter_gates_dma    = false;
+  static constexpr bool             preselection        = false;
+  static constexpr bool             gain                = false;
+  static constexpr bool             left_shift          = false;
+  static constexpr bool             low_frequency       = false;
+  static constexpr std::string_view align               = "ALIGN";
+  static constexpr std::string_view offset_enable       = "OFFSET_EN";
+  static constexpr std::string_view injected_oversample = "JOVSE";
+  static constexpr std::string_view option_register     = {};
+  static constexpr std::string_view option_switch       = {};
+  static constexpr std::string_view option_owner        = {};
+  static constexpr std::uint32_t    option_channel      = 0;
+  static constexpr std::string_view cite_option         = {};
+  static constexpr std::string_view cite_clock_mode     = "RM0351 18.8.2";
+  static constexpr std::uint64_t    min_hz              = 140'000;
+  static constexpr std::uint64_t    max_hz              = 80'000'000;
+  static constexpr std::string_view clock_range         = "0.14 to 80 MHz";
+  static constexpr std::string_view cite_control        = "RM0351 18.4.10";
+  static constexpr std::string_view cite_discontinuous  = "RM0351 18.4.20";
+
+  static constexpr std::array<std::string_view, 2> dma_fields{"DMAEN", "DMACFG"};
+  static constexpr std::array<std::uint32_t, 3>    synchronous_dividers{1, 2, 4};
+  static constexpr std::array<adc_inputs, 3>       inputs{
+      {{.instance = "ADC1", .vrefint = 0, .sensor = 17, .irq = "ADC1_2_IRQn"},
+       {.instance = "ADC2", .vrefint = std::nullopt, .sensor = std::nullopt, .irq = "ADC1_2_IRQn"},
+       {.instance       = "ADC3",
+        .vrefint        = std::nullopt,
+        .sensor         = 17,
+        .irq            = "ADC3_IRQn",
+        .externals      = 0x3FDE,
+        .external_names = "1 to 4 or 6 to 13"}}
+  };
+  static constexpr std::array<threshold_names, watchdogs> thresholds{
+      {{"ADC_TR1", "LT1", "ADC_TR1", "HT1"},
+       {"ADC_TR2", "LT2", "ADC_TR2", "HT2"},
+       {"ADC_TR3", "LT3", "ADC_TR3", "HT3"}}
+  };
+
+  static constexpr std::array<std::uint32_t, 8>  sampling_half_cycles{5,  13,  25,  49,
+                                                                      95, 185, 495, 1281};
+  static constexpr std::array<std::uint32_t, 4>  sar_half_cycles{25, 21, 17, 13};
+  static constexpr std::array<std::uint32_t, 12> prescalers{1,  2,  4,  6,  8,   10,
+                                                            12, 16, 32, 64, 128, 256};
+
+  [[nodiscard]] static constexpr auto external(std::uint32_t channel) -> bool
+  {
+    return channel >= 1 and channel <= 16;
+  }
+
+  [[nodiscard]] static constexpr auto decode_dma(std::array<std::uint32_t, 2> raw) -> dma_mode
+  {
+    if(raw[0] == 0)
+    {
+      return dma_mode::off;
+    }
+    return raw[1] != 0 ? dma_mode::circular : dma_mode::one_shot;
+  }
+
+  [[nodiscard]] static constexpr auto ratio(std::uint32_t raw) -> std::uint32_t
+  {
+    return 2u << raw;
+  }
+
+  [[nodiscard]] static constexpr auto compared(
+      std::size_t   watchdog,
+      std::uint32_t result,
+      std::uint32_t resolution,
+      bool          oversampled) -> std::uint64_t
+  {
+    if(oversampled)
+    {
+      return watchdog == 0 ? result >> 4 : result >> 8;
+    }
+    auto const raw = std::uint64_t{result} << (2 * resolution);
+    return watchdog == 0 ? raw : raw >> 4;
+  }
+
+  [[nodiscard]] static constexpr auto left_aligned(std::uint32_t result, std::uint32_t resolution)
+      -> std::uint32_t
+  {
+    return resolution == 3 ? result << 2 : result << (4 + 2 * resolution);
+  }
+
+  [[nodiscard]] static constexpr auto
+      trigger_latency_eighths(std::uint32_t, std::uint32_t clock_mode) -> std::uint32_t
+  {
+    constexpr std::array<std::uint32_t, 4> eighths{12, 16, 18, 17};
+    return eighths[clock_mode & 3u];
+  }
+};
+
 struct adc_edge
 {
   bool          pending{};
@@ -532,6 +690,11 @@ template <typename Traits>
  *        not modelled and ADC1 and ADC2 convert independently. A read of ADC_CSR gives the
  *        ADC_ISR bits 10:0 of ADC1 at bits 10:0 and of ADC2 at bits 26:16, RM0481 28.7.1, and
  *        writes leave it. ADC_CDR is storage.
+ *
+ *        ADC_Common of the STM32L47x and STM32L48x, RM0351 section 18.8, serves ADC1, ADC2 and
+ *        ADC3 as ADCC does ADC1 and ADC2: CKMODE and PRESC per RM0351 18.8.2, VREFEN connects
+ *        VREFINT, CH17SEL the temperature sensor, CH18SEL VBAT, and ADC_CSR reports ADC1 as the
+ *        master and ADC2 as the slave, RM0351 18.8.1. ADC3 has no ADC_CSR bits.
  */
 template <typename Traits> class adc_model;
 
@@ -839,6 +1002,28 @@ struct adc_clock
  *        edge with the ADC clock outside 1.5 to 75 MHz logs a warning. An ADEN edge under CKMODE 01
  *        with HCLK not SYSCLK, forbidden by RM0481 28.7.2, logs a warning once, a model_error under
  *        strict_peripherals, and converts at HCLK.
+ *
+ *        ADC1, ADC2 and ADC3 of the STM32L47x and STM32L48x, RM0351 section 18, run the H5 path
+ *        with these differences. ADC_DR holds one result, RM0351 18.4.26: with OVRMOD 0 a result
+ *        finding EOC set sets OVR and is discarded, and every result while OVR stays set. ADC1 and
+ *        ADC2 raise ADC1_2_IRQn, ADC3 ADC3_IRQn. The kernel clock is the RCC_CCIPR.ADCSEL clock,
+ *        common to the three ADCs. ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD
+ *        clear. The external channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3,
+ *        RM0351 Figures 68 to 70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the
+ *        temperature sensor on 17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000
+ *        / VDDA, RM0351 18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15
+ *        of ADC3, and the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19
+ *        converts 0 with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes
+ *        0 to 15: EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line
+ *        SYSCFG_EXTICR3 selects, and the TRGO2 selections 8 and 10, which no L4 timer model
+ *        produces, log a warning once, a model_error under strict_peripherals. At CKMODE 00 a
+ *        trigger waits for the next ADC clock edge, counted from virtual time 0, then tLATR 1.5
+ *        cycles, which spans the 1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01,
+ *        10 and 11 tLATR is 2, 2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA
+ *        transfer leaves ADSTART set, which RM0351 18.4.15 does not list among its hardware clears,
+ *        and drops the conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the
+ *        ADC clock outside 0.14 to 80 MHz logs a warning. AWDFILT, BULB, SMPTRIG and SMPPLUS do not
+ *        exist.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
@@ -849,6 +1034,7 @@ class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
                         public bus_reset_listener
 {
   using base = dispatch_model<adc_model<Traits>, adc_state>;
+  static_assert(not Traits::filter_gates_dma or not Traits::filter_field.empty());
   using base::claims;
   using base::ctx_;
   using base::desc_;
@@ -2288,6 +2474,20 @@ auto adc_common_h5_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<adc_common_model<h5_adc>>(ctx, desc);
+  };
+}
+
+auto adc_l4_factory(supply_options supply) -> model_factory
+{
+  return [supply](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<adc_model<l4_adc>>(ctx, desc, supply);
+  };
+}
+
+auto adc_common_l4_factory() -> model_factory
+{
+  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<adc_common_model<l4_adc>>(ctx, desc);
   };
 }
 }

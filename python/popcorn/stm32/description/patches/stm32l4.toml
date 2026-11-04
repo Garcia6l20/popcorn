@@ -302,77 +302,175 @@ register = "OR2"
 reset = 0x00000001
 source = "RM0351 Rev 11, 32.7.20 TIM17_OR2: reset value 0x0000 0001. The four SVDs give 0"
 
+[[register_renames]]
+peripherals = ["ADC1", "ADC2", "ADC3"]
+renames = { ISR = "ADC_ISR", IER = "ADC_IER", CR = "ADC_CR", CFGR = "ADC_CFGR", CFGR2 = "ADC_CFGR2", SMPR1 = "ADC_SMPR1", SMPR2 = "ADC_SMPR2", TR1 = "ADC_TR1", TR2 = "ADC_TR2", TR3 = "ADC_TR3", SQR1 = "ADC_SQR1", SQR2 = "ADC_SQR2", SQR3 = "ADC_SQR3", SQR4 = "ADC_SQR4", DR = "ADC_DR", JSQR = "ADC_JSQR", OFR1 = "ADC_OFR1", OFR2 = "ADC_OFR2", OFR3 = "ADC_OFR3", OFR4 = "ADC_OFR4", JDR1 = "ADC_JDR1", JDR2 = "ADC_JDR2", JDR3 = "ADC_JDR3", JDR4 = "ADC_JDR4", AWD2CR = "ADC_AWD2CR", AWD3CR = "ADC_AWD3CR", DIFSEL = "ADC_DIFSEL", CALFACT = "ADC_CALFACT" }
+source = "RM0351 Rev 11, 18.7 ADC registers: the manual names each register with the ADC_ prefix, ADC_ISR to ADC_CALFACT. The four SVDs drop it. The builder strips the prefix again and keeps ADC_ISR and the others as aliases, as the U5 and H5 SVD names give"
+
+[[register_renames]]
+peripherals = ["ADC_Common"]
+renames = { CSR = "ADC_CSR", CCR = "ADC_CCR", CDR = "ADC_CDR" }
+source = "RM0351 Rev 11, 18.8 ADC common registers: ADC_CSR, ADC_CCR and ADC_CDR. The four SVDs drop the ADC_ prefix"
+
 [[resets]]
 peripheral = "ADC1"
-register = "CR"
+register = "ADC_CR"
 reset = 0x20000000
 source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC1"
-register = "CFGR"
+register = "ADC_CFGR"
 reset = 0x80000000
 source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC1"
-register = "TR2"
+register = "ADC_TR2"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
 
 [[resets]]
 peripheral = "ADC1"
-register = "TR3"
+register = "ADC_TR3"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
 
 [[resets]]
 peripheral = "ADC2"
-register = "CR"
+register = "ADC_CR"
 reset = 0x20000000
 source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC2"
-register = "CFGR"
+register = "ADC_CFGR"
 reset = 0x80000000
 source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC2"
-register = "TR2"
+register = "ADC_TR2"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
 
 [[resets]]
 peripheral = "ADC2"
-register = "TR3"
+register = "ADC_TR3"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
 
 [[resets]]
 peripheral = "ADC3"
-register = "CR"
+register = "ADC_CR"
 reset = 0x20000000
 source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC3"
-register = "CFGR"
+register = "ADC_CFGR"
 reset = 0x80000000
 source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
 
 [[resets]]
 peripheral = "ADC3"
-register = "TR2"
+register = "ADC_TR2"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
 
 [[resets]]
 peripheral = "ADC3"
-register = "TR3"
+register = "ADC_TR3"
 reset = 0x00FF0000
 source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_ISR"]
+fields = ["ADRDY", "EOSMP", "EOC", "EOS", "OVR", "JEOC", "JEOS", "AWD1", "AWD2", "AWD3", "JQOVF"]
+on_write = "one_to_clear"
+source = "RM0351 Rev 11, 18.7.1 ADC_ISR: ADRDY to JQOVF in bits 10:0 are rc_w1. The four SVDs give plain read-write"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_CFGR"]
+rename = { AWDCH1CH = "AWD1CH" }
+source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: AWD1CH[4:0] in bits 30:26. The four SVDs spell it AWDCH1CH"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_CFGR"]
+fields = ["DFSDMCFG"]
+drop = true
+source = "RM0351 Rev 11, 18.3 Table 106: the DFSDM interface is available only on STM32L49x/STM32L4Ax devices, so ADC_CFGR bit 2 is reserved on the STM32L47x/L48x. The four SVDs and 18.7.4 draw DFSDMCFG"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_SMPR1"]
+fields = ["SMPPLUS"]
+drop = true
+source = "RM0351 Rev 11, 18.3 Table 106: SMPPLUS is available only on STM32L49x/STM32L4Ax devices, so ADC_SMPR1 bit 31 is reserved on the STM32L47x/L48x. The four SVDs and 18.7.5 draw it"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_DIFSEL"]
+fields = ["DIFSEL_16_18"]
+acc = "read_write"
+source = "RM0351 Rev 11, 18.7.21 ADC_DIFSEL: DIFSEL[18:16] are rw, bit 0 is r. The four SVDs give DIFSEL_16_18 read-only"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_OFR1"]
+rename = { OFFSET1 = "OFFSET", OFFSET1_CH = "OFFSET_CH", OFFSET1_EN = "OFFSET_EN" }
+source = "RM0351 Rev 11, 18.7.17 ADC_OFR1: OFFSET_EN, OFFSET_CH[4:0] and OFFSET[11:0], the field names of the manual's register drawing. The four SVDs number them OFFSET1_EN, OFFSET1_CH and OFFSET1"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_OFR2"]
+rename = { OFFSET2 = "OFFSET", OFFSET2_CH = "OFFSET_CH", OFFSET2_EN = "OFFSET_EN" }
+source = "RM0351 Rev 11, 18.7.17 ADC_OFR2: OFFSET_EN, OFFSET_CH[4:0] and OFFSET[11:0], the field names of the manual's register drawing. The four SVDs number them OFFSET2_EN, OFFSET2_CH and OFFSET2"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_OFR3"]
+rename = { OFFSET3 = "OFFSET", OFFSET3_CH = "OFFSET_CH", OFFSET3_EN = "OFFSET_EN" }
+source = "RM0351 Rev 11, 18.7.17 ADC_OFR3: OFFSET_EN, OFFSET_CH[4:0] and OFFSET[11:0], the field names of the manual's register drawing. The four SVDs number them OFFSET3_EN, OFFSET3_CH and OFFSET3"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_OFR4"]
+rename = { OFFSET4 = "OFFSET", OFFSET4_CH = "OFFSET_CH", OFFSET4_EN = "OFFSET_EN" }
+source = "RM0351 Rev 11, 18.7.17 ADC_OFR4: OFFSET_EN, OFFSET_CH[4:0] and OFFSET[11:0], the field names of the manual's register drawing. The four SVDs number them OFFSET4_EN, OFFSET4_CH and OFFSET4"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_JDR1"]
+rename = { JDATA1 = "JDATA" }
+source = "RM0351 Rev 11, 18.7.18 ADC_JDR1: JDATA[15:0]. The four SVDs number it JDATA1"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_JDR2"]
+rename = { JDATA2 = "JDATA" }
+source = "RM0351 Rev 11, 18.7.18 ADC_JDR2: JDATA[15:0]. The four SVDs number it JDATA2"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_JDR3"]
+rename = { JDATA3 = "JDATA" }
+source = "RM0351 Rev 11, 18.7.18 ADC_JDR3: JDATA[15:0]. The four SVDs number it JDATA3"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_JDR4"]
+rename = { JDATA4 = "JDATA" }
+source = "RM0351 Rev 11, 18.7.18 ADC_JDR4: JDATA[15:0]. The four SVDs number it JDATA4"
+
+[[fields]]
+instances = ["ADC_Common"]
+registers = ["ADC_CSR"]
+rename = { ADDRDY_MST = "ADRDY_MST" }
+source = "RM0351 Rev 11, 18.8.1 ADC_CSR: bit 0 ADRDY_MST, master ADC ready. The four SVDs spell it ADDRDY_MST"
 
 [[resets]]
 peripheral = "SAI1"
