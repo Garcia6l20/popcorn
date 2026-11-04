@@ -319,6 +319,7 @@ struct u5_adc
   static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = {};
   static constexpr bool             injected_ovs        = false;
+  static constexpr bool             triggered_ovs       = false;
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
   static constexpr std::string_view option_owner        = {};
@@ -445,6 +446,7 @@ struct h5_adc
   static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = "JOVSE";
   static constexpr bool             injected_ovs        = false;
+  static constexpr bool             triggered_ovs       = false;
   static constexpr std::string_view option_register     = "ADC_OR";
   static constexpr std::string_view option_switch       = "OP0";
   static constexpr std::string_view option_owner        = "ADC1";
@@ -622,6 +624,7 @@ struct l4_adc
   static constexpr bool             subtracts_offset    = true;
   static constexpr std::string_view injected_oversample = "JOVSE";
   static constexpr bool             injected_ovs        = true;
+  static constexpr bool             triggered_ovs       = true;
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
   static constexpr std::string_view option_owner        = {};
@@ -799,6 +802,10 @@ struct l4_adc_state
   std::array<std::uint32_t, 2>        queue_next{};
   std::array<adc_edge, 2>             injected_edges{};
   std::uint32_t                       injected_edge_generation{};
+  std::uint32_t                       last_code{};
+  bool                                continued{};
+  std::uint32_t                       kept_held{};
+  std::uint32_t                       kept_sum{};
 
   friend auto operator==(l4_adc_state const&, l4_adc_state const&) -> bool = default;
 };
@@ -1312,10 +1319,21 @@ struct adc_clock
  *        oversamples both groups, Figure 117. ROVSE and JOVSE with ROVSM 0 and JAUTO 0 convert in
  *        the resumed mode, as the RM0351 18.4.30 text says ROVSM is ignored there, and log a
  *        warning once, a model_error under strict_peripherals, as Table 119 marks the setting not
- *        supported. An injection into a ROVSE conversion with ROVSM 0 and JOVSE 0 converts every
- *        sample of the dropped rank again and logs a warning once, a model_error under
- *        strict_peripherals. A strict model_error raised at a JADSTART write leaves ADC_CR as it
- *        was before the write.
+ *        supported. With ROVSE, ROVSM 0 and JOVSE 0 an injection keeps the samples the dropped rank
+ *        completed, and the rank converts its remaining samples after the group, the sample in
+ *        progress again, the continued mode of RM0351 18.4.30 Figure 114. TROVS with ROVSE converts
+ *        one sample per trigger and lands the result after 2 to the OVSR + 1 triggers, Figure 113,
+ *        with DISCEN read as 1 and one rank per trigger. TROVS with CONT is the DISCEN and CONT
+ *        pair, logged once, a model_error under strict_peripherals, and converts as DISCEN
+ *        alone. An injection between triggers zeroes the samples taken, and a sample it drops
+ *        converts again at the end of the group with no trigger, the resumed mode of Figure 116.
+ *        ADSTP between triggers zeroes them too, inferred. With EXTEN 0 each ADSTART converts one
+ *        sample and ADSTART clears after it, inferred, and the samples taken survive an
+ *        ADC_CFGR2, ADC_SQRx or ADC_SMPRx write between them, inferred. TROVS with ROVSM 0, and
+ *        TROVS with JOVSE outside JAUTO, not supported by Table 119, log a warning once, a
+ *        model_error under strict_peripherals, and convert one sample per trigger in the resumed
+ *        mode. TROVS with JAUTO logs a warning once as not modelled. A strict model_error raised
+ *        at a JADSTART write leaves ADC_CR as it was before the write.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
@@ -1405,6 +1423,8 @@ private:
   void               hold_until(std::uint64_t ps);
   [[nodiscard]] auto ratio() const -> std::uint32_t;
   [[nodiscard]] auto injected_oversampled() const -> bool;
+  [[nodiscard]] auto triggered() const -> bool;
+  [[nodiscard]] auto due_samples() const -> std::uint32_t;
   [[nodiscard]] auto result_oversampled() const -> bool;
   [[nodiscard]] auto shifted(std::uint32_t sum) const -> std::uint32_t;
   [[nodiscard]] auto channel() const -> std::uint32_t;
@@ -1455,6 +1475,7 @@ private:
   void               fire_edge(adc_edge& slot);
   void               begin_rank(std::uint64_t start_ps);
   void               schedule(std::uint64_t start_ps);
+  void               keep_samples(std::uint64_t at_ps);
   void               schedule_sampling_end(std::uint64_t not_before_ps);
   void               finish();
   void               advance(std::uint64_t end_ps, bool last);
@@ -1574,13 +1595,14 @@ private:
   bool                                             enable_lost_logged_{};
   std::array<bool, trigger_selections>             injected_unproduced_logged_{};
   bool                                             injected_refused_logged_{};
-  bool                                             resumed_oversampling_logged_{};
   bool                                             queue_software_logged_{};
   bool                                             automatic_start_logged_{};
   bool                                             automatic_trigger_logged_{};
   bool                                             automatic_discontinuous_logged_{};
   bool                                             automatic_oversampling_logged_{};
   bool                                             oversampling_modes_logged_{};
+  bool                                             triggered_modes_logged_{};
+  bool                                             triggered_injected_logged_{};
   bool                                             injected_oversampling_logged_{};
   bool                                             sequence_written_logged_{};
 };
@@ -1872,7 +1894,12 @@ template <typename Traits> void adc_model<Traits>::hold_until(std::uint64_t ps)
   while(state_.held < samples
         and after(std::uint64_t{state_.held} * conversion() + sampling()) <= ps)
   {
-    state_.sum += code();
+    auto const sampled = code();
+    if constexpr(injected_group)
+    {
+      state_.last_code = sampled;
+    }
+    state_.sum += sampled;
     ++state_.held;
   }
 }
@@ -1880,6 +1907,23 @@ template <typename Traits> void adc_model<Traits>::hold_until(std::uint64_t ps)
 template <typename Traits> auto adc_model<Traits>::ratio() const -> std::uint32_t
 {
   return result_oversampled() ? Traits::ratio(get(regs_, oversampling_ratio_)) : 1u;
+}
+
+template <typename Traits> auto adc_model<Traits>::triggered() const -> bool
+{
+  return Traits::triggered_ovs and oversampled() and get(regs_, triggered_oversampling_) != 0;
+}
+
+template <typename Traits> auto adc_model<Traits>::due_samples() const -> std::uint32_t
+{
+  if constexpr(injected_group)
+  {
+    if(triggered() and not injecting())
+    {
+      return state_.kept_held + 1u;
+    }
+  }
+  return ratio();
 }
 
 template <typename Traits> auto adc_model<Traits>::injected_oversampled() const -> bool
@@ -2440,6 +2484,15 @@ template <typename Traits> void adc_model<Traits>::prepare()
             "DISCEN and CONT both set, forbidden by {}: converted as DISCEN alone",
             Traits::cite_discontinuous));
   }
+  else if(triggered() and get(regs_, continuous_) != 0)
+  {
+    forbidden(
+        discontinuous_continuous_logged_, Traits::config,
+        std::format(
+            "TROVS and CONT both set, DISCEN read as 1 by RM0351 18.4.30, forbidden by {}: "
+            "converted as DISCEN alone",
+            Traits::cite_discontinuous));
+  }
   if(get(regs_, auto_delay_) != 0)
   {
     unmodelled(auto_delay_logged_, Traits::config, "AUTDLY: auto-delayed conversions");
@@ -2453,7 +2506,7 @@ template <typename Traits> void adc_model<Traits>::prepare()
     unmodelled(
         sampling_trigger_logged_, "ADC_CFGR2", "SMPTRIG: sampling time control trigger mode");
   }
-  if(get(regs_, triggered_oversampling_) != 0)
+  if(get(regs_, triggered_oversampling_) != 0 and (not Traits::triggered_ovs or automatic()))
   {
     unmodelled(
         triggered_oversampling_logged_, "ADC_CFGR2", "TROVS: triggered regular oversampling");
@@ -2503,6 +2556,15 @@ template <typename Traits> void adc_model<Traits>::begin_sequence(std::uint64_t 
     state_.rank = 0;
   }
   state_.subgroup_left = static_cast<std::uint8_t>(get(regs_, discontinuous_count_) + 1u);
+  if constexpr(Traits::triggered_ovs)
+  {
+    if(triggered())
+    {
+      state_.subgroup_left = 1;
+      begin_rank(start_ps);
+      return;
+    }
+  }
   begin_rank(start_ps);
 }
 
@@ -2565,6 +2627,20 @@ template <typename Traits> void adc_model<Traits>::check_oversampling_modes()
           "ROVSE 1, JOVSE 1 and ROVSM 0, not supported by RM0351 Table 119: converted in the "
           "resumed mode");
     }
+    if(triggered() and not automatic() and get(regs_, injected_->resumed_oversampling) == 0)
+    {
+      forbidden(
+          triggered_modes_logged_, "ADC_CFGR2",
+          "ROVSE 1, TROVS 1 and ROVSM 0, not supported by RM0351 Table 119: converted in the "
+          "triggered resumed mode");
+    }
+    if(triggered() and not automatic() and injected_oversampled())
+    {
+      forbidden(
+          triggered_injected_logged_, "ADC_CFGR2",
+          "ROVSE 1, JOVSE 1 and TROVS 1, not supported by RM0351 Table 119: the injected ranks are "
+          "oversampled, the regular ranks one sample per trigger");
+    }
   }
 }
 
@@ -2618,17 +2694,33 @@ template <typename Traits> void adc_model<Traits>::check_option_switch(std::uint
 
 template <typename Traits> void adc_model<Traits>::schedule(std::uint64_t start_ps)
 {
-  auto const clock     = source();
-  state_.start_ps      = start_ps;
-  state_.clock_hz      = clock.hz;
-  state_.divider       = clock.divider;
-  state_.held          = 0;
-  state_.sum           = 0;
+  std::uint32_t kept = 0;
+  if constexpr(injected_group)
+  {
+    if(not injecting() and (triggered() or std::exchange(state_.continued, false)))
+    {
+      kept = state_.kept_held;
+    }
+  }
+  auto const clock = source();
+  state_.clock_hz  = clock.hz;
+  state_.divider   = clock.divider;
+  state_.start_ps  = start_ps;
+  state_.start_ps -= after(std::uint64_t{kept} * conversion()) - start_ps;
+  state_.held = kept;
+  state_.sum  = 0;
+  if constexpr(injected_group)
+  {
+    if(kept != 0)
+    {
+      state_.sum = state_.kept_sum;
+    }
+  }
   state_.waiting_clock = false;
   state_.converting    = true;
   ++state_.generation;
   ctx_.events.schedule_at(
-      vtime{after(std::uint64_t{ratio()} * conversion())}, conversion_end, state_.generation,
+      vtime{after(std::uint64_t{due_samples()} * conversion())}, conversion_end, state_.generation,
       ctx_.clock);
   if(get(regs_, end_of_sampling_) == 0 and not injecting())
   {
@@ -2660,11 +2752,25 @@ template <typename Traits> void adc_model<Traits>::finish()
       return;
     }
   }
-  auto const end    = after(std::uint64_t{ratio()} * conversion());
+  auto const due    = due_samples();
+  auto const end    = after(std::uint64_t{due} * conversion());
   state_.converting = false;
-  for(auto const samples = ratio(); state_.held < samples; ++state_.held)
+  for(; state_.held < due; ++state_.held)
   {
     state_.sum += code();
+  }
+  if constexpr(Traits::triggered_ovs)
+  {
+    if(triggered() and state_.held < ratio())
+    {
+      state_.kept_held = state_.held;
+      state_.kept_sum  = state_.sum;
+      update(regs_, start_, get(regs_, trigger_) != 0 ? 1u : 0u);
+      signal();
+      return;
+    }
+    state_.kept_held = 0;
+    state_.kept_sum  = 0;
   }
   auto const result = oversampled() ? shifted(state_.sum) : state_.sum;
   watch(channel(), result);
@@ -2845,6 +2951,9 @@ template <typename Traits> void adc_model<Traits>::abort()
   {
     state_.regular_resume  = false;
     state_.regular_pending = false;
+    state_.continued       = false;
+    state_.kept_held       = 0;
+    state_.kept_sum        = 0;
   }
   if(injecting())
   {
@@ -3363,6 +3472,11 @@ template <typename Traits> void adc_model<Traits>::begin_injected(std::uint64_t 
     {
       state_.queue_pending = false;
     }
+    if(triggered())
+    {
+      state_.kept_held = 0;
+      state_.kept_sum  = 0;
+    }
     state_.injecting = true;
     begin_rank(start_ps);
   }
@@ -3510,7 +3624,7 @@ template <typename Traits> void adc_model<Traits>::flush_queue()
 
 template <typename Traits> auto adc_model<Traits>::regular_discontinuous() const -> bool
 {
-  return get(regs_, discontinuous_) != 0 and not automatic();
+  return (get(regs_, discontinuous_) != 0 or triggered()) and not automatic();
 }
 
 template <typename Traits> auto adc_model<Traits>::injected_discontinuous() const -> bool
@@ -3554,19 +3668,41 @@ template <typename Traits> void adc_model<Traits>::preempt(std::uint64_t at_ps)
 {
   if constexpr(injected_group)
   {
-    if(oversampled()
-       and get(regs_, injected_->resumed_oversampling) == 0
-       and not(Traits::injected_ovs and injected_oversampled()))
-    {
-      unmodelled(
-          resumed_oversampling_logged_, "ADC_CFGR2",
-          "ROVSM 0: continued regular oversampling across an injected conversion");
-    }
+    keep_samples(at_ps);
     ++state_.generation;
     state_.converting     = false;
     state_.waiting_clock  = false;
     state_.regular_resume = true;
     begin_injected(at_ps + trigger_latency_ps(at_ps, true));
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::keep_samples(std::uint64_t at_ps)
+{
+  if constexpr(injected_group)
+  {
+    state_.continued = state_.converting
+                   and oversampled()
+                   and get(regs_, injected_->resumed_oversampling) == 0
+                   and not injected_oversampled()
+                   and not triggered();
+    if(not state_.continued)
+    {
+      return;
+    }
+    hold_until(at_ps);
+    auto completed = std::uint32_t{};
+    while(completed < state_.held and after(std::uint64_t{completed + 1u} * conversion()) <= at_ps)
+    {
+      ++completed;
+    }
+    if(state_.held > completed)
+    {
+      state_.sum -= state_.last_code;
+      state_.held = completed;
+    }
+    state_.kept_held = state_.held;
+    state_.kept_sum  = state_.sum;
   }
 }
 

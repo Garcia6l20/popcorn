@@ -1208,9 +1208,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a software JADSTART with JQDIS 0, ROVSE and JOVSE with ROVSM 0, RM0351 Table 119, and an "
-    "injection into a ROVSE sequence with ROVSM 0 each log once, a model_error when strict that "
-    "leaves JADSTART 0")
+    "a software JADSTART with JQDIS 0 and ROVSE and JOVSE with ROVSM 0, RM0351 Table 119, each "
+    "log once, a model_error when strict that leaves JADSTART 0")
 {
   struct leg
   {
@@ -1218,18 +1217,17 @@ TEST_CASE(
     std::function_ref<void(rig const&)> setup;
     std::uint32_t                       cr;
   };
-  auto const continued = [](rig const& r) {
-    r.write("ADC1", "ADC_CFGR2", 1u);
-    r.write("ADC1", "ADC_SMPR1", 7u << 3);
-    r.write("ADC1", "ADC_JSQR", jsqr({2}));
-    r.start(1);
+  auto const queue     = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
+  auto const sampled   = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", 1u | jovse); };
+  auto const triggered = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", 1u | 1u << 9); };
+  auto const both      = [](rig const& r) {
+    r.write("ADC1", "ADC_CFGR2", 1u | jovse | 1u << 9 | 1u << 10);
   };
-  auto const queue   = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
-  auto const sampled = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", 1u | jovse); };
   for(auto const& [what, setup, cr] : {
-          leg{"ROVSM 0",              continued, enabled | adstart | jadstart},
-          leg{"JQDIS 0 and JEXTEN 0", queue,     enabled | jadstart          },
-          leg{"Table 119",            sampled,   enabled | jadstart          },
+          leg{"JQDIS 0 and JEXTEN 0", queue,     enabled | jadstart},
+          leg{"JOVSE 1 and ROVSM 0",  sampled,   enabled | jadstart},
+          leg{"TROVS 1 and ROVSM 0",  triggered, enabled | jadstart},
+          leg{"JOVSE 1 and TROVS 1",  both,      enabled | jadstart},
   })
   {
     CAPTURE(what);
@@ -2783,6 +2781,291 @@ TEST_CASE(
   auto const logged = r.warnings();
   REQUIRE(logged.size() == 1);
   CHECK(logged[0].message.contains("Table 119"));
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 114: with ROVSE, ROVSM 0 and JOVSE 0 an injection keeps the samples "
+    "the dropped rank completed, the sample in progress converts again after JEOS")
+{
+  for(std::string_view const what : {"live", "injected", "driven", "ADSTP"})
+  {
+    CAPTURE(what);
+    rig const  r;
+    rig const  fresh;
+    auto const copy = [&r, &fresh] {
+      fresh.f->target->restore(
+          core::snapshot{
+              core::decode_snapshot(core::encode_snapshot(r.f->target->snapshot().data()))});
+    };
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.port().drive(2, 750'000);
+    r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5);
+    r.write("ADC1", "ADC_SMPR1", 7u << 3);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
+    auto const start = r.now();
+    r.start(1);
+    r.run_until(start + 653 * cycle_ps + 642 * cycle_ps);
+    r.port().drive(1, 750'000);
+    if(what == "driven")
+    {
+      copy();
+    }
+    rig const& before = what == "driven" ? fresh : r;
+    before.run_until(start + 653 * cycle_ps + 645 * cycle_ps);
+    auto const at = before.now();
+    before.write("ADC1", "ADC_CR", enabled | adstart | jadstart);
+    auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 15) * cycle_ps / 8;
+    if(what == "ADSTP")
+    {
+      r.write("ADC1", "ADC_CR", enabled | adstp);
+      r.run_until(injected);
+      CHECK(r.isr("JEOS") == 1);
+      CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+      auto const again = r.now();
+      r.write("ADC1", "ADC_CR", enabled | adstart);
+      r.run_until(again + 663 * cycle_ps);
+      CHECK(r.isr("EOC") == 0);
+      r.run_until(again + 2 * 663 * cycle_ps);
+      CHECK(r.isr("EOC") == 1);
+      CHECK(r.cpu_read("ADC1", "ADC_DR") == 1024);
+      continue;
+    }
+    if(what == "injected")
+    {
+      copy();
+    }
+    rig const& run = what == "live" ? r : fresh;
+    run.run_until(injected);
+    CHECK(run.isr("JEOS") == 1);
+    run.run_until(injected + 653 * cycle_ps - cycle_ps);
+    CHECK(run.isr("EOC") == 0);
+    run.run_until(injected + 653 * cycle_ps);
+    CHECK(run.isr("EOC") == 1);
+    CHECK(run.cpu_read("ADC1", "ADC_DR") == 1536);
+    CHECK(run.warnings().empty());
+  }
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 113: with TROVS each trigger converts one sample, EOC after OVSR "
+    "triggers, the input read at each, ADSTART stays set")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 2 | 2u << 5 | 1u << 9 | 1u << 10);
+  auto const trigger = r.timer("TIM1", "");
+  r.start(1);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.dues().empty());
+  r.run_until(trigger + ms + 100 * us);
+  r.port().drive(1, 750'000);
+  r.run_until(trigger + 2 * ms + 100 * us);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(trigger + 3 * ms + 100 * us);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1536);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 113: a drive between EOSMP and EOC of a TROVS sample leaves that "
+    "trigger one sample, EOC after the second trigger")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 9 | 1u << 10);
+  auto const trigger = r.timer("TIM1", "");
+  r.start(1);
+  r.run_until(trigger + 10 * cycle_ps);
+  CHECK(r.isr("EOSMP") == 1);
+  CHECK(r.dues().size() == 1);
+  r.port().drive(1, 750'000);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.dues().empty());
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1536);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: a TROVS trigger that waits for the ADC kernel clock keeps the samples "
+    "taken and converts one sample when ADCSEL returns")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 2 | 2u << 5 | 1u << 9 | 1u << 10);
+  auto const trigger = r.timer("TIM1", "");
+  r.start(1);
+  r.run_until(trigger + ms + 100 * us);
+  r.set("RCC", "CCIPR", "ADCSEL", 0);
+  r.run_until(trigger + 2 * ms + 100 * us);
+  CHECK(r.dues().empty());
+  r.port().drive(1, 750'000);
+  r.set("RCC", "CCIPR", "ADCSEL", 3);
+  r.run_until(trigger + 2 * ms + 200 * us);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(trigger + 3 * ms + 100 * us);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1536);
+}
+
+TEST_CASE(
+    "RM0351 18.4.20 and 18.4.30: TROVS with CONT logs once as DISCEN with CONT, a model_error "
+    "when strict that leaves ADSTART 0")
+{
+  {
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_CFGR", jqdis | cont);
+    r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 9 | 1u << 10);
+    r.start(1);
+    r.settle();
+    r.start(1);
+    r.settle();
+    CHECK(r.isr("EOC") == 1);
+    auto const logged = r.warnings();
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("TROVS and CONT"));
+  }
+  rig const strict{true};
+  strict.enable();
+  strict.write("ADC1", "ADC_SQR1", 1u << 6);
+  strict.write("ADC1", "ADC_CFGR", jqdis | cont);
+  strict.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 9 | 1u << 10);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, enabled | adstart)),
+      popcorn::model_error);
+  CHECK(strict.get("ADC1", "ADC_CR", "ADSTART") == 0);
+}
+
+TEST_CASE(
+    "RM0351 Table 119: TROVS with ROVSM 0, then with JOVSE, log one warning each on one machine")
+{
+  rig const r;
+  r.enable();
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 9);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  r.write("ADC1", "ADC_CFGR2", 1u | jovse | 1u << 9 | 1u << 10);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 2);
+  CHECK(logged[0].message.contains("TROVS 1 and ROVSM 0"));
+  CHECK(logged[1].message.contains("JOVSE 1 and TROVS 1"));
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: TROVS reads DISCEN as 1 with one conversion per trigger, DISCNUM 1 does "
+    "not start the next rank after a result")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_SQR1", 1u | 1u << 6 | 2u << 12);
+  r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9) | 1u << 17);
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 9 | 1u << 10);
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.dues().empty());
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  r.run_until(trigger + 2 * ms + 100 * us);
+  CHECK(r.isr("EOS") == 0);
+  r.run_until(trigger + 3 * ms + 100 * us);
+  CHECK(r.isr("EOS") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 1024);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: with TROVS and EXTEN 0 each ADSTART converts one sample and ADSTART clears "
+    "after it, inferred")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5 | 1u << 9 | 1u << 10);
+  r.start(1);
+  r.settle();
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.settle();
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 116: an injection between TROVS triggers zeroes the samples taken, "
+    "a sample it drops converts again after the group, ADSTP zeroes them, inferred, and a "
+    "snapshot keeps them")
+{
+  struct leg
+  {
+    std::string_view what;
+    std::uint32_t    left;
+  };
+  for(auto const& [what, left] : {
+          leg{"kept",       2},
+          leg{"injection",  4},
+          leg{"mid-sample", 3},
+          leg{"ADSTP",      4},
+          leg{"snapshot",   2},
+  })
+  {
+    CAPTURE(what);
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.port().drive(2, 750'000);
+    r.write("ADC1", "ADC_JSQR", jsqr({2}));
+    r.write("ADC1", "ADC_CFGR", jqdis | exten_up | extsel(9));
+    r.write("ADC1", "ADC_CFGR2", 1u | 1u << 2 | 2u << 5 | 1u << 9 | 1u << 10);
+    auto const trigger = r.timer("TIM1", "");
+    r.start(1);
+    r.run_until(trigger + ms + (what == "mid-sample" ? 5 * cycle_ps : 100 * us));
+    if(what == "injection" or what == "mid-sample")
+    {
+      r.write("ADC1", "ADC_CR", enabled | adstart | jadstart);
+      r.settle();
+      CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+    }
+    if(what == "ADSTP")
+    {
+      r.write("ADC1", "ADC_CR", enabled | adstart | adstp);
+      r.run_until(r.now() + 10 * cycle_ps);
+      r.start(1);
+    }
+    rig const  fresh;
+    rig const& run = what == "snapshot" ? fresh : r;
+    if(what == "snapshot")
+    {
+      fresh.f->target->restore(
+          core::snapshot{
+              core::decode_snapshot(core::encode_snapshot(r.f->target->snapshot().data()))});
+    }
+    auto const next = trigger + 2 * ms;
+    run.run_until(next + (left - 2) * ms + 100 * us);
+    CHECK(run.isr("EOC") == 0);
+    run.run_until(next + (left - 1) * ms + 100 * us);
+    CHECK(run.isr("EOC") == 1);
+    CHECK(run.cpu_read("ADC1", "ADC_DR") == 2048);
+  }
 }
 
 TEST_CASE(

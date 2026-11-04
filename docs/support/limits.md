@@ -162,8 +162,8 @@ Not modelled, logged once each:
 - Left shift, gain compensation and offset of the result.
 - Bulb sampling, `ADC_CFGR2.BULB`.
 - The sampling time control trigger mode, `ADC_CFGR2.SMPTRIG` with `SWTRIG`.
-- Triggered regular oversampling, `ADC_CFGR2.TROVS`: all samples of a result convert back to
-  back from the first trigger.
+- Triggered regular oversampling, `ADC_CFGR2.TROVS`, on the STM32U5 and STM32H5: all samples of a
+  result convert back to back from the first trigger.
 - Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
   single-ended.
 - Reserved trigger selections in `EXTSEL`.
@@ -339,11 +339,24 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   `ADC_JDRy[15:4]`, the `ADC_DR[15:4]` rule of RM0351 18.4.30, inferred. With ROVSE and JOVSE an
   injection restarts the dropped regular rank from its first sample, RM0351 Figure 115, and JAUTO
   with both oversamples both groups, Figure 117.
+- With ROVSE, ROVSM 0 and JOVSE 0 an injection keeps the samples the dropped rank completed, and the
+  rank converts its remaining samples after the group, the sample in progress again, RM0351 18.4.30
+  Figure 114. TROVS with ROVSE converts one sample per trigger and lands the result after 2 to the
+  OVSR + 1 triggers, Figure 113, with DISCEN read as 1 and one rank per trigger. An injection
+  between triggers zeroes the samples taken, and a sample it drops converts again at the end of the
+  group with no trigger, RM0351 Figure 116. ADSTP between triggers zeroes them too, inferred. With
+  EXTEN 0 each ADSTART converts one sample and ADSTART clears after it, inferred. The samples taken
+  survive an `ADC_CFGR2`, `ADC_SQRx` or `ADC_SMPRx` write while ADSTART reads 0 between them, and
+  the result then sums samples taken under both settings, inferred.
+- TROVS with CONT is the DISCEN and CONT pair RM0351 18.4.20 forbids, as RM0351 18.4.30 reads DISCEN
+  as 1 under TROVS. It is logged once, a model_error under strict_peripherals, and converts as
+  DISCEN alone.
 - These oversampling settings are logged once, a model_error under strict_peripherals: ROVSE and
   JOVSE with ROVSM 0 and JAUTO 0 convert in the resumed mode, as the RM0351 18.4.30 text says ROVSM
-  is ignored there, and are logged because Table 119 marks the setting not supported, and an
-  injection into a ROVSE conversion with ROVSM 0 and JOVSE 0 converts every sample of the dropped
-  rank again. A strict model_error at a JADSTART write leaves `ADC_CR` as before the write.
+  is ignored there, and are logged because Table 119 marks the setting not supported, and TROVS with
+  ROVSM 0, and TROVS with JOVSE outside JAUTO, not supported by Table 119, convert one sample per
+  trigger in the resumed mode. TROVS with JAUTO is logged as not modelled. A strict model_error at a
+  JADSTART write leaves `ADC_CR` as before the write.
 - With JQDIS 0 a CPU or DMA `ADC_JSQR` write goes through the queue of context with one stage at JQM
   0, ES0250 2.8.1, where RM0351 18.4.21 describes two. A write before the waiting context is
   consumed sets JQOVF, an interrupt with JQOVFIE, and is ignored. `ADC_JSQR` reads the active
