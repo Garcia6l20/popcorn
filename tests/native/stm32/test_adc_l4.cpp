@@ -65,6 +65,7 @@ constexpr std::uint32_t jeoc     = 1u << 5;
 constexpr std::uint32_t jeos     = 1u << 6;
 constexpr std::uint32_t align    = 1u << 5;
 constexpr std::uint32_t jdiscen  = 1u << 20;
+constexpr std::uint32_t discen   = 1u << 16;
 constexpr std::uint32_t awd1en   = 1u << 23;
 constexpr std::uint32_t jawd1en  = 1u << 24;
 constexpr std::uint32_t jauto    = 1u << 25;
@@ -1189,11 +1190,12 @@ TEST_CASE(
       static_cast<void>(
           strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, advregen | jadstart)),
       popcorn::model_error);
+  CHECK(strict.get("ADC1", "ADC_CR", "JADSTART") == 0);
 }
 
 TEST_CASE(
-    "JQDIS 0, JAUTO, JOVSE and an injection into a ROVSE sequence with ROVSM 0 each log once, "
-    "a model_error when strict")
+    "JQDIS 0, JOVSE and an injection into a ROVSE sequence with ROVSM 0 each log once, a "
+    "model_error when strict")
 {
   struct leg
   {
@@ -1207,13 +1209,11 @@ TEST_CASE(
     r.write("ADC1", "ADC_JSQR", jsqr({2}));
     r.start(1);
   };
-  auto const queue     = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
-  auto const automatic = [](rig const& r) { r.write("ADC1", "ADC_CFGR", jqdis | jauto); };
-  auto const sampled   = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
+  auto const queue   = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
+  auto const sampled = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
   for(auto const& [what, setup, cr] : {
           leg{"ROVSM 0", continued, enabled | adstart | jadstart},
           leg{"JQDIS 0", queue,     enabled | jadstart          },
-          leg{"JAUTO",   automatic, enabled | adstart           },
           leg{"JOVSE",   sampled,   enabled | jadstart          },
   })
   {
@@ -1536,6 +1536,294 @@ TEST_CASE(
   fresh.run_until(injected + 15 * cycle_ps);
   CHECK(fresh.isr("EOC") == 1);
   CHECK(fresh.cpu_read("ADC1", "ADC_DR") == 2048);
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: with JAUTO the injected group converts after the last regular rank with no "
+    "delay, inferred, ADSTART clears at EOS and JADSTART reads 0 meanwhile, inferred")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(at + 15 * cycle_ps);
+  CHECK(r.isr("EOS") == 1);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  CHECK(std::ranges::contains(r.dues(), at + 668 * cycle_ps));
+  r.run_until(at + 667 * cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(at + 668 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.dues().empty());
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: with JAUTO and CONT the regular sequence starts again at JEOS, "
+    "ADSTP stops both groups")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto | cont);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(at + 668 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 1024);
+  r.write("ADC1", "ADC_ISR", jeos);
+  CHECK(std::ranges::contains(r.dues(), at + 683 * cycle_ps));
+  r.run_until(at + 683 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(std::ranges::contains(r.dues(), at + 1336 * cycle_ps));
+  r.run_until(at + 700 * cycle_ps);
+  r.write("ADC1", "ADC_CR", enabled | adstart | adstp);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  r.run_until(at + 1400 * cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.isr("JEOC") == 0);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: with JAUTO and a TIM1 TRGO regular trigger each trigger converts the regular "
+    "rank then the injected group, ADSTART stays set")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto | exten_up | extsel(9));
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  auto const regular = trigger + edge_after(trigger, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8;
+  r.run_until(trigger + us);
+  CHECK(std::ranges::contains(r.dues(), regular));
+  r.ends_at(regular);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(std::ranges::contains(r.dues(), regular + 653 * cycle_ps));
+  r.run_until(regular + 653 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "a snapshot taken during the auto-injected group of a JAUTO CONT loop starts the regular "
+    "sequence again at JEOS once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto | cont);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(at + 100 * cycle_ps);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(at + 668 * cycle_ps);
+  CHECK(fresh.isr("JEOS") == 1);
+  CHECK(fresh.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(std::ranges::contains(fresh.dues(), at + 683 * cycle_ps));
+  fresh.run_until(at + 683 * cycle_ps);
+  CHECK(fresh.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: with JAUTO the one-shot DMA transfer end stops the sequence, the injected "
+    "group does not convert and ADSTART clears, inferred")
+{
+  constexpr std::uint32_t buffer = 0x2000'2000;
+  rig const               r;
+  r.set("RCC", "AHB1ENR", "DMA1EN", 1);
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto | cont | 1u);
+  r.write("DMA1", "CPAR1", static_cast<std::uint32_t>(r.at("ADC1", "ADC_DR")));
+  r.write("DMA1", "CMAR1", buffer);
+  r.write("DMA1", "CNDTR1", 1);
+  r.write("DMA1", "CCR1", 1u | 1u << 7 | 2u << 8 | 2u << 10);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(at + 15 * cycle_ps + us);
+  auto const word = r.f->target->mem().read(buffer, 4);
+  REQUIRE(word.has_value());
+  CHECK(*word == 2048);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  r.run_until(at + 100 * cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.isr("JEOC") == 0);
+  CHECK(r.dues().empty());
+}
+
+TEST_CASE(
+    "JADSTART, JADSTP, JEXTEN set, DISCEN, JDISCEN and ROVSE without JOVSE with JAUTO each "
+    "log once, a model_error when strict, JADSTART left 0")
+{
+  struct leg
+  {
+    std::string_view what;
+    std::uint32_t    cfgr;
+    std::uint32_t    cfgr2;
+    std::uint32_t    jsqr;
+    std::uint32_t    cr;
+  };
+  for(auto const& [what, cfgr, cfgr2, word, cr] : {
+          leg{"JADSTART or JADSTP", jqdis | jauto, 0, jsqr({2}), enabled | jadstart},
+          leg{"JADSTART or JADSTP", jqdis | jauto, 0, jsqr({2}), enabled | jadstp},
+          leg{"JEXTEN set", jqdis | jauto, 0, jsqr({2}, 1, 0), enabled | adstart},
+          leg{"DISCEN or JDISCEN", jqdis | jauto | discen, 0, jsqr({2}), enabled | adstart},
+          leg{"DISCEN or JDISCEN", jqdis | jauto | jdiscen, 0, jsqr({2}), enabled | adstart},
+          leg{"ROVSE 1 and JOVSE 0", jqdis | jauto, 1, jsqr({2}), enabled | adstart},
+  })
+  {
+    CAPTURE(what);
+    CAPTURE(cr);
+    CAPTURE(cfgr);
+    {
+      rig const r;
+      r.enable();
+      r.write("ADC1", "ADC_JSQR", word);
+      r.write("ADC1", "ADC_CFGR", cfgr);
+      r.write("ADC1", "ADC_CFGR2", cfgr2);
+      r.write("ADC1", "ADC_CR", cr);
+      CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 0);
+      r.write("ADC1", "ADC_CR", enabled);
+      r.write("ADC1", "ADC_CR", cr);
+      auto const logged = r.warnings();
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(what));
+    }
+    rig const strict{true};
+    strict.enable();
+    strict.write("ADC1", "ADC_JSQR", word);
+    strict.write("ADC1", "ADC_CFGR", cfgr);
+    strict.write("ADC1", "ADC_CFGR2", cfgr2);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, cr)),
+        popcorn::model_error);
+    CHECK(strict.get("ADC1", "ADC_CR", "JADSTART") == 0);
+  }
+}
+
+TEST_CASE(
+    "JAUTO converts as JAUTO alone: with DISCEN both regular ranks then the group, with JDISCEN "
+    "both injected ranks, and with JAUTO set while JADSTART is 1, which RM0351 18.7.4 forbids, a "
+    "TIM1 TRGO on JEXTSEL starts no injected group")
+{
+  {
+    rig const r;
+    r.enable();
+    r.port().drive(1, 1'500'000);
+    r.write("ADC1", "ADC_SQR1", 1u | 1u << 6 | 1u << 12);
+    r.write("ADC1", "ADC_JSQR", jsqr({1, 1}));
+    r.write("ADC1", "ADC_CFGR", jqdis | jauto | discen | jdiscen);
+    auto const at = r.now();
+    r.write("ADC1", "ADC_CR", enabled | adstart);
+    r.run_until(at + 30 * cycle_ps);
+    CHECK(r.isr("EOS") == 1);
+    CHECK(std::ranges::contains(r.dues(), at + 45 * cycle_ps));
+    r.run_until(at + 45 * cycle_ps);
+    CHECK(r.isr("JEOC") == 1);
+    CHECK(r.isr("JEOS") == 0);
+    r.run_until(at + 60 * cycle_ps);
+    CHECK(r.isr("JEOS") == 1);
+    CHECK(r.read("ADC1", "ADC_JDR2") == 2048);
+  }
+  rig const r;
+  r.enable();
+  r.write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  r.write("ADC1", "ADC_CFGR", jqdis);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto);
+  auto const trigger = r.timer("TIM1", "");
+  r.run_until(trigger + 100 * us);
+  CHECK(r.get("ADC1", "ADC_CR", "JADSTART") == 1);
+  CHECK(r.isr("JEOC") == 0);
+  CHECK(r.dues().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.19: with JAUTO a regular EXTI11 edge during the auto-injected group starts the "
+    "regular rank at JEOS with no tLATR, inferred, then the group again")
+{
+  rig const r;
+  r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+  r.set("GPIOA", "MODER", "MODER11", 0);
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 6);
+  r.write("ADC1", "ADC_SQR1", 1u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto | exten_up | extsel(6));
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  r.run_until(r.now() + 10 * us);
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  auto const edge    = r.now();
+  auto const regular = edge + edge_after(edge, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8;
+  pins->drive(11, true);
+  r.run_until(regular);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  r.run_until(regular + 100 * cycle_ps);
+  pins->drive(11, false);
+  pins->drive(11, true);
+  auto const injected = regular + 653 * cycle_ps;
+  r.run_until(injected);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(std::ranges::contains(r.dues(), injected + 15 * cycle_ps));
+  r.run_until(injected + 15 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(std::ranges::contains(r.dues(), injected + 668 * cycle_ps));
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.11: JAUTO checks the injected channels at ADSTART, an open GPIOx_ASCR switch "
+    "logs once and converts as 0")
+{
+  rig const r{false, false};
+  r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+  r.write("GPIOA", "ASCR", 1);
+  r.enable();
+  r.port().drive(5, 1'500'000);
+  r.write("ADC1", "ADC_SQR1", 5u << 6);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto);
+  r.write("ADC1", "ADC_CR", enabled | adstart);
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("channel 2"));
+  r.settle();
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 0);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
 }
 
 TEST_CASE("RM0351 18.4.26: ALIGN 1 left-aligns ADC_JDR1, 2048 reads 0x8000")
@@ -1862,6 +2150,15 @@ TEST_CASE(
   CHECK(run.log == std::vector<std::uint32_t>{0, 0});
   REQUIRE(run.warnings.size() == 1);
   CHECK(run.warnings[0].message.contains("ES0250 2.8.4"));
+}
+
+TEST_CASE(
+    "LL firmware: LL_ADC_INJ_SetTrigAuto converts PA0 then VREFINT into ADC_JDR1 after one "
+    "LL_ADC_REG_StartConversion, both groups idle at JEOS")
+{
+  auto const run = run_adc_ll("auto_injected");
+  CHECK(run.log == std::vector<std::uint32_t>{2048, 1654, 0, 0});
+  CHECK(run.warnings.empty());
 }
 
 TEST_CASE(

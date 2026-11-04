@@ -319,7 +319,18 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
 - These injected settings are logged once, a model_error under strict_peripherals: an injection
   into a ROVSE conversion with ROVSM 0 converts every sample of the dropped rank again, JQDIS 0
-  converts as JQDIS 1, JAUTO converts no injected group and JOVSE converts without oversampling.
+  converts as JQDIS 1 and JOVSE converts without oversampling.
+- With JAUTO the injected group converts after the last regular rank, RM0351 18.4.19, with no
+  delay, inferred, and with CONT the regular sequence starts again at JEOS. With CONT 0 and
+  EXTEN 0 ADSTART clears at EOS, as the RM0351 18.7.3 ADSTART bit says, and JADSTART reads 0 while
+  the auto-injected group converts, inferred: the RM0351 18.4.15 note says ADSTART and JADSTART
+  "provide information on whether any ADC operation is currently ongoing". ADSTP stops both
+  groups, RM0351 18.4.17. The one-shot DMA transfer end stops the sequence and drops the
+  conversion in progress, RM0351 18.4.19 and 18.4.26, and clears ADSTART, inferred.
+- JADSTART or JADSTP with JAUTO is ignored, JAUTO with JEXTEN set ignores the injected triggers,
+  JAUTO with DISCEN or JDISCEN converts as JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0
+  oversamples the regular ranks only, RM0351 18.4.31. Each is logged once, a model_error under
+  strict_peripherals, RM0351 18.4.19 and 18.7.4.
 - An injected start or trigger during a regular conversion drops it, and the dropped rank converts
   again after the group, RM0351 18.4.19, starting at the group's end, inferred. tLATRINJ is the
   next ADC clock edge then 2.5 cycles at CKMODE 00, inside the 2.5 to 3.5 cycles of DS10198 Table

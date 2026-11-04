@@ -1244,10 +1244,20 @@ struct adc_clock
  *        18.4.19, at once with no tLATR, inferred. ADSTART with EXTEN set arms the trigger. ADSTP
  *        during the group cancels the resumed rank and the latched start. JADSTP resumes the
  *        dropped rank at once, inferred.
+ *        With JAUTO the injected group converts after the last regular rank, RM0351 18.4.19,
+ *        with no delay, inferred, and with CONT the regular sequence starts again at JEOS. With
+ *        CONT 0 and EXTEN 0 ADSTART clears at EOS, as the RM0351 18.7.3 ADSTART bit says, and
+ *        JADSTART reads 0 while the auto-injected group converts, inferred: the RM0351 18.4.15
+ *        note says ADSTART and JADSTART "provide information on whether any ADC operation is
+ *        currently ongoing". ADSTP stops both groups, RM0351 18.4.17. The one-shot DMA transfer
+ *        end stops the sequence and drops the conversion in progress, RM0351 18.4.19 and
+ *        18.4.26, and clears ADSTART, inferred. JADSTART or JADSTP with JAUTO is ignored, JAUTO
+ *        with JEXTEN set ignores the injected triggers, JAUTO with DISCEN or JDISCEN converts as
+ *        JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0 oversamples the regular ranks only,
+ *        RM0351 18.4.31, each logged once, a model_error under strict_peripherals.
  *        These log a warning once, a model_error under strict_peripherals: an injection into a
  *        ROVSE conversion with ROVSM 0, which converts every sample of the dropped rank again,
- *        JQDIS 0, converted as JQDIS 1, JAUTO, which converts no injected group, and JOVSE,
- *        converted without oversampling.
+ *        JQDIS 0, converted as JQDIS 1, and JOVSE, converted without oversampling.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
@@ -1364,8 +1374,12 @@ private:
   void finish_injected();
   void abort_injected();
   void latch_regular();
-  void preempt(std::uint64_t at_ps);
-  void resume_regular(std::uint64_t at_ps);
+  [[nodiscard]] auto automatic() const -> bool;
+  [[nodiscard]] auto regular_discontinuous() const -> bool;
+  [[nodiscard]] auto injected_discontinuous() const -> bool;
+  void               check_automatic();
+  void               preempt(std::uint64_t at_ps);
+  void               resume_regular(std::uint64_t at_ps);
   [[nodiscard]] auto aligned(std::uint32_t result) const -> std::uint32_t;
   [[nodiscard]] auto trigger_latency_ps(std::uint64_t at_ps, bool aborting = false)
       -> std::uint64_t;
@@ -1495,7 +1509,10 @@ private:
   bool                                             injected_refused_logged_{};
   bool                                             resumed_oversampling_logged_{};
   bool                                             queue_logged_{};
-  bool                                             automatic_logged_{};
+  bool                                             automatic_start_logged_{};
+  bool                                             automatic_trigger_logged_{};
+  bool                                             automatic_discontinuous_logged_{};
+  bool                                             automatic_oversampling_logged_{};
   bool                                             injected_oversampling_logged_{};
   bool                                             sequence_written_logged_{};
 };
@@ -1996,10 +2013,28 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
        and injected_start_.of(old) == 0
        and (enable_.of(old) == 0 or disable_.of(now) != 0))
     {
+      now = injected_start_.with(now, 0);
+      if(ctx_.strict_peripherals)
+      {
+        regs_.poke(enable_.offset, old);
+      }
       forbidden(
           injected_refused_logged_, "ADC_CR",
           "JADSTART written with ADEN 0 or ADDIS 1, RM0351 18.7.3: the write is ignored");
-      now = injected_start_.with(now, 0);
+    }
+    auto const injected_rises = injected_start_.of(now) != 0 and injected_start_.of(old) == 0;
+    if(automatic() and (injected_rises or injected_->stop.of(now) != 0))
+    {
+      now = injected_start_.with(now, injected_start_.of(old));
+      now = injected_->stop.with(now, 0);
+      if(ctx_.strict_peripherals)
+      {
+        regs_.poke(enable_.offset, old);
+      }
+      forbidden(
+          automatic_start_logged_, "ADC_CR",
+          "JADSTART or JADSTP with JAUTO, forbidden by RM0351 18.4.19: ignored, converted as "
+          "JAUTO alone");
     }
   }
   if(deep_power_down_.of(now) != 0)
@@ -2110,6 +2145,10 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   {
     update(regs_, stop_, 0);
     update(regs_, start_, 0);
+    if(automatic())
+    {
+      abort_injected();
+    }
     abort();
     signal();
     return;
@@ -2312,9 +2351,10 @@ template <typename Traits> void adc_model<Traits>::prepare()
   }
   if constexpr(injected_group)
   {
-    if(get(regs_, injected_->automatic) != 0)
+    if(automatic())
     {
-      unmodelled(automatic_logged_, Traits::config, "JAUTO: auto-injected conversions");
+      check_automatic();
+      prepare_injected();
     }
   }
   if constexpr(Traits::filter_gates_dma)
@@ -2341,7 +2381,7 @@ template <typename Traits> void adc_model<Traits>::prepare()
 template <typename Traits> void adc_model<Traits>::begin_sequence(std::uint64_t start_ps)
 {
   prepare();
-  if(get(regs_, discontinuous_) == 0 or state_.rank >= length())
+  if(not regular_discontinuous() or state_.rank >= length())
   {
     state_.rank = 0;
   }
@@ -2510,7 +2550,23 @@ template <typename Traits> void adc_model<Traits>::advance(std::uint64_t end_ps,
 {
   state_.rank      = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
   auto const stays = get(regs_, trigger_) != 0 ? 1u : 0u;
-  if(get(regs_, discontinuous_) != 0)
+  if constexpr(injected_group)
+  {
+    if(last and automatic())
+    {
+      if(get(regs_, continuous_) == 0)
+      {
+        update(regs_, start_, stays);
+      }
+      else
+      {
+        state_.regular_pending = true;
+      }
+      begin_injected(end_ps);
+      return;
+    }
+  }
+  if(regular_discontinuous())
   {
     if(last or state_.subgroup_left <= 1)
     {
@@ -2987,7 +3043,7 @@ void adc_model<Traits>::injected_triggered(
     auto const polarity = get(regs_, injected_->trigger);
     auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
                                                        : (polarity & exten_falling) != 0;
-    if(not detected or not injected_listens(signal))
+    if(not detected or not injected_listens(signal) or automatic())
     {
       return;
     }
@@ -3084,10 +3140,6 @@ template <typename Traits> void adc_model<Traits>::prepare_injected()
     {
       unmodelled(queue_logged_, Traits::config, "JQDIS 0: the injected context queue");
     }
-    if(get(regs_, injected_->automatic) != 0)
-    {
-      unmodelled(automatic_logged_, Traits::config, "JAUTO: auto-injected conversions");
-    }
     if(injected_oversampling_ and get(regs_, *injected_oversampling_) != 0)
     {
       unmodelled(injected_oversampling_logged_, "ADC_CFGR2", "JOVSE: injected oversampling");
@@ -3106,7 +3158,7 @@ template <typename Traits> void adc_model<Traits>::begin_injected(std::uint64_t 
 {
   if constexpr(injected_group)
   {
-    if(get(regs_, injected_->discontinuous) == 0 or state_.injected_rank >= injected_length())
+    if(not injected_discontinuous() or state_.injected_rank >= injected_length())
     {
       state_.injected_rank = 0;
     }
@@ -3136,7 +3188,7 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
       update(regs_, injected_->end_of_sequence, 1);
     }
     state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(rank + 1u);
-    if(last or get(regs_, injected_->discontinuous) != 0)
+    if(last or injected_discontinuous())
     {
       state_.injecting = false;
       if(get(regs_, injected_->trigger) == 0)
@@ -3175,6 +3227,57 @@ template <typename Traits> void adc_model<Traits>::latch_regular()
     if(state_.injecting)
     {
       state_.regular_pending = true;
+    }
+  }
+}
+
+template <typename Traits> auto adc_model<Traits>::automatic() const -> bool
+{
+  if constexpr(injected_group)
+  {
+    return get(regs_, injected_->automatic) != 0;
+  }
+  return false;
+}
+
+template <typename Traits> auto adc_model<Traits>::regular_discontinuous() const -> bool
+{
+  return get(regs_, discontinuous_) != 0 and not automatic();
+}
+
+template <typename Traits> auto adc_model<Traits>::injected_discontinuous() const -> bool
+{
+  if constexpr(injected_group)
+  {
+    return get(regs_, injected_->discontinuous) != 0 and not automatic();
+  }
+  return false;
+}
+
+template <typename Traits> void adc_model<Traits>::check_automatic()
+{
+  if constexpr(injected_group)
+  {
+    if(get(regs_, injected_->trigger) != 0)
+    {
+      forbidden(
+          automatic_trigger_logged_, Traits::config,
+          "JAUTO with JEXTEN set, forbidden by RM0351 18.4.19: the injected triggers are "
+          "ignored, converted as JAUTO alone");
+    }
+    if(oversampled() and injected_oversampling_ and get(regs_, *injected_oversampling_) == 0)
+    {
+      forbidden(
+          automatic_oversampling_logged_, Traits::config,
+          "JAUTO with ROVSE 1 and JOVSE 0, not supported by RM0351 18.4.31: the regular ranks "
+          "are oversampled, the injected ranks converted once");
+    }
+    if(get(regs_, discontinuous_) != 0 or get(regs_, injected_->discontinuous) != 0)
+    {
+      forbidden(
+          automatic_discontinuous_logged_, Traits::config,
+          "JAUTO with DISCEN or JDISCEN, forbidden by RM0351 18.4.19 and 18.7.4: converted as "
+          "JAUTO alone");
     }
   }
 }
@@ -3224,8 +3327,12 @@ void adc_model<Traits>::transfer_completed(dma_controller const& by, std::uint32
     return;
   }
   state_.dma_stopped = true;
+  if(automatic())
+  {
+    abort_injected();
+  }
   abort();
-  if constexpr(Traits::dma_end_stops)
+  if(Traits::dma_end_stops or automatic())
   {
     auto const was = listened();
     if(was)

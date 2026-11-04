@@ -11,6 +11,7 @@
 void idle(void);
 void aden_at_once(void);
 void injected(void);
+void auto_injected(void);
 
 void idle(void)
 {
@@ -82,6 +83,29 @@ void injected(void)
   }
   LOG(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1));
   LOG(LL_ADC_IsActiveFlag_JEOC(ADC1));
+  LOG(LL_ADC_INJ_IsConversionOngoing(ADC1));
+  DONE();
+}
+
+void auto_injected(void)
+{
+  calibrate();
+  spin(CALIBRATION_SPIN);
+  LL_ADC_Enable(ADC1);
+  while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0u)
+  {
+  }
+  LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_5);
+  LL_ADC_INJ_SetTriggerSource(ADC1, LL_ADC_INJ_TRIG_SOFTWARE);
+  LL_ADC_INJ_SetSequencerRanks(ADC1, LL_ADC_INJ_RANK_1, LL_ADC_CHANNEL_VREFINT);
+  LL_ADC_INJ_SetTrigAuto(ADC1, LL_ADC_INJ_TRIG_FROM_GRP_REGULAR);
+  LL_ADC_REG_StartConversion(ADC1);
+  while(LL_ADC_IsActiveFlag_JEOS(ADC1) == 0u)
+  {
+  }
+  LOG(LL_ADC_REG_ReadConversionData12(ADC1));
+  LOG(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1));
+  LOG(LL_ADC_REG_IsConversionOngoing(ADC1));
   LOG(LL_ADC_INJ_IsConversionOngoing(ADC1));
   DONE();
 }
