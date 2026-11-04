@@ -7,7 +7,7 @@
     "irqs": 44,
     "patched_fields": 117,
     "peripherals": 38,
-    "regions": 7,
+    "regions": 8,
     "registers": 423
   },
   "part": "STM32L151V8Hx",
@@ -18,7 +18,7 @@
     "fields": "15c268b436a0534743ff97a477fc0399cd13ad21334f65502a9a2c9b7b363adf",
     "irqs": "cef9d1f2f0596500ef0a73f779cc10e9a45d03c579ef5ec28d9b87caccd796d0",
     "peripherals": "ea9e2816f4391a749823a921ef0db5d2625d78c5e437a8644e94a194344666e5",
-    "regions": "2cd3125324c581a2fd24c603a85421e3ebe45b1a1255217b0f966b5c7d816fc2",
+    "regions": "b4402029090e8501c665e6b65f0149d5dff9089361523c2d4bea0b2225c70cbc",
     "registers": "2b0532e9c3a7f92ca205433566f8975be7104052ff1c9dbc2c83a830cd6017a3"
   }
 }

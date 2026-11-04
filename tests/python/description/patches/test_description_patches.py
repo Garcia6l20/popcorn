@@ -1074,7 +1074,7 @@ add = [{_OTP}]
     assert excinfo.value.expected == "a peripheral of the description that is not an alias"
 
 
-def test_memory_without_add_controller_or_fill_is_refused(tmp_path: Path) -> None:
+def test_memory_without_add_alias_controller_or_fill_is_refused(tmp_path: Path) -> None:
     text = """
 format = 1
 [match]
@@ -1087,7 +1087,7 @@ source = "probe"
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, _synthetic_target())
     assert excinfo.value.key == "memory"
-    assert excinfo.value.expected == "an add, eeprom, controller or fill entry"
+    assert excinfo.value.expected == "an add, alias, eeprom, controller or fill entry"
 
 
 def test_memory_controller_refuses_an_alias(tmp_path: Path) -> None:

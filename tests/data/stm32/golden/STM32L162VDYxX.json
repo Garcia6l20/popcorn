@@ -7,7 +7,7 @@
     "irqs": 56,
     "patched_fields": 130,
     "peripherals": 48,
-    "regions": 8,
+    "regions": 10,
     "registers": 566
   },
   "part": "STM32L162VDYxX",
@@ -18,7 +18,7 @@
     "fields": "20530f0e6c60f016c2983c175120a024fc0308825b90c727728a6885739b7264",
     "irqs": "8ac426b25b6a4545f25929c722defdf52ad069d4347c2a555a598d65bf5f3208",
     "peripherals": "363bd2c248370c0f6f8be7b57dc6dd0b519814544bcae52253baa79f4df1b05e",
-    "regions": "f88fbae8bbda6b801180d04dfc39af7776afadaf232700b0a9a8d1bea9bd91d8",
+    "regions": "7fd5634d5816d9ad3f35e803f5f0a38510123ee8a35e257c8481674b58d65514",
     "registers": "2e74ed4352c1f135619c6a192ac142f7a4b336f29b33cd99ca1b07b1590df86d"
   }
 }

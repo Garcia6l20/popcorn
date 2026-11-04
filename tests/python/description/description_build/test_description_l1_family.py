@@ -182,7 +182,7 @@ def test_usb_sram_is_a_registerless_window_and_one_peripheral_has_the_usb_regist
         ("STM32L151VDTxX", "STM32_DIE437_80_384"),
     ],
 )
-def test_the_family_patch_adds_the_bit_band_windows_and_the_data_eeprom(
+def test_the_family_patch_adds_the_bit_band_windows_the_data_eeprom_and_the_boot_alias(
     name: str, stem: str
 ) -> None:
     description = _description(name)
@@ -203,6 +203,16 @@ def test_the_family_patch_adds_the_bit_band_windows_and_the_data_eeprom(
     ram, flash = _ram_flash(stem)
     assert regions["SRAM"]["size"] == ram * 1024
     assert sum(r["size"] for n, r in regions.items() if n.startswith("Flash")) == flash * 1024
+    banks = sorted(
+        (r for n, r in regions.items() if n.startswith("Flash")), key=lambda r: r["start"]
+    )
+    boots = sorted(
+        (r for n, r in regions.items() if n.startswith("BOOT")), key=lambda r: r["start"]
+    )
+    assert [(r["start"], r["size"], r["physical"], r["kind"]) for r in boots] == [
+        (r["start"] - 0x0800_0000, r["size"], r["start"], r["kind"]) for r in banks
+    ]
+    assert all("controller" not in r for r in boots)
 
 
 def test_a_facts_file_refuses_a_missing_mpu_secure_count(tmp_path: Path) -> None:

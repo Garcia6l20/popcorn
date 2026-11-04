@@ -7,7 +7,7 @@
     "irqs": 52,
     "patched_fields": 130,
     "peripherals": 42,
-    "regions": 7,
+    "regions": 8,
     "registers": 499
   },
   "part": "STM32L151UCYx",
@@ -18,7 +18,7 @@
     "fields": "bcafe1efde8fa3abe166f4315e7648a86e452bbe7d54a874e43a72ce5078c315",
     "irqs": "fc5db188f0598a163276655cfc9e30369f5f5f169a3e0e7e2b02c7ad5684a076",
     "peripherals": "507f76aad12104d3ba9afe200f49d5fcb041f87e3fdcaaea9533427260a103c9",
-    "regions": "89470ecb55f9875a0bb1fad964373baa4eeb0d5332275f29953cdbd778872822",
+    "regions": "3296d4617304cabda8d65027b6119402c8240eb776d33d813bfc2a36836688e6",
     "registers": "9a51523363f740d5b51ad6a97cd9b387e70a1495cce55d96d6fd7fe3166da3e4"
   }
 }

@@ -2,6 +2,7 @@
 #include "family_names.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
+#include "memory_alias.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"
 #include "temporal_isolation.hpp"
@@ -523,18 +524,20 @@ private:
  *        error. At level 2 the debug port is off and every DAP access is a bus error. A CPU,
  *        DMA or DAP load of a PCROP area reads 0 and calls the read protection hook, a DAP
  *        store to it is dropped, a fetch from it runs. CPU and DMA stores reach the FLASH
- *        model, unfiltered debugger accesses pass.
+ *        model, unfiltered debugger accesses pass. An access through a memory alias, the main
+ *        flash at 0 of RM0351 2.6.1, follows the rules of the address it reaches, inferred.
  */
 class read_protection_filter final : public bus_firewall
 {
 public:
   read_protection_filter(
       std::vector<memory_extent>                     windows,
+      std::vector<memory_alias>                      aliases,
       std::vector<memory_extent> const&              pcrop,
       std::move_only_function<std::uint32_t() const> level,
       std::move_only_function<void()>                read_protected)
-      : windows_{std::move(windows)}, pcrop_{pcrop}, level_{std::move(level)},
-        read_protected_{std::move(read_protected)}
+      : windows_{std::move(windows)}, aliases_{std::move(aliases)}, pcrop_{pcrop},
+        level_{std::move(level)}, read_protected_{std::move(read_protected)}
   {}
 
   [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs attrs, arch::memory_op)
@@ -552,14 +555,16 @@ public:
       memory_page(address page, std::uint32_t size, address, bus_attrs, arch::memory_op)
           -> page_verdict override
   {
+    auto const first = physical_of(aliases_, page);
     return {.filter_data = std::ranges::any_of(pcrop_, [&](memory_extent const& area) {
-              return area.first < std::uint64_t{page} + size and area.last >= page;
+              return area.first < std::uint64_t{first} + size and area.last >= first;
             })};
   }
 
-  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+  [[nodiscard]] auto check_memory(address seen, std::uint8_t, bus_attrs attrs, arch::memory_op op)
       -> bus_verdict override
   {
+    auto const at = physical_of(aliases_, seen);
     if(not dap(attrs))
     {
       return op == arch::memory_op::read ? pcrop_read(at) : bus_verdict::allow;
@@ -604,6 +609,7 @@ private:
   }
 
   std::vector<memory_extent>                     windows_;
+  std::vector<memory_alias>                      aliases_;
   std::vector<memory_extent> const&              pcrop_;
   std::move_only_function<std::uint32_t() const> level_;
   std::move_only_function<void()>                read_protected_;
@@ -2656,8 +2662,8 @@ flash_model<Traits>::flash_model(
     }
     update_pcrop();
     protection_filter_ = std::make_unique<read_protection_filter>(
-        std::move(windows), pcrop_extents_, [this] { return protection_level(); },
-        [this] { read_protected(); });
+        std::move(windows), memory_aliases(ctx.part), pcrop_extents_,
+        [this] { return protection_level(); }, [this] { read_protected(); });
     ctx.install_firewall(*protection_filter_);
   }
   if(not options_.option_bytes)
@@ -5306,7 +5312,13 @@ auto check_option_bytes(part_description const& part, option_bytes const& wanted
   {
     return refuse("a part whose FLASH row encodes option bytes");
   }
-  return variant.encode_options(variant, *program, wanted);
+  return variant.encode_options(variant, *program, wanted).transform([&part](address boot) {
+    auto const& regions = part.regions;
+    auto const  alias   = std::ranges::find_if(regions, [boot](region_desc const& region) {
+      return region.start == 0 and region.physical == boot;
+    });
+    return alias == regions.end() ? boot : address{0};
+  });
 }
 
 auto flash_factory(flash_options options) -> model_factory

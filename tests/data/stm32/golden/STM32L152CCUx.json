@@ -7,7 +7,7 @@
     "irqs": 53,
     "patched_fields": 130,
     "peripherals": 43,
-    "regions": 7,
+    "regions": 8,
     "registers": 511
   },
   "part": "STM32L152CCUx",
@@ -18,7 +18,7 @@
     "fields": "85c451dcd2f1544b98454e0d2f8dc1520979ae13adb63b42bf1d3693da35620b",
     "irqs": "15440d3cfdc20946e055e8a2d53db8fe1c6323f1b668dd8138182f205bbdf7da",
     "peripherals": "bb195d4ce913683dfefee3e1bfbbaa1a2863c166394f5e9b8952cc16ee1599d8",
-    "regions": "89470ecb55f9875a0bb1fad964373baa4eeb0d5332275f29953cdbd778872822",
+    "regions": "3296d4617304cabda8d65027b6119402c8240eb776d33d813bfc2a36836688e6",
     "registers": "1700d10f4268d5a2c1a4f3a81eaffd2bcfceb2c25222e3e33bb71154136a3f17"
   }
 }

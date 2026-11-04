@@ -66,6 +66,15 @@ The model column of a part page marks the instances without a model as `none`. O
 these are COMP, DAC, OPAMP, RI, WWDG, LCD, AES, FSMC and SDIO. They keep plain register storage.
 A firmware access logs one `model_warning` per register and raises `ModelError` under `strict`.
 
+## Boot memory
+
+Every code aliases its main flash at address 0, the main flash boot of RM0038 2.7 Table 6, and
+VTOR resets to 0. The core boots from the vector table read through the alias, so a load, a
+fetch and an exception vector at 0 reach the flash. The second bank of a Cat.6 part reads at
+0x00040000, inferred. SYSCFG_MEMRMP MEM_MODE is storage and address 0 always maps the flash.
+With `swap_bank` it also maps the flash, where silicon keeps the system memory aliased at 0,
+RM0038 Table 6.
+
 ## Bit-banding
 
 Every code maps the two Cortex-M3 bit-band windows from its description. The alias window at
@@ -130,8 +139,8 @@ from popcorn.stm32 import mcu
 machine = Machine(mcu("STM32L152RETx"), option_bytes=OptionBytes(swap_bank=True))
 ```
 
-Without `option_bytes` the machine keeps the option words of the description and boots from the
-flash base.
+Without `option_bytes` the machine keeps the option words of the description and boots from
+address 0, where the flash is aliased.
 
 ## Examples
 

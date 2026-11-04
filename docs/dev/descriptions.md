@@ -395,6 +395,24 @@ The size is a whole number of 1 KB pages, or the build raises `DescriptionError`
 `memory.eeprom`, as it does for a part without the element, for a range that overlaps another
 region, and for a `controller` table entry naming `DATA_EEPROM` beside the `eeprom` one.
 
+## Region alias
+
+`[memory] alias` adds a region at `start` that aliases a whole region of the description: it
+takes the target's size, kind, access and security, `physical` is the target's start, and it has
+no controller, content or fill. The STM32L1 and STM32L4 family patches alias the main flash at
+address 0 this way, whatever flash size the part has:
+
+```toml
+[memory]
+source = "RM0351 Rev 11, 2.6.1 Table 4 and Table 5: the main flash aliased at 0x0000 0000"
+alias = [{ name = "BOOT", start = 0x0, region = "Flash" }]
+```
+
+The build raises `DescriptionError` keyed `memory.alias.<name>` for a target that does not exist,
+is a `bit_band` window or is itself an alias, and for an alias that is not in whole 1 KB pages,
+overlaps another region or reuses a region name. Aliases apply after `add`, so an alias can
+target an added region.
+
 ## Erased value
 
 A region holds 0xFF bytes from power-on when it is `rom` and 0 when it is `ram`, where no

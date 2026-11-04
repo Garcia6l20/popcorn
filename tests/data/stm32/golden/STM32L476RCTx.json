@@ -7,7 +7,7 @@
     "irqs": 81,
     "patched_fields": 48,
     "peripherals": 66,
-    "regions": 9,
+    "regions": 10,
     "registers": 1256
   },
   "part": "STM32L476RCTx",
@@ -18,7 +18,7 @@
     "fields": "2d1db64a1f0c90c02b1d21c9b15a4e2ff7d284ed618ee5d79b6a73163df945ff",
     "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
     "peripherals": "59951b7bb326981dbe891ceb1b9a9157fa1bcd0bf1256c3ee06739d3efd9e28a",
-    "regions": "61c5276aaeb9a23d8e18902ed9896dc40cba04a50e7175252f2c2054bcf8abce",
+    "regions": "7ac014351dd24f0ca3cb54419d712ab9d30822cd605df60cf63356e0618f0e8e",
     "registers": "64300c7f761f70095e1fb0ca46699efc3f50effdc4f6d9593f146748b28a0f94"
   }
 }

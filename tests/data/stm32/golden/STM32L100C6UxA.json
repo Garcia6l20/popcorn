@@ -7,7 +7,7 @@
     "irqs": 45,
     "patched_fields": 116,
     "peripherals": 38,
-    "regions": 7,
+    "regions": 8,
     "registers": 416
   },
   "part": "STM32L100C6UxA",
@@ -18,7 +18,7 @@
     "fields": "5123eed9c16136aba08ee014f2d30d145e5c8c64e3b1b828336588cee50d201c",
     "irqs": "4a7ca3ef7dd4e964a523e1288620bf899efb970a0bd39150d52270712e995bf7",
     "peripherals": "2b500c484605f1aaf5099ae896c806ac81262580e2b36f5763f24a40b567b1e4",
-    "regions": "89c2bc2c7ac49e3ee4342fa4da3aa877fcabc3677317496b114174cd53f10b96",
+    "regions": "2fe05820f9c487c717a8f94478f18c35a08f9973222fe6fd905b77c5057b2caa",
     "registers": "b5f3691685d258ba3d1cf0394276a04aadf192c6111beef8b28f141afa2083c3"
   }
 }

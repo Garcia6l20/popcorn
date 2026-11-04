@@ -48,12 +48,21 @@ and U585 C packages and SPI4, UART8 and USART10 on the 64-pin STM32H5 parts are 
 
 ## Memory map
 
-- Nothing is mapped at address 0, as on the STM32U5. Under the default `faults="stop"`, a load,
-  store or fetch there stops the run with a bus fault.
+- On the STM32U5 and STM32H5 nothing is mapped at address 0. Under the default `faults="stop"`, a
+  load, store or fetch there stops the run with a bus fault.
 - The ICACHE remap of external memories onto the code region is not modelled. CRR0 to CRR3 store
   what the firmware writes and map nothing.
-- The STM32L1 and STM32L4 also map nothing at address 0, where silicon aliases the boot memory,
-  and VTOR resets to the flash base, so the core boots from the flash at its own address.
+- On the STM32L1 and STM32L4 the main flash is aliased at address 0 over the size of the Flash
+  region, RM0038 2.7 and RM0351 2.6.1, and VTOR resets to 0. The second bank of an STM32L1 Cat.6
+  part reads at 0x00040000 to 0x0006FFFF, inferred. A CPU, DMA or debugger load and a fetch
+  through the alias reach the flash under the PCROP, bank lock and read protection rules of the
+  flash address, inferred: at RDP level 1 on the STM32L4 a debugger access through the alias is
+  refused like one at 0x08000000. A CPU or DMA store through the alias is refused, a bus fault for
+  the CPU and a transfer error for the DMA, inferred.
+- SYSCFG_MEMRMP MEM_MODE, and FB_MODE on the STM32L4, are storage. Address 0 always maps the main
+  flash.
+- With `swap_bank` address 0 also maps the main flash. On silicon the system memory stays aliased
+  at 0 with BFB2 set, RM0351 9.2.1, and with nBFB2 0, RM0038 Table 6.
 
 ## Core faults
 
@@ -453,11 +462,11 @@ On the STM32L1, RM0038 section 3:
   SPRMOD 1, OPTVERR and WRPR1 and WRPR2 at 0 after an RDP 1 to 0 store and a power-on, RM0038
   3.7.4. On every other category and
   part FLASH_WRPRx bits at 1 are write protection.
-- `Machine(option_bytes=)` selects the boot bank: the flash base, or with `swap_bank` on Cat.4 to
-  Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19 boots the
-  system bootloader, which jumps to bank 2 when its first word is an SRAM address. FLASH_OBR.nBFB2
-  then loads as the inverse of `swap_bank` at every option load, whatever the USER word holds. Any
-  other field away from its default is refused as `option_bytes.<field>`.
+- `Machine(option_bytes=)` selects the boot bank: address 0, the flash alias, or with `swap_bank`
+  on Cat.4 to Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19
+  boots the system bootloader, which jumps to bank 2 when its first word is an SRAM address.
+  FLASH_OBR.nBFB2 then loads as the inverse of `swap_bank` at every option load, whatever the
+  USER word holds. Any other field away from its default is refused as `option_bytes.<field>`.
 - OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
   set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
 - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
@@ -581,17 +590,17 @@ On the STM32L47x/L48x, RM0351 section 3:
   `strict_peripherals`, inferred. The bank 2 WRP and PCROP words protect nothing then. On a 1 MB
   part the flash is always two banks.
 - `Machine(option_bytes=)` programs and loads `FLASH_OPTR` at construction, the option byte area
-  with it: `swap_bank` sets `BFB2`, `dualbank=False` clears `DUALBANK` on a 256 KB or 512 KB part.
-  A BFB2 boot runs bank 2 code at its own address: the core boots from the bank 2 base, 0x08020000
-  on a 256 KB part, and the banks keep their addresses. An
-  image linked at 0x08000000 for a bank-swap boot runs only from bank 1. The core boots the
-  bank 2 base whatever bank 2 holds. On silicon, AN2606 Rev 71 79.1.2 Figure 102 and 79.2.2
-  Figure 104, the system bootloader boots bank 2 only when its first word is an internal SRAM
-  address, else bank 1 when bank 1's first word is one, else bank 1 at RDP level 2, else it
-  runs its own command loop. `RDP` and the other user
-  option bits keep their production values, firmware programs them with `OPTSTRT`. A `BFB2`
-  that firmware programs is loaded only. Any other field away from its default, `dualbank=False`
-  on a 1 MB part and `swap_bank` with `dualbank=False` are refused as `option_bytes.<field>`.
+  with it: `swap_bank` sets `BFB2`, `dualbank=False` clears `DUALBANK` on a 256 KB or 512 KB part. A
+  BFB2 boot runs bank 2 code at its own address: the core boots from the bank 2 base, 0x08020000 on
+  a 256 KB part, and the banks keep their addresses. Without `swap_bank` the core boots from address
+  0, the flash alias. An image linked at 0x08000000 for a bank-swap boot runs only from bank 1. The
+  core boots the bank 2 base whatever bank 2 holds. On silicon, AN2606 Rev 71 79.1.2 Figure 102 and
+  79.2.2 Figure 104, the system bootloader boots bank 2 only when its first word is an internal SRAM
+  address, else bank 1 when bank 1's first word is one, else bank 1 at RDP level 2, else it runs its
+  own command loop. `RDP` and the other user option bits keep their production values, firmware
+  programs them with `OPTSTRT`. A `BFB2` that firmware programs is loaded only. Any other field away
+  from its default, `dualbank=False` on a 1 MB part and `swap_bank` with `dualbank=False` are
+  refused as `option_bytes.<field>`.
 - ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as
   RM0351 3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
 - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a

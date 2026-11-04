@@ -7,7 +7,7 @@
     "irqs": 56,
     "patched_fields": 130,
     "peripherals": 48,
-    "regions": 7,
+    "regions": 8,
     "registers": 572
   },
   "part": "STM32L152RDYx",
@@ -18,7 +18,7 @@
     "fields": "8102c7cb5d8bc620e3fe708b1abd7bba0f8ca9686009436a40817977bbe0e4a9",
     "irqs": "afbe4e215668e21a4d511dfef851625917c040f4ffedef35e9ac495e3dc575e2",
     "peripherals": "1da14f42b21ca613340c3f5a49fe532b9fe6227c1e1b246d7ddf0e7316145864",
-    "regions": "f1a92aa2f4d856eb7beda75ae201ffcebb302a4dc8245e0db269a2b9092b668d",
+    "regions": "7c45c9a004b6fe6fe7fa806d7c0dcb2387f1d2f7e9261b4e97432b4f78120a3a",
     "registers": "c4d289e5189b74b36f0e5dd725633292953e3741f9adea58ae7578d40791a63a"
   }
 }

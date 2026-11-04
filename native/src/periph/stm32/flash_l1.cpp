@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "memory_alias.hpp"
 #include "model_base.hpp"
 #include "voltage_range.hpp"
 
@@ -121,18 +122,21 @@ struct bank_window
  *        bus error and a fetch from it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. A
  *        CPU, DMA or filtered debugger load of a PCROP sector reads 0 and calls the read
  *        protection hook, a fetch from it runs, RM0038 3.7.4. Stores reach the FLASH model,
- *        unfiltered debugger accesses and every other address pass.
+ *        unfiltered debugger accesses and every other address pass. An access through a memory
+ *        alias, the main flash at 0 of RM0038 2.7, follows the rules of the address it reaches,
+ *        inferred.
  */
 class bank_filter final : public bus_firewall
 {
 public:
   bank_filter(
       std::vector<bank_window>          windows,
+      std::vector<memory_alias>         aliases,
       std::uint8_t const&               locked,
       std::vector<memory_extent> const& protected_reads,
       std::move_only_function<void()>   read_protected)
-      : windows_{std::move(windows)}, locked_{locked}, protected_reads_{protected_reads},
-        read_protected_{std::move(read_protected)}
+      : windows_{std::move(windows)}, aliases_{std::move(aliases)}, locked_{locked},
+        protected_reads_{protected_reads}, read_protected_{std::move(read_protected)}
   {}
 
   [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs, arch::memory_op)
@@ -147,19 +151,21 @@ public:
   }
 
   [[nodiscard]] auto
-      memory_page(address page, std::uint32_t size, address at, bus_attrs, arch::memory_op)
+      memory_page(address seen_page, std::uint32_t size, address seen, bus_attrs, arch::memory_op)
           -> page_verdict override
   {
-    auto const bank_locked = locked(at);
+    auto const page        = physical_of(aliases_, seen_page);
+    auto const bank_locked = locked(physical_of(aliases_, seen));
     auto const read_ruled  = std::ranges::any_of(protected_reads_, [&](memory_extent const& e) {
       return e.first < std::uint64_t{page} + size and e.last >= page;
     });
     return {.filter_data = bank_locked or read_ruled, .deny_fetch = bank_locked};
   }
 
-  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+  [[nodiscard]] auto check_memory(address seen, std::uint8_t, bus_attrs attrs, arch::memory_op op)
       -> bus_verdict override
   {
+    auto const at = physical_of(aliases_, seen);
     if(op == arch::memory_op::write)
     {
       return bus_verdict::allow;
@@ -176,29 +182,47 @@ public:
     return bus_verdict::allow;
   }
 
-  [[nodiscard]] auto allowed_extent(address at, std::uint8_t, bus_attrs, arch::memory_op op)
+  [[nodiscard]] auto allowed_extent(address seen, std::uint8_t, bus_attrs, arch::memory_op op)
       -> memory_extent override
   {
-    auto extent = bank_extent(at);
-    if(op == arch::memory_op::write)
+    auto const* const alias  = alias_at(aliases_, seen);
+    auto const        at     = physical_of(aliases_, seen);
+    auto              extent = bank_extent(at);
+    if(op != arch::memory_op::write)
     {
-      return extent;
+      for(auto const& area : protected_reads_)
+      {
+        extent = outside(extent, at, area);
+      }
     }
-    for(auto const& [first, last] : protected_reads_)
+    if(alias != nullptr)
     {
-      if(last < at)
-      {
-        extent.first = std::max(extent.first, last + 1);
-      }
-      else if(first > at)
-      {
-        extent.last = std::min(extent.last, first - 1);
-      }
+      return through(*alias, extent);
+    }
+    for(auto const& other : aliases_)
+    {
+      extent = outside(
+          extent, at,
+          {.first = other.start, .last = static_cast<address>(other.start + (other.size - 1u))});
     }
     return extent;
   }
 
 private:
+  [[nodiscard]] static auto outside(memory_extent extent, address at, memory_extent area)
+      -> memory_extent
+  {
+    if(area.last < at)
+    {
+      extent.first = std::max(extent.first, area.last + 1);
+    }
+    else if(area.first > at)
+    {
+      extent.last = std::min(extent.last, area.first - 1);
+    }
+    return extent;
+  }
+
   [[nodiscard]] auto read_protected(address at) const -> bool
   {
     return std::ranges::any_of(
@@ -254,6 +278,7 @@ private:
   }
 
   std::vector<bank_window>          windows_;
+  std::vector<memory_alias>         aliases_;
   std::uint8_t const&               locked_;
   std::vector<memory_extent> const& protected_reads_;
   std::move_only_function<void()>   read_protected_;
@@ -644,7 +669,8 @@ flash_l1::flash_l1(
     windows.push_back({.start = region->start, .size = region->size, .second = data_bank(*region)});
   }
   filter_ = std::make_unique<bank_filter>(
-      std::move(windows), state_.locked, protected_reads_, [this] { read_refused(); });
+      std::move(windows), memory_aliases(ctx.part), state_.locked, protected_reads_,
+      [this] { read_refused(); });
   ctx.install_firewall(*filter_);
 }
 

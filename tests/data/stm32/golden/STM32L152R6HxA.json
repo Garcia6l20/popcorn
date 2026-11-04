@@ -7,7 +7,7 @@
     "irqs": 45,
     "patched_fields": 116,
     "peripherals": 39,
-    "regions": 7,
+    "regions": 8,
     "registers": 441
   },
   "part": "STM32L152R6HxA",
@@ -18,7 +18,7 @@
     "fields": "a4f21c841e4e6cb0ab355105afc5ef205463d095582f28a3b93f5ef7e82a30c3",
     "irqs": "4a7ca3ef7dd4e964a523e1288620bf899efb970a0bd39150d52270712e995bf7",
     "peripherals": "12cbedf7affb5ad03bf82e19902667d20867f614090fb19581111c56201f2a50",
-    "regions": "e7697ce7be051e5fbee567ee7778ca20773f8ea04b0b272afd1cfed4b56974c1",
+    "regions": "a44c31f9b48d6f9f8bca27d9cc4119c38f88724e8a1a225129e6ca84739c7acc",
     "registers": "140e60567bfb9ed13403958c43503e072f0e73e4820cb576982c84b3f1e27546"
   }
 }

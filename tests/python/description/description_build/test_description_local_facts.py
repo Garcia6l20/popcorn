@@ -7,6 +7,7 @@ from popcorn.stm32.description._cubemx import DbPart, expand_refname, read_part
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._model import RegionAccess, RegionDesc, RegionKind
 from popcorn.stm32.description._patches import (
+    LoadedPatch,
     PatchTarget,
     apply_patches,
     cmsis_suffix,
@@ -385,6 +386,80 @@ def test_an_eeprom_controller_must_be_a_peripheral(tmp_path: Path) -> None:
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, target)
     assert excinfo.value.key == "memory.controller.DATA_EEPROM"
+
+
+def _alias_patches(tmp_path: Path, target: PatchTarget, entry: str) -> list[LoadedPatch]:
+    return load_patches(
+        _eeprom_patch(tmp_path, entry),
+        part="STM32T001ABTx",
+        svd_name="",
+        db_part=target.db_part,
+    )
+
+
+def test_an_alias_entry_adds_a_region_sized_and_typed_by_its_target(tmp_path: Path) -> None:
+    target = _eeprom_target([2048])
+    flash = target.regions[0]
+    patches = _alias_patches(
+        tmp_path, target, 'alias = [{ name = "BOOT", start = 0x0, region = "Flash" }]'
+    )
+    report = apply_patches(patches, target)
+    boot = target.regions[-1]
+    assert report.regions_added == 1
+    assert (boot.name, boot.start, boot.size, boot.kind, boot.physical) == (
+        "BOOT",
+        0,
+        flash.size,
+        RegionKind.ROM,
+        flash.start,
+    )
+    assert boot.acc == flash.acc and boot.acc is not flash.acc
+    assert boot.controller is None and boot.content is None and boot.fill is None
+    assert boot.secure == flash.secure
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ('{ name = "BOOT", start = 0x0, region = "NOPE" }', "an existing region"),
+        (
+            '{ name = "BOOT", start = 0x0, region = "BB" }',
+            "a region that is neither bit_band nor an alias",
+        ),
+        (
+            '{ name = "BOOT", start = 0x0, region = "ALIAS" }',
+            "a region that is neither bit_band nor an alias",
+        ),
+        (
+            '{ name = "BOOT", start = 0x08020000, region = "Flash" }',
+            "a range clear of region Flash",
+        ),
+        (
+            '{ name = "BOOT", start = 0x200, region = "Flash" }',
+            "a start and size in whole 1 KB pages",
+        ),
+        ('{ name = "Flash", start = 0x0, region = "Flash" }', "a region name not already used"),
+    ],
+)
+def test_an_alias_entry_is_refused_under_its_key(tmp_path: Path, entry: str, expected: str) -> None:
+    target = _eeprom_target([2048])
+    flash = target.regions[0]
+    target.regions += [
+        replace(
+            flash,
+            name="BB",
+            start=0x2200_0000,
+            size=0x0200_0000,
+            kind=RegionKind.BIT_BAND,
+            physical=0x2000_0000,
+        ),
+        replace(flash, name="ALIAS", start=0x1000_0000, physical=flash.start),
+    ]
+    patches = _alias_patches(tmp_path, target, f"alias = [{entry}]")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key in {"memory.alias.BOOT", "memory.alias.Flash"}
+    assert excinfo.value.expected == expected
 
 
 def test_a_malformed_cmsis_suffix_is_refused_beside_an_explicit_header(

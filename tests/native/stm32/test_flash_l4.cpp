@@ -1,5 +1,6 @@
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/inert_model.hpp"
+#include "boot_alias_checks.hpp"
 #include "read_protection.hpp"
 #include "stm32_fixture.hpp"
 
@@ -1557,34 +1558,38 @@ auto dap_refused(rig const& r, bool secure, address at) -> bool
 }
 
 TEST_CASE(
-    "RM0351 3.5.1 Table 15: at RDP level 1 a DAP read or write of the flash, the OTP area or SRAM2 "
-    "is a bus error, the host view, the option bytes, the system memory, SRAM1 and the "
-    "peripherals stay open")
+    "RM0351 3.5.1 Table 15 and 2.6.1: at RDP level 1 a DAP read or write of the flash, its alias "
+    "at 0, the OTP area or SRAM2 is a bus error, the host view, the option bytes, the system "
+    "memory, SRAM1 and the peripherals stay open")
 {
   rig r;
   REQUIRE(r.f.target->mem().write(bank2, 4, 0x2222'2222u).has_value());
   REQUIRE(r.f.target->mem().write(sram2, 4, 0x1111'1111u).has_value());
   CHECK(r.f.target->mem(true).read(bank2, 4) == 0x2222'2222u);
   CHECK(r.f.target->mem(false).read(sram2, 4) == 0x1111'1111u);
+  CHECK(r.f.target->mem(true).read(bank2 - bank1_low, 4) == 0x2222'2222u);
   program_rdp(r, 0xbb);
   for(auto const secure : {true, false})
   {
     CAPTURE(secure);
-    for(auto const at : {bank1_low, bank2, bank2_last, otp, otp + 0x3fc, sram2, sram2 + 0x7ffc})
+    for(auto const at :
+        {bank1_low, bank2, bank2_last, address{0}, bank2 - bank1_low,
+         bank2_last - bank1_low + 0x7fc, otp, otp + 0x3fc, sram2, sram2 + 0x7ffc})
     {
       CAPTURE(at);
       CHECK(dap_refused(r, secure, at));
     }
     CHECK_FALSE(r.f.target->mem(secure).write(sram2 + 4, 4, 1).has_value());
     CHECK_FALSE(r.f.target->mem(secure).write(bank2 + 4, 4, 1).has_value());
+    CHECK_FALSE(r.f.target->mem(secure).write(bank2 - bank1_low + 4, 4, 1).has_value());
     CHECK(r.f.target->mem(secure).read(option1, 4) == 0xffef'f8bbu);
     CHECK(r.f.target->mem(secure).read(otp + 0x400, 4).has_value());
     CHECK(r.f.target->mem(secure).read(system1, 4).has_value());
     CHECK(r.f.target->mem(secure).read(sram1, 4).has_value());
     CHECK(r.f.target->mem(secure).read(r.at("SR"), 4).has_value());
-    CHECK_FALSE(r.f.target->mem(secure).read(0, 4).has_value());
   }
   CHECK(r.f.target->mem().read(bank2, 4) == 0x2222'2222u);
+  CHECK(r.f.target->mem().read(bank2 - bank1_low, 4) == 0x2222'2222u);
   CHECK(r.f.target->mem().read(sram2, 4) == 0x1111'1111u);
   CHECK(r.f.target->mem().read(sram2 + 4, 4) == 0u);
   program_rdp(r, 0xbc);
@@ -1715,8 +1720,9 @@ void program_pcrop1(rig const& r, std::uint32_t start, std::uint32_t end)
 }
 
 TEST_CASE(
-    "RM0351 3.5.2 and 3.6: a CPU or DAP load of a PCROP area reads 0 and sets RDERR, RDERRIE "
-    "raises FLASH_IRQn, a fetch from it runs, m.mem reads the data")
+    "RM0351 3.5.2, 3.6 and 2.6.1: a CPU or DAP load of a PCROP area, at its address or through "
+    "the alias at 0, reads 0 and sets RDERR, RDERRIE raises FLASH_IRQn, a fetch from it runs, "
+    "m.mem reads the data")
 {
   rig r;
   REQUIRE(r.f.target->mem().write(pcrop_at, 4, 0x1234'5678u).has_value());
@@ -1729,6 +1735,11 @@ TEST_CASE(
   CHECK(r.status("OPERR") == 0);
   CHECK_FALSE(r.pending());
   r.write("SR", rderr);
+  CHECK(r.status("RDERR") == 0);
+  CHECK(r.load(pcrop_at - bank1_low).value == 0u);
+  CHECK(r.status("RDERR") == 1);
+  r.write("SR", rderr);
+  CHECK(r.load(pcrop_at - bank1_low + page_bytes).value == 0xabcdu);
   CHECK(r.status("RDERR") == 0);
   CHECK(r.load(pcrop_at + page_bytes).value == 0xabcdu);
   CHECK(r.status("RDERR") == 0);
@@ -1743,12 +1754,21 @@ TEST_CASE(
     CHECK(r.f.target->mem(secure).read(pcrop_at, 4) == 0u);
     CHECK(r.status("RDERR") == 1);
     r.write("SR", rderr);
+    CHECK(r.f.target->mem(secure).read(pcrop_at - bank1_low, 4) == 0u);
+    CHECK(r.status("RDERR") == 1);
+    r.write("SR", rderr);
   }
+  CHECK(r.f.target->mem().read(pcrop_at - bank1_low, 4) == 0x1234'5678u);
   REQUIRE(r.f.target->mem(true).write(pcrop_at, 4, 0).has_value());
   CHECK(r.f.target->mem().read(pcrop_at, 4) == 0x1234'5678u);
   CHECK(r.status("RDERR") == 0);
   r.f.set("r0", 0);
   r.f.set("pc", (pcrop_at + 0x100) | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+  CHECK(r.f.target->regs().read(*r.f.target->regs().find("r0")) == 42);
+  CHECK(r.status("RDERR") == 0);
+  r.f.set("r0", 0);
+  r.f.set("pc", (pcrop_at - bank1_low + 0x100) | 1u);
   REQUIRE(r.f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
   CHECK(r.f.target->regs().read(*r.f.target->regs().find("r0")) == 42);
   CHECK(r.status("RDERR") == 0);
@@ -1798,6 +1818,61 @@ TEST_CASE(
   r.program_options();
   CHECK(r.word(0x1fff'7808) == 0xffff'2000u);
   CHECK(r.word(0x1fff'7810) == 0xffff'2100u);
+}
+
+class services_probe final : public popcorn::testing::inert_model
+{
+public:
+  explicit services_probe(popcorn::periph::model_context& ctx) : ctx_{ctx}
+  {}
+
+  [[nodiscard]] auto services() const -> core::machine_services&
+  {
+    return ctx_.services;
+  }
+
+private:
+  popcorn::periph::model_context& ctx_;
+};
+
+TEST_CASE(
+    "RM0351 3.5.2: a DMA program of a PCROP double word sets WRPERR and writes nothing, one "
+    "outside the area programs, a DMA load of the area at its address or through the alias at 0 "
+    "reads 0 and sets RDERR")
+{
+  services_probe* probe   = nullptr;
+  auto            options = popcorn::testing::stm32_options();
+  options.models["SYSCFG"] =
+      [&probe](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        auto made = std::make_shared<services_probe>(ctx);
+        probe     = made.get();
+        return made;
+      };
+  rig r{options};
+  REQUIRE(probe != nullptr);
+  program_pcrop1(r, 0x2010, 0x20ff);
+  auto const dma_program = [&](address at) {
+    r.control(pg);
+    REQUIRE(probe->services().write(at, 4, 1, popcorn::initiator::dma).has_value());
+    REQUIRE(probe->services().write(at + 4, 4, 2, popcorn::initiator::dma).has_value());
+    r.wait_idle();
+  };
+  dma_program(pcrop_at + 0x10);
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(r.words(pcrop_at + 0x10, 2) == std::vector<std::uint32_t>{1, 2});
+  dma_program(pcrop_at + 0x80);
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(pcrop_at + 0x80, 2) == erased(2));
+  r.write("SR", wrperr);
+  for(auto const at : {pcrop_at + 0x80, pcrop_at + 0x80 - bank1_low})
+  {
+    CAPTURE(at);
+    CHECK(probe->services().read(at, 4, popcorn::initiator::dma) == 0u);
+    CHECK(r.status("RDERR") == 1);
+    r.write("SR", rderr);
+    CHECK(probe->services().read(at - 0x70, 4, popcorn::initiator::dma) == 1u);
+    CHECK(r.status("RDERR") == 0);
+  }
 }
 
 TEST_CASE(
@@ -1976,15 +2051,16 @@ auto configured(stm32::option_bytes const& wanted) -> core::machine_options
 }
 
 TEST_CASE(
-    "RM0351 3.7.8: L4 option bytes boot from the flash base, popcorn rule: swap_bank from the "
-    "bank 2 base, dualbank false on 512 KB or less, every other field refused")
+    "RM0351 3.7.8 and 2.6.1 Table 5: L4 option bytes boot from address 0, where the flash is "
+    "aliased, popcorn rule: swap_bank from the bank 2 base, dualbank false on 512 KB or less, "
+    "every other field refused")
 {
-  CHECK(stm32::check_option_bytes(l476rc(), {}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l476rc(), {}) == address{0});
   CHECK(stm32::check_option_bytes(l476rc(), {.swap_bank = true}) == address{0x0802'0000});
-  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = true}) == address{0x0800'0000});
-  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = false}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = true}) == address{0});
+  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = false}) == address{0});
   CHECK(stm32::check_option_bytes(resized(0x8'0000), {.swap_bank = true}) == address{0x0804'0000});
-  CHECK(stm32::check_option_bytes(resized(0x8'0000), {.dualbank = false}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(resized(0x8'0000), {.dualbank = false}) == address{0});
   CHECK(stm32::check_option_bytes(resized(0x10'0000), {.swap_bank = true}) == address{0x0808'0000});
   CHECK(refusal_key(resized(0x10'0000), {.dualbank = false}) == "option_bytes.dualbank");
   CHECK(refusal_key(l476rc(), {.swap_bank = true, .dualbank = false}) == "option_bytes.swap_bank");
@@ -2050,7 +2126,7 @@ TEST_CASE(
   {
     CAPTURE(optr);
     auto options = configured(wanted);
-    CHECK(options.vector_table == address{wanted.swap_bank ? bank2 : 0x0800'0000u});
+    CHECK(options.vector_table == address{wanted.swap_bank ? bank2 : 0u});
     stm32::register_builtin_models();
     core::machine target{l476rc(), popcorn::arch::armv8m::factory(), std::move(options)};
     target.load(popcorn::testing::elf(firmware));
@@ -2121,6 +2197,14 @@ TEST_CASE("host option bytes on an L4 description without FLASH_PCROP2SR throw c
     CHECK(error.key() == "option_bytes");
   }
 }
+}
+
+TEST_CASE(
+    "RM0351 2.6.1 Tables 4 and 5: the L476 aliases its main flash at 0, VTOR resets to 0, a load "
+    "and a fetch at 0 reach the flash and SysTick takes its vector through the alias")
+{
+  stm32_fixture const f{l476rc(), firmware, popcorn::testing::stm32_options()};
+  popcorn::testing::check_flash_boot_alias(f, 0x0800'0000, 0x0803'0000, 0x2000'c000);
 }
 
 TEST_CASE("an L476 SysTick entry under the RDP firewall drops translated code once per entry")

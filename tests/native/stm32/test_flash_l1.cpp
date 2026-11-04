@@ -1,3 +1,4 @@
+#include "boot_alias_checks.hpp"
 #include "flash_unit.hpp"
 #include "stm32_fixture.hpp"
 
@@ -1071,10 +1072,19 @@ auto split_banks(std::uint32_t regions) -> part_description
       std::ranges::find(part.regions, std::string_view{"Flash"}, &popcorn::region_desc::name);
   REQUIRE(flash_region != part.regions.end());
   flash_region->size = 0x3'0000;
-  auto second        = *flash_region;
-  second.name        = "Flash_Bank2";
-  second.start       = bank2;
+  auto boot =
+      std::ranges::find(part.regions, std::string_view{"BOOT"}, &popcorn::region_desc::name);
+  REQUIRE(boot != part.regions.end());
+  boot->size          = flash_region->size;
+  auto boot_bank2     = *boot;
+  boot_bank2.name     = "BOOT_BANK2";
+  boot_bank2.start    = bank2 - 0x0800'0000;
+  boot_bank2.physical = bank2;
+  auto second         = *flash_region;
+  second.name         = "Flash_Bank2";
+  second.start        = bank2;
   part.regions.push_back(second);
+  part.regions.push_back(boot_bank2);
   if(regions > 2)
   {
     second.name  = "Flash_Bank3";
@@ -1098,6 +1108,14 @@ TEST_CASE("RM0038 3.4.3: a half page into bank 2 with PARALLELBANK clear program
   CHECK(read(f, bank2 + 124) == 0x51f);
 }
 
+TEST_CASE(
+    "RM0038 2.7 Tables 6 and 7: the L152RE aliases its main flash at 0, VTOR resets to 0, a load "
+    "and a fetch at 0 reach the flash and SysTick takes its vector through the alias")
+{
+  stm32_fixture const f{l152re(), firmware};
+  popcorn::testing::check_flash_boot_alias(f, 0x0800'0000, 0x0807'0000, 0x2000'4000);
+}
+
 TEST_CASE("HAL_FLASHEx_HalfPageProgram into bank 2 from bank 1 code returns HAL_OK")
 {
   stm32_fixture const f{l152re(), firmware};
@@ -1117,25 +1135,29 @@ TEST_CASE("HAL_FLASHEx_HalfPageProgram into bank 2 from bank 1 code returns HAL_
 }
 
 TEST_CASE(
-    "RM0038 3.4.3 note 2: during a half page a load of its bank is a BusFault, of the other "
-    "bank it completes")
+    "RM0038 3.4.3 note 2 and 2.7: during a half page a load of its bank, at its address or through "
+    "the alias at 0, is a BusFault, of the other bank it completes")
 {
-  auto const f = parked(l152re(), firmware, handler_options());
-  vectors_in_sram(f);
-  unlock(f);
-  write(f, pecr, fprg | prog);
-  REQUIRE(memory_write(f, target, 4, 1));
-  call(f, "load_word", {static_cast<std::uint32_t>(bank2 + 8)});
-  CHECK(f.log().back() == read(f, bank2 + 8));
-  CHECK(read(f, cfsr) == 0);
-  call(f, "load_word", {static_cast<std::uint32_t>(target + 64)});
-  auto const log = f.log();
-  REQUIRE(log.size() >= 2);
-  CHECK(log[log.size() - 2] == fault_mark);
-  CHECK(ipsr(f) == hardfault_n);
-  CHECK((read(f, hfsr) & forced) != 0);
-  CHECK((read(f, cfsr) & (preciserr | bfarvalid)) == (preciserr | bfarvalid));
-  CHECK(read(f, bfar) == target + 64);
+  for(auto const base : {address{0}, address{0x0800'0000}})
+  {
+    CAPTURE(base);
+    auto const f = parked(l152re(), firmware, handler_options());
+    vectors_in_sram(f);
+    unlock(f);
+    write(f, pecr, fprg | prog);
+    REQUIRE(memory_write(f, target, 4, 1));
+    call(f, "load_word", {static_cast<std::uint32_t>(bank2 + 8 - base)});
+    CHECK(f.log().back() == read(f, bank2 + 8));
+    CHECK(read(f, cfsr) == 0);
+    call(f, "load_word", {static_cast<std::uint32_t>(target + 64 - base)});
+    auto const log = f.log();
+    REQUIRE(log.size() >= 2);
+    CHECK(log[log.size() - 2] == fault_mark);
+    CHECK(ipsr(f) == hardfault_n);
+    CHECK((read(f, hfsr) & forced) != 0);
+    CHECK((read(f, cfsr) & (preciserr | bfarvalid)) == (preciserr | bfarvalid));
+    CHECK(read(f, bfar) == target + 64 - base);
+  }
 }
 
 TEST_CASE(
@@ -1957,13 +1979,16 @@ TEST_CASE("flash_unit on an STM32L1 part gives FLASH and its Flash regions, no d
   }
 }
 
-TEST_CASE("RM0038 Table 19: L1 option bytes boot from the flash base, swap_bank from bank 2")
+TEST_CASE(
+    "RM0038 Table 19 and 2.7 Table 7: L1 option bytes boot from address 0, where the flash is "
+    "aliased, swap_bank from bank 2")
 {
-  CHECK(stm32::check_option_bytes(l152re(), {}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l152re(), {}) == address{0});
   CHECK(stm32::check_option_bytes(l152re(), {.swap_bank = true}) == address{0x0804'0000});
   CHECK(stm32::check_option_bytes(resized(0x6'0000), {.swap_bank = true}) == address{0x0803'0000});
   CHECK(stm32::check_option_bytes(split_banks(2), {.swap_bank = true}) == address{0x0804'0000});
-  CHECK(stm32::check_option_bytes(l152rb(), {}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(split_banks(2), {}) == address{0});
+  CHECK(stm32::check_option_bytes(l152rb(), {}) == address{0});
   CHECK(refusal_key(popcorn::testing::l152rc(), {.swap_bank = true}) == "option_bytes.swap_bank");
   CHECK(refusal_key(l152rb(), {.swap_bank = true}) == "option_bytes.swap_bank");
   CHECK(refusal_key(l152re(), {.tzen = true}) == "option_bytes.tzen");
@@ -2021,7 +2046,7 @@ TEST_CASE("option_bytes on STM32L152RETx: the boot bank and FLASH_OBR nBFB2 at e
     auto       options    = popcorn::testing::stm32_options();
     auto const configured = stm32::configure_option_bytes(l152re(), {.swap_bank = swap}, options);
     REQUIRE(configured.has_value());
-    CHECK(options.vector_table == address{swap ? 0x0804'0000u : 0x0800'0000u});
+    CHECK(options.vector_table == address{swap ? 0x0804'0000u : 0u});
     CHECK_FALSE(options.trustzone);
     stm32_fixture const f{l152re(), firmware, std::move(options)};
     auto const          handler = read(f, 0x0800'0004);
@@ -2064,6 +2089,7 @@ constexpr std::uint32_t rderr      = 1u << 13;
 constexpr address       pcrop_read = 0x0801'4000;
 constexpr address       pcrop_code = 0x0801'5000;
 constexpr address       open_page  = 0x0801'3000;
+constexpr address       flash_base = 0x0800'0000;
 constexpr std::uint32_t pcrop_bits = (1u << 20) | (1u << 21);
 
 void run_entry(
@@ -2116,7 +2142,9 @@ TEST_CASE("RM0038 3.7.4: HAL_FLASHEx_AdvOBProgram sets PCROP on RCTx, AdvOBGetCo
   CHECK(loaded_log(f, 3) == std::vector<std::uint32_t>{1, ~pcrop_bits, 0xFFFF'FFFFu});
 }
 
-TEST_CASE("RM0038 3.7.4: a data read of a PCROP sector reads 0 and sets RDERR, a fetch runs")
+TEST_CASE(
+    "RM0038 3.7.4 and 2.7: a data read of a PCROP sector, at its address or through the alias at "
+    "0, reads 0 and sets RDERR, a fetch runs")
 {
   auto const f = pcrop_rc();
   CHECK((read(f, sr) & rderr) == 0);
@@ -2127,9 +2155,18 @@ TEST_CASE("RM0038 3.7.4: a data read of a PCROP sector reads 0 and sets RDERR, a
   CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0});
   CHECK((read(f, sr) & rderr) == rderr);
   write(f, sr, rderr);
+  run_entry(f, "read_flash", {static_cast<std::uint32_t>(pcrop_read - flash_base)});
+  CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0});
+  CHECK((read(f, sr) & rderr) == rderr);
+  write(f, sr, rderr);
   CHECK((read(f, sr) & rderr) == 0);
   f.set("r0", 0);
   f.set("pc", pcrop_code | 1u);
+  REQUIRE(f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  CHECK(f.target->regs().read(*f.target->regs().find("r0")) == 42);
+  CHECK((read(f, sr) & rderr) == 0);
+  f.set("r0", 0);
+  f.set("pc", (pcrop_code - flash_base) | 1u);
   REQUIRE(f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
   CHECK(f.target->regs().read(*f.target->regs().find("r0")) == 42);
   CHECK((read(f, sr) & rderr) == 0);
@@ -2144,8 +2181,9 @@ TEST_CASE("RM0038 3.7.4: a data read of a PCROP sector reads 0 and sets RDERR, a
 }
 
 TEST_CASE(
-    "RM0038 3.7.4: a DAP read of a PCROP sector through m.mem.secure or m.mem.nonsecure reads 0 "
-    "and sets RDERR, the unfiltered debugger view reads the data")
+    "RM0038 3.7.4 and 2.7: a DAP read of a PCROP sector through m.mem.secure or m.mem.nonsecure, "
+    "at its address or through the alias at 0, reads 0 and sets RDERR, the unfiltered debugger "
+    "view reads the data")
 {
   auto const f    = pcrop_rc();
   auto const data = f.target->mem().read(pcrop_read, 4);
@@ -2155,12 +2193,20 @@ TEST_CASE(
   for(auto const secure : {true, false})
   {
     CAPTURE(secure);
-    CHECK(f.target->mem(secure).read(pcrop_read, 4) == 0u);
-    CHECK((read(f, sr) & rderr) == rderr);
-    write(f, sr, rderr);
+    for(auto const at : {pcrop_read, pcrop_read - flash_base})
+    {
+      CAPTURE(at);
+      CHECK(f.target->mem(secure).read(at, 4) == 0u);
+      CHECK((read(f, sr) & rderr) == rderr);
+      write(f, sr, rderr);
+    }
     CHECK(f.target->mem(secure).read(open_page, 4) == f.target->mem().read(open_page, 4));
+    CHECK(
+        f.target->mem(secure).read(open_page - flash_base, 4)
+        == f.target->mem().read(open_page, 4));
     CHECK((read(f, sr) & rderr) == 0);
   }
+  CHECK(f.target->mem().read(pcrop_read - flash_base, 4) == data);
 }
 
 TEST_CASE(
@@ -2360,17 +2406,46 @@ TEST_CASE("bank_filter: a DMA grant from bank 1 stops at the bank boundary while
   CHECK(dma_copied(f, 1, 2) == 0xDEAD'BEEFu);
 }
 
-TEST_CASE("RM0038 3.7.4: a DMA read entering a PCROP sector reads 0 and sets RDERR, inferred")
+TEST_CASE(
+    "RM0038 3.7.4 and 2.7: a DMA read entering a PCROP sector, at its address or through the "
+    "alias at 0, reads 0 and sets RDERR, inferred")
 {
-  auto const f = pcrop_rc();
-  REQUIRE(f.target->mem().write(pcrop_read - 8, 4, 0x0505'0505u).has_value());
-  REQUIRE(f.target->mem().write(pcrop_read - 4, 4, 0x0606'0606u).has_value());
-  REQUIRE((read(f, sr) & rderr) == 0);
-  CHECK(dma_copy(f, 1, pcrop_read - 8, 3) == 0x7u);
-  CHECK(dma_copied(f, 1, 0) == 0x0505'0505u);
-  CHECK(dma_copied(f, 1, 1) == 0x0606'0606u);
-  CHECK(dma_copied(f, 1, 2) == 0);
-  CHECK((read(f, sr) & rderr) == rderr);
+  for(auto const shift : {address{0}, flash_base})
+  {
+    CAPTURE(shift);
+    auto const f = pcrop_rc();
+    REQUIRE(f.target->mem().write(pcrop_read - 8, 4, 0x0505'0505u).has_value());
+    REQUIRE(f.target->mem().write(pcrop_read - 4, 4, 0x0606'0606u).has_value());
+    REQUIRE((read(f, sr) & rderr) == 0);
+    CHECK(dma_copy(f, 1, pcrop_read - 8 - shift, 3) == 0x7u);
+    CHECK(dma_copied(f, 1, 0) == 0x0505'0505u);
+    CHECK(dma_copied(f, 1, 1) == 0x0606'0606u);
+    CHECK(dma_copied(f, 1, 2) == 0);
+    CHECK((read(f, sr) & rderr) == rderr);
+  }
+}
+
+TEST_CASE(
+    "RM0038 2.7: a DMA store through the alias at 0 is a transfer error and leaves the flash, "
+    "inferred, the same store at 0x08000100 reaches FLASH, which sets WRPERR while locked")
+{
+  constexpr std::uint32_t teif = 1u << 3;
+  constexpr std::uint32_t dir  = 1u << 4;
+  for(auto const at : {address{0x100}, flash_base + 0x100})
+  {
+    CAPTURE(at);
+    auto const f      = pcrop_rc();
+    auto const before = read(f, flash_base + 0x100);
+    write(f, dma_buf + 0x100, 0x1234'5678u);
+    write(f, dma1 + 0x10, static_cast<std::uint32_t>(at));
+    write(f, dma1 + 0x14, static_cast<std::uint32_t>(dma_buf + 0x100));
+    write(f, dma1 + 0x0C, 1);
+    write(f, dma1 + 0x08, word_copy | dir | 1u);
+    idle_to(f, now_ps(f) + 50'000'000);
+    CHECK((read(f, dma1) & teif) == (at == 0x100 ? teif : 0u));
+    CHECK((read(f, sr) & wrperr) == (at == 0x100 ? 0u : wrperr));
+    CHECK(read(f, flash_base + 0x100) == before);
+  }
 }
 
 TEST_CASE("RM0038 3.4.3 note 2: a half page started mid-copy fails the next DMA read of its bank")

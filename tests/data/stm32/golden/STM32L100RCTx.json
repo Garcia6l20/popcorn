@@ -7,7 +7,7 @@
     "irqs": 52,
     "patched_fields": 122,
     "peripherals": 40,
-    "regions": 7,
+    "regions": 8,
     "registers": 451
   },
   "part": "STM32L100RCTx",
@@ -18,7 +18,7 @@
     "fields": "85304c2b62cf60aeb83043cb70a816f106635b2182c6b260464d87b97025302d",
     "irqs": "f26da91402c4090aa2c0a49171c146aea36d693f3c42a0ab5f6a34ec9e51a555",
     "peripherals": "7accfeb7a39af5662d07c771349ec9f17248fef34676d943b041614fe032b495",
-    "regions": "f62f2c5ac5dcb4cc8e69894d6d8b60e7d6a2efcfbdc8c5971d5af39f0bee4b1c",
+    "regions": "b1dbbf444d47e5a17d0a1f574f28d16fcb7f6556e6f4407a1919349a01532cf7",
     "registers": "c15fa6690534f33e211c28f161f94038524f7f42bbfee7081fd93e49a5b75fa0"
   }
 }

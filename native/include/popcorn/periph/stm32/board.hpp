@@ -114,8 +114,9 @@ struct option_refusal
  * @param part Description the machine is built from.
  * @param wanted Option bytes the machine boots with.
  * @return The address the core boots from: the secure boot address with TZEN set, the
- *         non-secure one otherwise. The refusal when the part has no built-in FLASH model that
- *         encodes option bytes, or a field breaks a rule of its family.
+ *         non-secure one otherwise, 0 when a region at address 0 aliases it. The refusal
+ *         when the part has no built-in FLASH model that encodes option bytes, or a field
+ *         breaks a rule of its family.
  */
 [[nodiscard]] POPCORN_API auto
     check_option_bytes(part_description const& part, option_bytes const& wanted)

@@ -106,9 +106,17 @@ class PatchEeprom:
 
 
 @dataclass(slots=True, kw_only=True)
+class PatchAlias:
+    name: str = field(metadata={"min_length": 1})
+    start: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    region: str = field(metadata={"min_length": 1})
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchMemory:
     source: str
     add: list[RegionDesc] | None = None
+    alias: list[PatchAlias] | None = None
     controller: dict[str, str] | None = None
     eeprom: PatchEeprom | None = None
     fill: dict[str, int] | None = None
@@ -1411,6 +1419,32 @@ def _add_region(
     report.regions_added += 1
 
 
+def _add_alias(
+    alias: PatchAlias, regions: list[RegionDesc], report: PatchReport, *, file: str
+) -> None:
+    key = f"memory.alias.{alias.name}"
+    target = next((region for region in regions if region.name == alias.region), None)
+    if target is None:
+        raise DescriptionError(file, 0, key, "an existing region")
+    if target.kind is RegionKind.BIT_BAND or target.physical is not None:
+        raise DescriptionError(file, 0, key, "a region that is neither bit_band nor an alias")
+    _add_region(
+        RegionDesc(
+            name=alias.name,
+            start=alias.start,
+            size=target.size,
+            kind=target.kind,
+            acc=target.acc,
+            secure=target.secure,
+            physical=target.start,
+        ),
+        regions,
+        report,
+        file=file,
+        key=key,
+    )
+
+
 def _apply_memory(
     rule: PatchMemory,
     regions: list[RegionDesc],
@@ -1420,10 +1454,18 @@ def _apply_memory(
     *,
     file: str,
 ) -> None:
-    if not rule.add and not rule.controller and rule.eeprom is None and not rule.fill:
-        raise DescriptionError(file, 0, "memory", "an add, eeprom, controller or fill entry")
+    if (
+        not rule.add
+        and not rule.alias
+        and not rule.controller
+        and rule.eeprom is None
+        and not rule.fill
+    ):
+        raise DescriptionError(file, 0, "memory", "an add, alias, eeprom, controller or fill entry")
     for added in rule.add or []:
         _add_region(added, regions, report, file=file, key=f"memory.add.{added.name}")
+    for alias in rule.alias or []:
+        _add_alias(alias, regions, report, file=file)
     controllers = dict(rule.controller or {})
     if rule.eeprom is not None:
         key = "memory.eeprom"

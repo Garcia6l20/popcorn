@@ -755,11 +755,12 @@ class Machine:
             option_bytes: User option bytes the built-in FLASH model encodes into its option
                 registers, None for the description's registers. With `tzen` the core boots
                 from the secure boot address and the machine has TrustZone, without it from the
-                non-secure one. On an STM32L1 the core boots from the flash base, or from the
-                bank 2 base with `swap_bank`, and FLASH_OBR.nBFB2 loads as the inverse of
-                `swap_bank`. On an STM32L4 the core boots from the flash base, or from the
-                bank 2 base at its own address with `swap_bank`, and FLASH_OPTR loads BFB2 as
-                `swap_bank` and DUALBANK as `dualbank`. `vector_table` wins over all of them.
+                non-secure one. On an STM32L1 the core boots from address 0, where the flash
+                is aliased, or from the bank 2 base with `swap_bank`, and FLASH_OBR.nBFB2 loads
+                as the inverse of `swap_bank`. On an STM32L4 the core boots from address 0, or
+                from the bank 2 base at its own address with `swap_bank`, and FLASH_OPTR loads
+                BFB2 as `swap_bank` and DUALBANK as `dualbank`. `vector_table` wins over all of
+                them.
             rng: Word source of the built-in RNG model, None for its default, seed 0. It puts
                 the built-in model on RNG, over a class registered with
                 `popcorn.model.register`.

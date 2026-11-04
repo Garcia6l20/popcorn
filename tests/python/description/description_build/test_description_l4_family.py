@@ -164,7 +164,9 @@ def test_dbgmcu_idcode_resets_to_dev_id_0x415_rev_4() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_the_memory_map_carries_the_information_block_and_the_bit_band_windows() -> None:
+def test_the_memory_map_carries_the_information_block_the_bit_band_windows_and_the_boot_alias() -> (
+    None
+):
     description = _description("STM32L476RCTx")
     added = {
         r.name: (r.start, r.size, r.kind.value, r.controller, r.physical)
@@ -178,7 +180,9 @@ def test_the_memory_map_carries_the_information_block_and_the_bit_band_windows()
         "OPTION2": (0x1FFF_F000, 0x1000, "rom", "FLASH", None),
         "BB_SRAM1": (0x2200_0000, 0x0200_0000, "bit_band", None, 0x2000_0000),
         "BB_PERIPH": (0x4200_0000, 0x0200_0000, "bit_band", None, 0x4000_0000),
+        "BOOT": (0x0000_0000, 0x4_0000, "rom", None, 0x0800_0000),
     }
+    assert _region(description, "BOOT").acc == _region(description, "Flash").acc
     assert _region(description, "Flash").controller == "FLASH"
     assert _region(description, "SYSTEM").acc.execute
     assert not _region(description, "INFO").acc.execute
