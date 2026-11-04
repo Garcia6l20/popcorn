@@ -1208,8 +1208,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "JQM 1 with JQDIS 0, a software JADSTART with JQDIS 0, JOVSE and an injection into a ROVSE "
-    "sequence with ROVSM 0 each log once, a model_error when strict")
+    "a software JADSTART with JQDIS 0, JOVSE and an injection into a ROVSE sequence with ROVSM 0 "
+    "each log once, a model_error when strict")
 {
   struct leg
   {
@@ -1223,16 +1223,11 @@ TEST_CASE(
     r.write("ADC1", "ADC_JSQR", jsqr({2}));
     r.start(1);
   };
-  auto const queue    = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
-  auto const emptying = [](rig const& r) {
-    r.write("ADC1", "ADC_CFGR", jqm);
-    r.write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
-  };
+  auto const queue   = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
   auto const sampled = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
   for(auto const& [what, setup, cr] : {
           leg{"ROVSM 0",              continued, enabled | adstart | jadstart},
           leg{"JQDIS 0 and JEXTEN 0", queue,     enabled | jadstart          },
-          leg{"JQM 1",                emptying,  enabled | jadstart          },
           leg{"JOVSE",                sampled,   enabled | jadstart          },
   })
   {
@@ -1847,7 +1842,7 @@ TEST_CASE(
 
 TEST_CASE(
     "ES0250 2.8.1: with JQDIS 0 and JQM 0 a second ADC_JSQR write before JEOS sets JQOVF and is "
-    "ignored, a write after JEOS applies at once, inferred, RM0351 18.4.21 Figures 82 and 84")
+    "ignored, a write after JEOS applies at once, RM0351 18.4.21 Figures 82 and 84")
 {
   for(auto const queued : {true, false})
   {
@@ -1913,7 +1908,7 @@ TEST_CASE(
 
 TEST_CASE(
     "RM0351 18.4.21: JADSTP and ADDIS flush the queue of context, the next ADC_JSQR write "
-    "applies at once, inferred, Figure 86")
+    "applies at once, Figures 86, 88 and 90")
 {
   for(auto const disable : {false, true})
   {
@@ -2045,8 +2040,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 43: a debugger ADC_JSQR write with a context waiting stores the word, no JQOVF, a "
-    "strict software JADSTART with the queue on leaves JADSTART 0")
+    "checklist 43: a debugger ADC_JSQR write with a context waiting stores the word, no JQOVF, on "
+    "an empty JQM 1 queue it starts nothing, a strict software JADSTART leaves JADSTART 0")
 {
   rig const r;
   r.enable();
@@ -2056,6 +2051,16 @@ TEST_CASE(
   r.write("ADC1", "ADC_JSQR", probe);
   CHECK(r.isr("JQOVF") == 0);
   CHECK(r.read("ADC1", "ADC_JSQR") == probe);
+  rig const empty;
+  empty.enable();
+  empty.port().drive(2, 750'000);
+  empty.write("ADC1", "ADC_CFGR", jqm);
+  auto const trigger = empty.timer("TIM1", "");
+  empty.write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  empty.write("ADC1", "ADC_CR", enabled | jadstart);
+  CHECK(empty.get("ADC1", "ADC_CR", "JADSTART") == 1);
+  empty.run_until(trigger + 100 * us);
+  CHECK(empty.isr("JEOS") == 0);
   rig const strict{true};
   strict.enable();
   strict.write("ADC1", "ADC_CFGR", 0);
@@ -2064,6 +2069,133 @@ TEST_CASE(
           strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, enabled | jadstart)),
       popcorn::model_error);
   CHECK(strict.get("ADC1", "ADC_CR", "JADSTART") == 0);
+}
+
+TEST_CASE(
+    "RM0351 18.4.21: with JQM 1 the queue empties at JEOS, ADC_JSQR reads 0, triggers are ignored "
+    "until the next write, which applies at once, Figure 85")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 375'000);
+  r.write("ADC1", "ADC_CFGR", jqm);
+  r.cpu_write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.read("ADC1", "ADC_JSQR") == 0);
+  r.write("ADC1", "ADC_ISR", jeos);
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.isr("JEOS") == 0);
+  auto const third = jsqr({3}, 1, 0);
+  r.cpu_write("ADC1", "ADC_JSQR", third);
+  CHECK(r.read("ADC1", "ADC_JSQR") == third);
+  CHECK(r.isr("JQOVF") == 0);
+  r.run_until(trigger + 2 * ms + 100 * us);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 512);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.21: with JQM 1 the queue holds two contexts, a third write sets JQOVF, JEOS "
+    "applies the next one, Figures 80 and 82")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 375'000);
+  r.write("ADC1", "ADC_CFGR", jqm);
+  auto const first  = jsqr({2}, 1, 0);
+  auto const second = jsqr({3}, 1, 0);
+  r.cpu_write("ADC1", "ADC_JSQR", first);
+  r.cpu_write("ADC1", "ADC_JSQR", second);
+  CHECK(r.isr("JQOVF") == 0);
+  r.cpu_write("ADC1", "ADC_JSQR", jsqr({2, 3}, 1, 0));
+  CHECK(r.isr("JQOVF") == 1);
+  CHECK(r.read("ADC1", "ADC_JSQR") == first);
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.read("ADC1", "ADC_JSQR") == second);
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 512);
+  CHECK(r.read("ADC1", "ADC_JSQR") == 0);
+}
+
+TEST_CASE(
+    "RM0351 18.4.21: with JQM 1 and JDISCEN the first trigger consumes the queue, the last one "
+    "changes the context")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(2, 750'000);
+  r.port().drive(3, 375'000);
+  r.write("ADC1", "ADC_CFGR", jqm | jdiscen);
+  auto const first  = jsqr({2, 3}, 1, 0);
+  auto const second = jsqr({3}, 1, 0);
+  r.cpu_write("ADC1", "ADC_JSQR", first);
+  r.cpu_write("ADC1", "ADC_JSQR", second);
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(trigger + 100 * us);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.isr("JEOS") == 0);
+  CHECK(r.read("ADC1", "ADC_JSQR") == first);
+  r.cpu_write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  CHECK(r.isr("JQOVF") == 0);
+  r.cpu_write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  CHECK(r.isr("JQOVF") == 1);
+  r.run_until(trigger + ms + 100 * us);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_JDR2") == 512);
+  CHECK(r.read("ADC1", "ADC_JSQR") == second);
+}
+
+TEST_CASE(
+    "RM0351 18.4.21: with JQM 1 JADSTP and ADDIS empty the queue, ADC_JSQR reads 0, the next "
+    "write applies at once, Figures 89 and 91")
+{
+  for(auto const disable : {false, true})
+  {
+    CAPTURE(disable);
+    rig const r;
+    r.enable();
+    r.write("ADC1", "ADC_CFGR", jqm);
+    r.cpu_write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+    r.cpu_write("ADC1", "ADC_JSQR", jsqr({3}, 1, 0));
+    r.write("ADC1", "ADC_CR", enabled | jadstart);
+    r.write("ADC1", "ADC_CR", enabled | (disable ? addis : jadstp));
+    CHECK(r.read("ADC1", "ADC_JSQR") == 0);
+    auto const next = jsqr({3, 2}, 1, 0);
+    r.cpu_write("ADC1", "ADC_JSQR", next);
+    CHECK(r.isr("JQOVF") == 0);
+    CHECK(r.read("ADC1", "ADC_JSQR") == next);
+  }
+}
+
+TEST_CASE(
+    "checklist 66: two contexts in a JQM 1 queue survive a snapshot, JEOS applies the second "
+    "once restored")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR", jqm);
+  auto const second = jsqr({3}, 1, 0);
+  r.cpu_write("ADC1", "ADC_JSQR", jsqr({2}, 1, 0));
+  r.cpu_write("ADC1", "ADC_JSQR", second);
+  auto const trigger = r.timer("TIM1", "");
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  fresh.run_until(trigger + 100 * us);
+  CHECK(fresh.cpu_read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(fresh.read("ADC1", "ADC_JSQR") == second);
 }
 
 TEST_CASE("RM0351 18.4.26: ALIGN 1 left-aligns ADC_JDR1, 2048 reads 0x8000")
