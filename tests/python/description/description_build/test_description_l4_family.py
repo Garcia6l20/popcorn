@@ -1167,3 +1167,15 @@ def test_the_adcs_take_the_rm0351_18_7_and_18_8_names_and_fields(name: str) -> N
     assert common["CSR"].fields[0].name == "ADRDY_MST"
     irqs = {unit: _peripheral(description, unit).irqs for unit in ("ADC1", "ADC2", "ADC3")}
     assert irqs == {"ADC1": [18], "ADC2": [18], "ADC3": [47]}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_rng_control_register_carries_ced_and_no_configuration_block(name: str) -> None:
+    description = _description(name)
+    rng = _peripheral(description, "RNG")
+    assert (rng.ip, rng.ip_version, rng.irqs) == ("RNG", "rng1_v1_1", [80])
+    assert _fields(description, "RNG", "CR") == {"CED": (5, 1), "IE": (3, 1), "RNGEN": (2, 1)}
+    ced = next(f for f in _registers(description, "RNG")["CR"].fields if f.name == "CED")
+    assert ced.acc == Access.READ_WRITE
+    assert set(_registers(description, "RNG")) == {"CR", "SR", "DR"}

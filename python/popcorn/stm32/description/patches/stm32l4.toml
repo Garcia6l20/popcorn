@@ -1503,3 +1503,9 @@ registers = ["ICR"]
 fields = ["UPCF", "DOWNCF"]
 drop = true
 source = "RM0351 Rev 11, 34.3 Table 216 and 34.7.2: without the encoder mode ICR bits 6:5 are reserved on LPTIM2. The four SVDs give LPTIM2 the LPTIM1 layout"
+
+[[fields]]
+instances = ["RNG"]
+registers = ["CR"]
+add = { name = "CED", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 27.7.1 RNG_CR: bit 5 CED, clock error detection disable, read-write, reset 0, and Table 182. The four SVDs and the CMSIS device headers leave it out"

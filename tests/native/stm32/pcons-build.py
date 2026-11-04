@@ -306,6 +306,7 @@ for program, source in (
     ("stm32-otg-fs-l4", "test_otg_fs_l4.cpp"),
     ("stm32-rtc-l4", "test_rtc_l4.cpp"),
     ("stm32-adc-l4", "test_adc_l4.cpp"),
+    ("stm32-rng-l4", "test_rng_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

@@ -1808,3 +1808,42 @@ TEST_CASE("a seed fault set again before the auto-reset waits for its own releas
   CHECK((r.read(sr) & secs) == 0);
   CHECK(r.logged.empty());
 }
+
+TEST_CASE("checklist 39: the U5 RNG row needs every configuration field of CR, NSCR and HTCR")
+{
+  auto const rng_of = [](popcorn::part_description& description) -> popcorn::peripheral_desc& {
+    auto const found = std::ranges::find(
+        description.peripherals, std::string{"RNG"}, &popcorn::peripheral_desc::name);
+    REQUIRE(found != description.peripherals.end());
+    return *found;
+  };
+  for(std::string const name :
+      {"CONFIGLOCK", "CONDRST", "RNG_CONFIG1", "CLKDIV", "RNG_CONFIG2", "NISTC", "RNG_CONFIG3",
+       "ARDIS", "CED"})
+  {
+    CAPTURE(name);
+    auto       description = u575();
+    auto&      rng         = rng_of(description);
+    auto const control =
+        std::ranges::find(rng.registers, std::string{"CR"}, &popcorn::register_desc::name);
+    REQUIRE(control != rng.registers.end());
+    REQUIRE(
+        std::erase_if(
+            control->fields, [&](popcorn::field_desc const& field) { return field.name == name; })
+        == 1);
+    CHECK_THROWS_WITH_AS(
+        (stm32_fixture{description, "rng_ll"}), doctest::Contains(name), popcorn::config_error);
+  }
+  for(std::string const name : {"NSCR", "HTCR"})
+  {
+    CAPTURE(name);
+    auto description = u575();
+    REQUIRE(
+        std::erase_if(
+            rng_of(description).registers,
+            [&](popcorn::register_desc const& reg) { return reg.name == name; })
+        == 1);
+    CHECK_THROWS_WITH_AS(
+        (stm32_fixture{description, "rng_ll"}), doctest::Contains(name), popcorn::config_error);
+  }
+}

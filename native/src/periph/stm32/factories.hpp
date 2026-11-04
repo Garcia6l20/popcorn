@@ -324,10 +324,11 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory;
 
 /**
- * @brief Factory of the RNG model, RM0456 section 48.
+ * @brief Factory of the RNG model, RM0456 section 48 and RM0351 section 27.
  * @param options Board configuration, copied into every model made.
+ * @param variant What differs between the RNG of the family the row serves.
  */
-[[nodiscard]] auto rng_factory(rng_options options) -> model_factory;
+[[nodiscard]] auto rng_factory(rng_options options, rng_variant variant) -> model_factory;
 
 /** @brief Factory of the HASH model, RM0456 section 51. */
 [[nodiscard]] auto hash_factory() -> model_factory;

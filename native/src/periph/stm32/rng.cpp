@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -28,7 +29,6 @@ constexpr std::uint32_t work_done     = 0;
 constexpr std::uint32_t condrst_done  = 1;
 constexpr std::uint32_t auto_reset    = 2;
 constexpr std::size_t   event_kinds   = 3;
-constexpr std::uint64_t clock_ratio   = 32;
 constexpr std::size_t   fifo_words    = 4;
 constexpr std::uint64_t ahb_round     = 203;
 constexpr std::uint64_t rng_round     = 128;
@@ -85,8 +85,10 @@ struct rng_state
 };
 
 /**
- * @brief RNG of the STM32U5, RM0456 Rev 7 chapter 48. The output pipeline is a 4-word FIFO in
- *        front of the 128-bit conditioning output register, 48.3.3 "Output buffer": init ends
+ * @brief RNG of the STM32U5 and STM32H5, RM0456 Rev 7 chapter 48, and of the STM32L4,
+ *        RM0351 Rev 11 chapter 27, rng_variant::configurable 0. The U5 output pipeline is a
+ *        4-word FIFO in front of the 128-bit conditioning output register, 48.3.3 "Output
+ *        buffer": init ends
  *        with the FIFO full and a conditioning round started, a round ends into the FIFO when
  *        it is empty, else into the register, and a new round starts only while the register is
  *        empty. The fourth DR read of the FIFO moves the register in and starts a round. DRDY
@@ -135,6 +137,24 @@ struct rng_state
  *        source: NSCR and HTCR are storage. Configuration B timing is not modelled, the
  *        configuration A and C column applies to every configuration. A rate change does
  *        not rescale a phase already started. The tamper output to TAMP is not modelled.
+ *        STM32L4, RM0351 27: CR holds IE, RNGEN and CED, its other bits are reserved and keep
+ *        0. DR holds one word, 27.3.3. RNGEN 1 starts the first word 46 RNG clock cycles later,
+ *        and a DR read that empties it starts the next one 42 cycles later, 27.5 and 27.7.3. A
+ *        re-enable while DR holds a word starts the 46 cycles at the read that empties it,
+ *        inferred. RNGEN 0 keeps the DR word and ends the word in progress, so the next RNGEN 1
+ *        waits the 46 cycles again, 27.3.8. A stopped kernel clock pauses the word as on the
+ *        U5. CED is taken only with RNGEN 0 before or in the write, inferred: 27.7.1 asks for
+ *        the RNG disabled and gives no rule for a write while it runs. With CED 0 and RNGEN 1,
+ *        CECS is 1 while the clock fault is set or 16 x fRNG < fHCLK and its rise sets CEIS,
+ *        27.3.3 and 27.7.2, and generation goes on, RM0351 27.3.7 as corrected by ES0250
+ *        2.15.1. A seed error sets SECS and SEIS and stops generation, 27.3.7, and empties DR,
+ *        the 27.3.5 note and 27.7.3: "The zero value means that a seed error occurred between
+ *        RNG_SR polling and RND_DR output reading". 27.3.7 says the values in DR are available
+ *        but should not be used. RNGEN written 0 clears SECS, so the 27.3.7 recovery, SEIS
+ *        cleared and RNGEN cleared and set, starts a new first word, and SECS sets again at
+ *        RNGEN 1 while the fault is still set. SECS clears at RNGEN 0 and stays 1 with RNGEN 1
+ *        after the fault ends, inferred: RM0351 gives the recovery sequence, not when SECS
+ *        clears. The 32-bit access rule is 27.2, RNGRST is in RCC_AHB2RSTR, 6.4.11.
  */
 class rng final : public dispatch_model<rng, rng_state>,
                   public clock_listener,
@@ -142,7 +162,7 @@ class rng final : public dispatch_model<rng, rng_state>,
                   public entropy_source
 {
 public:
-  rng(model_context& ctx, peripheral_desc const& desc, rng_options options);
+  rng(model_context& ctx, peripheral_desc const& desc, rng_options options, rng_variant variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -174,6 +194,7 @@ public:
   void               set_clock_fault_after(std::optional<std::uint64_t> words) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
+  void enable_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
   void noise_written(std::uint32_t old, std::uint32_t now);
   void health_written(std::uint32_t old, std::uint32_t now);
@@ -188,6 +209,8 @@ private:
   [[nodiscard]] auto init_ps() const -> std::uint64_t;
   [[nodiscard]] auto round_ps() const -> std::uint64_t;
   [[nodiscard]] auto clear_ps() const -> std::uint64_t;
+  [[nodiscard]] auto cycles_ps(std::uint64_t cycles) const -> std::uint64_t;
+  [[nodiscard]] auto room() const -> bool;
 
   void post(std::uint32_t kind, std::uint64_t due);
   void withdraw(std::uint32_t kind);
@@ -211,18 +234,19 @@ private:
 
   register_file&     regs_;
   rng_options        options_;
+  rng_variant        variant_;
   reg_ref            cr_;
   reg_ref            sr_;
   reg_ref            dr_;
-  reg_ref            nscr_;
-  reg_ref            htcr_;
-  field_ref          configlock_;
-  field_ref          condrst_;
-  field_ref          config1_;
-  field_ref          clkdiv_;
-  field_ref          config2_;
-  field_ref          nistc_;
-  field_ref          config3_;
+  reg_ref            nscr_{};
+  reg_ref            htcr_{};
+  field_ref          configlock_{};
+  field_ref          condrst_{};
+  field_ref          config1_{};
+  field_ref          clkdiv_{};
+  field_ref          config2_{};
+  field_ref          nistc_{};
+  field_ref          config3_{};
   field_ref          ced_;
   field_ref          ie_;
   field_ref          rngen_;
@@ -231,9 +255,9 @@ private:
   field_ref          drdy_;
   field_ref          secs_;
   field_ref          cecs_;
-  field_ref          ardis_;
-  std::uint32_t      config_bits_;
-  std::uint32_t      live_bits_;
+  field_ref          ardis_{};
+  std::uint32_t      config_bits_{};
+  std::uint32_t      live_bits_{};
   core::clock_domain kernel_;
   core::clock_domain hclk_;
   irq_line&          line_;
@@ -251,27 +275,63 @@ constexpr std::array<write_entry<rng>, 5> rng_writes{
      }
 };
 
-rng::rng(model_context& ctx, peripheral_desc const& desc, rng_options options)
-    : dispatch_model{ctx, desc, "RNG", rng_writes}, regs_{ctx.regs}, options_{options},
-      cr_{reg("CR")}, sr_{reg("SR")}, dr_{reg("DR")}, nscr_{reg("NSCR")}, htcr_{reg("HTCR")},
-      configlock_{field("CR", "CONFIGLOCK")}, condrst_{field("CR", "CONDRST")},
-      config1_{field("CR", "RNG_CONFIG1")}, clkdiv_{field("CR", "CLKDIV")},
-      config2_{field("CR", "RNG_CONFIG2")}, nistc_{field("CR", "NISTC")},
-      config3_{field("CR", "RNG_CONFIG3")}, ced_{field("CR", "CED")}, ie_{field("CR", "IE")},
-      rngen_{field("CR", "RNGEN")}, seis_{field("SR", "SEIS")}, ceis_{field("SR", "CEIS")},
-      drdy_{field("SR", "DRDY")}, secs_{field("SR", "SECS")}, cecs_{field("SR", "CECS")},
-      ardis_{field("CR", "ARDIS")},
-      config_bits_{
-          config1_.mask()
-          | clkdiv_.mask()
-          | config2_.mask()
-          | nistc_.mask()
-          | config3_.mask()
-          | ardis_.mask()
-          | ced_.mask()},
-      live_bits_{clkdiv_.mask() | ced_.mask()}, kernel_{ctx.clock.domain("rng")},
-      hclk_{ctx.clock.domain("hclk")}, line_{irq("RNG_IRQn")}
-{}
+constexpr std::array<write_entry<rng>, 3> rng_plain_writes{
+    {
+     {"CR", &rng::enable_written},
+     {"SR", &rng::status_written},
+     {"DR", nullptr},
+     }
+};
+
+constexpr std::array<std::string_view, 8> config_fields{"CONFIGLOCK",  "CONDRST",     "RNG_CONFIG1",
+                                                        "CLKDIV",      "RNG_CONFIG2", "NISTC",
+                                                        "RNG_CONFIG3", "ARDIS"};
+
+auto write_table(rng_variant const& variant) -> std::span<write_entry<rng> const>
+{
+  if(variant.configurable)
+  {
+    return rng_writes;
+  }
+  return rng_plain_writes;
+}
+
+rng::rng(model_context& ctx, peripheral_desc const& desc, rng_options options, rng_variant variant)
+    : dispatch_model{ctx, desc, "RNG", write_table(variant)}, regs_{ctx.regs}, options_{options},
+      variant_{variant}, cr_{reg("CR")}, sr_{reg("SR")}, dr_{reg("DR")}, ced_{field("CR", "CED")},
+      ie_{field("CR", "IE")}, rngen_{field("CR", "RNGEN")}, seis_{field("SR", "SEIS")},
+      ceis_{field("SR", "CEIS")}, drdy_{field("SR", "DRDY")}, secs_{field("SR", "SECS")},
+      cecs_{field("SR", "CECS")}, kernel_{ctx.clock.domain("rng")}, hclk_{ctx.clock.domain("hclk")},
+      line_{irq("RNG_IRQn")}
+{
+  for(auto const name : config_fields)
+  {
+    expect_field("CR", name, variant.configurable);
+  }
+  expect_register("NSCR", variant.configurable);
+  expect_register("HTCR", variant.configurable);
+  if(variant.configurable)
+  {
+    nscr_        = reg("NSCR");
+    htcr_        = reg("HTCR");
+    configlock_  = field("CR", "CONFIGLOCK");
+    condrst_     = field("CR", "CONDRST");
+    config1_     = field("CR", "RNG_CONFIG1");
+    clkdiv_      = field("CR", "CLKDIV");
+    config2_     = field("CR", "RNG_CONFIG2");
+    nistc_       = field("CR", "NISTC");
+    config3_     = field("CR", "RNG_CONFIG3");
+    ardis_       = field("CR", "ARDIS");
+    config_bits_ = config1_.mask()
+                 | clkdiv_.mask()
+                 | config2_.mask()
+                 | nistc_.mask()
+                 | config3_.mask()
+                 | ardis_.mask()
+                 | ced_.mask();
+  }
+  live_bits_ = clkdiv_.mask() | ced_.mask();
+}
 
 auto rng::now_ps() const -> std::uint64_t
 {
@@ -316,8 +376,23 @@ auto rng::loops() const -> std::uint64_t
   return get(regs_, nistc_) == 0 ? 2 : (get(regs_, config3_) & 3u) + 1;
 }
 
+auto rng::cycles_ps(std::uint64_t cycles) const -> std::uint64_t
+{
+  auto const fr = wide{std::max<std::uint64_t>(ctx_.clock.hz(kernel_), 1)};
+  return static_cast<std::uint64_t>((wide{cycles} * ps_per_second + fr - 1) / fr);
+}
+
+auto rng::room() const -> bool
+{
+  return variant_.configurable ? state_.staged_full == 0 : state_.fifo_count == 0;
+}
+
 auto rng::init_ps() const -> std::uint64_t
 {
+  if(not variant_.configurable)
+  {
+    return cycles_ps(variant_.start_cycles);
+  }
   auto const fr    = wide{ctx_.clock.hz(kernel_)};
   auto const fa    = wide{std::max<std::uint64_t>(ctx_.clock.hz(hclk_), 1)};
   auto const d     = wide{1} << get(regs_, clkdiv_);
@@ -337,6 +412,10 @@ auto rng::init_ps() const -> std::uint64_t
 
 auto rng::round_ps() const -> std::uint64_t
 {
+  if(not variant_.configurable)
+  {
+    return cycles_ps(variant_.word_cycles);
+  }
   auto const fa    = wide{std::max<std::uint64_t>(ctx_.clock.hz(hclk_), 1)};
   auto const fr    = wide{ctx_.clock.hz(kernel_)};
   auto const ratio = wide{1} << get(regs_, clkdiv_);
@@ -398,11 +477,11 @@ void rng::refresh(std::uint64_t at)
       withdraw(work_done);
     }
   }
-  else if(on and state_.initialised == 0)
+  else if(on and state_.initialised == 0 and room())
   {
     start(init, at, init_ps());
   }
-  else if(on and state_.staged_full == 0)
+  else if(on and room())
   {
     start(round, at, round_ps());
   }
@@ -440,9 +519,9 @@ void rng::detect_seed_error()
 void rng::check_clock()
 {
   auto const active = get(regs_, ced_) == 0 and get(regs_, rngen_) != 0 and bus_enabled();
-  auto const slow =
-      state_.source.clock_fault != 0 or clock_ratio * ctx_.clock.hz(kernel_) < ctx_.clock.hz(hclk_);
-  auto const now = active and slow ? std::uint8_t{1} : std::uint8_t{0};
+  auto const slow   = state_.source.clock_fault != 0
+                   or variant_.clock_ratio * ctx_.clock.hz(kernel_) < ctx_.clock.hz(hclk_);
+  auto const now    = active and slow ? std::uint8_t{1} : std::uint8_t{0};
   if(now != 0 and state_.cecs == 0)
   {
     update(regs_, ceis_, 1);
@@ -453,7 +532,8 @@ void rng::check_clock()
 
 void rng::schedule_auto_reset()
 {
-  if(state_.secs == 0
+  if(not variant_.configurable
+     or state_.secs == 0
      or get(regs_, ardis_) != 0
      or get(regs_, condrst_) != 0
      or state_.source.seed_fault != 0
@@ -635,7 +715,8 @@ void rng::schedule_clear()
 void rng::finish_phase()
 {
   std::array<std::uint32_t, fifo_words> words{};
-  for(auto& word : words)
+  auto const produced = variant_.configurable ? fifo_words : std::size_t{1};
+  for(auto& word : std::span{words}.first(produced))
   {
     word = next_word();
   }
@@ -648,7 +729,7 @@ void rng::finish_phase()
   if(state_.fifo_count == 0)
   {
     state_.fifo       = words;
-    state_.fifo_count = fifo_words;
+    state_.fifo_count = static_cast<std::uint8_t>(produced);
   }
   else
   {
@@ -782,6 +863,27 @@ void rng::control_written(std::uint32_t old, std::uint32_t now)
   refresh(now_ps());
 }
 
+void rng::enable_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const was_on = rngen_.of(old) != 0;
+  auto const is_on  = rngen_.of(now) != 0;
+  if(was_on and is_on and ced_.of(now) != ced_.of(old))
+  {
+    regs_.poke(cr_.offset, ced_.with(now, ced_.of(old)));
+  }
+  if(was_on and not is_on)
+  {
+    withdraw(work_done);
+    state_.phase        = idle;
+    state_.initialised  = 0;
+    state_.remaining_ps = 0;
+    state_.due_ps       = 0;
+    state_.secs         = 0;
+    show_status();
+  }
+  refresh(now_ps());
+}
+
 void rng::status_written(std::uint32_t old, std::uint32_t now)
 {
   auto const flags = seis_.mask() | ceis_.mask();
@@ -861,10 +963,11 @@ void rng::on_clock_change()
 
 entropy_source::~entropy_source() = default;
 
-auto rng_factory(rng_options options) -> model_factory
+auto rng_factory(rng_options options, rng_variant variant) -> model_factory
 {
-  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<rng>(ctx, desc, options);
+  return [options,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<rng>(ctx, desc, options, variant);
   };
 }
 }
