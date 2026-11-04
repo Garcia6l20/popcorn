@@ -61,26 +61,25 @@ public:
 
   /**
    * @brief Drives an external channel. The drive is board state: it survives an MCU reset and a
-   *        snapshot restores it. A conversion reads the value in force when it ends. On the
-   *        STM32U5, STM32H5 and STM32L4 the drive is the board analog slot of the channel's pad,
-   *        gpio_port::drive_analog(), so every ADC channel on that pad converts it, and a
-   *        conversion reads the pad's gpio_port::analog_level(). The STM32L1 ADC keeps the drive
-   *        in its own state.
+   *        snapshot restores it. A conversion reads the value in force when it ends. The drive
+   *        is the board analog slot of the channel's pad, gpio_port::drive_analog(), so every
+   *        ADC channel on that pad converts it, and a conversion reads the pad's
+   *        gpio_port::analog_level().
    * @param channel External channel, one of external_channels() of its bank.
    * @param microvolts Input voltage. Above VDDA the code saturates.
    * @throws config_error for an internal or absent channel, a bank B channel that shares its
-   *         pad with bank A, or, on the STM32U5, STM32H5 and STM32L4, a channel without a
-   *         positive pad in the description's `channel_pins`.
+   *         pad with bank A, or a channel without its pad in the description's
+   *         `channel_pins`.
    */
   virtual void drive(analog_channel channel, std::uint32_t microvolts) = 0;
 
   /**
-   * @brief The voltage driven on an external channel in microvolts, 0 when never driven: on the
-   *        STM32U5, STM32H5 and STM32L4 the board analog slot of its pad, whichever ADC drove it.
+   * @brief The voltage driven on an external channel in microvolts, 0 when never driven: the
+   *        board analog slot of its pad, whichever ADC drove it.
    * @param channel External channel, one of external_channels() of its bank.
    * @throws config_error for an internal or absent channel, a bank B channel that shares its
-   *         pad with bank A, or, on the STM32U5, STM32H5 and STM32L4, a channel without a
-   *         positive pad in the description's `channel_pins`.
+   *         pad with bank A, or a channel without its pad in the description's
+   *         `channel_pins`.
    */
   [[nodiscard]] virtual auto input(analog_channel channel) const -> std::uint32_t = 0;
 

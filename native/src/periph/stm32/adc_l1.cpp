@@ -8,6 +8,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <algorithm>
@@ -77,39 +78,46 @@ struct adc_l1_edge
   friend auto operator==(adc_l1_edge const&, adc_l1_edge const&) -> bool = default;
 };
 
+struct adc_l1_pad
+{
+  std::uint8_t channel{};
+  bool         bank_b{};
+  char         port{};
+  std::uint8_t pin{};
+  gpio_port*   gpio{};
+};
+
 struct adc_l1_state
 {
-  std::array<std::uint32_t, channels> input_uv{};
-  std::array<std::uint32_t, channels> input_b_uv{};
-  std::uint32_t                       generation{};
-  std::uint32_t                       ready_generation{};
-  std::uint64_t                       start_ps{};
-  std::uint64_t                       sample_end_ps{};
-  std::uint64_t                       end_ps{};
-  std::uint64_t                       clock_hz{};
-  std::uint32_t                       held_code{};
-  bool                                held{};
-  bool                                converting{};
-  bool                                waiting_clock{};
-  bool                                ready_waiting{};
-  bool                                unread{};
-  bool                                start_pending{};
-  bool                                frozen{};
-  bool                                resume_frozen{};
-  std::uint64_t                       delay_until_ps{};
-  std::uint8_t                        rank{};
-  std::uint8_t                        resolution{};
-  std::uint8_t                        subgroup_left{};
-  bool                                injecting{};
-  bool                                regular_resume{};
-  bool                                injected_frozen{};
-  std::uint64_t                       injected_delay_until_ps{};
-  std::uint8_t                        injected_rank{};
-  std::uint8_t                        injected_left{};
-  std::uint64_t                       queued{};
-  bool                                dma_done{};
-  adc_l1_edge                         regular_edge{};
-  adc_l1_edge                         injected_edge{};
+  std::uint32_t generation{};
+  std::uint32_t ready_generation{};
+  std::uint64_t start_ps{};
+  std::uint64_t sample_end_ps{};
+  std::uint64_t end_ps{};
+  std::uint64_t clock_hz{};
+  std::uint32_t held_code{};
+  bool          held{};
+  bool          converting{};
+  bool          waiting_clock{};
+  bool          ready_waiting{};
+  bool          unread{};
+  bool          start_pending{};
+  bool          frozen{};
+  bool          resume_frozen{};
+  std::uint64_t delay_until_ps{};
+  std::uint8_t  rank{};
+  std::uint8_t  resolution{};
+  std::uint8_t  subgroup_left{};
+  bool          injecting{};
+  bool          regular_resume{};
+  bool          injected_frozen{};
+  std::uint64_t injected_delay_until_ps{};
+  std::uint8_t  injected_rank{};
+  std::uint8_t  injected_left{};
+  std::uint64_t queued{};
+  bool          dma_done{};
+  adc_l1_edge   regular_edge{};
+  adc_l1_edge   injected_edge{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
 };
@@ -166,10 +174,16 @@ struct trigger_selection
  *        A description with `channel_pins` holds a positive pad for every external channel and a
  *        bank B pad for every bank B channel on a pad of its own, or construction throws
  *        config_error naming the channel. Every shipped description carries the table, and a
- *        hand-written one without it passes unchecked.
+ *        hand-written one without it passes unchecked. A bank A channel's input is the analog
+ *        level of its positive pad, gpio_port::analog_level(), and a bank B channel on a pad of
+ *        its own that of its bank B pad. `analog_port` drive and input act on the pad's board
+ *        slot. Without a pad, drive and input throw config_error naming `channel_pins.<c>`, or
+ *        `channel_pins.<c>b` for bank B, and the channel converts 0. A slot change during a
+ *        conversion reaches the ADC through gpio_port::on_analog_changing() before it applies,
+ *        so a code held at the end of the sampling phase keeps the old level.
  *
- *        Codes against VDDA, the board's `supply_options`: an external channel reads its driven
- *        input, `analog_port`, as V x 4096 / VDDA, floored and saturated, two bits fewer per RES
+ *        Codes against VDDA, the board's `supply_options`: an external channel reads its input,
+ *        `analog_port`, as V x 4096 / VDDA, floored and saturated, two bits fewer per RES
  *        step. A conversion holds the input at the end of its sampling phase. With TSVREFE of
  *        ADC_CCR set, channel 16 reads the factory TS_CAL1 and channel 17 VREFINT_CAL, both
  *        scaled by 3000 / VDDA, from the TSVREFE write on, with no sensor tSTART, and 0 with
@@ -295,6 +309,7 @@ public:
       adc_l1_variant         variant);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void load(std::span<std::byte const> in) override;
   void on_bus_reset() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
@@ -377,6 +392,11 @@ private:
   [[nodiscard]] auto code(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
   void               hold_until(std::uint64_t ps);
+  [[nodiscard]] auto pad_port(char letter) const -> gpio_port*;
+  [[nodiscard]] auto driven_pad(analog_channel channel) const
+      -> std::pair<gpio_port&, std::uint8_t>;
+  [[nodiscard]] auto level_uv(std::uint32_t channel, bool bank_b) const -> std::uint32_t;
+  void               listen_pads();
   void               power_up();
   void               check_common();
   void               check_group();
@@ -414,6 +434,8 @@ private:
   adc_l1_variant                                  variant_;
   std::uint32_t                                   bonded_channels_{};
   std::uint32_t                                   bonded_channels_b_{};
+  std::vector<adc_l1_pad>                         pads_;
+  std::vector<subscription>                       pad_listeners_;
   core::clock_domain                              hsi_;
   core::clock_domain                              pclk2_;
   irq_line&                                       line_;
@@ -612,11 +634,99 @@ adc_l1_model::adc_l1_model(
   }
   require_channel_pins(desc, variant.external, pad_role::positive);
   require_channel_pins(desc, variant.bank_b_only, pad_role::bank_b);
+  for(auto const& pad : desc.channel_pins.value_or(std::vector<adc_pad_desc>{}))
+  {
+    if(pad.role != pad_role::negative and not pad.port.empty())
+    {
+      pads_.push_back(
+          {.channel = pad.channel,
+           .bank_b  = pad.role == pad_role::bank_b,
+           .port    = pad.port.front(),
+           .pin     = pad.pin});
+    }
+  }
 }
 
 void adc_l1_model::reset(register_file&, reset_kind)
 {
   restore_reset_values();
+  listen_pads();
+}
+
+void adc_l1_model::load(std::span<std::byte const> in)
+{
+  base::load(in);
+  listen_pads();
+}
+
+void adc_l1_model::listen_pads()
+{
+  if(not pad_listeners_.empty())
+  {
+    return;
+  }
+  std::string ports;
+  for(auto& pad : pads_)
+  {
+    pad.gpio = pad_port(pad.port);
+    if(not ports.contains(pad.port))
+    {
+      ports.push_back(pad.port);
+    }
+  }
+  for(auto const letter : ports)
+  {
+    auto* const port = pad_port(letter);
+    if(port == nullptr)
+    {
+      continue;
+    }
+    std::uint16_t pins = 0;
+    for(auto const& pad : pads_)
+    {
+      pins |= pad.port == letter ? static_cast<std::uint16_t>(1u << pad.pin) : std::uint16_t{0};
+    }
+    pad_listeners_.push_back(port->on_analog_changing([this, pins](std::uint8_t pin) {
+      if(state_.converting and (pins >> pin & 1u) != 0)
+      {
+        hold_until(ctx_.clock.time().ps);
+      }
+    }));
+  }
+}
+
+auto adc_l1_model::pad_port(char letter) const -> gpio_port*
+{
+  return dynamic_cast<gpio_port*>(ctx_.peers.find(std::format("GPIO{}", letter)));
+}
+
+auto adc_l1_model::driven_pad(analog_channel channel) const -> std::pair<gpio_port&, std::uint8_t>
+{
+  auto const  at     = external(channel);
+  auto const  bank_b = channel.bank == analog_bank::b;
+  auto const  pad    = std::ranges::find_if(pads_, [&](adc_l1_pad const& entry) {
+    return entry.channel == at and entry.bank_b == bank_b;
+  });
+  auto* const port   = pad == pads_.end()   ? nullptr
+                     : pad->gpio != nullptr ? pad->gpio
+                                            : pad_port(pad->port);
+  if(port == nullptr)
+  {
+    throw config_error(
+        desc_.name, 0, std::format("channel_pins.{}{}", at, bank_b ? "b" : ""),
+        std::format(
+            "a {} pad of channel {} on a GPIO port of the machine", bank_b ? "bank B" : "positive",
+            at));
+  }
+  return {*port, pad->pin};
+}
+
+auto adc_l1_model::level_uv(std::uint32_t channel, bool bank_b) const -> std::uint32_t
+{
+  auto const pad = std::ranges::find_if(pads_, [&](adc_l1_pad const& entry) {
+    return entry.channel == channel and entry.bank_b == bank_b;
+  });
+  return pad == pads_.end() or pad->gpio == nullptr ? 0 : pad->gpio->analog_level(pad->pin);
 }
 
 void adc_l1_model::on_bus_reset()
@@ -752,7 +862,7 @@ auto adc_l1_model::code(std::uint32_t channel) const -> std::uint32_t
     return 0;
   }
   auto const own_pad = bank_b() and (variant_.bank_b_only >> channel & 1u) != 0;
-  auto const scaled  = std::uint64_t{(own_pad ? state_.input_b_uv : state_.input_uv)[channel]}
+  auto const scaled  = std::uint64_t{level_uv(channel, own_pad)}
                      * full_scale
                      / (std::uint64_t{supply_.vdda_mv} * 1000u);
   return static_cast<std::uint32_t>(std::min<std::uint64_t>(full_scale - 1u, scaled)) >> shift;
@@ -794,18 +904,15 @@ auto adc_l1_model::external(analog_channel channel) const -> std::size_t
 
 void adc_l1_model::drive(analog_channel channel, std::uint32_t microvolts)
 {
-  auto const at = external(channel);
-  if(state_.converting)
-  {
-    hold_until(ctx_.clock.time().ps);
-  }
-  (channel.bank == analog_bank::a ? state_.input_uv : state_.input_b_uv)[at] = microvolts;
+  auto const [port, pin] = driven_pad(channel);
+  listen_pads();
+  port.drive_analog(pin, microvolts);
 }
 
 auto adc_l1_model::input(analog_channel channel) const -> std::uint32_t
 {
-  auto const at = external(channel);
-  return (channel.bank == analog_bank::a ? state_.input_uv : state_.input_b_uv)[at];
+  auto const [port, pin] = driven_pad(channel);
+  return port.analog_drive(pin).value_or(0);
 }
 
 void adc_l1_model::hold_until(std::uint64_t ps)

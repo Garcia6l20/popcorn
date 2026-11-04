@@ -30,6 +30,8 @@ using popcorn::stop_reason;
 using popcorn::vtime;
 using popcorn::testing::l152rb;
 using popcorn::testing::l152re;
+using popcorn::testing::no_reset;
+using popcorn::testing::no_reset_t;
 using popcorn::testing::rcc_reset_pulse;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
@@ -133,6 +135,10 @@ struct adc_rig
       hsi_on();
     }
   }
+
+  explicit adc_rig(no_reset_t)
+      : firmware{"l152xe_l1_tim_ll"}, f{no_reset, l152re(), firmware, options(l152re(), false, {})}
+  {}
 
   void hsi_on() const
   {
@@ -993,6 +999,38 @@ TEST_CASE("a snapshot mid-conversion ends it at the same time with the same code
   REQUIRE(aborted.due() == start + 396 * cycle);
   aborted.write(sqr5, 5);
   CHECK(aborted.due() == ~std::uint64_t{});
+}
+
+TEST_CASE(
+    "a snapshot mid-conversion restored into a machine never reset ends with the pad level, a "
+    "GPIOA drive after the sampling of the next conversion leaves its held code")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(smpr3, 7u << 15);
+  r.write(sqr5, 5);
+  auto const start = r.now();
+  r.write(cr2, adon | swstart);
+  r.run_until(start + 100 * cycle);
+  auto const    saved = r.f.target->snapshot();
+  adc_rig const fresh{no_reset};
+  fresh.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(fresh.due() == start + 396 * cycle);
+  fresh.run_until(start + 396 * cycle + us);
+  REQUIRE((fresh.read(sr) & eoc) != 0);
+  CHECK(fresh.read(dr) == 2048);
+  auto* const gpioa = fresh.f.model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(gpioa != nullptr);
+  auto const next = fresh.now();
+  fresh.write(cr2, adon | swstart);
+  fresh.run_until(next + 385 * cycle);
+  gpioa->drive_analog(5, 750'000);
+  CHECK(fresh.due() == next + 396 * cycle);
+  fresh.run_until(next + 396 * cycle + us);
+  REQUIRE((fresh.read(sr) & eoc) != 0);
+  CHECK(fresh.read(dr) == 2048);
 }
 
 TEST_CASE(
@@ -3203,4 +3241,54 @@ TEST_CASE(
     adc->channel_pins.reset();
     CHECK_NOTHROW(adc_rig{description});
   }
+}
+
+TEST_CASE(
+    "IN1b is the level of its own pad PF11 and IN1 that of PA1, a GPIOF drive after the sampling "
+    "of 1b leaves the held code")
+{
+  adc_rig const r;
+  auto* const   gpioa = r.f.model_of<stm32::gpio_port>("GPIOA");
+  auto* const   gpiof = r.f.model_of<stm32::gpio_port>("GPIOF");
+  REQUIRE(gpioa != nullptr);
+  REQUIRE(gpiof != nullptr);
+  r.port().drive({1, stm32::analog_bank::b}, 1'500'000);
+  r.port().drive(1, 750'000);
+  CHECK(gpiof->analog_drive(11) == std::optional<std::uint32_t>{1'500'000});
+  CHECK(gpioa->analog_drive(1) == std::optional<std::uint32_t>{750'000});
+  r.power();
+  r.write(smpr3, 7u << 3);
+  r.write(sqr5, 1);
+  auto const start = r.now();
+  r.write(cr2, adon | bank_b | swstart);
+  r.run_until(start + 385 * cycle);
+  gpiof->drive_analog(11, 750'000);
+  CHECK(r.due() == start + 396 * cycle);
+  r.run_until(start + 396 * cycle + us);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  CHECK(r.read(dr) == 2048);
+  CHECK(r.port().input({1, stm32::analog_bank::b}) == 750'000);
+  CHECK(r.convert(1) == 1024);
+}
+
+TEST_CASE(
+    "without channel_pins the L1 ADC drive and input throw naming channel_pins and an external "
+    "channel converts 0")
+{
+  auto       description = l152re();
+  auto const adc         = std::ranges::find(
+      description.peripherals, std::string_view{"ADC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc != description.peripherals.end());
+  adc->channel_pins.reset();
+  adc_rig const r{description};
+  CHECK_THROWS_WITH_AS(
+      r.port().drive(5, 1'000'000), doctest::Contains("channel_pins.5"), popcorn::config_error);
+  CHECK_THROWS_WITH_AS(
+      r.port().drive({0, stm32::analog_bank::b}, 1'000'000), doctest::Contains("channel_pins.0b"),
+      popcorn::config_error);
+  CHECK_THROWS_WITH_AS(
+      static_cast<void>(r.port().input(5)), doctest::Contains("channel_pins.5"),
+      popcorn::config_error);
+  r.power();
+  CHECK(r.convert(5) == 0);
 }

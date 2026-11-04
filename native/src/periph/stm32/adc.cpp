@@ -205,9 +205,11 @@ struct l4_adc_state;
 
 struct adc_pad
 {
-  std::uint8_t channel;
-  char         port;
-  std::uint8_t pin;
+  std::uint8_t                channel{};
+  char                        port{};
+  std::uint8_t                pin{};
+  gpio_port*                  gpio{};
+  analog_switch_source const* switch_source{};
 };
 
 struct adc_inputs
@@ -1462,8 +1464,8 @@ private:
   [[nodiscard]] auto option_open(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto switch_open(std::uint32_t channel) const -> std::optional<adc_pad>;
   void               check_analog_switch(std::uint32_t channel);
-  [[nodiscard]] auto pad_of(std::uint32_t channel) const -> std::optional<adc_pad>;
-  [[nodiscard]] auto pad_port(adc_pad const& pad) const -> gpio_port*;
+  [[nodiscard]] auto pad_of(std::uint32_t channel) const -> adc_pad const*;
+  [[nodiscard]] auto pad_port(char letter) const -> gpio_port*;
   [[nodiscard]] auto driven_pad(std::size_t channel) const -> std::pair<gpio_port&, std::uint8_t>;
   [[nodiscard]] auto level_uv(std::uint32_t channel) const -> std::uint32_t;
   void               listen_pads();
@@ -1695,7 +1697,7 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
   {
     if(pad.role == pad_role::positive and not pad.port.empty())
     {
-      pads_.push_back({pad.channel, pad.port.front(), pad.pin});
+      pads_.push_back({.channel = pad.channel, .port = pad.port.front(), .pin = pad.pin});
     }
   }
   for(std::size_t index = 0; index < Traits::dma_fields.size(); ++index)
@@ -2059,8 +2061,10 @@ template <typename Traits> void adc_model<Traits>::listen_pads()
     return;
   }
   std::string ports;
-  for(auto const& pad : pads_)
+  for(auto& pad : pads_)
   {
+    pad.gpio          = pad_port(pad.port);
+    pad.switch_source = dynamic_cast<analog_switch_source const*>(pad.gpio);
     if(not ports.contains(pad.port))
     {
       ports.push_back(pad.port);
@@ -2068,7 +2072,7 @@ template <typename Traits> void adc_model<Traits>::listen_pads()
   }
   for(auto const letter : ports)
   {
-    auto* const port = pad_port({0, letter, 0});
+    auto* const port = pad_port(letter);
     if(port == nullptr)
     {
       continue;
@@ -2088,26 +2092,24 @@ template <typename Traits> void adc_model<Traits>::listen_pads()
 }
 
 template <typename Traits>
-auto adc_model<Traits>::pad_of(std::uint32_t channel) const -> std::optional<adc_pad>
+auto adc_model<Traits>::pad_of(std::uint32_t channel) const -> adc_pad const*
 {
   auto const pad = std::ranges::find(pads_, channel, &adc_pad::channel);
-  if(pad == pads_.end())
-  {
-    return std::nullopt;
-  }
-  return *pad;
+  return pad == pads_.end() ? nullptr : &*pad;
 }
 
-template <typename Traits> auto adc_model<Traits>::pad_port(adc_pad const& pad) const -> gpio_port*
+template <typename Traits> auto adc_model<Traits>::pad_port(char letter) const -> gpio_port*
 {
-  return dynamic_cast<gpio_port*>(ctx_.peers.find(std::format("GPIO{}", pad.port)));
+  return dynamic_cast<gpio_port*>(ctx_.peers.find(std::format("GPIO{}", letter)));
 }
 
 template <typename Traits>
 auto adc_model<Traits>::driven_pad(std::size_t channel) const -> std::pair<gpio_port&, std::uint8_t>
 {
-  auto const  pad  = pad_of(static_cast<std::uint32_t>(channel));
-  auto* const port = pad ? pad_port(*pad) : nullptr;
+  auto const* const pad  = pad_of(static_cast<std::uint32_t>(channel));
+  auto* const       port = pad == nullptr       ? nullptr
+                         : pad->gpio != nullptr ? pad->gpio
+                                                : pad_port(pad->port);
   if(port == nullptr)
   {
     throw config_error(
@@ -2120,9 +2122,8 @@ auto adc_model<Traits>::driven_pad(std::size_t channel) const -> std::pair<gpio_
 template <typename Traits>
 auto adc_model<Traits>::level_uv(std::uint32_t channel) const -> std::uint32_t
 {
-  auto const  pad  = pad_of(channel);
-  auto* const port = pad ? pad_port(*pad) : nullptr;
-  return port == nullptr ? 0 : port->analog_level(pad->pin);
+  auto const* const pad = pad_of(channel);
+  return pad == nullptr or pad->gpio == nullptr ? 0 : pad->gpio->analog_level(pad->pin);
 }
 
 template <typename Traits> void adc_model<Traits>::on_bus_reset()
@@ -2448,14 +2449,8 @@ template <typename Traits> void adc_model<Traits>::end_calibration()
 template <typename Traits>
 auto adc_model<Traits>::switch_open(std::uint32_t channel) const -> std::optional<adc_pad>
 {
-  auto const pad = pad_of(channel);
-  if(not pad)
-  {
-    return std::nullopt;
-  }
-  auto const* const port =
-      dynamic_cast<analog_switch_source const*>(ctx_.peers.find(std::format("GPIO{}", pad->port)));
-  if(port == nullptr or port->switch_closed(pad->pin))
+  auto const* const pad = pad_of(channel);
+  if(pad == nullptr or pad->switch_source == nullptr or pad->switch_source->switch_closed(pad->pin))
   {
     return std::nullopt;
   }
