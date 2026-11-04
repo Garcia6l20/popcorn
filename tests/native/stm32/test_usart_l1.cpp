@@ -427,21 +427,35 @@ TEST_CASE(
   CHECK(r.usart1->frames.empty());
 }
 
-TEST_CASE("RM0038 27.6.1: a break CTS holds after a data frame leaves TC to rise at its end")
+TEST_CASE(
+    "ES0242 2.11.3 and 2.11.8: a break requested while D1 shifts sets TC after D1 with nCTS "
+    "ready, keeps it 0 with nCTS deasserted, leaves either way, then TC rises, inferred")
 {
-  rig r{"idle"};
-  r.write(::usart1 + 0x08, 18);
-  r.write(::usart1 + cr3, 1u << 9);
-  r.write(::usart1 + cr1, ue | te);
-  r.cpu_write(::usart1 + sr, 0);
-  auto const start = r.now_ps();
-  r.cpu_write(::usart1 + dr, 'x');
-  r.cpu_write(::usart1 + cr1, ue | te | sbk);
-  r.port("USART1").set_cts(false, vtime{start + frame / 2});
-  r.idle_to(start + frame + frame / 10);
-  REQUIRE(r.usart1->frames.size() == 1);
-  CHECK((r.read(::usart1 + cr1) & sbk) != 0);
-  CHECK((r.read(::usart1 + sr) & tc) != 0);
+  for(auto const ready : {false, true})
+  {
+    CAPTURE(ready);
+    rig r{"idle"};
+    r.write(::usart1 + 0x08, 18);
+    r.write(::usart1 + cr3, 1u << 9);
+    r.write(::usart1 + cr1, ue | te);
+    r.cpu_write(::usart1 + sr, 0);
+    auto const start = r.now_ps();
+    r.cpu_write(::usart1 + dr, 'x');
+    r.cpu_write(::usart1 + cr1, ue | te | sbk);
+    r.port("USART1").set_cts(ready, vtime{start + frame / 2});
+    r.idle_to(start + frame + frame / 10);
+    CHECK((r.read(::usart1 + sr) & tc) == (ready ? tc : 0));
+    CHECK((r.read(::usart1 + cr1) & sbk) != 0);
+    r.idle_to(start + 3 * frame);
+    REQUIRE(r.usart1->frames.size() == 2);
+    CHECK_FALSE(r.usart1->frames[0].brk);
+    CHECK(r.usart1->frames[1].brk);
+    CHECK((r.read(::usart1 + cr1) & sbk) == 0);
+    CHECK((r.read(::usart1 + sr) & tc) != 0);
+    r.cpu_write(::usart1 + dr, 'y');
+    r.idle_to(start + 6 * frame);
+    CHECK(r.usart1->frames.size() == (ready ? 3u : 2u));
+  }
 }
 
 TEST_CASE("RM0038 27.6.4: UE written 0 mid-frame stops the output at the end of that frame")

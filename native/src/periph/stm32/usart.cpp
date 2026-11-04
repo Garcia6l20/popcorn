@@ -302,11 +302,15 @@ struct lock
  *        RS232 flow control, RM0456 66.5.21: with CR3.CTSE a frame, a break included, starts only
  *        while the nCTS input the far end drives, `uart_port::set_cts`, says ready, a frame in
  *        flight completes, and a held frame starts at the change to ready, a break's 2-bit hold
- *        kept. TC stays 0 while a data frame is held. A break held alone lets TC rise at the end
- *        of the data frame before it, RM0456 66.8.10, on the STM32L1 inferred from RM0038 27.6.1,
- *        and keeps it 0 with `usart_variant::break_keeps_tc_low`, the STM32L4 ES0250 2.21.2 and
- *        2.22.1: a break requested while a data frame shifts with CTSE 1 and CTS deasserted at
- *        its end leaves TC 0 until the break has run, inferred. Changes apply through events on
+ *        kept. TC sets at the end of a data frame when TXE is set, a break following or not,
+ *        RM0456 66.8.10 and RM0038 27.6.1, and stays 0 while a data frame is held. With
+ *        `usart_variant::break_keeps_tc_low`, the STM32L4 ES0250 2.21.2 and 2.22.1 and the
+ *        STM32L1 ES0125 2.11.3, ES0242 2.11.3, ES0224 2.10.3, ES0240 and ES0241 2.12.3 and
+ *        ES0578 2.11.3, a break requested while a data frame shifts with CTSE 1 and nCTS
+ *        deasserted at its end leaves TC 0 until the break has run, inferred. With
+ *        `usart_variant::break_ignores_cts`, the STM32L1 ES0125 2.11.8, ES0242 2.11.8, ES0224
+ *        2.10.8, ES0240 and ES0241 2.12.8 and ES0578 2.11.8, a break leaves at the end of the
+ *        current transmission whatever nCTS says. Changes apply through events on
  *        core::host_lane at their own time, kept in the state with their board time and
  *        rescheduled at every reset at the same instant. A frame starting at the instant of a
  *        change to not ready is not held, whatever the event order of that instant. A change runs
@@ -540,6 +544,7 @@ private:
   std::uint32_t                                break_stop_half_bits_;
   bool                                         flow_control_;
   bool                                         break_keeps_tc_low_;
+  bool                                         break_ignores_cts_;
   bool                                         flow_logged_{};
   std::uint32_t                                read_clears_{};
   std::uint32_t                                write_clears_{};
@@ -728,7 +733,7 @@ usart::usart(
               : std::nullopt},
       kernel_{ctx.clock.domain(kernel_name(desc, variant))}, line_{irq(line_name(desc, variant))},
       break_stop_half_bits_{variant.break_stop_half_bits}, flow_control_{variant.flow_control},
-      break_keeps_tc_low_{variant.break_keeps_tc_low}
+      break_keeps_tc_low_{variant.break_keeps_tc_low}, break_ignores_cts_{variant.break_ignores_cts}
 {
   expect_register("CR1_enabled", variant.mode_views);
   expect_field(cr1_, "FIFOEN", variant.fifo);
@@ -1103,7 +1108,7 @@ void usart::start_frame(std::uint64_t from_ps)
      or not queued
      or not enabled()
      or get(regs_, transmit_) == 0
-     or not clear_to_send(from_ps))
+     or not(clear_to_send(from_ps) or (state_.break_pending and break_ignores_cts_)))
   {
     return;
   }
@@ -1537,10 +1542,13 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
             / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)]);
       state_.tx_end_ps = next;
     }
+    auto const data_sent = not brk and state_.tx_fifo.empty();
+    auto const kept_low  = break_keeps_tc_low_ and state_.break_pending and not clear_to_send(next);
     start_frame(next);
     auto const held =
         (state_.break_pending and (brk or break_keeps_tc_low_)) or not state_.tx_fifo.empty();
-    if(not state_.shifting and not(held and not clear_to_send(next)))
+    if((data_sent and not kept_low)
+       or (not state_.shifting and not(held and not clear_to_send(next))))
     {
       update(regs_, complete_, 1);
     }

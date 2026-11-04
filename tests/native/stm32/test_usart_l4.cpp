@@ -476,7 +476,8 @@ TEST_CASE("the l4_dma_ll channel 7 sequence runs on the USART2 TX request of the
 }
 
 TEST_CASE(
-    "ES0250 2.21.2: a break requested while D1 shifts with CTS deasserted keeps TC 0 after D1")
+    "ES0250 2.21.2: a break requested while D1 shifts with CTS deasserted keeps TC 0 after D1, "
+    "with CTS ready TC sets")
 {
   for(auto const ready : {false, true})
   {
@@ -490,8 +491,13 @@ TEST_CASE(
     r.cpu_write(usart2 + rqr, sbkrq);
     r.port("USART2").set_cts(ready, vtime{start + pclk1_frame / 2});
     r.idle_to(start + pclk1_frame + pclk1_frame / 10);
-    CHECK((r.read(usart2 + isr) & tc) == 0);
+    CHECK((r.read(usart2 + isr) & tc) == (ready ? tc : 0));
     CHECK((r.read(usart2 + isr) & sbkf) != 0);
+    if(not ready)
+    {
+      r.idle_to(start + 4 * pclk1_frame);
+      CHECK((r.read(usart2 + isr) & (tc | sbkf)) == sbkf);
+    }
     r.port("USART2").set_cts(true, vtime{r.now_ps()});
     r.idle_to(r.now_ps() + 3 * pclk1_frame);
     CHECK((r.read(usart2 + isr) & (tc | sbkf)) == tc);

@@ -2694,6 +2694,21 @@ TEST_CASE("RM0456 66.8.10: a break CTS holds after a data frame leaves TC to ris
   CHECK((p->isr() & isr_tc) != 0);
 }
 
+TEST_CASE("RM0456 66.8.10: TC sets at the end of a data frame a break follows, CTSE 0")
+{
+  auto const p     = flow_rig(0);
+  auto const frame = usart1_frame(*p);
+  p->t.cpu("USART1", "TDR", 'x');
+  p->t.cpu("USART1", "RQR", 1u << 1);
+  REQUIRE(p->box->posts.size() == 1);
+  auto const start = p->box->posts[0].frame.start.ps;
+  p->advance(start + frame + frame / 10 - p->now());
+  REQUIRE(p->box->posts.size() == 2);
+  CHECK(p->box->posts[1].frame.kind == frame_kind::brk);
+  CHECK((p->isr() & isr_sbkf) != 0);
+  CHECK((p->isr() & isr_tc) != 0);
+}
+
 TEST_CASE("a CTS change at the instant a frame ends does not hold the next, one before does")
 {
   for(auto const early : {std::uint64_t{0}, instruction_ps})

@@ -884,10 +884,18 @@ struct usart_variant
   std::span<named_field<usart_role> const> names = sci3_fifo_names;
   /**
    * @brief A break requested while a data frame shifts with CTSE 1 keeps TC 0 at that frame's
-   *        end when CTS is deasserted then, ES0250 2.21.2 and 2.22.1. Without it a break that CTS
-   *        holds leaves TC to rise at the end of the data frame, RM0456 66.8.10.
+   *        end when nCTS is deasserted then, ES0250 2.21.2 and 2.22.1 on the STM32L4, ES0125
+   *        2.11.3, ES0242 2.11.3, ES0224 2.10.3, ES0240 and ES0241 2.12.3 and ES0578 2.11.3 on
+   *        the STM32L1. Without it TC sets at the end of the data frame, RM0456 66.8.10.
    */
   bool break_keeps_tc_low = false;
+  /**
+   * @brief With CTSE 1 a break leaves at the end of the current transmission whatever nCTS says,
+   *        ES0125 2.11.8, ES0242 2.11.8, ES0224 2.10.8, ES0240 and ES0241 2.12.8 and ES0578
+   *        2.11.8 on the STM32L1. Without it nCTS holds a break as it holds a data frame, RM0456
+   *        66.5.21.
+   */
+  bool break_ignores_cts = false;
 };
 
 /** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
@@ -904,7 +912,9 @@ inline constexpr usart_variant l1_usart{
     .registers            = usart_registers::sci2,
     .kernel_buses         = l1_apb_windows,
     .break_stop_half_bits = 2,
-    .names                = sci2_names};
+    .names                = sci2_names,
+    .break_keeps_tc_low   = true,
+    .break_ignores_cts    = true};
 /** @brief STM32L1 UART4 and UART5: the L1 USART with no flow control, RM0038 Table 157. */
 inline constexpr usart_variant l1_uart{
     .mode_views           = false,
