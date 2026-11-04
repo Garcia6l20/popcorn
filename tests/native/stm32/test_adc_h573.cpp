@@ -825,6 +825,12 @@ TEST_CASE("OVSR n sums 2 to the n + 1 codes in as many conversions, truncated to
     r.write("ADC1", "ADC_CFGR2", rovse | ovsr(2) | (3u << 5));
     CHECK(r.convert(3) == 2048);
   }
+  SUBCASE("OVSR 2, 8x, OVSS 4 rounds 8 x 2049 to nearest")
+  {
+    r.port().drive(3, 1'650'806);
+    r.write("ADC1", "ADC_CFGR2", rovse | ovsr(2) | (4u << 5));
+    CHECK(r.convert(3) == 1025);
+  }
   SUBCASE("OVSR 7, 256x full scale: 0xFFF00 truncated to 0xFF00, AWD1 compares 0xFF0")
   {
     r.port().drive(3, 3'300'000);

@@ -335,9 +335,15 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   once, with JEXTEN set each edge of the JEXTSEL event of RM0351 Table 112 converts them after the
   tLATR of a regular trigger. With JDISCEN and JEXTEN 0 each JADSTART converts the next channel and
   JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
-- These injected settings are logged once, a model_error under strict_peripherals: an injection
-  into a ROVSE conversion with ROVSM 0 converts every sample of the dropped rank again, and JOVSE
-  converts without oversampling.
+- JOVSE oversamples the injected ranks with OVSR and OVSS, RM0351 18.4.30, and AWD1 compares
+  `ADC_JDRy[15:4]`, the `ADC_DR[15:4]` rule of RM0351 18.4.30, inferred. With ROVSE and JOVSE an
+  injection restarts the dropped regular rank from its first sample, RM0351 Figure 115, and JAUTO
+  with both oversamples both groups, Figure 117.
+- These oversampling settings are logged once, a model_error under strict_peripherals: ROVSE and
+  JOVSE with ROVSM 0 and JAUTO 0 convert in the resumed mode, as the RM0351 18.4.30 text says ROVSM
+  is ignored there, and are logged because Table 119 marks the setting not supported, and an
+  injection into a ROVSE conversion with ROVSM 0 and JOVSE 0 converts every sample of the dropped
+  rank again. A strict model_error at a JADSTART write leaves `ADC_CR` as before the write.
 - With JQDIS 0 a CPU or DMA `ADC_JSQR` write goes through the queue of context with one stage at JQM
   0, ES0250 2.8.1, where RM0351 18.4.21 describes two. A write before the waiting context is
   consumed sets JQOVF, an interrupt with JQOVFIE, and is ignored. `ADC_JSQR` reads the active
@@ -364,7 +370,7 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   conversion in progress, RM0351 18.4.19 and 18.4.26, and clears ADSTART, inferred.
 - JADSTART or JADSTP with JAUTO is ignored, JAUTO with JEXTEN set ignores the injected triggers,
   JAUTO with DISCEN or JDISCEN converts as JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0
-  oversamples the regular ranks only, RM0351 18.4.31. Each is logged once, a model_error under
+  oversamples the regular ranks only, RM0351 18.4.30. Each is logged once, a model_error under
   strict_peripherals, RM0351 18.4.19 and 18.7.4.
 - An injected start or trigger during a regular conversion drops it, and the dropped rank converts
   again after the group, RM0351 18.4.19, starting at the group's end, inferred. tLATRINJ is the

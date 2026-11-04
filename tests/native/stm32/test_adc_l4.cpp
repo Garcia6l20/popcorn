@@ -1208,8 +1208,9 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a software JADSTART with JQDIS 0, JOVSE and an injection into a ROVSE sequence with ROVSM 0 "
-    "each log once, a model_error when strict that leaves JADSTART 0")
+    "a software JADSTART with JQDIS 0, ROVSE and JOVSE with ROVSM 0, RM0351 Table 119, and an "
+    "injection into a ROVSE sequence with ROVSM 0 each log once, a model_error when strict that "
+    "leaves JADSTART 0")
 {
   struct leg
   {
@@ -1224,11 +1225,11 @@ TEST_CASE(
     r.start(1);
   };
   auto const queue   = [](rig const& r) { r.write("ADC1", "ADC_CFGR", 0); };
-  auto const sampled = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", jovse); };
+  auto const sampled = [](rig const& r) { r.write("ADC1", "ADC_CFGR2", 1u | jovse); };
   for(auto const& [what, setup, cr] : {
           leg{"ROVSM 0",              continued, enabled | adstart | jadstart},
           leg{"JQDIS 0 and JEXTEN 0", queue,     enabled | jadstart          },
-          leg{"JOVSE",                sampled,   enabled | jadstart          },
+          leg{"Table 119",            sampled,   enabled | jadstart          },
   })
   {
     CAPTURE(what);
@@ -1253,7 +1254,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0351 18.4.31: an injection into a ROVSE x2 conversion with ROVSM 1 logs nothing, the "
+    "RM0351 18.4.30: an injection into a ROVSE x2 conversion with ROVSM 1 logs nothing, the "
     "dropped rank converts two fresh samples after JEOS")
 {
   rig const r;
@@ -2212,7 +2213,7 @@ TEST_CASE("RM0351 18.4.26: ALIGN 1 left-aligns ADC_JDR1, 2048 reads 0x8000")
 }
 
 TEST_CASE(
-    "RM0351 18.4.31: ROVSE oversamples the regular channels only, an injected conversion takes "
+    "RM0351 18.4.30: ROVSE oversamples the regular channels only, an injected conversion takes "
     "one conversion time and ADC_JDR1 reads the plain code")
 {
   rig const r;
@@ -2557,7 +2558,7 @@ TEST_CASE(
   CHECK(r.isr("AWD1") == 1);
   r.write("ADC1", "ADC_CFGR2", 1u | 1u << 5);
   CHECK(r.convert(1) == 2048);
-  r.write("ADC1", "ADC_CFGR2", jovse);
+  r.write("ADC1", "ADC_CFGR2", jovse | 1u << 5);
   r.write("ADC1", "ADC_JSQR", jsqr({1}));
   r.write("ADC1", "ADC_CR", enabled | jadstart);
   r.settle();
@@ -2672,6 +2673,140 @@ TEST_CASE(
   r.run_until(at + 30 * cycle_ps);
   CHECK(r.isr("OVR") == 1);
   CHECK(r.cpu_read("ADC1", "ADC_DR") == 1024);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: JOVSE oversamples the injected ranks with OVSR and OVSS, the regular ranks "
+    "convert once, ADC_JDR1 ignores ALIGN")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | align);
+  r.write("ADC1", "ADC_CFGR2", jovse | 1u << 2 | 2u << 5);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 1}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 4 * 15 * cycle_ps - cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(at + 4 * 15 * cycle_ps);
+  CHECK(r.isr("JEOC") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 2048);
+  r.run_until(at + 8 * 15 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR2") == 2048);
+  r.write("ADC1", "ADC_CFGR2", jovse);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 4096);
+  r.port().drive(1, 1'500'733);
+  r.write("ADC1", "ADC_CFGR2", jovse | 1u << 2 | 3u << 5);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1025);
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis);
+  auto const regular = r.now();
+  r.start(1);
+  r.ends_at(regular + 15 * cycle_ps);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 18.4.30, inferred for the injected group: with JOVSE AWD1 compares ADC_JDRy[15:4] "
+    "of the oversampled result")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | jawd1en);
+  r.write("ADC1", "ADC_TR1", 1000u << 16);
+  r.write("ADC1", "ADC_CFGR2", jovse | 1u << 2);
+  r.write("ADC1", "ADC_JSQR", jsqr({1}));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.read("ADC1", "ADC_JDR1") == 8192);
+  CHECK(r.isr("AWD1") == 0);
+  r.write("ADC1", "ADC_TR1", 511u << 16);
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.settle();
+  CHECK(r.isr("AWD1") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 115: with ROVSE, JOVSE and ROVSM 1 an injection oversamples the "
+    "injected rank, the dropped regular rank converts two fresh samples after JEOS")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | jovse | 1u << 5 | 1u << 10);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.start(1);
+  r.run_until(r.now() + 100 * cycle_ps);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 2 * 15) * cycle_ps / 8;
+  r.run_until(injected - cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(injected);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  r.run_until(injected + 2 * 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 Table 119: ROVSE, JOVSE and ROVSM 0 preempted by an injection log one warning and "
+    "convert in the resumed mode")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | jovse | 1u << 5);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  r.start(1);
+  r.run_until(r.now() + 100 * cycle_ps);
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  auto const injected = at + edge_after(at, cycle_ps) + (20 + 8 * 2 * 15) * cycle_ps / 8;
+  r.run_until(injected + 2 * 653 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("Table 119"));
+}
+
+TEST_CASE(
+    "RM0351 18.4.30 Figure 117: JAUTO with ROVSE and JOVSE oversamples the regular and the "
+    "auto-injected ranks, nothing logged")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.port().drive(2, 750'000);
+  r.write("ADC1", "ADC_CFGR", jqdis | jauto);
+  r.write("ADC1", "ADC_CFGR2", 1u | jovse | 1u << 2 | 2u << 5);
+  r.write("ADC1", "ADC_JSQR", jsqr({2}));
+  auto const at = r.now();
+  r.start(1);
+  r.run_until(at + 4 * 15 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 2048);
+  r.run_until(at + 8 * 15 * cycle_ps - cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(at + 8 * 15 * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+  CHECK(r.read("ADC1", "ADC_JDR1") == 1024);
+  CHECK(r.warnings().empty());
 }
 
 namespace

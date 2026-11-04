@@ -318,6 +318,7 @@ struct u5_adc
   static constexpr std::string_view offset_enable       = {};
   static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = {};
+  static constexpr bool             injected_ovs        = false;
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
   static constexpr std::string_view option_owner        = {};
@@ -443,6 +444,7 @@ struct h5_adc
   static constexpr std::string_view offset_enable       = "OFFSET_EN";
   static constexpr bool             subtracts_offset    = false;
   static constexpr std::string_view injected_oversample = "JOVSE";
+  static constexpr bool             injected_ovs        = false;
   static constexpr std::string_view option_register     = "ADC_OR";
   static constexpr std::string_view option_switch       = "OP0";
   static constexpr std::string_view option_owner        = "ADC1";
@@ -619,6 +621,7 @@ struct l4_adc
   static constexpr std::string_view offset_enable       = "OFFSET_EN";
   static constexpr bool             subtracts_offset    = true;
   static constexpr std::string_view injected_oversample = "JOVSE";
+  static constexpr bool             injected_ovs        = true;
   static constexpr std::string_view option_register     = {};
   static constexpr std::string_view option_switch       = {};
   static constexpr std::string_view option_owner        = {};
@@ -1287,7 +1290,7 @@ struct adc_clock
  *        18.4.26, and clears ADSTART, inferred. JADSTART or JADSTP with JAUTO is ignored, JAUTO
  *        with JEXTEN set ignores the injected triggers, JAUTO with DISCEN or JDISCEN converts as
  *        JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0 oversamples the regular ranks only,
- *        RM0351 18.4.31, each logged once, a model_error under strict_peripherals.
+ *        RM0351 18.4.30, each logged once, a model_error under strict_peripherals.
  *        With JQDIS 0 a CPU or DMA ADC_JSQR write goes through the queue of context, RM0351
  *        18.4.21, with the one stage of ES0250 2.8.1 at JQM 0: a write before the waiting context
  *        is consumed sets JQOVF and is ignored. ADC_JSQR reads the active context. JEOS consumes
@@ -1302,9 +1305,17 @@ struct adc_clock
  *        later one waits, and a third sets JQOVF. JEOS applies the next context or empties the
  *        queue, which then reads ADC_JSQR 0, RM0351 Figures 85, 89 and 91, and ignores the injected
  *        triggers until a write. JADSTP, ADDIS and a JQDIS change empty it.
- *        These log a warning once, a model_error under strict_peripherals: an injection into a
- *        ROVSE conversion with ROVSM 0, which converts every sample of the dropped rank again, and
- *        JOVSE, converted without oversampling.
+ *        JOVSE oversamples the injected ranks with OVSR and OVSS, RM0351 18.4.30, with ALIGN and
+ *        the offsets ignored, and AWD1 then compares ADC_JDRy[15:4], the ADC_DR[15:4] rule of
+ *        RM0351 18.4.30, inferred. With ROVSE and JOVSE an injection restarts the dropped regular
+ *        rank from its first sample, the resumed mode of Figure 115, and JAUTO with both
+ *        oversamples both groups, Figure 117. ROVSE and JOVSE with ROVSM 0 and JAUTO 0 convert in
+ *        the resumed mode, as the RM0351 18.4.30 text says ROVSM is ignored there, and log a
+ *        warning once, a model_error under strict_peripherals, as Table 119 marks the setting not
+ *        supported. An injection into a ROVSE conversion with ROVSM 0 and JOVSE 0 converts every
+ *        sample of the dropped rank again and logs a warning once, a model_error under
+ *        strict_peripherals. A strict model_error raised at a JADSTART write leaves ADC_CR as it
+ *        was before the write.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
@@ -1393,6 +1404,9 @@ private:
   [[nodiscard]] auto after(std::uint64_t half_cycles) const -> std::uint64_t;
   void               hold_until(std::uint64_t ps);
   [[nodiscard]] auto ratio() const -> std::uint32_t;
+  [[nodiscard]] auto injected_oversampled() const -> bool;
+  [[nodiscard]] auto result_oversampled() const -> bool;
+  [[nodiscard]] auto shifted(std::uint32_t sum) const -> std::uint32_t;
   [[nodiscard]] auto channel() const -> std::uint32_t;
   [[nodiscard]] auto channel_at(std::size_t rank) const -> std::uint32_t;
   [[nodiscard]] auto length() const -> std::size_t;
@@ -1453,6 +1467,7 @@ private:
   void               check_clock_range();
   void               check_clock_mode();
   void               check_unmodelled(std::uint32_t channel);
+  void               check_oversampling_modes();
   void               check_preselection(std::uint32_t channel);
   [[nodiscard]] auto option_switch_set() const -> bool;
   void               check_option_switch(std::uint32_t channel);
@@ -1565,6 +1580,7 @@ private:
   bool                                             automatic_trigger_logged_{};
   bool                                             automatic_discontinuous_logged_{};
   bool                                             automatic_oversampling_logged_{};
+  bool                                             oversampling_modes_logged_{};
   bool                                             injected_oversampling_logged_{};
   bool                                             sequence_written_logged_{};
 };
@@ -1863,7 +1879,27 @@ template <typename Traits> void adc_model<Traits>::hold_until(std::uint64_t ps)
 
 template <typename Traits> auto adc_model<Traits>::ratio() const -> std::uint32_t
 {
-  return oversampled() and not injecting() ? Traits::ratio(get(regs_, oversampling_ratio_)) : 1u;
+  return result_oversampled() ? Traits::ratio(get(regs_, oversampling_ratio_)) : 1u;
+}
+
+template <typename Traits> auto adc_model<Traits>::injected_oversampled() const -> bool
+{
+  return injected_oversampling_ and get(regs_, *injected_oversampling_) != 0;
+}
+
+template <typename Traits> auto adc_model<Traits>::result_oversampled() const -> bool
+{
+  if(injecting())
+  {
+    return Traits::injected_ovs and injected_oversampled();
+  }
+  return oversampled();
+}
+
+template <typename Traits> auto adc_model<Traits>::shifted(std::uint32_t sum) const -> std::uint32_t
+{
+  auto const shift = get(regs_, oversampling_shift_);
+  return (shift == 0 ? sum : (sum + (1u << (shift - 1u))) >> shift) & Traits::result_mask;
 }
 
 template <typename Traits> auto adc_model<Traits>::channel() const -> std::uint32_t
@@ -2392,6 +2428,10 @@ template <typename Traits> void adc_model<Traits>::check_clock_mode()
 
 template <typename Traits> void adc_model<Traits>::prepare()
 {
+  if constexpr(Traits::injected_ovs)
+  {
+    check_oversampling_modes();
+  }
   if(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0)
   {
     forbidden(
@@ -2511,6 +2551,23 @@ template <typename Traits> void adc_model<Traits>::check_unmodelled(std::uint32_
   }
 }
 
+template <typename Traits> void adc_model<Traits>::check_oversampling_modes()
+{
+  if constexpr(injected_group)
+  {
+    if(oversampled()
+       and injected_oversampled()
+       and get(regs_, injected_->resumed_oversampling) == 0
+       and not automatic())
+    {
+      forbidden(
+          oversampling_modes_logged_, "ADC_CFGR2",
+          "ROVSE 1, JOVSE 1 and ROVSM 0, not supported by RM0351 Table 119: converted in the "
+          "resumed mode");
+    }
+  }
+}
+
 template <typename Traits> void adc_model<Traits>::check_preselection(std::uint32_t channel)
 {
   if(preselection_ and channel < channels and get(regs_, (*preselection_)[channel]) == 0)
@@ -2609,13 +2666,7 @@ template <typename Traits> void adc_model<Traits>::finish()
   {
     state_.sum += code();
   }
-  auto result = state_.sum;
-  if(oversampled())
-  {
-    auto const shift = get(regs_, oversampling_shift_);
-    result           = shift == 0 ? state_.sum : (state_.sum + (1u << (shift - 1u))) >> shift;
-    result &= Traits::result_mask;
-  }
+  auto const result = oversampled() ? shifted(state_.sum) : state_.sum;
   watch(channel(), result);
   land(aligned(channel(), result));
   auto const last = std::size_t{state_.rank} + 1u >= length();
@@ -2692,8 +2743,8 @@ void adc_model<Traits>::watch(std::uint32_t channel, std::uint32_t result)
     {
       continue;
     }
-    auto const compared = Traits::compared(
-        watchdog, result, get(regs_, resolution_), oversampled() and not injecting());
+    auto const compared =
+        Traits::compared(watchdog, result, get(regs_, resolution_), result_oversampled());
     auto out = compared < get(regs_, watchdog_low_[watchdog])
             or compared > get(regs_, watchdog_high_[watchdog]);
     if(watchdog == 0)
@@ -3282,7 +3333,11 @@ template <typename Traits> void adc_model<Traits>::prepare_injected()
 {
   if constexpr(injected_group)
   {
-    if(injected_oversampling_ and get(regs_, *injected_oversampling_) != 0)
+    if constexpr(Traits::injected_ovs)
+    {
+      check_oversampling_modes();
+    }
+    else if(injected_oversampled())
     {
       unmodelled(injected_oversampling_logged_, "ADC_CFGR2", "JOVSE: injected oversampling");
     }
@@ -3317,13 +3372,13 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
 {
   if constexpr(injected_group)
   {
-    auto const end    = after(conversion());
+    auto const end    = after(std::uint64_t{ratio()} * conversion());
     state_.converting = false;
-    for(; state_.held < 1; ++state_.held)
+    for(auto const samples = ratio(); state_.held < samples; ++state_.held)
     {
       state_.sum += code();
     }
-    auto const result = state_.sum;
+    auto const result = result_oversampled() ? shifted(state_.sum) : state_.sum;
     auto const rank   = std::size_t{state_.injected_rank};
     watch(channel(), result);
     update(regs_, injected_->data[rank], aligned(channel(), result));
@@ -3482,7 +3537,7 @@ template <typename Traits> void adc_model<Traits>::check_automatic()
     {
       forbidden(
           automatic_oversampling_logged_, Traits::config,
-          "JAUTO with ROVSE 1 and JOVSE 0, not supported by RM0351 18.4.31: the regular ranks "
+          "JAUTO with ROVSE 1 and JOVSE 0, not supported by RM0351 18.4.30: the regular ranks "
           "are oversampled, the injected ranks converted once");
     }
     if(get(regs_, discontinuous_) != 0 or get(regs_, injected_->discontinuous) != 0)
@@ -3499,7 +3554,9 @@ template <typename Traits> void adc_model<Traits>::preempt(std::uint64_t at_ps)
 {
   if constexpr(injected_group)
   {
-    if(oversampled() and get(regs_, injected_->resumed_oversampling) == 0)
+    if(oversampled()
+       and get(regs_, injected_->resumed_oversampling) == 0
+       and not(Traits::injected_ovs and injected_oversampled()))
     {
       unmodelled(
           resumed_oversampling_logged_, "ADC_CFGR2",
