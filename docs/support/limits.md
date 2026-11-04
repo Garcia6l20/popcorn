@@ -1702,7 +1702,10 @@ STM32L4 TIM6 and TIM7, RM0351 section 33:
 Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usart.cpp)
 
 - Only plain asynchronous mode is modelled. Synchronous, smartcard, IrDA, LIN, half-duplex,
-  driver enable, auto baud, receiver timeout and wake-up from Stop are logged as not modelled.
+  driver enable, auto baud and receiver timeout are logged as not modelled.
+- The model runs in Run mode only. A CPU or DMA write that sets CR1.UESM, CR3.UCESM, CR3.WUFIE
+  or CR3.WUS, where the description has them, logs one `model_warning` and raises `ModelError`
+  under `strict_peripherals` before the store, on every family. WUF stays 0.
 - GTPR and AUTOCR are not served, so the locks on their fields are not enforced.
 - IDLE is never gated on RXFNE, which RM0456 66.8.10 does.
 - BUSY does not follow frames from other machines.
@@ -1732,3 +1735,15 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   set after the SR read stays set, and a DR write with no SR read since TC rose sends the word
   and leaves TC set, RM0038 27.6.1.
 - STM32L1 EIE raises the interrupt on ORE, NF or FE only while DMAR is 1, RM0038 27.6.6.
+- STM32L4 USART1 to USART3, UART4 and UART5, RM0351 section 40, run the sci3 frame engine with
+  one data word each way: ISR.TXE, RXNE and NF, CR1.TXEIE and RXNEIE, ICR.NCF clears NF. The
+  kernel clock is the instance's `RCC_CCIPR` selection, BRR alone divides it, the L4 has no
+  PRESC. Every instance has CTS and RTS flow control, RM0351 Table 251. USART_ISR reads
+  0x000000C0 after reset, TXE and TC, bit 25 0, inferred: RM0351 40.8.8 gives 0x020000C0 with
+  TCBGT, which the Table 251 note gives to the L49x and L4Ax only.
+- STM32L4 ES0250 2.21.1, NACK sampling in smartcard mode, follows smartcard: logged as not
+  modelled. ES0250 2.21.4, the receiver timeout start with two stop bits, follows RTOEN: logged
+  as not modelled. ES0250 2.21.5, data corruption on a noisy receive line, and 2.21.6, data
+  corrupted when ABREN is cleared, are analog and auto-baud effects the frame engine leaves out.
+  ES0250 2.21.7, NF with ONEBIT: the model samples once with ONEBIT and sets NF only for a host
+  frame tagged with noise.

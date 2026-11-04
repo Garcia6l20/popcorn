@@ -101,6 +101,8 @@ the FLASH model. Every other variant goes through the row's `make` into its fact
   `flash_model<Traits>` takes `u5_flash` or `h5_flash`.
 - **name table**: a `field_table` of `family_names.hpp` that maps the roles of a model to the
   register and field names of a family. An empty name says the family lacks that item.
+  `pwr_role` names the PWR fields of each family, `usart_role` the USART fields whose names
+  differ between the FIFO sci3, the single-register sci3 of the STM32L4 and the sci2 registers.
 - **board option**: a value the user passes to `Machine` for a peripheral, such as `rcc`,
   `supply`, `option_bytes`, `rng` or `usb`. It reaches the model through the `board`.
 

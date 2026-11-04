@@ -113,6 +113,7 @@ l4_firmwares = {
         "l476_l4_dma_ll",
         "l476_l4_tim_ll",
         "l476_l4_lptim_ll",
+        "l476_l4_usart_ll",
     )
 }
 l4_env = {
@@ -281,6 +282,7 @@ for program, source in (
     ("stm32-spi-l4", "test_spi_l4.cpp"),
     ("stm32-lptim-l4", "test_lptim_l4.cpp"),
     ("stm32-sai-l4", "test_sai_l4.cpp"),
+    ("stm32-usart-l4", "test_usart_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

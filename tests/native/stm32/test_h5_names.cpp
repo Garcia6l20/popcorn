@@ -1,9 +1,12 @@
+#include "../support/inert_model.hpp"
 #include "factories.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/services.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/flash.hpp>
 
@@ -11,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -59,6 +63,15 @@ auto idle(part_description desc, core::machine_options options = popcorn::testin
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   return f;
 }
+
+class bus_probe final : public popcorn::testing::inert_model
+{
+public:
+  explicit bus_probe(popcorn::periph::model_context& ctx) : context{ctx}
+  {}
+
+  popcorn::periph::model_context& context;
+};
 
 constexpr std::uint32_t loop_at = 0x2000'0100;
 
@@ -407,6 +420,41 @@ TEST_CASE("RM0481 56.8: the USART variant takes the FIFO presence apart from the
            return o;
          }()),
       popcorn::config_error);
+}
+
+TEST_CASE(
+    "RM0481 56.8: H573 USART2 needs TXFNF, PRESC and NECF, WUFIE is a model_error under strict")
+{
+  auto  no_txfnf = h573();
+  auto& isr      = described(no_txfnf, "USART2", "ISR_enabled").fields;
+  REQUIRE(std::erase_if(isr, [](popcorn::field_desc const& f) { return f.name == "TXFNF"; }) == 1);
+  CHECK_THROWS_WITH_AS(h5(no_txfnf), doctest::Contains("TXFNF"), popcorn::config_error);
+  auto  no_necf = h573();
+  auto& icr     = described(no_necf, "USART2", "ICR").fields;
+  REQUIRE(std::erase_if(icr, [](popcorn::field_desc const& f) { return f.name == "NECF"; }) == 1);
+  std::erase_if(unit(no_necf, "USART2").cross_rules, [](popcorn::cross_rule const& rule) {
+    return rule.field == "NECF";
+  });
+  CHECK_THROWS_WITH_AS(h5(no_necf), doctest::Contains("NECF"), popcorn::config_error);
+  auto  no_presc = h573();
+  auto& regs     = unit(no_presc, "USART2").registers;
+  REQUIRE(std::erase_if(regs, [](register_desc const& r) { return r.name == "PRESC"; }) == 1);
+  CHECK_THROWS_WITH_AS(h5(no_presc), doctest::Contains("PRESC"), popcorn::config_error);
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  options.models.insert_or_assign(
+      "CRC", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        return std::make_shared<bus_probe>(ctx);
+      });
+  auto const  f     = h5(h573(), std::move(options));
+  auto* const probe = f.model_of<bus_probe>("CRC");
+  REQUIRE(probe != nullptr);
+  auto const cr3 = address_of(f, "USART2", "CR3");
+  CHECK_THROWS_AS(
+      static_cast<void>(probe->context.services.write(
+          cr3, 4, bit_of(f, "USART2", "CR3", "WUFIE"), popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(f.target->mem().read(cr3, 4).value_or(1) == 0);
 }
 
 TEST_CASE("RM0481 59.6.2: the H573 SAI takes SAIEN as the block enable")

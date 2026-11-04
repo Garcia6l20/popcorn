@@ -1,5 +1,6 @@
 #pragma once
 
+#include "family_names.hpp"
 #include "flash_unit.hpp"
 
 #include <popcorn/periph/stm32/board.hpp>
@@ -721,6 +722,101 @@ enum class usart_registers : std::uint8_t
   sci2,
 };
 
+/** @brief Fields of a USART whose name differs between register sets and families. */
+enum class usart_role : std::uint8_t
+{
+  tx_not_full,
+  rx_not_empty,
+  noise,
+  tx_not_full_ie,
+  rx_not_empty_ie,
+  tx_empty,
+  rx_full,
+  tx_empty_ie,
+  rx_full_ie,
+  tx_threshold,
+  rx_threshold,
+  tx_threshold_ie,
+  rx_threshold_ie,
+  tx_threshold_flag,
+  rx_threshold_flag,
+  flush_tx,
+  prescaler,
+  noise_clear,
+};
+
+/**
+ * @brief sci3 names with the FIFO, RM0456 66.8 and 67.7, RM0481 56.8 and 57.7. `CR1` and `ISR`
+ *        stand for the register or the view the model uses, such as `CR1_enabled`.
+ */
+inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci3_fifo_names{
+    {{usart_role::tx_not_full, {"ISR", "TXFNF"}},
+     {usart_role::rx_not_empty, {"ISR", "RXFNE"}},
+     {usart_role::noise, {"ISR", "NE"}},
+     {usart_role::tx_not_full_ie, {"CR1", "TXFNFIE"}},
+     {usart_role::rx_not_empty_ie, {"CR1", "RXFNEIE"}},
+     {usart_role::tx_empty, {"ISR", "TXFE"}},
+     {usart_role::rx_full, {"ISR", "RXFF"}},
+     {usart_role::tx_empty_ie, {"CR1", "TXFEIE"}},
+     {usart_role::rx_full_ie, {"CR1", "RXFFIE"}},
+     {usart_role::tx_threshold, {"CR3", "TXFTCFG"}},
+     {usart_role::rx_threshold, {"CR3", "RXFTCFG"}},
+     {usart_role::tx_threshold_ie, {"CR3", "TXFTIE"}},
+     {usart_role::rx_threshold_ie, {"CR3", "RXFTIE"}},
+     {usart_role::tx_threshold_flag, {"ISR", "TXFT"}},
+     {usart_role::rx_threshold_flag, {"ISR", "RXFT"}},
+     {usart_role::flush_tx, {"RQR", "TXFRQ"}},
+     {usart_role::prescaler, {"PRESC", "PRESCALER"}},
+     {usart_role::noise_clear, {"ICR", "NECF"}}}
+};
+
+/**
+ * @brief sci3 names of the STM32L4 USART and UART, RM0351 40.8: one data register each way, no
+ *        FIFO and no PRESC, TXE, RXNE and NF in ISR, NCF in ICR.
+ */
+inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci3_names{
+    {{usart_role::tx_not_full, {"ISR", "TXE"}},
+     {usart_role::rx_not_empty, {"ISR", "RXNE"}},
+     {usart_role::noise, {"ISR", "NF"}},
+     {usart_role::tx_not_full_ie, {"CR1", "TXEIE"}},
+     {usart_role::rx_not_empty_ie, {"CR1", "RXNEIE"}},
+     {usart_role::tx_empty, {"", ""}},
+     {usart_role::rx_full, {"", ""}},
+     {usart_role::tx_empty_ie, {"", ""}},
+     {usart_role::rx_full_ie, {"", ""}},
+     {usart_role::tx_threshold, {"", ""}},
+     {usart_role::rx_threshold, {"", ""}},
+     {usart_role::tx_threshold_ie, {"", ""}},
+     {usart_role::rx_threshold_ie, {"", ""}},
+     {usart_role::tx_threshold_flag, {"", ""}},
+     {usart_role::rx_threshold_flag, {"", ""}},
+     {usart_role::flush_tx, {"RQR", "TXFRQ"}},
+     {usart_role::prescaler, {"", ""}},
+     {usart_role::noise_clear, {"ICR", "NCF"}}}
+};
+
+/** @brief sci2 names, RM0038 27.6: `ISR` stands for SR. */
+inline constexpr std::array<named_field<usart_role>, role_count<usart_role>> sci2_names{
+    {{usart_role::tx_not_full, {"ISR", "TXE"}},
+     {usart_role::rx_not_empty, {"ISR", "RXNE"}},
+     {usart_role::noise, {"ISR", "NF"}},
+     {usart_role::tx_not_full_ie, {"CR1", "TXEIE"}},
+     {usart_role::rx_not_empty_ie, {"CR1", "RXNEIE"}},
+     {usart_role::tx_empty, {"", ""}},
+     {usart_role::rx_full, {"", ""}},
+     {usart_role::tx_empty_ie, {"", ""}},
+     {usart_role::rx_full_ie, {"", ""}},
+     {usart_role::tx_threshold, {"", ""}},
+     {usart_role::rx_threshold, {"", ""}},
+     {usart_role::tx_threshold_ie, {"", ""}},
+     {usart_role::rx_threshold_ie, {"", ""}},
+     {usart_role::tx_threshold_flag, {"", ""}},
+     {usart_role::rx_threshold_flag, {"", ""}},
+     {usart_role::flush_tx, {"", ""}},
+     {usart_role::prescaler, {"", ""}},
+     {usart_role::noise_clear, {"", ""}}}
+};
+
 /** @brief Differences between the USART, UART and LPUART peripherals the model rows serve. */
 struct usart_variant
 {
@@ -748,6 +844,9 @@ struct usart_variant
    *        and leave transmission and reception unchanged.
    */
   bool flow_control = true;
+  /** @brief Names of the fields that differ between register sets, checked by
+   *         names_every_role() and, against `fifo`, by flag_matches_roles(). */
+  std::span<named_field<usart_role> const> names = sci3_fifo_names;
 };
 
 /** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
@@ -763,7 +862,8 @@ inline constexpr usart_variant l1_usart{
     .fifo                 = false,
     .registers            = usart_registers::sci2,
     .kernel_buses         = l1_apb_windows,
-    .break_stop_half_bits = 2};
+    .break_stop_half_bits = 2,
+    .names                = sci2_names};
 /** @brief STM32L1 UART4 and UART5: the L1 USART with no flow control, RM0038 Table 157. */
 inline constexpr usart_variant l1_uart{
     .mode_views           = false,
@@ -771,7 +871,14 @@ inline constexpr usart_variant l1_uart{
     .registers            = usart_registers::sci2,
     .kernel_buses         = l1_apb_windows,
     .break_stop_half_bits = 2,
-    .flow_control         = false};
+    .flow_control         = false,
+    .names                = sci2_names};
+/**
+ * @brief STM32L4 USART1 to USART3, UART4 and UART5, RM0351 40.8: one `CR1` and one `ISR`, the
+ *        sci3 registers with one data register each way and no PRESC. Every instance has flow
+ *        control, RM0351 Table 251. The kernel clock is the CCIPR selection of the instance.
+ */
+inline constexpr usart_variant l4_usart{.mode_views = false, .fifo = false, .names = sci3_names};
 
 /** @brief Differences between the IWDG peripherals the model rows serve. */
 struct iwdg_variant

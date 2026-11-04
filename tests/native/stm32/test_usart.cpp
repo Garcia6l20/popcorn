@@ -626,6 +626,30 @@ TEST_CASE("a CR1 write of 0 with UE 1 clears UE and the locked fields, no log, n
   CHECK(t.logged.empty());
 }
 
+TEST_CASE("UESM written 1 on U5 USART1 logs once, a model_error under strict before the store")
+{
+  constexpr std::uint32_t uesm = 1u << 1;
+  locked_rig              t;
+  t.cpu("USART1", "CR1_enabled", uesm);
+  t.cpu("USART1", "CR1_enabled", uesm);
+  CHECK(t.read("USART1", "CR1_enabled") == uesm);
+  CHECK(
+      std::ranges::count_if(
+          t.logged,
+          [](core::log_record const& record) {
+            return record.message.find("Stop mode") != std::string::npos;
+          })
+      == 1);
+  locked_rig  s{true};
+  auto* const probe = s.r.f->model_of<bus_probe>("DAC1");
+  REQUIRE(probe != nullptr);
+  CHECK_THROWS_AS(
+      static_cast<void>(probe->context.services.write(
+          address_of(*s.r.f, "USART1", "CR1_enabled"), 4, uesm, popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(s.read("USART1", "CR1_enabled") == 0);
+}
+
 namespace
 {
 constexpr std::uint64_t us_ps         = 1'000'000;

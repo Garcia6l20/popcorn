@@ -248,7 +248,8 @@ struct lock
 };
 
 /**
- * @brief USART, UART and LPUART of the STM32U5, RM0456 sections 66 and 67, asynchronous mode.
+ * @brief USART, UART and LPUART of the STM32U5, RM0456 sections 66 and 67, of the STM32H5, the
+ *        STM32L1 and the STM32L4, asynchronous mode.
  *        Frames leave and arrive one frame time apart at the baud the kernel clock, PRESC and BRR
  *        give, read when each frame starts. A frame lasts its bit count times USARTDIV periods of
  *        the kernel clock divided by PRESC, one exact product rounded down to the picosecond.
@@ -342,6 +343,15 @@ struct lock
  *        while the hold's character is still sampled: silicon reads one garbled character. A
  *        reset ends every hold: nothing after it, and a later release is ignored. Host frames
  *        keep their own path during a hold, a linked UART takes none.
+ *
+ *        The STM32L4 USART and UART, RM0351 40.8, run the sci3 registers in single-register mode:
+ *        ISR.TXE, RXNE and NF and CR1.TXEIE and RXNEIE take the bits of TXFNF, RXFNE, NE,
+ *        TXFNFIE and RXFNEIE, ICR.NCF clears NF, the kernel clock is the instance's CCIPR
+ *        selection, and the part has no PRESC, so the kernel clock divided by BRR gives the
+ *        baud. `usart_variant::names` maps the field names of each family. On every family,
+ *        a CPU or DMA write that sets a bit of CR1.UESM, CR3.UCESM, WUFIE or WUS logs one
+ *        warning and raises model_error under strict peripherals before the store: the model
+ *        runs in Run mode only and WUF stays 0.
  *
  *        The `sci2` register set of the STM32L1 USART and UART, RM0038 27.6, drives the same
  *        frame engine with one data word each way: SR holds TXE for an empty TDR, TC, RXNE, IDLE,
@@ -444,7 +454,8 @@ private:
   [[nodiscard]] auto bit(std::optional<field_ref> const& flag) const -> std::uint32_t;
   [[nodiscard]] auto sci3_field(std::string_view reg_name, std::string_view name) const
       -> std::optional<field_ref>;
-  void put(std::optional<field_ref> const& flag, std::uint32_t value);
+  [[nodiscard]] auto named_register(std::string_view reg_name) const -> std::string_view;
+  void               put(std::optional<field_ref> const& flag, std::uint32_t value);
 
   register_file&                               regs_;
   std::shared_ptr<uart_endpoint>               far_end_;
@@ -455,6 +466,7 @@ private:
   reg_ref                                      rdr_;
   reg_ref                                      tdr_;
   std::optional<reg_ref>                       icr_;
+  field_table<usart_role>                      names_;
   field_ref                                    enable_;
   field_ref                                    transmit_;
   field_ref                                    receive_;
@@ -514,6 +526,8 @@ private:
   std::optional<field_ref>                     one_bit_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<field_ref>                       unsupported_;
+  std::vector<field_ref>                       stop_mode_;
+  bool                                         stop_mode_logged_{};
   core::clock_domain                           kernel_;
   irq_line&                                    line_;
   bool                                         unsupported_logged_{};
@@ -531,6 +545,35 @@ private:
   std::optional<field_ref>                     auto_baud_mode_;
   std::optional<field_ref>                     retransmissions_;
 };
+
+static_assert(names_every_role(sci3_fifo_names));
+static_assert(names_every_role(sci3_names));
+static_assert(names_every_role(sci2_names));
+
+consteval auto fifo_named(usart_variant const& variant) -> bool
+{
+  return names_every_role<usart_role>(variant.names)
+     and flag_matches_roles<usart_role>(
+             variant.names, variant.fifo,
+             {usart_role::tx_empty, usart_role::rx_full, usart_role::tx_empty_ie,
+              usart_role::rx_full_ie, usart_role::tx_threshold, usart_role::rx_threshold,
+              usart_role::tx_threshold_ie, usart_role::rx_threshold_ie,
+              usart_role::tx_threshold_flag, usart_role::rx_threshold_flag});
+}
+
+static_assert(fifo_named(with_views_usart));
+static_assert(fifo_named(u5_lpuart));
+static_assert(fifo_named(h5_lpuart));
+static_assert(fifo_named(l1_usart));
+static_assert(fifo_named(l1_uart));
+static_assert(fifo_named(l4_usart));
+
+constexpr auto has_prescaler(usart_variant const& variant) -> bool
+{
+  auto const found =
+      std::ranges::find(variant.names, usart_role::prescaler, &named_field<usart_role>::role);
+  return found != variant.names.end() and not found->name.reg.empty();
+}
 
 auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> const>
 {
@@ -562,6 +605,19 @@ auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> 
        {"PRESC", &usart::control_written},
        }
   };
+  static constexpr std::array<write_entry<usart>, 9> single{
+      {
+       {"CR1", &usart::control_written},
+       {"CR2", &usart::control_written},
+       {"CR3", &usart::control_written},
+       {"RQR", &usart::request_written},
+       {"ISR", &usart::plain_written},
+       {"ICR", &usart::clear_written},
+       {"RDR", &usart::plain_written},
+       {"TDR", &usart::transmit_written},
+       {"BRR", &usart::control_written},
+       }
+  };
   static constexpr std::array<write_entry<usart>, 6> sci2{
       {
        {"CR1", &usart::control_written},
@@ -575,6 +631,10 @@ auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> 
   if(variant.registers == usart_registers::sci2)
   {
     return sci2;
+  }
+  if(not variant.mode_views and not has_prescaler(variant))
+  {
+    return single;
   }
   return variant.mode_views ? std::span<write_entry<usart> const>{with_views} : plain;
 }
@@ -610,33 +670,44 @@ usart::usart(
       cr1_{variant.mode_views ? "CR1_enabled" : "CR1"},
       isr_{sci2_ ? "SR" : (variant.mode_views ? "ISR_enabled" : "ISR")},
       rdr_{reg(sci2_ ? "DR" : "RDR")}, tdr_{reg(sci2_ ? "DR" : "TDR")},
-      icr_{sci2_ ? std::nullopt : std::optional{reg("ICR")}}, enable_{field(cr1_, "UE")},
-      transmit_{field(cr1_, "TE")}, receive_{field(cr1_, "RE")},
+      icr_{sci2_ ? std::nullopt : std::optional{reg("ICR")}},
+      names_{
+          variant.names,
+          [this](std::string_view reg_name, std::string_view name) {
+            return field(named_register(reg_name), name);
+          },
+          [this](std::string_view reg_name, std::string_view name) {
+            return has_field(named_register(reg_name), name);
+          }},
+      enable_{field(cr1_, "UE")}, transmit_{field(cr1_, "TE")}, receive_{field(cr1_, "RE")},
       fifo_enable_{variant.fifo ? std::optional{field(cr1_, "FIFOEN")} : std::nullopt},
       word_low_{field(cr1_, sci2_ ? "M" : "M0")}, word_high_{sci3_field(cr1_, "M1")},
       oversampling_{low_power_ ? std::nullopt : std::optional{field(cr1_, "OVER8")}},
       stop_{field("CR2", "STOP")}, overrun_disable_{sci3_field("CR3", "OVRDIS")},
       baud_{field("BRR", sci2_ ? "DIV_Mantissa" : "BRR")},
       baud_fraction_{sci2_ ? std::optional{field("BRR", "DIV_Fraction")} : std::nullopt},
-      prescaler_{sci3_field("PRESC", "PRESCALER")},
+      prescaler_{names_.find(usart_role::prescaler)},
       data_{field(sci2_ ? "DR" : "RDR", sci2_ ? "DR" : "RDR")},
-      tx_not_full_{field(isr_, sci2_ ? "TXE" : "TXFNF")}, tx_empty_{sci3_field(isr_, "TXFE")},
-      complete_{field(isr_, "TC")}, rx_not_empty_{field(isr_, sci2_ ? "RXNE" : "RXFNE")},
-      rx_full_{sci3_field(isr_, "RXFF")}, idle_{field(isr_, "IDLE")}, overrun_{field(isr_, "ORE")},
-      noise_{field(isr_, sci2_ ? "NF" : "NE")}, framing_{field(isr_, "FE")},
+      tx_not_full_{names_[usart_role::tx_not_full]}, tx_empty_{names_.find(usart_role::tx_empty)},
+      complete_{field(isr_, "TC")}, rx_not_empty_{names_[usart_role::rx_not_empty]},
+      rx_full_{names_.find(usart_role::rx_full)}, idle_{field(isr_, "IDLE")},
+      overrun_{field(isr_, "ORE")}, noise_{names_[usart_role::noise]}, framing_{field(isr_, "FE")},
       parity_{field(isr_, "PE")}, tx_ack_{sci3_field(isr_, "TEACK")},
       rx_ack_{sci3_field(isr_, "REACK")}, busy_{sci3_field(isr_, "BUSY")},
-      tx_not_full_ie_{field(cr1_, sci2_ ? "TXEIE" : "TXFNFIE")},
-      tx_empty_ie_{sci3_field(cr1_, "TXFEIE")}, complete_ie_{field(cr1_, "TCIE")},
-      rx_not_empty_ie_{field(cr1_, sci2_ ? "RXNEIE" : "RXFNEIE")},
-      rx_full_ie_{sci3_field(cr1_, "RXFFIE")}, idle_ie_{field(cr1_, "IDLEIE")},
+      tx_not_full_ie_{names_[usart_role::tx_not_full_ie]},
+      tx_empty_ie_{names_.find(usart_role::tx_empty_ie)}, complete_ie_{field(cr1_, "TCIE")},
+      rx_not_empty_ie_{names_[usart_role::rx_not_empty_ie]},
+      rx_full_ie_{names_.find(usart_role::rx_full_ie)}, idle_ie_{field(cr1_, "IDLEIE")},
       parity_ie_{field(cr1_, "PEIE")}, error_ie_{field("CR3", "EIE")},
-      tx_threshold_{sci3_field("CR3", "TXFTCFG")}, dma_transmit_{field("CR3", "DMAT")},
+      tx_threshold_{names_.find(usart_role::tx_threshold)}, dma_transmit_{field("CR3", "DMAT")},
       dma_receive_{field("CR3", "DMAR")}, tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
-      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, rx_threshold_{sci3_field("CR3", "RXFTCFG")},
-      tx_threshold_ie_{sci3_field("CR3", "TXFTIE")}, rx_threshold_ie_{sci3_field("CR3", "RXFTIE")},
-      tx_threshold_flag_{sci3_field(isr_, "TXFT")}, rx_threshold_flag_{sci3_field(isr_, "RXFT")},
-      flush_rx_{sci3_field("RQR", "RXFRQ")}, flush_tx_{sci3_field("RQR", "TXFRQ")},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
+      rx_threshold_{names_.find(usart_role::rx_threshold)},
+      tx_threshold_ie_{names_.find(usart_role::tx_threshold_ie)},
+      rx_threshold_ie_{names_.find(usart_role::rx_threshold_ie)},
+      tx_threshold_flag_{names_.find(usart_role::tx_threshold_flag)},
+      rx_threshold_flag_{names_.find(usart_role::rx_threshold_flag)},
+      flush_rx_{sci3_field("RQR", "RXFRQ")}, flush_tx_{names_.find(usart_role::flush_tx)},
       parity_enable_{field(cr1_, "PCE")}, parity_odd_{field(cr1_, "PS")},
       break_request_{sci2_ ? field(cr1_, "SBK") : field("RQR", "SBKRQ")},
       break_flag_{sci2_ ? field(cr1_, "SBK") : field(isr_, "SBKF")},
@@ -657,13 +728,19 @@ usart::usart(
   expect_field(cr1_, "FIFOEN", variant.fifo);
   if(icr_)
   {
+    auto const noise_clear = names_.find(usart_role::noise_clear);
     for(auto const& clear : describe("ICR").fields)
     {
       auto const target = clear.name == "CTSCF"
                             ? std::string_view{"CTSIF"}
                             : std::string_view{clear.name}.substr(0, clear.name.size() - 2);
-      if(clear.name.ends_with("CF")
-         and std::ranges::contains(describe(isr_).fields, target, &field_desc::name))
+      if(noise_clear and field("ICR", clear.name).mask() == noise_clear->mask())
+      {
+        clears_.emplace_back(*noise_clear, noise_);
+      }
+      else if(
+          clear.name.ends_with("CF")
+          and std::ranges::contains(describe(isr_).fields, target, &field_desc::name))
       {
         clears_.emplace_back(field("ICR", clear.name), field(isr_, target));
       }
@@ -671,6 +748,7 @@ usart::usart(
   }
   if(not sci2_)
   {
+    auto const presc = prescaler_.has_value();
     auto const tables = low_power_ ? std::array<locked_fields, 5>{{{cr1_, lpuart_cr1},
                                                                    {"CR2", lpuart_cr2},
                                                                    {"CR3", lpuart_cr3},
@@ -683,6 +761,10 @@ usart::usart(
                                                                    {"PRESC", whole_presc}}};
     for(auto const& [reg_name, names] : tables)
     {
+      if(reg_name == "PRESC" and not presc)
+      {
+        continue;
+      }
       auto& entry  = locks_.emplace_back();
       entry.reg    = reg_name == cr1_ ? std::string{"CR1"} : std::string{reg_name};
       entry.offset = reg(reg_name).offset;
@@ -700,6 +782,15 @@ usart::usart(
              ? std::optional{field(reg_name, bits)}
              : std::nullopt;
   };
+  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 4>{
+          {{cr1_, "UESM"}, {"CR3", "UCESM"}, {"CR3", "WUFIE"}, {"CR3", "WUS"}}
+  })
+  {
+    if(auto const found = optional(reg_name, bits))
+    {
+      stop_mode_.push_back(*found);
+    }
+  }
   auto_baud_       = optional("CR2", "ABREN");
   auto_baud_mode_  = optional("CR2", "ABRMOD");
   retransmissions_ = optional("CR3", "SCARCNT");
@@ -744,6 +835,28 @@ auto usart::on_write(
   if(sci2_ and access.by != initiator::debugger and word == tdr_.offset)
   {
     clear_sequence(write_clears_);
+  }
+  if(access.by != initiator::debugger)
+  {
+    auto const stored = regs.peek(word);
+    auto const merged = merge_write(stored, offset, size, value);
+    auto const wakeup = std::ranges::any_of(stop_mode_, [&](field_ref const& bits) {
+      return bits.offset == word and (bits.of(merged) & ~bits.of(stored)) != 0;
+    });
+    if(wakeup)
+    {
+      if(not std::exchange(stop_mode_logged_, true))
+      {
+        warn(
+            word == enable_.offset ? "CR1" : "CR3",
+            "UESM, UCESM, WUFIE or WUS set: Stop mode and the wake-up from it are not "
+            "modelled, WUF never sets");
+      }
+      if(ctx_.strict_peripherals)
+      {
+        throw model_error(desc_.name, word == enable_.offset ? "CR1" : "CR3", word);
+      }
+    }
   }
   auto const found = std::ranges::find(locks_, word, &lock::offset);
   if(found == locks_.end() or access.by == initiator::debugger or not enabled())
@@ -854,6 +967,15 @@ auto usart::sci3_field(std::string_view reg_name, std::string_view name) const
     -> std::optional<field_ref>
 {
   return sci2_ ? std::nullopt : std::optional{field(reg_name, name)};
+}
+
+auto usart::named_register(std::string_view reg_name) const -> std::string_view
+{
+  if(reg_name == "CR1")
+  {
+    return cr1_;
+  }
+  return reg_name == "ISR" ? std::string_view{isr_} : reg_name;
 }
 
 auto usart::cts_on() const -> bool
@@ -1244,7 +1366,7 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
     state_.rx_fifo.clear();
     resume_host();
   }
-  if(flush_tx_->of(now) != 0)
+  if(flush_tx_ and flush_tx_->of(now) != 0)
   {
     state_.tx_fifo.clear();
   }
