@@ -969,9 +969,25 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
   `strict`. The register keeps its value, except the second write, whose value replaces the
   pending one, inferred.
-- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, ENC 1, or OR_0 or OR_1 set logs
-  one `model_warning` each and raises `ModelError` under `strict`. The counter then
-  counts the kernel clock.
+- A start with CKSEL 1, COUNTMODE 1, ENC 1, OR_0 or OR_1 set, or TRIGSEL not 0 with TRIGEN not
+  00 logs one `model_warning` each and raises `ModelError` under `strict`. The counter then
+  counts the kernel clock, and with TRIGSEL not 0 no trigger starts it.
+- With TRIGEN not 00 and TRIGSEL 0, the `lptim1_etr` and `lptim2_etr` pin signals, PB6 or PC3 AF1
+  and PA5 or PC3 AF14 on the L476, start the counter on the edge TRIGEN selects, RM0351 34.4.6 and
+  34.7.4. CNTSTRT or SNGSTRT arm the start and choose the mode. EXTTRIG sets at the edge, and the
+  counter starts two prescaled clocks after it, RM0351 34.4.6. With TRGFLT 01, 10 or 11 a level
+  change counts once the pin has held it for 2, 4 or 8 kernel clocks, and a shorter pulse is
+  rejected, RM0351 34.4.4 and 34.7.4: EXTTRIG and the start move by that many clocks, the
+  sampling phase taken as the edge itself, inferred. An edge during a debug hold or with the
+  kernel clock stopped starts nothing, and the level it leaves becomes the filtered level, since
+  the filter samples on the kernel clock, inferred. LPTIMxRST takes the pin's level as the
+  filtered level, inferred. A trigger while the
+  counter runs is ignored and sets no EXTTRIG, RM0351 34.4.6 and 34.7.1, unless TIMOUT is 1: it
+  then sets EXTTRIG and restarts the count from 0 two prescaled clocks later, RM0351 34.4.8, the
+  latency inferred. In one-shot mode each trigger after the stop starts a new run, RM0351 34.4.7,
+  and with WAVE 1 only the first trigger starts one. A trigger before CNTSTRT or SNGSTRT starts
+  nothing and sets no EXTTRIG, inferred. A trigger at the time of another term applies after it,
+  inferred.
 - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
 - A kernel rate change, such as an LPTIM1SEL write or a PPRE1 change under PCLK1, keeps CNT,
   the kernel clocks already spent in the current tick or the start latency, and the kernel

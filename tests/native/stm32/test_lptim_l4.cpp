@@ -8,6 +8,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
@@ -65,6 +66,12 @@ constexpr std::uint32_t    cntstrt    = 1u << 2;
 constexpr std::uint32_t    preload    = 1u << 22;
 constexpr std::uint32_t    wavpol     = 1u << 21;
 constexpr std::uint32_t    wave       = 1u << 20;
+constexpr std::uint32_t    exttrig    = 1u << 2;
+constexpr std::uint32_t    timout     = 1u << 19;
+constexpr std::uint32_t    rising     = 1u << 17;
+constexpr std::uint32_t    falling    = 2u << 17;
+constexpr std::uint32_t    both_edges = 3u << 17;
+constexpr address          ahb2enr    = 0x4002'104C;
 constexpr std::uint32_t    lptim1_irq = 1u << (65 - 64);
 constexpr std::uint64_t    cycle      = 250'000;
 constexpr std::uint64_t    lsi_tick   = 31'250'000;
@@ -793,12 +800,12 @@ TEST_CASE("a machine reset after PPRE1 /2 takes the reset kernel rate, CMPM on t
 TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, raises under strict")
 {
   for(auto const& [at, bits] : std::vector<std::pair<address, std::uint32_t>>{
-          {cfgr,   1u << 17},
-          {cfgr,   1u << 0 },
-          {cfgr,   1u << 23},
-          {cfgr,   1u << 19},
-          {cfgr,   1u << 24},
-          {option, 1u << 0 }
+          {cfgr,   1u << 17 | 1u << 13},
+          {cfgr,   1u << 17 | 7u << 13},
+          {cfgr,   1u << 0            },
+          {cfgr,   1u << 23           },
+          {cfgr,   1u << 24           },
+          {option, 1u << 0            }
   })
   {
     CAPTURE(at);
@@ -1476,4 +1483,274 @@ TEST_CASE("RM0351 48.16.4: a system reset keeps DBG_LPTIM1_STOP, LPTIM1 stays fr
   r.f->target->hold_core(false);
   auto const x = r.now_ps();
   CHECK(r.pending() == x + 3 * cycle);
+}
+
+namespace
+{
+auto etr_pin(rig const& r, std::string_view port, std::uint8_t pin, std::uint32_t af)
+    -> stm32::gpio_port&
+{
+  auto const base = port == "GPIOA" ? address{0x4800'0000} : address{0x4800'0400};
+  r.write(ahb2enr, r.read(ahb2enr) | (port == "GPIOA" ? 1u : 2u));
+  auto* const found = r.f->model_of<stm32::gpio_port>(port);
+  REQUIRE(found != nullptr);
+  found->drive(pin, false);
+  r.write(base, (r.read(base) & ~(3u << (2 * pin))) | (2u << (2 * pin)));
+  r.write(base + 0x20, (r.read(base + 0x20) & ~(15u << (4 * pin))) | (af << (4 * pin)));
+  return *found;
+}
+
+auto lptim1_etr(rig const& r) -> stm32::gpio_port&
+{
+  return etr_pin(r, "GPIOB", 6, 1);
+}
+}
+
+TEST_CASE("RM0351 34.4.6: a rising PB6 LPTIM1_ETR edge starts CNTSTRT two clocks later, EXTTRIG")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(6, 100, cntstrt, rising, exttrig);
+  r.idle_to(t + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.read(lptim1 + isr) == 0);
+  auto const e = r.now_ps() + 2 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  r.idle_to(e);
+  CHECK((r.read(lptim1 + isr) & exttrig) == exttrig);
+  CHECK((r.read(ispr2) & lptim1_irq) == lptim1_irq);
+  CHECK(r.pending() == e + 2 * cycle + 6 * cycle + cycle);
+  r.idle_to(e + 2 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(e + 3 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 1);
+}
+
+TEST_CASE("RM0351 34.7.4 TRIGEN: 10 starts on the falling edge only, 11 on either edge")
+{
+  for(auto const& [config, first_starts] : {
+          std::pair{falling,    false},
+          std::pair{both_edges, true }
+  })
+  {
+    CAPTURE(config);
+    rig        r;
+    auto&      pins = lptim1_etr(r);
+    auto const t    = r.started(6, 100, cntstrt, config);
+    auto const e    = t + 20 * cycle;
+    pins.drive_at(6, true, vtime{e});
+    pins.drive_at(6, false, vtime{e + 10 * cycle});
+    r.idle_to(e + 5 * cycle);
+    CHECK(r.read(lptim1 + cnt) == (first_starts ? 3u : 0u));
+    r.idle_to(e + 15 * cycle);
+    CHECK(r.read(lptim1 + cnt) == (first_starts ? 13u : 3u));
+  }
+}
+
+TEST_CASE("RM0351 34.4.6: a trigger while counting is ignored and sets no EXTTRIG")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(60, 100, cntstrt, rising);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 5 * cycle});
+  pins.drive_at(6, true, vtime{e + 10 * cycle});
+  r.idle_to(e + 6 * cycle);
+  r.write(lptim1 + icr, exttrig);
+  r.idle_to(e + 20 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  CHECK(r.read(lptim1 + cnt) == 18);
+}
+
+TEST_CASE("RM0351 34.4.8: with TIMOUT 1 a trigger while counting restarts CNT from 0")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(30, 100, cntstrt, rising | timout, cmpm);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 5 * cycle});
+  pins.drive_at(6, true, vtime{e + 20 * cycle});
+  r.idle_to(e + 6 * cycle);
+  r.write(lptim1 + icr, exttrig);
+  r.idle_to(e + 20 * cycle);
+  CHECK((r.read(lptim1 + isr) & exttrig) == exttrig);
+  CHECK(r.pending() == e + 22 * cycle + 31 * cycle);
+  r.idle_to(e + 22 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.idle_to(e + 25 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+}
+
+TEST_CASE("RM0351 34.7.4 TRGFLT: 01, 10 and 11 delay EXTTRIG and the start by 2, 4 and 8 clocks")
+{
+  for(std::uint32_t code = 1; code <= 3; ++code)
+  {
+    CAPTURE(code);
+    rig        r;
+    auto&      pins  = lptim1_etr(r);
+    auto const delay = (1u << code) * cycle;
+    auto const t     = r.started(6, 100, cntstrt, rising | code << 6, cmpm);
+    auto const e     = t + 20 * cycle;
+    pins.drive_at(6, true, vtime{e});
+    r.idle_to(e + delay - cycle);
+    CHECK((r.read(lptim1 + isr) & exttrig) == 0);
+    r.idle_to(e + delay);
+    CHECK((r.read(lptim1 + isr) & exttrig) == exttrig);
+    CHECK(r.pending() == e + delay + 9 * cycle);
+  }
+}
+
+TEST_CASE("RM0351 34.4.7: SNGSTRT with a trigger counts once to ARR, the next trigger restarts it")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(3, 10, sngstrt, rising);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 4 * cycle});
+  pins.drive_at(6, true, vtime{e + 6 * cycle});
+  pins.drive_at(6, false, vtime{e + 30 * cycle});
+  pins.drive_at(6, true, vtime{e + 40 * cycle});
+  r.idle_to(e + 8 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 6);
+  r.idle_to(e + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  r.write(lptim1 + icr, exttrig | arrm | cmpm);
+  r.idle_to(e + 45 * cycle);
+  CHECK((r.read(lptim1 + isr) & exttrig) == exttrig);
+  CHECK(r.read(lptim1 + cnt) == 3);
+}
+
+TEST_CASE("RM0351 34.4.7: with WAVE 1 only the first trigger starts the one-shot run")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(3, 10, sngstrt, rising | wave);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 30 * cycle});
+  pins.drive_at(6, true, vtime{e + 40 * cycle});
+  r.idle_to(e + 20 * cycle);
+  r.write(lptim1 + icr, exttrig | arrm | cmpm);
+  r.idle_to(e + 45 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("inferred: a trigger before CNTSTRT or SNGSTRT starts nothing and sets no EXTTRIG")
+{
+  rig   r;
+  auto& pins = lptim1_etr(r);
+  r.write(lptim1 + cfgr, rising);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  auto const e = r.now_ps() + 2 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  r.idle_to(e + 10 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(e + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("RM0351 34.4.6: a rising PA5 LPTIM2_ETR edge starts LPTIM2, LPTIM1 stays at 0")
+{
+  rig   r;
+  auto& pins = etr_pin(r, "GPIOA", 5, 14);
+  for(auto const base : {lptim1, lptim2})
+  {
+    r.write(base + cfgr, rising);
+    r.write(base + cr, enable);
+  }
+  r.idle_to(r.now_ps() + 300 * cycle);
+  for(auto const base : {lptim1, lptim2})
+  {
+    r.write(base + arr, 100);
+    r.idle_to(r.now_ps() + 4 * cycle);
+    r.write(base + cr, enable | cntstrt);
+  }
+  auto const e = r.now_ps() + 2 * cycle;
+  pins.drive_at(5, true, vtime{e});
+  r.idle_to(e + 12 * cycle);
+  CHECK(r.read(lptim2 + cnt) == 10);
+  CHECK((r.read(lptim2 + isr) & exttrig) == exttrig);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK((r.read(lptim1 + isr) & exttrig) == 0);
+}
+
+TEST_CASE(
+    "RM0351 34.4.4: at TRGFLT 11 a 2-clock pulse while counting with TIMOUT 1 restarts nothing")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(60, 100, cntstrt, rising | timout | 3u << 6);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 10 * cycle});
+  pins.drive_at(6, true, vtime{e + 20 * cycle});
+  pins.drive_at(6, false, vtime{e + 22 * cycle});
+  r.idle_to(e + 12 * cycle);
+  REQUIRE(r.read(lptim1 + cnt) == 2);
+  r.write(lptim1 + icr, exttrig);
+  r.idle_to(e + 40 * cycle);
+  CHECK((r.read(lptim1 + isr) & exttrig) == 0);
+  CHECK(r.read(lptim1 + cnt) == 30);
+}
+
+TEST_CASE(
+    "RM0351 34.7.4 TRGFLT: a pulse shorter than 2 or 8 clocks starts nothing, one of 2 or 8 does")
+{
+  for(std::uint32_t code : {1u, 3u})
+  {
+    CAPTURE(code);
+    auto const n = std::uint64_t{1} << code;
+    for(auto const width : {n - 1, n})
+    {
+      CAPTURE(width);
+      rig        r;
+      auto&      pins = lptim1_etr(r);
+      auto const t    = r.started(60, 100, cntstrt, rising | code << 6);
+      auto const e    = t + 20 * cycle;
+      pins.drive_at(6, true, vtime{e});
+      pins.drive_at(6, false, vtime{e + width * cycle});
+      r.idle_to(e + 30 * cycle);
+      auto const started = width == n;
+      CHECK((r.read(lptim1 + isr) & exttrig) == (started ? exttrig : 0u));
+      CHECK(r.read(lptim1 + cnt) == (started ? 30u - n - 2u : 0u));
+    }
+  }
+}
+
+TEST_CASE("RM0351 34.4.4: with TRIGEN 11 and TRGFLT 11 a 2-clock pulse starts nothing")
+{
+  rig        r;
+  auto&      pins = lptim1_etr(r);
+  auto const t    = r.started(60, 100, cntstrt, both_edges | 3u << 6);
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(6, true, vtime{e});
+  pins.drive_at(6, false, vtime{e + 2 * cycle});
+  r.idle_to(e + 30 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("an LPTIM1RST pulse with PB6 high keeps the ETR level, TRIGEN 10 starts on its fall")
+{
+  for(auto const high : {true, false})
+  {
+    CAPTURE(high);
+    rig   r;
+    auto& pins = lptim1_etr(r);
+    pins.drive(6, high);
+    r.write(apb1rstr1, 1u << 31);
+    r.write(apb1rstr1, 0);
+    auto const t = r.started(60, 100, cntstrt, falling);
+    auto const e = t + 20 * cycle;
+    pins.drive_at(6, false, vtime{e});
+    r.idle_to(e + 12 * cycle);
+    CHECK((r.read(lptim1 + isr) & exttrig) == (high ? exttrig : 0u));
+    CHECK(r.read(lptim1 + cnt) == (high ? 10u : 0u));
+  }
 }
