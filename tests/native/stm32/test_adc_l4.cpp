@@ -3261,3 +3261,33 @@ TEST_CASE(
   CHECK(run.log == std::vector<std::uint32_t>{2048, vrefint_cal, ts_cal1, 0, 1, 0, 0, 0});
   CHECK(run.warnings.empty());
 }
+
+TEST_CASE(
+    "the L476 pad tables hold every external channel of ADC1 to ADC3, ADC2 IN9 missing throws "
+    "config_error naming it, no table passes")
+{
+  auto const attach = [](popcorn::part_description const& description) {
+    stm32::board board{};
+    auto         options = popcorn::testing::stm32_options();
+    options.models       = stm32::factories(board, description);
+    stm32_fixture const f{description, firmware, std::move(options)};
+  };
+  auto description = l476rc();
+  for(auto const name : {"ADC1", "ADC2", "ADC3"})
+  {
+    CAPTURE(name);
+    auto const adc = std::ranges::find(
+        description.peripherals, std::string_view{name}, &popcorn::peripheral_desc::name);
+    REQUIRE(adc != description.peripherals.end());
+    CHECK(adc->channel_pins.has_value());
+  }
+  CHECK_NOTHROW(attach(description));
+  auto const adc2 = std::ranges::find(
+      description.peripherals, std::string_view{"ADC2"}, &popcorn::peripheral_desc::name);
+  std::erase_if(
+      *adc2->channel_pins, [](popcorn::adc_pad_desc const& pad) { return pad.channel == 9; });
+  CHECK_THROWS_WITH_AS(
+      attach(description), doctest::Contains("channel_pins.9"), popcorn::config_error);
+  adc2->channel_pins.reset();
+  CHECK_NOTHROW(attach(description));
+}

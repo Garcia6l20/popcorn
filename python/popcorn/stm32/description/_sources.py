@@ -51,7 +51,9 @@ class Sources:
     """Files a description is built from. The memory map and core values come from `rzone`
     when set, else from `rzone_facts`, and the source digests record only the one read. Neither
     set is a DescriptionError at build time. `die_ip` maps each instance `mcu_db` does not list
-    to the part file of the die reference that gives its IP identity, see die_ip_sources."""
+    to the part file of the die reference that gives its IP identity, see die_ip_sources.
+    `pad_reference` is the part file whose pin list gives the ADC channel pads, see
+    pad_reference."""
 
     part: str
     svd: Path
@@ -62,6 +64,7 @@ class Sources:
     gpio_modes: Path | None = None
     rzone_facts: Path | None = None
     die_ip: Mapping[str, Path] = field(default_factory=dict[str, Path])
+    pad_reference: Path | None = None
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
@@ -402,6 +405,58 @@ def _scan_die_ips(
     return {}
 
 
+pad_reference_memo: OrderedDict[tuple[object, ...], Path] = OrderedDict()
+
+
+def pad_reference(db_part: DbPart, mcu_db: Path) -> Path:
+    """Part file of the reference by reference_rank among the parts of @p db_part's die, @p mcu_db
+    included: the part files next to @p mcu_db whose name starts with the family prefix of
+    @p db_part, `STM32L4` for `STM32L476RCTx`, read with the `[[part_facts]]` dies. The pads of a
+    die's ADC channels are those of its reference, so a package that bonds fewer pins keeps every
+    pad, and parts of one die that resolve different SVDs share one reference. A part file that
+    cannot be read or that read_part refuses is no candidate. Results are memoized in the
+    process, 64 entries, keyed on the inputs, the die of @p db_part, the bytes of every package
+    patch file and the name, size and mtime of every candidate file."""
+    candidates = sorted(mcu_db.parent.glob(f"{db_part.ref_name[:7]}*.xml"))
+    if mcu_db not in candidates:
+        candidates.append(mcu_db)
+    files = _patch_files()
+    try:
+        patches_key: tuple[tuple[Path, bytes], ...] | None = patch_contents(files)
+        facts = part_facts(files)
+    except OSError, DescriptionError:
+        patches_key = None
+        facts = {}
+    key = (mcu_db, db_part.die, patches_key, tuple(_stat_key(path) for path in candidates))
+    memoized = pad_reference_memo.pop(key, None)
+    if memoized is None:
+        memoized = _scan_pad_reference(db_part, mcu_db, candidates, facts)
+    pad_reference_memo[key] = memoized
+    if len(pad_reference_memo) > _DIE_IP_MEMO_SIZE:
+        pad_reference_memo.popitem(last=False)
+    return memoized
+
+
+def _scan_pad_reference(
+    db_part: DbPart, mcu_db: Path, candidates: Sequence[Path], facts: Mapping[str, PartFact]
+) -> Path:
+    best = (reference_rank(db_part), mcu_db)
+    for path in candidates:
+        try:
+            group = read_part(path.read_bytes(), file=str(path))
+            members = [
+                with_part_facts(group.select(name, file=str(path)), facts)
+                for name, _ in expand_refname(group.ref_name)
+            ]
+        except OSError, DescriptionError:
+            continue
+        for candidate in members:
+            rank = reference_rank(candidate)
+            if candidate.die == db_part.die and rank < best[0]:
+                best = (rank, path)
+    return best[1]
+
+
 def find_sources(
     part: str,
     *,
@@ -470,6 +525,7 @@ def find_sources(
         gpio_modes=gpio_modes,
         rzone_facts=facts,
         die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
+        pad_reference=pad_reference(db_part, mcu_db),
     )
 
 
@@ -526,6 +582,7 @@ def pin_data_sources(
         gpio_modes=gpio_modes,
         rzone_facts=facts,
         die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
+        pad_reference=pad_reference(db_part, mcu_db),
     )
 
 
@@ -536,7 +593,7 @@ def _sha256_bytes(data: bytes) -> str:
 def compute_source_digests(sources: Sources) -> dict[str, str]:
     """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone when set
     or else rzone_facts when set, cmsis_header and gpio_modes when present, patch:<file name>
-    per patch file and die_ip:<instance> per die_ip entry."""
+    per patch file, die_ip:<instance> per die_ip entry and pad_reference when set."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
@@ -553,6 +610,8 @@ def compute_source_digests(sources: Sources) -> dict[str, str]:
         digests[f"patch:{patch_path.name}"] = _sha256_bytes(patch_path.read_bytes())
     for instance, donor_path in sources.die_ip.items():
         digests[f"die_ip:{instance}"] = _sha256_bytes(donor_path.read_bytes())
+    if sources.pad_reference is not None:
+        digests["pad_reference"] = _sha256_bytes(sources.pad_reference.read_bytes())
     return digests
 
 

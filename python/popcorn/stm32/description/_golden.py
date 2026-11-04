@@ -1,7 +1,7 @@
 """Canonical text dumps of an PartDescription and the golden digest file they round-trip through.
 
 Table format, one line per item, in description order (already deterministic, spec 04):
-  P name base size ip bonded bonded_channels [bonded_b bonded_channels_b]
+  P name base size ip bonded bonded_channels [bonded_b bonded_channels_b] [pads channel_pins]
   R periph reg offset width access reset mask nfields alternate_of aliases
   F periph reg field lsb width access on_write on_read
   I number name
@@ -11,7 +11,9 @@ Table format, one line per item, in description order (already deterministic, sp
     nvic_prio_bits num_irqs vendor_systick_config reset_clock_hz
 Addresses, offsets, resets and masks are lower-case hex; every other number is decimal; a missing
 optional value is "-", a bracketed group is written only when its value is present. Register
-aliases are joined by commas. Region content is offset:hexbytes pieces joined by commas.
+aliases are joined by commas. ADC pads are the channel, `n` for a negative or `b` for a bank B
+pad, `:` and the pin, such as `3n:PA7`, joined by commas. Region content is offset:hexbytes
+pieces joined by commas.
 """
 
 import hashlib
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict, cast
 
-from popcorn.stm32.description._model import PartDescription
+from popcorn.stm32.description._model import AdcPadDesc, PadRole, PartDescription
 from popcorn.stm32.description._patches import PatchReport
 
 _TABLES = ("peripherals", "registers", "fields", "regions", "irqs", "core", "alternates")
@@ -55,12 +57,24 @@ class GoldenFile(TypedDict):
     tables: GoldenTablesDict
 
 
+_PAD_SUFFIX = {PadRole.POSITIVE: "", PadRole.NEGATIVE: "n", PadRole.BANK_B: "b"}
+
+
+def _pads(pads: list[AdcPadDesc] | None) -> str:
+    if pads is None:
+        return ""
+    return " pads " + ",".join(
+        f"{pad.channel}{_PAD_SUFFIX[pad.role]}:P{pad.port}{pad.pin}" for pad in pads
+    )
+
+
 def _dump_peripherals(description: PartDescription) -> str:
     lines = [
         f"P {p.name} {p.base:#010x} {p.size:#010x} {p.ip} "
         f"{f'{p.bonded:#06x}' if p.bonded is not None else '-'} "
         f"{f'{p.bonded_channels:#010x}' if p.bonded_channels is not None else '-'}"
         f"{f' bonded_b {p.bonded_channels_b:#010x}' if p.bonded_channels_b is not None else ''}"
+        f"{_pads(p.channel_pins)}"
         for p in description.peripherals
     ]
     return "\n".join(lines) + "\n"

@@ -1,3 +1,4 @@
+#include "adc_pads.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -1137,6 +1138,10 @@ struct adc_clock
  *        path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its ADC_IER
  *        enable.
  *
+ *        A description with `channel_pins` holds a positive pad for every external channel, or
+ *        construction throws config_error naming the channel. Every shipped description
+ *        carries the table, and a hand-written one without it passes unchecked.
+ *
  *        Codes against VDDA, the board's `supply_options`: an external channel 1 to 17 reads
  *        its driven input, `analog_port` bank A, as V x 16384 / VDDA, floored and saturated. A
  *        bank B channel of the port is a config_error, the ADC has one bank. VREFINT
@@ -1716,6 +1721,7 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
   {
     throw config_error(desc.name, 0, "bonded_channels_b", "0 or absent, the ADC has one bank");
   }
+  require_channel_pins(desc, external_channels(analog_bank::a), pad_role::positive);
   for(std::size_t index = 0; index < Traits::dma_fields.size(); ++index)
   {
     dma_mode_[index] = field(Traits::config, Traits::dma_fields[index]);

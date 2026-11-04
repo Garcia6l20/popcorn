@@ -10,13 +10,21 @@ from xml.etree.ElementTree import Element
 
 from popcorn.stm32.description._binder import from_mapping
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
+from popcorn.stm32.description._model import (
+    AdcPadDesc,
+    AlternateDesc,
+    PadRole,
+    RegionAccess,
+    RegionDesc,
+    RegionKind,
+)
 
 _MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.com")
 """Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
 _ADC_INPUT_RE = re.compile(r"(ADC\d*)_INP?(\d+)(b?)")
+_ADC_PAD_RE = re.compile(r"(ADC\d*)_IN([PN]?)(\d+)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 _GROUP_RE = re.compile(r"\(([^()]*)\)")
 MAX_GPIO_MODES_BYTES = 8 << 20
@@ -248,6 +256,38 @@ def bonded_adc_channels_b(part: DbPart) -> dict[str, int]:
     description takes the mask from the pads, `_adc_banks.bonded_bank_b`, this reading checks
     it."""
     return _adc_inputs(part, bank_b=True)
+
+
+def adc_pads(part: DbPart) -> dict[str, list[AdcPadDesc]]:
+    """Pads of the ADC channels on the GPIO pins of @p part's pin list: ADC instance -> its pads,
+    sorted by instance, each list sorted by channel, then role, port and pin. A pin carrying
+    `ADC<n>_IN<c>` or `ADC<n>_INP<c>` is the positive pad of channel c of ADC<n>, `ADC<n>_INN<c>`
+    its negative pad, and `ADC_IN<c>` the positive pad of channel c of the single STM32L1 `ADC`.
+    The STM32L1 bank B signals `ADC_IN<c>b`, channels above 31, trigger signals such as
+    `ADC1_EXTI11` and pins that are no GPIO pin are left out."""
+    roles = {"": PadRole.POSITIVE, "P": PadRole.POSITIVE, "N": PadRole.NEGATIVE}
+    order = list(PadRole)
+    adcs: dict[str, list[AdcPadDesc]] = {}
+    for name, signals in part.pins.items():
+        pin = _BONDED_PIN_RE.fullmatch(name)
+        if pin is None or int(pin.group(2)) > 15:
+            continue
+        for signal in signals:
+            found = _ADC_PAD_RE.fullmatch(signal)
+            if found is None or int(found.group(3)) > 31:
+                continue
+            adcs.setdefault(found.group(1), []).append(
+                AdcPadDesc(
+                    channel=int(found.group(3)),
+                    role=roles[found.group(2)],
+                    port=pin.group(1),
+                    pin=int(pin.group(2)),
+                )
+            )
+    return {
+        adc: sorted(pads, key=lambda p: (p.channel, order.index(p.role), p.port, p.pin))
+        for adc, pads in sorted(adcs.items())
+    }
 
 
 def reference_rank(part: DbPart) -> tuple[int, int, str]:

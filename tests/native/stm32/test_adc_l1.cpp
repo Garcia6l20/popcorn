@@ -3172,3 +3172,35 @@ TEST_CASE(
   CHECK((r.read(sr) & (jeoc | eoc | strt)) == (jeoc | strt));
   CHECK(r.due() == begin + 32 * cycle);
 }
+
+TEST_CASE(
+    "the L152RE pad table holds every bank A channel and every bank B channel on a pad of its own, "
+    "IN27 or IN0b missing throws config_error naming it, no table passes")
+{
+  struct row
+  {
+    std::uint8_t      channel;
+    popcorn::pad_role role;
+  };
+  for(auto const [channel, role] : {
+          row{27, popcorn::pad_role::positive},
+          row{0,  popcorn::pad_role::bank_b  },
+  })
+  {
+    CAPTURE(channel);
+    auto       description = l152re();
+    auto const adc         = std::ranges::find(
+        description.peripherals, std::string_view{"ADC"}, &popcorn::peripheral_desc::name);
+    REQUIRE(adc != description.peripherals.end());
+    REQUIRE(adc->channel_pins.has_value());
+    CHECK_NOTHROW(adc_rig{description});
+    std::erase_if(*adc->channel_pins, [&](popcorn::adc_pad_desc const& pad) {
+      return pad.channel == channel and pad.role == role;
+    });
+    CHECK_THROWS_WITH_AS(
+        adc_rig{description}, doctest::Contains(std::format("channel_pins.{}", channel).c_str()),
+        popcorn::config_error);
+    adc->channel_pins.reset();
+    CHECK_NOTHROW(adc_rig{description});
+  }
+}

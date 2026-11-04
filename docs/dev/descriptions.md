@@ -257,6 +257,34 @@ version with no pad table fails the build. The `ADC_IN<c>b` signals of the pin d
 at `bonded_channels`, else it adds `bonded_b` and the mask. A hand-written description may leave it
 out, every bank B channel on a pad of its own then counts as bonded.
 
+Each ADC instance also carries `channel_pins`, the pads of its channels on the die, one entry per
+channel and role, here the H573 ADC1 channel 3:
+
+```json
+[
+  {"channel": 3, "role": "positive", "port": "A", "pin": 6},
+  {"channel": 3, "role": "negative", "port": "A", "pin": 7}
+]
+```
+
+- `adc_pads` in `_cubemx.py` reads `positive` from the `ADC<n>_IN<c>`, `ADC<n>_INP<c>` and STM32L1
+  `ADC_IN<c>` signals, `negative` from `ADC<n>_INN<c>`. A `negative` entry exists where the pin
+  list names `ADC<n>_INN<c>`: the STM32H5 ADCs.
+- The signals come from the pin list of the die's reference part, `pad_reference` in
+  `_sources.py`: the first by `reference_rank` among the part files of the family prefix, `STM32L4`
+  for `STM32L476RCTx`, on the same die. A package that does not bond a pad keeps its pin, as
+  `STM32L476RCTx` keeps ADC3 IN6 to IN13 on PF3 to PF10. The STM32L100C6Ux, whose line has no
+  100-pin package, takes IN22 to IN25 on PE7 to PE10 from the STM32L151V(8-B)Hx of its die.
+- `bank_b` pads come from the bank B pad table of the IP version, RM0038 Table 41, on an ADC whose
+  `CR2` has `ADC_CFG`. The same table, `unbonded_pads` in `_adc_banks.py`, gives the Cat.3 IN27 to
+  IN31 on PF6 to PF10, which no Cat.3 package bonds. A table pad that a pin list names on another
+  pin fails the build.
+- The entries are sorted by channel, then `positive`, `negative`, `bank_b`. The golden `P` line
+  adds `pads` and the list, such as `3:PA6,3n:PA7`.
+- The ADC models refuse a table that lacks the `positive` pad of an external channel, or on the
+  STM32L1 the `bank_b` pad of a bank B channel on a pad of its own, with `config_error` naming
+  `channel_pins.<c>`. A hand-written description may leave `channel_pins` out.
+
 ## Field drops
 
 An SVD can describe fields a part does not implement, such as the per-pin fields of pins a port

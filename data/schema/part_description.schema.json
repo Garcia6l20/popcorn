@@ -10,6 +10,34 @@
       ],
       "type": "string"
     },
+    "adc_pad_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pin": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "port": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/pad_role"
+        }
+      },
+      "required": [
+        "channel",
+        "role",
+        "port",
+        "pin"
+      ],
+      "type": "object"
+    },
     "alternate_desc": {
       "additionalProperties": false,
       "properties": {
@@ -198,6 +226,14 @@
       ],
       "type": "object"
     },
+    "pad_role": {
+      "enum": [
+        "positive",
+        "negative",
+        "bank_b"
+      ],
+      "type": "string"
+    },
     "peripheral_desc": {
       "additionalProperties": false,
       "properties": {
@@ -229,6 +265,12 @@
           "maximum": 4294967295,
           "minimum": 0,
           "type": "integer"
+        },
+        "channel_pins": {
+          "items": {
+            "$ref": "#/$defs/adc_pad_desc"
+          },
+          "type": "array"
         },
         "cross_rules": {
           "items": {

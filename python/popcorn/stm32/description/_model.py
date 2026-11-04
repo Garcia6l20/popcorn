@@ -15,6 +15,20 @@ class Access(StrEnum):
     READ_WRITE_ONCE = "read_write_once"
 
 
+class PadRole(StrEnum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    BANK_B = "bank_b"
+
+
+@dataclass(slots=True, kw_only=True)
+class AdcPadDesc:
+    channel: int = field(metadata={"minimum": 0, "maximum": 255})
+    role: PadRole
+    port: str
+    pin: int = field(metadata={"minimum": 0, "maximum": 255})
+
+
 @dataclass(slots=True, kw_only=True)
 class AlternateDesc:
     pin: int = field(metadata={"minimum": 0, "maximum": 255})
@@ -122,6 +136,7 @@ class PeripheralDesc:
     bonded_channels_b: int | None = field(
         default=None, metadata={"minimum": 0, "maximum": 4294967295}
     )
+    channel_pins: list[AdcPadDesc] | None = None
 
 
 @dataclass(slots=True, kw_only=True)

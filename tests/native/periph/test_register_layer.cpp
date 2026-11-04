@@ -75,7 +75,8 @@ auto unit(
       .alternates        = std::nullopt,
       .bonded            = std::nullopt,
       .bonded_channels   = std::nullopt,
-      .bonded_channels_b = std::nullopt};
+      .bonded_channels_b = std::nullopt,
+      .channel_pins      = std::nullopt};
 }
 
 struct bench

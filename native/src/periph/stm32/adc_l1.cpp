@@ -1,3 +1,4 @@
+#include "adc_pads.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -161,6 +162,11 @@ struct trigger_selection
  *        EOC and AWD clear on a write of 0 and keep on a write of 1. ADC1_IRQn is high while EOC,
  *        JEOC, AWD or OVR is set with EOCIE, JEOCIE, AWDIE or OVRIE. ADC_CSR reads ADC_SR bits 6
  *        to 0, 12.15.19.
+ *
+ *        A description with `channel_pins` holds a positive pad for every external channel and a
+ *        bank B pad for every bank B channel on a pad of its own, or construction throws
+ *        config_error naming the channel. Every shipped description carries the table, and a
+ *        hand-written one without it passes unchecked.
  *
  *        Codes against VDDA, the board's `supply_options`: an external channel reads its driven
  *        input, `analog_port`, as V x 4096 / VDDA, floored and saturated, two bits fewer per RES
@@ -604,6 +610,8 @@ adc_l1_model::adc_l1_model(
     throw config_error(
         desc.name, 0, "bonded_channels_b", "a mask of bank B channels on a pad of their own");
   }
+  require_channel_pins(desc, variant.external, pad_role::positive);
+  require_channel_pins(desc, variant.bank_b_only, pad_role::bank_b);
 }
 
 void adc_l1_model::reset(register_file&, reset_kind)

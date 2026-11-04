@@ -1,7 +1,7 @@
 """Assembles an PartDescription from Sources: expand the SVD, read the db, the die IP identity of
 the instances the package drops and the rzone, apply every patch, strip the peripheral prefix of
 register names, build the IRQ table, then assemble core, regions and peripherals, GPIO alternate
-functions and bonded pins included."""
+functions, bonded pins and ADC channel pads included."""
 
 import logging
 import re
@@ -9,11 +9,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from popcorn.stm32.description._adc_banks import bank_b_pads, bonded_bank_b
+from popcorn.stm32.description._adc_banks import bank_b_pads, bonded_bank_b, unbonded_pads
 from popcorn.stm32.description._cubemx import (
     DbIp,
     DbPart,
     Rzone,
+    adc_pads,
     bonded_adc_channels,
     bonded_pins,
     instance_ips,
@@ -24,7 +25,14 @@ from popcorn.stm32.description._cubemx import (
 )
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
-from popcorn.stm32.description._model import CoreDesc, IrqDesc, PartDescription, PeripheralDesc
+from popcorn.stm32.description._model import (
+    AdcPadDesc,
+    CoreDesc,
+    IrqDesc,
+    PadRole,
+    PartDescription,
+    PeripheralDesc,
+)
 from popcorn.stm32.description._patches import (
     PatchReport,
     PatchTarget,
@@ -133,6 +141,43 @@ def apply_bonding(
                         f"a bank B pad table for the IP version {peripheral.ip_version}",
                     )
                 peripheral.bonded_channels_b = bonded_bank_b(peripheral.ip_version, bonded)
+
+
+def apply_adc_pads(
+    part: str, peripherals: Sequence[PeripheralDesc], pads: Mapping[str, Sequence[AdcPadDesc]]
+) -> None:
+    """Set `channel_pins` on each ADC of @p peripherals: its pads in @p pads, an adc_pads result
+    of the die's reference part, by instance name, the unbonded_pads of its IP version and, on an
+    ADC whose `CR2` has `ADC_CFG`, the bank_b_pads of its IP version. Sorted by channel, then
+    role, port and pin.
+
+    @throws DescriptionError A table pad and a pin list pad of one channel and role differ.
+    """
+    order = list(PadRole)
+    for peripheral in peripherals:
+        if peripheral.alias_of is not None or peripheral.ip != "ADC":
+            continue
+        found = list(pads.get(peripheral.name, []))
+        listed = {(pad.channel, pad.role): pad for pad in found}
+        tables = [(PadRole.POSITIVE, unbonded_pads(peripheral.ip_version))]
+        if _has_field(peripheral, "CR2", "ADC_CFG"):
+            tables.append((PadRole.BANK_B, bank_b_pads(peripheral.ip_version)))
+        for role, table in tables:
+            for channel, (port, pin) in table.items():
+                pad = AdcPadDesc(channel=channel, role=role, port=port, pin=pin)
+                known = listed.get((channel, role))
+                if known is None:
+                    found.append(pad)
+                elif known != pad:
+                    raise DescriptionError(
+                        part,
+                        0,
+                        f"{peripheral.name}.channel_pins.{channel}",
+                        f"P{port}{pin}, the pad of RM0038 Table 41, not P{known.port}{known.pin}",
+                    )
+        peripheral.channel_pins = sorted(
+            found, key=lambda p: (p.channel, order.index(p.role), p.port, p.pin)
+        )
 
 
 def _ancestors(name: str, derived_from: Mapping[str, str | None]) -> list[str]:
@@ -294,6 +339,12 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
         apply_bonding(
             sources.part, target.peripherals, bonded_pins(db_part), bonded_adc_channels(db_part)
         )
+        reference = (
+            db_part
+            if sources.pad_reference is None or sources.pad_reference == sources.mcu_db
+            else read_part(sources.pad_reference.read_bytes(), file=str(sources.pad_reference))
+        )
+        apply_adc_pads(sources.part, target.peripherals, adc_pads(reference))
 
     description = PartDescription(
         part=sources.part,

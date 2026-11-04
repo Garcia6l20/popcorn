@@ -161,6 +161,37 @@ struct alternate_desc
   friend auto operator==(alternate_desc const&, alternate_desc const&) -> bool = default;
 };
 
+/**
+ * @brief Input of an ADC channel that a pad carries.
+ *
+ * `positive` is the channel's single-ended or positive input, the CubeMX `ADCx_INn` or
+ * `ADCx_INPn` signal, and `bank_b` the input of channel n of bank B, `ADC_INnb`, on a pad of its
+ * own. A `negative` entry, the negative differential input, exists where the pin list names
+ * `ADCx_INNn`: the STM32H5 ADCs.
+ */
+enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] pad_role
+{
+  positive,
+  negative,
+  bank_b,
+};
+
+/** @brief Pad of an ADC channel on the die. */
+struct adc_pad_desc
+{
+  /** @brief Channel number. */
+  std::uint8_t channel{};
+  /** @brief Input of the channel the pad carries. */
+  pad_role role{};
+  /** @brief GPIO port letter, such as `A`. */
+  std::string port;
+  /** @brief Pin number in its port, 0 to 15. */
+  std::uint8_t pin{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(adc_pad_desc const&, adc_pad_desc const&) -> bool = default;
+};
+
 /** @brief Peripheral instance. */
 struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
 {
@@ -197,6 +228,10 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
    * ADC, on other peripherals and on hand-written descriptions, where every such channel counts as
    * bonded. */
   std::optional<std::uint32_t> bonded_channels_b;
+  /** @brief Pads of the external channels of an ADC on the die, by channel, then role, from the
+   * CubeMX pin list of the die's reference part, so a pad keeps its pin on a package that does not
+   * bond it. Absent on other peripherals and on hand-written descriptions. */
+  std::optional<std::vector<adc_pad_desc>> channel_pins;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;

@@ -1282,3 +1282,38 @@ TEST_CASE("JADSTART logs one warning and clears on the H5, ADC_JDR1 stays 0")
   REQUIRE(logged.size() == 1);
   CHECK(logged[0].message.contains("JADSTART"));
 }
+
+TEST_CASE(
+    "the H573 ADC1 pad table needs the positive pad of every external channel, INP3 missing "
+    "throws config_error naming it, INN3 missing passes, no table passes")
+{
+  auto const attach = [](popcorn::part_description const& description) {
+    stm32::board board{};
+    auto         options = popcorn::testing::stm32_options();
+    options.models       = stm32::factories(board, description);
+    stm32_fixture const f{description, firmware, std::move(options)};
+  };
+  auto const drop = [](popcorn::peripheral_desc& adc, popcorn::pad_role role) {
+    std::erase_if(*adc.channel_pins, [role](popcorn::adc_pad_desc const& pad) {
+      return pad.channel == 3 and pad.role == role;
+    });
+  };
+  auto const adc1_of = [](popcorn::part_description& description) -> popcorn::peripheral_desc& {
+    auto const adc1 = std::ranges::find(
+        description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+    REQUIRE(adc1 != description.peripherals.end());
+    REQUIRE(adc1->channel_pins.has_value());
+    return *adc1;
+  };
+  auto description = h573();
+  CHECK_NOTHROW(attach(description));
+  drop(adc1_of(description), popcorn::pad_role::negative);
+  CHECK_NOTHROW(attach(description));
+
+  auto without_inp3 = h573();
+  drop(adc1_of(without_inp3), popcorn::pad_role::positive);
+  CHECK_THROWS_WITH_AS(
+      attach(without_inp3), doctest::Contains("channel_pins.3"), popcorn::config_error);
+  adc1_of(without_inp3).channel_pins.reset();
+  CHECK_NOTHROW(attach(without_inp3));
+}

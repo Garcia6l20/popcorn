@@ -2756,3 +2756,21 @@ TEST_CASE(
     CHECK(f.isr("EOSMP") == 1);
   }
 }
+
+TEST_CASE(
+    "the U575 ADC1 pad table holds every external channel, one missing throws config_error naming "
+    "it, no table passes")
+{
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  REQUIRE(adc1->channel_pins.has_value());
+  CHECK_NOTHROW(adc_fixture{description});
+  std::erase_if(
+      *adc1->channel_pins, [](popcorn::adc_pad_desc const& pad) { return pad.channel == 5; });
+  CHECK_THROWS_WITH_AS(
+      adc_fixture{description}, doctest::Contains("channel_pins.5"), popcorn::config_error);
+  adc1->channel_pins.reset();
+  CHECK_NOTHROW(adc_fixture{description});
+}
