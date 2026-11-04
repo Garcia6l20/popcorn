@@ -3291,3 +3291,30 @@ TEST_CASE(
   adc2->channel_pins.reset();
   CHECK_NOTHROW(attach(description));
 }
+
+TEST_CASE(
+    "ADC1 IN9 and ADC2 IN9 read the one level of PA4, a GPIOA drive after the sampling phase "
+    "leaves the conversion on the old level")
+{
+  constexpr auto code = [](std::uint64_t microvolts) {
+    return static_cast<std::uint32_t>(microvolts * 4096 / (std::uint64_t{vdda_mv} * 1000));
+  };
+  rig const   r;
+  auto* const gpioa = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(gpioa != nullptr);
+  r.enable("ADC1");
+  r.enable("ADC2");
+  r.port("ADC1").drive(9, 1'000'000);
+  CHECK(gpioa->analog_drive(4) == std::optional<std::uint32_t>{1'000'000});
+  CHECK(r.port("ADC2").input(9) == 1'000'000);
+  CHECK(r.convert(9, "ADC2") == code(1'000'000));
+  auto const at = r.now();
+  r.start(9);
+  r.run_until(at + 5 * cycle_ps);
+  gpioa->drive_analog(4, 2'000'000);
+  CHECK(r.last_due() == at + 15 * cycle_ps);
+  r.ends_at(at + 15 * cycle_ps);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == code(1'000'000));
+  CHECK(r.convert(9, "ADC2") == code(2'000'000));
+  CHECK(r.port("ADC1").input(9) == 2'000'000);
+}

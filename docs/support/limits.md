@@ -174,6 +174,12 @@ Not modelled, logged once each:
 
 On the STM32U5, STM32H5 and STM32L4:
 
+- An external channel converts the analog level of its pad, the GPIO pin its description's
+  `channel_pins` names. Channels of several ADCs on one pad read one level: a drive through
+  `ADCx.input(n)` is the pad's board drive, and every ADC channel on that pad converts it. A
+  description without `channel_pins` gives its ADC no pads: drive and input of an external
+  channel raise `ConfigError` naming `channel_pins`, and the channel converts 0. Every shipped
+  description carries the table.
 - Writes to `ADC_CFGR`, `ADC_CFGR2`, `ADC_SMPRx`, `ADC_SQRx`, `ADC_OFRy`, `ADC_TRx` and
   `ADC_AWDxCR` with ADSTART or JADSTART set apply at once.
 

@@ -84,6 +84,13 @@ inline auto stm32_options() -> core::machine_options
   return options;
 }
 
+/** @brief Tag of the stm32_fixture constructor that leaves the machine unreset. */
+struct no_reset_t
+{};
+
+/** @brief Selects the stm32_fixture constructor that leaves the machine unreset. */
+inline constexpr no_reset_t no_reset{};
+
 /** @brief Machine over the Cortex-M module and the built-in STM32 models, a firmware loaded. */
 struct stm32_fixture
 {
@@ -109,6 +116,26 @@ struct stm32_fixture
         std::move(desc), arch::armv8m::factory(), std::move(options));
     target->load(elf(firmware_name));
     target->reset();
+  }
+
+  /**
+   * @brief Registers the built-in models, builds the machine and loads, with no reset, as
+   *        `MachineDescription.machine()` gives it before `Machine.load_snapshot`.
+   * @param desc Description.
+   * @param name Firmware to load.
+   * @param options Machine options.
+   */
+  stm32_fixture(
+      no_reset_t,
+      part_description      desc,
+      std::string_view      name,
+      core::machine_options options = stm32_options())
+      : firmware_name{name}
+  {
+    periph::stm32::register_builtin_models();
+    target = std::make_unique<core::machine>(
+        std::move(desc), arch::armv8m::factory(), std::move(options));
+    target->load(elf(firmware_name));
   }
 
   /** @brief Writes a core register by name. */

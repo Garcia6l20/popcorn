@@ -7,6 +7,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <doctest/doctest.h>
@@ -880,7 +881,9 @@ TEST_CASE("ADC1 reads TS_CAL1 on channel 16 with TSEN and VREFINT_CAL on 17 with
   CHECK(celsius == 30);
 }
 
-TEST_CASE("ADC2 channels 16 and 17 read 0 with TSEN and VREFEN, its external channels convert")
+TEST_CASE(
+    "ADC2 channels 16 and 17 read 0 with TSEN and VREFEN, its external channels convert, the "
+    "drive of IN18 on PA4 is also ADC1's IN18")
 {
   rig const r;
   r.enable("ADC2");
@@ -889,7 +892,7 @@ TEST_CASE("ADC2 channels 16 and 17 read 0 with TSEN and VREFEN, its external cha
   CHECK(r.convert(17, "ADC2") == 0);
   r.port("ADC2").drive(18, 1'650'000);
   CHECK(r.convert(18, "ADC2") == 2048);
-  CHECK(r.port("ADC1").input(18) == 0);
+  CHECK(r.port("ADC1").input(18) == 1'650'000);
 }
 
 TEST_CASE("the external channels are 0 to 15, 18 and 19")
@@ -910,18 +913,18 @@ TEST_CASE("the external channels are 0 to 15, 18 and 19")
   }
 }
 
-TEST_CASE("ADC1 and ADC2 convert at once, each sets its own flags and IRQ")
+TEST_CASE("ADC1 IN3 on PA6 and ADC2 IN5 on PB1 convert at once, each sets its own flags and IRQ")
 {
   rig const r;
   r.enable("ADC1");
   r.enable("ADC2");
   r.port("ADC1").drive(3, 1'000'000);
-  r.port("ADC2").drive(3, 2'000'000);
+  r.port("ADC2").drive(5, 2'000'000);
   r.write("ADC1", "ADC_IER", eoc);
   r.write("ADC2", "ADC_IER", eoc);
-  r.write("ADC2", "ADC_SMPR1", 1u << 9);
+  r.write("ADC2", "ADC_SMPR1", 1u << 15);
   auto const start = r.start(3, "ADC1");
-  static_cast<void>(r.start(3, "ADC2"));
+  static_cast<void>(r.start(5, "ADC2"));
   r.run_until(start + 15 * cycle_ps);
   CHECK(r.isr("EOC", "ADC1") == 1);
   CHECK(r.isr("EOC", "ADC2") == 0);
@@ -1069,7 +1072,7 @@ TEST_CASE(
     r.port("ADC1").drive(0, 1'650'000);
     r.write("ADC1", "ADC_OR", 1);
     CHECK(r.convert(0, "ADC1") == 2048);
-    CHECK(r.convert(0, "ADC2") == 0);
+    CHECK(r.convert(0, "ADC2") == 2048);
     CHECK(r.warnings().empty());
     r.write("ADC1", "ADC_OR", 0);
     CHECK(r.convert(0, "ADC1") == 0);
@@ -1316,4 +1319,33 @@ TEST_CASE(
       attach(without_inp3), doctest::Contains("channel_pins.3"), popcorn::config_error);
   adc1_of(without_inp3).channel_pins.reset();
   CHECK_NOTHROW(attach(without_inp3));
+}
+
+TEST_CASE(
+    "a drive of ADC1 IN3 is the level of PA6 that ADC2 IN3 converts, a GPIOA drive after the "
+    "sampling phase leaves the conversion on the old level")
+{
+  rig const   r;
+  auto* const gpioa = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(gpioa != nullptr);
+  r.enable("ADC1");
+  r.enable("ADC2");
+  r.port("ADC1").drive(3, 1'000'000);
+  CHECK(gpioa->analog_drive(6) == std::optional<std::uint32_t>{1'000'000});
+  CHECK(r.port("ADC2").input(3) == 1'000'000);
+  CHECK(r.convert(3, "ADC2") == code_at(1'000'000));
+  auto const at = r.start(3);
+  r.run_until(at + 5 * cycle_ps);
+  gpioa->drive_analog(6, 2'000'000);
+  auto const& units = r.f->target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  auto const pending = r.f->target->snapshot().data().events.pending;
+  CHECK(std::ranges::any_of(pending, [&](auto const& event) {
+    return event.id.owner == owner and event.due_ps == at + 15 * cycle_ps;
+  }));
+  r.ends_at(at + 15 * cycle_ps);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == code_at(1'000'000));
+  CHECK(r.convert(3, "ADC2") == code_at(2'000'000));
 }

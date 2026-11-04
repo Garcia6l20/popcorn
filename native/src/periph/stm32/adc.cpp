@@ -9,6 +9,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <reflex/enum.hpp>
@@ -217,7 +218,6 @@ struct adc_inputs
   std::string_view             irq{};
   std::uint32_t                externals{};
   std::string_view             external_names{};
-  std::span<adc_pad const>     pads{};
 };
 
 struct threshold_names
@@ -525,40 +525,6 @@ struct h5_adc
   }
 };
 
-constexpr std::array<adc_pad, 16> l4_adc12_pads{
-    {{1, 'C', 0},
-     {2, 'C', 1},
-     {3, 'C', 2},
-     {4, 'C', 3},
-     {5, 'A', 0},
-     {6, 'A', 1},
-     {7, 'A', 2},
-     {8, 'A', 3},
-     {9, 'A', 4},
-     {10, 'A', 5},
-     {11, 'A', 6},
-     {12, 'A', 7},
-     {13, 'C', 4},
-     {14, 'C', 5},
-     {15, 'B', 0},
-     {16, 'B', 1}}
-};
-
-constexpr std::array<adc_pad, 12> l4_adc3_pads{
-    {{1, 'C', 0},
-     {2, 'C', 1},
-     {3, 'C', 2},
-     {4, 'C', 3},
-     {6, 'F', 3},
-     {7, 'F', 4},
-     {8, 'F', 5},
-     {9, 'F', 6},
-     {10, 'F', 7},
-     {11, 'F', 8},
-     {12, 'F', 9},
-     {13, 'F', 10}}
-};
-
 /**
  * @brief Family traits of the STM32L47x and STM32L48x ADC1, ADC2 and ADC3, `aditf5_v2_0_Cube`,
  *        RM0351 section 18: register names, 12-bit codes, the sampling times of RM0351 18.4.12
@@ -641,23 +607,14 @@ struct l4_adc
   static constexpr std::array<std::string_view, 2> dma_fields{"DMAEN", "DMACFG"};
   static constexpr std::array<std::uint32_t, 3>    synchronous_dividers{1, 2, 4};
   static constexpr std::array<adc_inputs, 3>       inputs{
-      {{.instance = "ADC1",
-        .vrefint  = 0,
-        .sensor   = 17,
-        .irq      = "ADC1_2_IRQn",
-        .pads     = l4_adc12_pads},
-       {.instance = "ADC2",
-        .vrefint  = std::nullopt,
-        .sensor   = std::nullopt,
-        .irq      = "ADC1_2_IRQn",
-        .pads     = l4_adc12_pads},
+      {{.instance = "ADC1", .vrefint = 0, .sensor = 17, .irq = "ADC1_2_IRQn"},
+       {.instance = "ADC2", .vrefint = std::nullopt, .sensor = std::nullopt, .irq = "ADC1_2_IRQn"},
        {.instance       = "ADC3",
         .vrefint        = std::nullopt,
         .sensor         = 17,
         .irq            = "ADC3_IRQn",
         .externals      = 0x3FDE,
-        .external_names = "1 to 4 or 6 to 13",
-        .pads           = l4_adc3_pads}}
+        .external_names = "1 to 4 or 6 to 13"}}
   };
   static constexpr std::array<threshold_names, watchdogs> thresholds{
       {{"ADC_TR1", "LT1", "ADC_TR1", "HT1"},
@@ -750,63 +707,61 @@ struct adc_edge
 
 struct adc_state
 {
-  std::array<std::uint32_t, channels> input_uv{};
-  std::uint32_t                       generation{};
-  std::uint32_t                       ready_generation{};
-  std::uint64_t                       start_ps{};
-  std::uint64_t                       clock_hz{};
-  std::uint32_t                       divider{};
-  std::uint32_t                       held{};
-  std::uint32_t                       sum{};
-  bool                                converting{};
-  bool                                waiting_clock{};
-  std::uint8_t                        rank{};
-  std::uint8_t                        subgroup_left{};
-  std::vector<std::uint32_t>          data;
-  bool                                dma_stopped{};
-  std::uint8_t                        filter_count{};
-  std::array<adc_edge, 2>             edges{};
-  std::uint32_t                       edge_generation{};
+  std::uint32_t              generation{};
+  std::uint32_t              ready_generation{};
+  std::uint64_t              start_ps{};
+  std::uint64_t              clock_hz{};
+  std::uint32_t              divider{};
+  std::uint32_t              held{};
+  std::uint32_t              sum{};
+  bool                       converting{};
+  bool                       waiting_clock{};
+  std::uint8_t               rank{};
+  std::uint8_t               subgroup_left{};
+  std::vector<std::uint32_t> data;
+  bool                       dma_stopped{};
+  std::uint8_t               filter_count{};
+  std::array<adc_edge, 2>    edges{};
+  std::uint32_t              edge_generation{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
 
 struct l4_adc_state
 {
-  std::array<std::uint32_t, channels> input_uv{};
-  std::uint32_t                       generation{};
-  std::uint32_t                       ready_generation{};
-  std::uint64_t                       start_ps{};
-  std::uint64_t                       clock_hz{};
-  std::uint32_t                       divider{};
-  std::uint32_t                       held{};
-  std::uint32_t                       sum{};
-  bool                                converting{};
-  bool                                waiting_clock{};
-  std::uint8_t                        rank{};
-  std::uint8_t                        subgroup_left{};
-  std::vector<std::uint32_t>          data;
-  bool                                dma_stopped{};
-  std::uint8_t                        filter_count{};
-  std::array<adc_edge, 2>             edges{};
-  std::uint32_t                       edge_generation{};
-  std::uint32_t                       calibration_generation{};
-  bool                                calibration_waiting{};
-  std::uint64_t                       enable_lock_ps{};
-  bool                                injecting{};
-  std::uint8_t                        injected_rank{};
-  bool                                regular_resume{};
-  bool                                regular_pending{};
-  bool                                queue_pending{};
-  bool                                queue_empty{true};
-  std::uint8_t                        queue_count{};
-  std::array<std::uint32_t, 2>        queue_next{};
-  std::array<adc_edge, 2>             injected_edges{};
-  std::uint32_t                       injected_edge_generation{};
-  std::uint32_t                       last_code{};
-  bool                                continued{};
-  std::uint32_t                       kept_held{};
-  std::uint32_t                       kept_sum{};
+  std::uint32_t                generation{};
+  std::uint32_t                ready_generation{};
+  std::uint64_t                start_ps{};
+  std::uint64_t                clock_hz{};
+  std::uint32_t                divider{};
+  std::uint32_t                held{};
+  std::uint32_t                sum{};
+  bool                         converting{};
+  bool                         waiting_clock{};
+  std::uint8_t                 rank{};
+  std::uint8_t                 subgroup_left{};
+  std::vector<std::uint32_t>   data;
+  bool                         dma_stopped{};
+  std::uint8_t                 filter_count{};
+  std::array<adc_edge, 2>      edges{};
+  std::uint32_t                edge_generation{};
+  std::uint32_t                calibration_generation{};
+  bool                         calibration_waiting{};
+  std::uint64_t                enable_lock_ps{};
+  bool                         injecting{};
+  std::uint8_t                 injected_rank{};
+  bool                         regular_resume{};
+  bool                         regular_pending{};
+  bool                         queue_pending{};
+  bool                         queue_empty{true};
+  std::uint8_t                 queue_count{};
+  std::array<std::uint32_t, 2> queue_next{};
+  std::array<adc_edge, 2>      injected_edges{};
+  std::uint32_t                injected_edge_generation{};
+  std::uint32_t                last_code{};
+  bool                         continued{};
+  std::uint32_t                kept_held{};
+  std::uint32_t                kept_sum{};
 
   friend auto operator==(l4_adc_state const&, l4_adc_state const&) -> bool = default;
 };
@@ -1140,10 +1095,16 @@ struct adc_clock
  *
  *        A description with `channel_pins` holds a positive pad for every external channel, or
  *        construction throws config_error naming the channel. Every shipped description
- *        carries the table, and a hand-written one without it passes unchecked.
+ *        carries the table, and a hand-written one without it passes unchecked. An external
+ *        channel's input is the analog level of its positive pad, gpio_port::analog_level(), so
+ *        channels of several ADCs on one pad read one level. `analog_port` drive and input act
+ *        on the pad's board slot. Without a pad, drive and input throw config_error naming
+ *        `channel_pins.<c>` and the channel converts 0. A slot change during a conversion
+ *        reaches the ADC through gpio_port::on_analog_changing() before it applies, so the
+ *        samples held before it keep the old level.
  *
  *        Codes against VDDA, the board's `supply_options`: an external channel 1 to 17 reads
- *        its driven input, `analog_port` bank A, as V x 16384 / VDDA, floored and saturated. A
+ *        its input, `analog_port` bank A, as V x 16384 / VDDA, floored and saturated. A
  *        bank B channel of the port is a config_error, the ADC has one bank. VREFINT
  *        reads the factory VREFINT_CAL and the temperature sensor TS_CAL1, at 30 C, both scaled
  *        by 3000 / VDDA, when ADC12_CCR connects them, and 0 otherwise. Each word is read from
@@ -1366,6 +1327,7 @@ public:
   adc_model(model_context& ctx, peripheral_desc const& desc, supply_options supply);
 
   void               reset(register_file& regs, reset_kind kind) override;
+  void               load(std::span<std::byte const> in) override;
   void               on_bus_reset() override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_clock_change() override;
@@ -1500,6 +1462,11 @@ private:
   [[nodiscard]] auto option_open(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto switch_open(std::uint32_t channel) const -> std::optional<adc_pad>;
   void               check_analog_switch(std::uint32_t channel);
+  [[nodiscard]] auto pad_of(std::uint32_t channel) const -> std::optional<adc_pad>;
+  [[nodiscard]] auto pad_port(adc_pad const& pad) const -> gpio_port*;
+  [[nodiscard]] auto driven_pad(std::size_t channel) const -> std::pair<gpio_port&, std::uint8_t>;
+  [[nodiscard]] auto level_uv(std::uint32_t channel) const -> std::uint32_t;
+  void               listen_pads();
   [[nodiscard]] auto calibration_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t;
   void               start_calibration();
   void               end_calibration();
@@ -1512,6 +1479,8 @@ private:
   supply_options                                   supply_;
   std::uint32_t                                    bonded_channels_{};
   adc_inputs                                       inputs_;
+  std::vector<adc_pad>                             pads_;
+  std::vector<subscription>                        pad_listeners_;
   core::clock_domain                               kernel_;
   core::clock_domain                               hclk_;
   core::clock_domain                               sysclk_;
@@ -1722,6 +1691,13 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
     throw config_error(desc.name, 0, "bonded_channels_b", "0 or absent, the ADC has one bank");
   }
   require_channel_pins(desc, external_channels(analog_bank::a), pad_role::positive);
+  for(auto const& pad : desc.channel_pins.value_or(std::vector<adc_pad_desc>{}))
+  {
+    if(pad.role == pad_role::positive and not pad.port.empty())
+    {
+      pads_.push_back({pad.channel, pad.port.front(), pad.pin});
+    }
+  }
   for(std::size_t index = 0; index < Traits::dma_fields.size(); ++index)
   {
     dma_mode_[index] = field(Traits::config, Traits::dma_fields[index]);
@@ -2004,18 +1980,16 @@ auto adc_model<Traits>::external(analog_channel channel) const -> std::size_t
 template <typename Traits>
 void adc_model<Traits>::drive(analog_channel channel, std::uint32_t microvolts)
 {
-  auto const at = external(channel);
-  if(state_.converting)
-  {
-    hold_until(ctx_.clock.time().ps);
-  }
-  state_.input_uv[at] = microvolts;
+  auto const [port, pin] = driven_pad(external(channel));
+  listen_pads();
+  port.drive_analog(pin, microvolts);
 }
 
 template <typename Traits>
 auto adc_model<Traits>::input(analog_channel channel) const -> std::uint32_t
 {
-  return state_.input_uv[external(channel)];
+  auto const [port, pin] = driven_pad(external(channel));
+  return port.analog_drive(pin).value_or(0);
 }
 
 template <typename Traits>
@@ -2069,6 +2043,86 @@ auto adc_model<Traits>::calibration(address at, std::string_view name) const -> 
 template <typename Traits> void adc_model<Traits>::reset(register_file&, reset_kind)
 {
   restore_reset_values();
+  listen_pads();
+}
+
+template <typename Traits> void adc_model<Traits>::load(std::span<std::byte const> in)
+{
+  base::load(in);
+  listen_pads();
+}
+
+template <typename Traits> void adc_model<Traits>::listen_pads()
+{
+  if(not pad_listeners_.empty())
+  {
+    return;
+  }
+  std::string ports;
+  for(auto const& pad : pads_)
+  {
+    if(not ports.contains(pad.port))
+    {
+      ports.push_back(pad.port);
+    }
+  }
+  for(auto const letter : ports)
+  {
+    auto* const port = pad_port({0, letter, 0});
+    if(port == nullptr)
+    {
+      continue;
+    }
+    std::uint16_t pins = 0;
+    for(auto const& pad : pads_)
+    {
+      pins |= pad.port == letter ? static_cast<std::uint16_t>(1u << pad.pin) : std::uint16_t{0};
+    }
+    pad_listeners_.push_back(port->on_analog_changing([this, pins](std::uint8_t pin) {
+      if(state_.converting and (pins >> pin & 1u) != 0)
+      {
+        hold_until(ctx_.clock.time().ps);
+      }
+    }));
+  }
+}
+
+template <typename Traits>
+auto adc_model<Traits>::pad_of(std::uint32_t channel) const -> std::optional<adc_pad>
+{
+  auto const pad = std::ranges::find(pads_, channel, &adc_pad::channel);
+  if(pad == pads_.end())
+  {
+    return std::nullopt;
+  }
+  return *pad;
+}
+
+template <typename Traits> auto adc_model<Traits>::pad_port(adc_pad const& pad) const -> gpio_port*
+{
+  return dynamic_cast<gpio_port*>(ctx_.peers.find(std::format("GPIO{}", pad.port)));
+}
+
+template <typename Traits>
+auto adc_model<Traits>::driven_pad(std::size_t channel) const -> std::pair<gpio_port&, std::uint8_t>
+{
+  auto const  pad  = pad_of(static_cast<std::uint32_t>(channel));
+  auto* const port = pad ? pad_port(*pad) : nullptr;
+  if(port == nullptr)
+  {
+    throw config_error(
+        desc_.name, 0, std::format("channel_pins.{}", channel),
+        std::format("a positive pad of channel {} on a GPIO port of the machine", channel));
+  }
+  return {*port, pad->pin};
+}
+
+template <typename Traits>
+auto adc_model<Traits>::level_uv(std::uint32_t channel) const -> std::uint32_t
+{
+  auto const  pad  = pad_of(channel);
+  auto* const port = pad ? pad_port(*pad) : nullptr;
+  return port == nullptr ? 0 : port->analog_level(pad->pin);
 }
 
 template <typename Traits> void adc_model<Traits>::on_bus_reset()
@@ -2394,8 +2448,8 @@ template <typename Traits> void adc_model<Traits>::end_calibration()
 template <typename Traits>
 auto adc_model<Traits>::switch_open(std::uint32_t channel) const -> std::optional<adc_pad>
 {
-  auto const pad = std::ranges::find(inputs_.pads, channel, &adc_pad::channel);
-  if(pad == inputs_.pads.end())
+  auto const pad = pad_of(channel);
+  if(not pad)
   {
     return std::nullopt;
   }
@@ -3874,7 +3928,7 @@ auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
   }
   if(is_external(channel) and not option_open(channel) and not switch_open(channel))
   {
-    return code_of<Traits>(state_.input_uv[channel], supply_.vdda_mv);
+    return code_of<Traits>(level_uv(channel), supply_.vdda_mv);
   }
   return 0;
 }

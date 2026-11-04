@@ -283,7 +283,11 @@ channel and role, here the H573 ADC1 channel 3:
   adds `pads` and the list, such as `3:PA6,3n:PA7`.
 - The ADC models refuse a table that lacks the `positive` pad of an external channel, or on the
   STM32L1 the `bank_b` pad of a bank B channel on a pad of its own, with `config_error` naming
-  `channel_pins.<c>`. A hand-written description may leave `channel_pins` out.
+  `channel_pins.<c>`.
+- The STM32U5, STM32H5 and STM32L4 ADCs convert the analog level of the `positive` pad's GPIO
+  pin, so channels of several ADCs on one pad read one level. A hand-written description may
+  leave `channel_pins` out: its ADC then has no pads, a drive or input of an external channel
+  raises `config_error` naming `channel_pins.<c>`, and the channel converts 0.
 
 ## Field drops
 
