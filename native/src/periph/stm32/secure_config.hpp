@@ -155,10 +155,10 @@ struct secure_config_rules
 };
 
 /**
- * @brief The diagnostics of a configuration unit's storage registers, `SYSCFG` or `SBS`: a
- *        firmware write that lands on one logs one model_warning per register, and raises
- *        model_error under strict_peripherals before it is stored. Debugger writes and writes
- *        the bus rules refuse whole are not noted.
+ * @brief The diagnostics of a model's storage registers, such as those of `SYSCFG`, `SBS` and
+ *        the `OTG_FS` ADP: a firmware write that lands on one logs one model_warning per
+ *        register, and raises model_error under strict_peripherals before it is stored.
+ *        Debugger writes and writes the bus rules refuse whole are not noted.
  */
 struct storage_notes
 {
@@ -169,7 +169,7 @@ struct storage_notes
    * @brief Notes a write of a storage register.
    * @param ctx Context of the unit's model.
    * @param desc Description of the unit.
-   * @param unit Unit name in the warning, `SYSCFG` or `SBS`.
+   * @param unit Unit name in the warning, such as `SYSCFG`, `SBS` or `OTG_FS ADP`.
    * @param word Offset of the word.
    * @param access Attributes of the write.
    * @param applied Guard of the write.

@@ -303,6 +303,7 @@ for program, source in (
     ("stm32-i2c-l4", "test_i2c_l4.cpp"),
     ("stm32-iwdg-l4", "test_iwdg_l4.cpp"),
     ("stm32-crc-l4", "test_crc_l4.cpp"),
+    ("stm32-otg-fs-l4", "test_otg_fs_l4.cpp"),
     ("stm32-rtc-l4", "test_rtc_l4.cpp"),
     ("stm32-adc-l4", "test_adc_l4.cpp"),
 ):
@@ -403,8 +404,9 @@ family_rows = add_doctest(
         "POPCORN_M33_DESC": str(project_dir / "tests" / "data" / "core" / "m33.json"),
         "POPCORN_U575_2M_DESC": str(u575_2m),
         "POPCORN_H573_DESC": str(h573),
+        "POPCORN_L476RC_DESC": str(l476rc),
     },
-    register=u575_2m is not None and h573 is not None,
+    register=u575_2m is not None and h573 is not None and l476rc is not None,
 )
 
 class_a_h573 = add_doctest(

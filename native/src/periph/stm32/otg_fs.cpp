@@ -1,6 +1,7 @@
 #include "factories.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
+#include "secure_config.hpp"
 #include "usb_device_link.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -187,12 +188,19 @@ struct out_fields
 }
 
 /**
- * @brief DWC2 OTG_FS core of the STM32U5 in device mode, slave FIFO mode, RM0456 section 72,
- *        and the bus side of the device as a usb::device_port.
+ * @brief DWC2 OTG_FS core of the STM32U5 and the STM32L47x/L48x in device mode, slave FIFO mode,
+ *        RM0456 section 72 and RM0351 section 47, and the bus side of the device as a
+ *        usb::device_port.
  *
- * Core resets: CSRST, PSRST, FSRST, RXFFLSH and TXFFLSH read 0 again as soon as they are written,
- * AHBIDL keeps its reset value 1. CSRST and the flushes empty the FIFOs, the TX flush the FIFO
- * TXFNUM names, all of them for 0x10. CSRST clears no register.
+ * Core resets: CSRST, the frame counter reset, FSRST on the STM32U5 and FCRST on the STM32L4,
+ * PSRST on the STM32U5, RXFFLSH and TXFFLSH read 0 again as soon as they are written, AHBIDL
+ * keeps its reset value 1. The STM32L47x/L48x core has no PSRST, ERRATIM, STSPHST or CURMOD,
+ * RM0351 Table 322. The PSRST note of 47.15.5 and the ERRATIM note of 47.15.35 agree, "This bit
+ * is available in STM32L49x/L4Ax products, reserved otherwise". The 47.15.1 GOTGCTL drawing shows
+ * CURMOD at bit 21, and the model follows the table. GPWRDN and GADPCTL of the STM32L4 ADP are
+ * storage: a firmware write logs one model_warning per register and raises model_error under
+ * strict_peripherals before it is stored. CSRST and the flushes empty the FIFOs, the TX flush the
+ * FIFO TXFNUM names, all of them for 0x10. CSRST clears no register.
  *
  * Link: B-valid is GOTGCTL.BVALOVAL while BVALOEN is set, else the attached host's VBUS while
  * GCCFG.VBDEN is set. BSVLD reads it, its fall sets GOTGINT.SEDET. The device pulls D+ up while
@@ -252,8 +260,10 @@ struct out_fields
  *
  * Interrupts: GINTSTS event bits are cleared by writing 1, RXFLVL, NPTXFE, GINAKEFF, GONAKEFF,
  * IEPINT, OEPINT and OTGINT follow their sources. DAINT is DIEPINTn masked by DIEPMSK, with TXFE
- * masked by DIEPEMPMSK, and DOEPINTn masked by DOEPMSK. IRQ 73 is GAHBCFG.GINTMSK and GINTSTS
- * masked by GINTMSK.
+ * masked by DIEPEMPMSK, and DOEPINTn masked by DOEPMSK. The IRQ is GAHBCFG.GINTMSK and GINTSTS
+ * masked by GINTMSK. The line is OTG_FS_IRQn, 73 on the STM32U5 and 67 on the STM32L4.
+ *
+ * Timing is full speed whatever the 48 MHz kernel clock source and its frequency.
  *
  * Not modelled, logged once and a model_error under strict_peripherals: host mode, HNP and SRP,
  * battery charging detection, test modes, a TX FIFO numbered other than its endpoint. DMA and LPM
@@ -269,7 +279,11 @@ public:
   static constexpr std::uint32_t host_wake_event    = host_wake;
   static constexpr std::uint32_t idle_suspend_event = idle_suspend;
 
-  otg_fs(model_context& ctx, peripheral_desc const& desc, std::optional<usb_host_options> wired);
+  otg_fs(
+      model_context&                  ctx,
+      peripheral_desc const&          desc,
+      std::optional<usb_host_options> wired,
+      otg_fs_variant const&           variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -286,6 +300,7 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
+  [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
   void               bus_reset_end(vtime at) override;
@@ -378,7 +393,7 @@ private:
   field_ref                         global_interrupt_;
   field_ref                         tx_empty_level_;
   field_ref                         force_host_;
-  std::array<field_ref, 5>          self_clearing_;
+  std::vector<field_ref>            self_clearing_;
   field_ref                         core_reset_;
   field_ref                         rx_flush_;
   field_ref                         tx_flush_;
@@ -418,6 +433,8 @@ private:
   field_ref                         speed_;
   field_ref                         frame_number_;
   field_ref                         empty_mask_;
+  std::vector<std::uint32_t>        storage_;
+  storage_notes                     notes_;
   std::uint32_t                     access_offset_{};
   std::uint32_t                     written_{};
   std::uint32_t                     warned_{};
@@ -501,10 +518,18 @@ constexpr std::array<write_entry<otg_fs>, 73> otg_fs_writes{
      }
 };
 
+constexpr std::array<write_entry<otg_fs>, 2> otg_fs_adp_writes{
+    {
+     {"GPWRDN", nullptr},
+     {"GADPCTL", nullptr},
+     }
+};
+
 otg_fs::otg_fs(
     model_context&                  ctx,
     peripheral_desc const&          desc,
-    std::optional<usb_host_options> wired)
+    std::optional<usb_host_options> wired,
+    otg_fs_variant const&           variant)
     : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs}, frames_{ctx.peers},
       line_{irq("OTG_FS_IRQn")}, in_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<in_fields, endpoints>{in_fields_of(n)...};
@@ -522,7 +547,7 @@ otg_fs::otg_fs(
       global_interrupt_{field("GAHBCFG", "GINTMSK")}, tx_empty_level_{field("GAHBCFG", "TXFELVL")},
       force_host_{field("GUSBCFG", "FHMOD")},
       self_clearing_{
-          field("GRSTCTL", "CSRST"), field("GRSTCTL", "PSRST"), field("GRSTCTL", "FSRST"),
+          field("GRSTCTL", "CSRST"), field("GRSTCTL", variant.frame_counter_reset),
           field("GRSTCTL", "RXFFLSH"), field("GRSTCTL", "TXFFLSH")},
       core_reset_{field("GRSTCTL", "CSRST")}, rx_flush_{field("GRSTCTL", "RXFFLSH")},
       tx_flush_{field("GRSTCTL", "TXFFLSH")}, tx_flush_number_{field("GRSTCTL", "TXFNUM")},
@@ -545,6 +570,18 @@ otg_fs::otg_fs(
       speed_{field("DSTS", "ENUMSPD")}, frame_number_{field("DSTS", "FNSOF")},
       empty_mask_{field("DIEPEMPMSK", "INEPTXFEM")}
 {
+  if(variant.adp)
+  {
+    bind(otg_fs_adp_writes);
+    for(auto const& entry : otg_fs_adp_writes)
+    {
+      storage_.push_back(reg(entry.reg).offset);
+    }
+  }
+  if(not variant.partial_reset.empty())
+  {
+    self_clearing_.push_back(field("GRSTCTL", variant.partial_reset));
+  }
   for(auto const* name :
       {"MMIS", "SOF", "ESUSP", "USBSUSP", "USBRST", "ENUMDNE", "ISOODRP", "EOPF", "IISOIXFR",
        "IPXFR", "RSTDET", "LPMINT", "CIDSCHG", "DISCINT", "SRQINT", "WKUPINT"})
@@ -957,7 +994,16 @@ auto otg_fs::on_write(
 {
   access_offset_ = offset & ~3u;
   written_       = merge_write(0, offset, size, value);
+  if(storage_only(access_offset_))
+  {
+    notes_.written(ctx_, desc_, "OTG_FS ADP", access_offset_, ctx, {});
+  }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+}
+
+auto otg_fs::storage_only(std::uint32_t offset) const -> bool
+{
+  return std::ranges::contains(storage_, offset);
 }
 
 void otg_fs::plain_written(std::uint32_t, std::uint32_t)
@@ -1638,8 +1684,8 @@ void otg_fs::resume(vtime)
 }
 }
 
-auto otg_fs_factory(board const& b) -> model_factory
+auto otg_fs_factory(board const& b, otg_fs_variant const& variant) -> model_factory
 {
-  return usb_device_factory<otg_fs>(b);
+  return usb_device_factory<otg_fs>(b, variant);
 }
 }

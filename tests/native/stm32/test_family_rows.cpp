@@ -204,6 +204,34 @@ TEST_CASE("a CRC of integtest1_v2_0 on a part outside the U5, H5 and L4 rows is 
   CHECK_THROWS_AS((void)machine_of(desc), config_error);
 }
 
+TEST_CASE(
+    "an OTG_FS of otgfs1_v3_0 takes the U5 row on an STM32U5 part only, otgfs1_v2_0 the L4 "
+    "row on an STM32L4 part only")
+{
+  auto const u5     = popcorn::testing::description_from("POPCORN_U575_2M_DESC");
+  auto const l4     = popcorn::testing::description_from("POPCORN_L476RC_DESC");
+  auto const otg_of = [](part_description const& desc) {
+    auto const found = std::ranges::find(
+        desc.peripherals, std::string_view{"OTG_FS"}, &popcorn::peripheral_desc::name);
+    REQUIRE(found != desc.peripherals.end());
+    return *found;
+  };
+  REQUIRE(otg_of(u5).ip_version == "otgfs1_v3_0_Cube");
+  REQUIRE(otg_of(l4).ip_version == "otgfs1_v2_0_Cube");
+  auto const with = [&](std::string part, part_description const& source) {
+    auto desc          = toy(std::move(part), false);
+    desc.core.num_irqs = source.core.num_irqs;
+    desc.irqs          = source.irqs;
+    desc.peripherals.push_back(otg_of(source));
+    return desc;
+  };
+  CHECK(machine_of(with("STM32U575ZITxQ", u5)).model("OTG_FS") != nullptr);
+  CHECK(machine_of(with("STM32L476RCTx", l4)).model("OTG_FS") != nullptr);
+  CHECK_THROWS_AS((void)machine_of(with("STM32L476RCTx", u5)), config_error);
+  CHECK_THROWS_AS((void)machine_of(with("STM32U575ZITxQ", l4)), config_error);
+  CHECK_THROWS_AS((void)machine_of(with("STM32L152RETx", u5)), config_error);
+}
+
 TEST_CASE("option_bytes.tzen on an STM32L1 part is refused")
 {
   auto       options = popcorn::testing::stm32_options();

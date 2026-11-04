@@ -1975,6 +1975,29 @@ inline constexpr usb_drd_variant l1_usb{
     .manual              = "RM0038 24.5"
 };
 
+/** @brief Differences between the OTG_FS cores the otg_fs rows serve. */
+struct otg_fs_variant
+{
+  /** @brief GRSTCTL bit 2, the frame counter reset. */
+  std::string_view frame_counter_reset;
+  /** @brief GRSTCTL bit 1, the partial soft reset, empty for none. */
+  std::string_view partial_reset;
+  /** @brief GPWRDN and GADPCTL present, claimed as storage registers. */
+  bool adp;
+};
+
+/** @brief STM32U5 OTG_FS, GRSTCTL in RM0456 72.15.5. */
+inline constexpr otg_fs_variant u5_otg_fs{
+    .frame_counter_reset = "FSRST",
+    .partial_reset       = "PSRST",
+    .adp                 = false};
+
+/** @brief STM32L47x/L48x OTG_FS, GRSTCTL in RM0351 47.15.5, no PSRST per Table 322. */
+inline constexpr otg_fs_variant l4_otg_fs{
+    .frame_counter_reset = "FCRST",
+    .partial_reset       = "",
+    .adp                 = true};
+
 /** @brief STM32H562, H563 and H573 GTZC1, RM0481 5.7.4 to 5.7.6 and 5.8: the SVD names
  *         `DAC`, `I3C`, `LPUART`, `OCTOSPI` and `UCPD1` of the stems `DAC1`, `I3C1`,
  *         `LPUART1`, `OCTOSPI1` and `UCPD`, and `ADC12SEC` covering ADC1, ADC2 and their common

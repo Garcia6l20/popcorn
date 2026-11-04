@@ -246,10 +246,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto mdf_factory() -> model_factory;
 
 /**
- * @brief Factory of the USB OTG_FS device core model, RM0456 section 72.
+ * @brief Factory of the USB OTG_FS device core model, RM0456 section 72 on the STM32U5, RM0351
+ *        section 47 on the STM32L4.
  * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
+ * @param variant GRSTCTL reset field names of the core, copied.
  */
-[[nodiscard]] auto otg_fs_factory(board const& b) -> model_factory;
+[[nodiscard]] auto otg_fs_factory(board const& b, otg_fs_variant const& variant) -> model_factory;
 
 /**
  * @brief Factory of the USB full-speed device controller model, RM0481 section 61 on the STM32H5,

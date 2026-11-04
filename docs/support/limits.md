@@ -1138,6 +1138,26 @@ Not modelled, logged:
 - A TX FIFO numbered other than its IN endpoint. DFIFOn feeds IN endpoint n.
 - An isochronous endpoint armed with PKTCNT above 1. One packet goes per frame.
 
+On every family the timing is full speed whatever the 48 MHz kernel clock source and its
+frequency, `CCIPR1.ICLKSEL` on the STM32U5 and `CCIPR.CLK48SEL` on the STM32L4.
+
+The STM32L47x/L48x core, RM0351 section 47, is the STM32U5 core with these differences:
+
+- GRSTCTL bit 2 is FCRST, RM0351 47.15.5, read 0 again as soon as it is written, as FSRST on the
+  STM32U5.
+- No PSRST, ERRATIM, STSPHST or CURMOD, RM0351 Table 322. The PSRST note of 47.15.5 and the
+  ERRATIM note of 47.15.35 agree: "This bit is available in STM32L49x/L4Ax products, reserved
+  otherwise". The 47.15.1 GOTGCTL drawing shows CURMOD at bit 21. The model follows the table:
+  GRSTCTL bit 1 and GOTGCTL bit 21 read 0.
+- The ADP registers `GPWRDN` and `GADPCTL`, RM0351 47.15.18 and 47.15.19, are storage. A
+  firmware write logs one `model_warning` per register and raises `model_error` under
+  `strict_peripherals` before it is stored.
+- The model raises `OTG_FS_IRQn`, 67, itself. EXTI line 17, the OTG_FS wakeup, is a Stop mode
+  wakeup line, RM0351 14.3, and stays idle.
+- ES0250 2.27.1, a TX FIFO write sequence interrupted by an access to an endpoint register
+  corrupts the FIFO on silicon. The model keeps the FIFO whole.
+- ES0250 2.27.2 concerns host mode through a hub to a low-speed device. The core is a device.
+
 ## USB
 
 Source: [usb_drd.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usb_drd.cpp)
