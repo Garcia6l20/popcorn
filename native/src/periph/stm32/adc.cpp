@@ -1113,7 +1113,7 @@ struct adc_clock
  *        with the ADC clock outside 5 to 55 MHz logs a warning and the conversions keep their
  *        computed time.
  *
- *        Results, RM0456 33.4.27: with OVRMOD 0, ADC_DR shows the head of an eight-result FIFO,
+ *        Results, RM0456 33.4.26: with OVRMOD 0, ADC_DR shows the head of an eight-result FIFO,
  *        a CPU or DMA read of ADC_DR pops it, and EOC stays set while results are left. A result
  *        finding the FIFO full sets OVR and is discarded, as is every result while OVR stays set.
  *        With OVRMOD 1, a result overwrites ADC_DR and sets OVR when EOC was still set. A
@@ -1123,7 +1123,7 @@ struct adc_clock
  *        0, ADSTART stays set, and no request rises until an ADC_CR write takes ADSTART from 0
  *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. A hardware trigger
  *        then starts sequences without a request, and their results land in ADC_DR: the data
- *        register RM0456 33.4.27 calls frozen after the DMA end is not modelled. DMNGT 10, the MDF
+ *        register RM0456 33.4.26 calls frozen after the DMA end is not modelled. DMNGT 10, the MDF
  *        path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its ADC_IER
  *        enable.
  *
@@ -1140,21 +1140,20 @@ struct adc_clock
  *        reaches the samples held after it. The ADC clock a conversion started with times all
  *        its samples.
  *
- *        Injected conversions are not modelled and log a warning once.
- *        DMNGT 10, AUTDLY, LFTRIG, LSHIFT, offsets, gain compensation, BULB, SMPTRIG, TROVS and
- *        the DIFSEL bit of a converted channel leave the conversions unchanged and log a warning
- *        once, a model_error under strict_peripherals. Two settings
- *        RM0456 forbids log a warning once, a model_error under strict_peripherals: an ADSTART
- *        write with ADEN 0 or ADDIS 1, ignored with ADSTART left at 0, and DISCEN with CONT,
- *        converted as DISCEN alone. A sequence converting a channel whose ADC_PCSEL bit is
- *        clear logs a warning once, a model_error under strict_peripherals, and converts it as if
- *        the bit were set, RM0456 33.4.12. Only the single DMA request is modelled: the burst
- * request RM0456 33.4.27 raises at four results is not. A GPDMA channel reading ADC_DR in bursts of
- * more than one beat starts each burst on the single request, and a beat finding the FIFO empty
- * reads the last result again. A reserved ADC12_CCR.PRESC divides by 256, logged once by ADC12, a
- * model_error under strict_peripherals.
+ *        Injected conversions are not modelled and log a warning once. DMNGT 10, AUTDLY, LFTRIG,
+ *        LSHIFT, offsets, gain compensation, BULB, SMPTRIG, TROVS and the DIFSEL bit of a converted
+ *        channel leave the conversions unchanged and log a warning once, a model_error under
+ *        strict_peripherals. Two settings RM0456 forbids log a warning once, a model_error under
+ *        strict_peripherals: an ADSTART write with ADEN 0 or ADDIS 1, ignored with ADSTART left at
+ *        0, and DISCEN with CONT, converted as DISCEN alone. A sequence converting a channel whose
+ *        ADC_PCSEL bit is clear logs a warning once, a model_error under strict_peripherals, and
+ *        converts it as if the bit were set, RM0456 33.4.12. Only the single DMA request is
+ *        modelled: the burst request RM0456 33.4.26 raises at four results is not. A GPDMA channel
+ *        reading ADC_DR in bursts of more than one beat starts each burst on the single request,
+ *        and a beat finding the FIFO empty reads the last result again. A reserved ADC12_CCR.PRESC
+ *        divides by 256, logged once by ADC12, a model_error under strict_peripherals.
  *
- *        Analog watchdogs, RM0456 33.4.30: each regular conversion's result, after the
+ *        Analog watchdogs, RM0456 33.4.29: each regular conversion's result, after the
  *        oversampler, is compared before alignment, as Q = result << (2 x RES), the 14-bit frame
  *        of RM0456 Table 318. A guarded result is out of window when Q < LTRx or Q > HTRx,
  *        strictly. AWD1 guards the AWD1CH channel with AWD1SGL, every channel without, while
@@ -3257,15 +3256,23 @@ void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
     {
       return;
     }
-    prepare_injected();
-    if(get(regs_, injected_->trigger) != 0)
+    try
     {
-      return;
+      prepare_injected();
+      if(get(regs_, injected_->trigger) != 0)
+      {
+        return;
+      }
+      if(busy())
+      {
+        preempt(ctx_.clock.time().ps);
+        return;
+      }
     }
-    if(busy())
+    catch(...)
     {
-      preempt(ctx_.clock.time().ps);
-      return;
+      regs_.poke(enable_.offset, old);
+      throw;
     }
     begin_injected(ctx_.clock.time().ps);
   }

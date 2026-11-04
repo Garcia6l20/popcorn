@@ -1209,7 +1209,7 @@ TEST_CASE(
 
 TEST_CASE(
     "a software JADSTART with JQDIS 0, JOVSE and an injection into a ROVSE sequence with ROVSM 0 "
-    "each log once, a model_error when strict")
+    "each log once, a model_error when strict that leaves JADSTART 0")
 {
   struct leg
   {
@@ -1248,6 +1248,7 @@ TEST_CASE(
     CHECK_THROWS_AS(
         static_cast<void>(strict.f->target->mem().write(strict.at("ADC1", "ADC_CR"), 4, cr)),
         popcorn::model_error);
+    CHECK(strict.get("ADC1", "ADC_CR", "JADSTART") == 0);
   }
 }
 
