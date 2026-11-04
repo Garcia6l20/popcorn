@@ -379,3 +379,40 @@ TEST_CASE("RM0351 43.5: the SAI1 and SAI2 fields carry their RM0351 names")
     }
   }
 }
+
+TEST_CASE("RM0351 43.3.8, 43.3.15 and 11.4.5: LL I2S master TX at 47.991 kHz on a DMA2 ring")
+{
+  constexpr std::string_view sai_ll = "l476_l4_sai_ll";
+  constexpr std::uint64_t    hz     = 16'000'000 / 2 * 43 / 7;
+  constexpr std::uint64_t    frame  = 256 * 4 * 1'000'000'000'000;
+  constexpr std::size_t      frames = 4 * 64 / 2;
+  auto const                 sink   = std::make_shared<stm32::audio_capture_endpoint>();
+  auto                       board  = stm32::board{};
+  board.audio["SAI1_A"]             = {.endpoint = sink};
+  auto options                      = popcorn::testing::stm32_options();
+  options.models                    = stm32::factories(board, l476rc());
+  stm32_fixture f{l476rc(), sai_ll, std::move(options)};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(sai_ll, "main")}).reason
+      == stop_reason::address);
+  f.set("pc", sym(sai_ll, "tx_dma"));
+  auto const stopped = f.run_to_stop({.max_instructions = icount{1'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(f.log() == std::vector<std::uint32_t>{0x0001'0000, 4, 4, 0, 0x1});
+  REQUIRE(sink->frames.size() >= frames);
+  auto const word = [](std::uint32_t index) {
+    return 0x5a00'0000u | ((index % 64u) << 8) | (index % 64u);
+  };
+  for(std::uint32_t index = 0; index < frames; ++index)
+  {
+    CAPTURE(index);
+    CHECK(
+        sink->frames[index].slots
+        == std::vector<std::uint32_t>{word(2 * index), word(2 * index + 1)});
+    auto const gap   = sink->frames[index].at.ps - sink->frames[0].at.ps;
+    auto const exact = index * frame / hz;
+    CHECK(gap >= exact);
+    CHECK(gap <= exact + 1);
+  }
+}
