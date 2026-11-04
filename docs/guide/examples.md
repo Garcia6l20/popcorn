@@ -324,6 +324,12 @@ The same layout on the STM32L476, a Cortex-M4F without TrustZone, from
 
 --8<-- "stm32l476/rcc/README.md:3:15"
 
+### l476 pwr_flash
+
+Four wait states at 80 MHz, a bank 2 page erase and double-word program, the option bytes, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/pwr_flash).
+
+--8<-- "stm32l476/pwr_flash/README.md:3:13"
+
 ### l476 gpio
 
 A push button on PC13 toggling an LED on PA5 through EXTI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/gpio).
@@ -335,6 +341,12 @@ A push button on PC13 toggling an LED on PA5 through EXTI, HAL. [Sources and tes
 printf banner and line echo on USART2, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usart).
 
 --8<-- "stm32l476/usart/README.md:3:10"
+
+### l476 crc
+
+The programmable CRC unit, three catalogue CRCs and CRC_IDR, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/crc).
+
+--8<-- "stm32l476/crc/README.md:3:12"
 
 ### l476 usb_cdc
 

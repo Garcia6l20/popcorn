@@ -1,0 +1,21 @@
+"""MachineDescription of the crc example on the STM32L476RCTx."""
+
+from pathlib import Path
+
+import popcorn
+import popcorn.pytest
+
+HERE = Path(__file__).parent
+
+CRC = popcorn.MachineDescription(
+    name="crc",
+    part="STM32L476RCTx",
+    images=[popcorn.Elf(HERE / "prebuilt/crc.elf")],
+    boot=popcorn.Boot(until="main", budget=1_000_000),
+    strict=True,
+)
+
+
+@popcorn.pytest.machine
+def crc() -> popcorn.MachineDescription:
+    return CRC
