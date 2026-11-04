@@ -1,5 +1,5 @@
 format = 1
-source = "RM0351 Rev 11 and the STM32L4 DIE415 CubeMX db against ST's STM32L471, L475, L476 and L486 SVDs: the core, memory, signature and IP identity of the STM32L47x/L48x lines. Line rules live in the line patches"
+source = "RM0351 Rev 11 and the STM32L4 DIE415 CubeMX db against ST's STM32L471, L475, L476 and L486 SVDs: the core, memory, signature and IP identity of the STM32L47x/L48x lines. RM0351 Rev 11, 13.3 Table 61: position 54 TIM6_DACUNDER is the TIM6 global and DAC1 underrun interrupt, the SVDs give it to TIM6 only, so [irqs] shares it with DAC1. Line rules live in the line patches"
 
 [match]
 parts = ["STM32L47*", "STM32L48*"]
@@ -21,6 +21,7 @@ share = [
   { name = "TIM1_BRK_TIM15", peripheral = "TIM15" },
   { name = "TIM1_UP_TIM16", peripheral = "TIM16" },
   { name = "TIM1_TRG_COM_TIM17", peripheral = "TIM17" },
+  { name = "TIM6_DACUNDER", peripheral = "DAC1" },
 ]
 
 [core]

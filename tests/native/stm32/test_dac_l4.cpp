@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -60,6 +61,19 @@ constexpr address          tim_cr1   = 0x00;
 constexpr address          tim_cr2   = 0x04;
 constexpr address          tim_egr   = 0x14;
 constexpr address          tim_arr   = 0x2C;
+constexpr address          tim_dier  = 0x0C;
+constexpr address          tim_sr    = 0x10;
+constexpr address          ahb1enr   = 0x4002'1048;
+constexpr address          dma1      = 0x4002'0000;
+constexpr address          ccr3      = 0x30;
+constexpr address          cndtr3    = 0x34;
+constexpr address          cpar3     = 0x38;
+constexpr address          cmar3     = 0x3C;
+constexpr address          cselr     = 0xA8;
+constexpr address          samples   = 0x2000'2000;
+constexpr address          rcc_cr    = 0x4002'1000;
+constexpr address          pllcfgr   = 0x4002'100C;
+constexpr address          flash_acr = 0x4002'2000;
 constexpr std::uint32_t    dac1en    = 1u << 29;
 constexpr std::uint32_t    ten1      = 1u << 2;
 constexpr std::uint32_t    software1 = 7u << 3;
@@ -75,6 +89,11 @@ constexpr std::uint32_t    cal_flag2 = 1u << 30;
 constexpr std::uint32_t    dmaudr1   = 1u << 13;
 constexpr std::uint32_t    dmaudr2   = 1u << 29;
 constexpr std::uint32_t    trim      = 16;
+constexpr std::uint32_t    dmaen1    = 1u << 12;
+constexpr std::uint32_t    dmaudrie1 = 1u << 13;
+constexpr std::uint32_t    dmaen2    = 1u << 28;
+constexpr std::uint32_t    dmaudrie2 = 1u << 29;
+constexpr std::uint32_t    tim6_dac  = 54;
 
 constexpr std::array<address, 6> trigger_timers{0x4000'1000, 0x4001'3400, 0x4000'1400,
                                                 0x4000'0C00, 0x4000'0000, 0x4000'0800};
@@ -149,6 +168,60 @@ struct rig
       }
     }
     return dues;
+  }
+
+  [[nodiscard]] auto events_of(std::string_view unit) const -> std::vector<std::uint64_t>
+  {
+    auto const& units = f->target->description().peripherals;
+    auto const  found = std::ranges::find(units, unit, &popcorn::peripheral_desc::name);
+    REQUIRE(found != units.end());
+    auto const                 owner = static_cast<std::uint32_t>(found - units.begin());
+    std::vector<std::uint64_t> dues;
+    for(auto const& event : f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner)
+      {
+        dues.push_back(event.due_ps);
+      }
+    }
+    return dues;
+  }
+
+  void dma_channel3(std::vector<std::uint32_t> const& data) const
+  {
+    write(ahb1enr, read(ahb1enr) | 1u);
+    for(std::size_t index = 0; index < data.size(); ++index)
+    {
+      write(samples + 4 * index, data[index]);
+    }
+    write(dma1 + cselr, 6u << 8);
+    write(dma1 + cpar3, dac1 + dhr12r1);
+    write(dma1 + cmar3, samples);
+    write(dma1 + cndtr3, static_cast<std::uint32_t>(data.size()));
+    write(dma1 + ccr3, 1u | 1u << 4 | 1u << 7 | 2u << 8 | 2u << 10);
+  }
+
+  [[nodiscard]] auto irq_pending(std::uint32_t irq) const -> bool
+  {
+    return (read(0xE000'E200u + 4 * (irq / 32)) >> (irq % 32) & 1u) != 0;
+  }
+
+  void clear_pending(std::uint32_t irq) const
+  {
+    write(0xE000'E280u + 4 * (irq / 32), 1u << (irq % 32));
+  }
+
+  void pll_72mhz() const
+  {
+    write(flash_acr, (read(flash_acr) & ~7u) | 4u);
+    write(pllcfgr, 1u | 36u << 8 | 1u << 24);
+    write(rcc_cr, read(rcc_cr) | 1u << 24);
+    for(int step = 0; step < 1000 and (read(rcc_cr) & 1u << 25) == 0; ++step)
+    {
+      idle_to(now_ps() + cycle);
+    }
+    REQUIRE((read(rcc_cr) & 1u << 25) != 0);
+    write(rcc_cfgr, (read(rcc_cfgr) & ~3u) | 3u);
   }
 
   void sources() const
@@ -313,8 +386,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "WAVE, DMAEN and DMAUDRIE each log once as not modelled, a model_error when strict that "
-    "leaves DAC_CR as before the write")
+    "WAVE logs once as not modelled, a model_error when strict that leaves DAC_CR as before the "
+    "write, and DMAEN, DMAUDRIE and a hardware TSEL log nothing")
 {
   struct leg
   {
@@ -322,10 +395,8 @@ TEST_CASE(
     std::uint32_t    word;
   };
   for(auto const& [what, word] : {
-          leg{"WAVE",     1u << 6 },
-          leg{"WAVE",     1u << 22},
-          leg{"DMAEN",    1u << 12},
-          leg{"DMAUDRIE", 1u << 29},
+          leg{"WAVE", 1u << 6 },
+          leg{"WAVE", 1u << 22},
   })
   {
     CAPTURE(what);
@@ -348,6 +419,7 @@ TEST_CASE(
   rig const quiet{true};
   quiet.write(dac1 + cr, ten1 | ten2 | 6u << 19);
   quiet.write(dac1 + cr, 1u | ten1 | software1 | 1u << 16 | ten2 | software2);
+  quiet.write(dac1 + cr, quiet.read(dac1 + cr) | dmaen1 | dmaudrie1 | dmaen2 | dmaudrie2);
   CHECK(quiet.logged.empty());
 }
 
@@ -658,38 +730,143 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "two trigger edges before a load give two loads in order, each taking DHR1 at its own load, "
-    "and a third replaces the second's load, inferred")
+    "three trigger edges before a load give three loads in order, each taking DHR1 at its own "
+    "load, and a fourth moves the third load to its own due")
 {
   constexpr auto apb = 16 * cycle;
-  for(auto const third : {false, true})
+  struct leg
   {
-    CAPTURE(third);
-    rig const r;
+    std::uint64_t                edges;
+    std::array<std::uint64_t, 3> loads;
+  };
+  for(auto const& [edges, loads] : {
+          leg{3, {6 * apb / 2, 8 * apb / 2, 10 * apb / 2}},
+          leg{4, {6 * apb / 2, 7 * apb / 2, 9 * apb / 2} },
+  })
+  {
+    CAPTURE(edges);
+    auto const spacing = edges == 3 ? apb : apb / 2;
+    rig const  r;
     r.sources();
     r.apb1_divider(div16);
     r.write(dac1 + cr, ten1);
-    r.write(dac1 + dhr12r1, 0x111);
     auto const at = r.now_ps();
-    r.fire(0);
-    r.idle_to(at + apb);
-    r.fire(0);
-    if(third)
+    for(std::uint64_t edge = 0; edge < edges; ++edge)
     {
-      r.idle_to(at + 2 * apb);
+      r.idle_to(at + edge * spacing);
       r.fire(0);
     }
-    CHECK(r.pending(0) == std::vector<std::uint64_t>{at + 3 * apb});
-    r.idle_to(at + 3 * apb);
-    CHECK(r.read(dac1 + dor1) == 0x111);
-    auto const second = at + (third ? 5 : 4) * apb;
-    CHECK(r.pending(0) == std::vector<std::uint64_t>{second});
-    r.write(dac1 + dhr12r1, 0x222);
-    r.idle_to(second - cycle);
-    CHECK(r.read(dac1 + dor1) == 0x111);
-    r.idle_to(second);
-    CHECK(r.read(dac1 + dor1) == 0x222);
-    CHECK(r.pending(0).empty());
+    CHECK(r.pending(0) == std::vector<std::uint64_t>{at + loads[0]});
+    for(std::size_t index = 0; index < loads.size(); ++index)
+    {
+      CAPTURE(index);
+      auto const value = static_cast<std::uint32_t>(0x111 * (index + 1));
+      r.write(dac1 + dhr12r1, value);
+      r.idle_to(at + loads[index] - cycle);
+      CHECK(r.read(dac1 + dor1) == (index == 0 ? 0u : value - 0x111));
+      r.idle_to(at + loads[index]);
+      CHECK(r.read(dac1 + dor1) == value);
+      auto const next = index + 1 < loads.size() ? std::vector<std::uint64_t>{at + loads[index + 1]}
+                                                 : std::vector<std::uint64_t>{};
+      CHECK(r.pending(0) == next);
+    }
+  }
+}
+
+TEST_CASE(
+    "a TIM6 with ARR 1 at HCLK 72 MHz and PPRE1 2, three APB1 cycles 83333.3 ps, loads DOR1 at "
+    "each of 16 updates, the due counted from the exact instant of the edge")
+{
+  rig const r;
+  r.sources();
+  r.apb1_divider(div2);
+  r.pll_72mhz();
+  auto const tim6 = trigger_timers[0];
+  r.write(dac1 + cr, ten1);
+  r.write(tim6 + tim_arr, 1);
+  r.write(tim6 + tim_cr2, 2u << 4);
+  r.write(tim6 + tim_cr1, 1);
+  auto dues = std::vector<std::uint64_t>{};
+  for(int step = 0; step < 16 and dues.empty(); ++step)
+  {
+    r.idle_to(r.now_ps() + 14'000);
+    dues = r.pending(0);
+  }
+  REQUIRE(dues.size() == 1);
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    CAPTURE(index);
+    auto const due = dues[0];
+    r.write(dac1 + dhr12r1, 0x100 + index);
+    r.idle_to(due);
+    CHECK(r.read(dac1 + dor1) == 0x100 + index);
+    dues = r.pending(0);
+    REQUIRE(dues.size() == 1);
+    CHECK(dues[0] - due >= 27'777);
+    CHECK(dues[0] - due <= 27'778);
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "EXTI9 edges one APB1 cycle apart from board drives scheduled ahead: the fourth edge, at the "
+    "first load, comes after that load, so every edge loads DOR1")
+{
+  constexpr auto apb = 16 * cycle;
+  rig const      r;
+  r.sources();
+  r.apb1_divider(div16);
+  r.write(dac1 + cr, ten1 | 6u << 3);
+  auto const at = r.now_ps() + apb;
+  for(std::uint64_t edge = 0; edge < 4; ++edge)
+  {
+    r.exti9_pin().drive_at(9, true, vtime{at + edge * apb});
+    r.exti9_pin().drive_at(9, false, vtime{at + edge * apb + apb / 2});
+  }
+  for(std::uint64_t index = 0; index < 4; ++index)
+  {
+    CAPTURE(index);
+    auto const due   = at + (3 + index) * apb;
+    auto const value = static_cast<std::uint32_t>(0x111 * (index + 1));
+    r.idle_to(due - cycle);
+    r.write(dac1 + dhr12r1, value);
+    r.idle_to(due);
+    CHECK(r.read(dac1 + dor1) == value);
+  }
+  CHECK(r.pending(0).empty());
+}
+
+TEST_CASE(
+    "a TIM6 with ARR 1 at PPRE1 2 updates once per APB1 cycle, three edges inside the three-cycle "
+    "window, and every update loads DOR1 three APB1 cycles later")
+{
+  rig const r;
+  r.sources();
+  r.apb1_divider(div2);
+  constexpr auto apb  = 2 * cycle;
+  auto const     tim6 = trigger_timers[0];
+  r.write(dac1 + cr, ten1);
+  r.write(tim6 + tim_arr, 1);
+  r.write(tim6 + tim_cr2, 2u << 4);
+  r.write(tim6 + tim_cr1, 1);
+  auto first = std::vector<std::uint64_t>{};
+  for(std::uint64_t step = 0; step < 16 and first.empty(); ++step)
+  {
+    r.idle_to(r.now_ps() + cycle);
+    first = r.pending(0);
+  }
+  REQUIRE(first.size() == 1);
+  auto const start = first[0];
+  for(std::uint64_t index = 0; index < 8; ++index)
+  {
+    CAPTURE(index);
+    auto const due   = start + index * apb;
+    auto const value = static_cast<std::uint32_t>(0x100 + index);
+    r.idle_to(due - cycle);
+    r.write(dac1 + dhr12r1, value);
+    r.idle_to(due);
+    CHECK(r.read(dac1 + dor1) == value);
+    CHECK(r.pending(0) == std::vector<std::uint64_t>{due + apb});
   }
 }
 
@@ -745,4 +922,192 @@ TEST_CASE(
   fresh.write(dac1 + dhr12r1, 0x222);
   fresh.idle_to(at + 4 * apb);
   CHECK(fresh.read(dac1 + dor1) == 0x222);
+}
+
+TEST_CASE(
+    "RM0351 19.4.7: with DMAEN1 each TIM6 edge raises dac1_ch1_dma at its load, DMA1 channel 3 "
+    "writes the next sample into DHR12R1 and its transfer drops the request, the instant inferred")
+{
+  rig const r;
+  r.sources();
+  r.dma_channel3({0x222, 0x333});
+  r.write(dac1 + cr, ten1 | dmaen1);
+  r.write(dac1 + dhr12r1, 0x111);
+  for(auto const& [loaded, next, left] : {
+          std::tuple{0x111u, 0x222u, 1u},
+          std::tuple{0x222u, 0x333u, 0u},
+  })
+  {
+    CAPTURE(loaded);
+    auto const due = r.now_ps() + 3 * cycle;
+    r.fire(0);
+    CHECK(r.events_of("DMA1").empty());
+    r.idle_to(due);
+    CHECK(r.read(dac1 + dor1) == loaded);
+    CHECK(r.events_of("DMA1").size() == 1);
+    r.idle_to(due + 10 * cycle);
+    CHECK(r.read(dac1 + dhr12r1) == next);
+    CHECK(r.read(dma1 + cndtr3) == left);
+    CHECK(r.events_of("DMA1").empty());
+  }
+  r.fire(0);
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0x333);
+  CHECK((r.read(dac1 + sr) & dmaudr1) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "RM0351 19.4.7: a hardware load while dac1_ch1_dma is high sets DMAUDR1, raises no new request "
+    "and still loads DOR1 from DHR1, decided at the load, inferred")
+{
+  rig const r;
+  r.sources();
+  r.write(dac1 + cr, ten1 | dmaen1);
+  r.write(dac1 + dhr12r1, 0x111);
+  r.fire(0);
+  r.idle_to(r.now_ps() + 3 * cycle);
+  CHECK((r.read(dac1 + sr) & dmaudr1) == 0);
+  r.write(dac1 + dhr12r1, 0x222);
+  auto const due = r.now_ps() + 3 * cycle;
+  r.fire(0);
+  r.idle_to(due - cycle);
+  CHECK((r.read(dac1 + sr) & dmaudr1) == 0);
+  r.idle_to(due);
+  CHECK((r.read(dac1 + sr) & dmaudr1) != 0);
+  CHECK(r.read(dac1 + dor1) == 0x222);
+  r.dma_channel3({0x333, 0x444});
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK(r.read(dma1 + cndtr3) == 1);
+  CHECK(r.read(dac1 + dhr12r1) == 0x333);
+  CHECK(r.events_of("DMA1").empty());
+}
+
+TEST_CASE(
+    "RM0351 19.4.7: SWTRIG and a TEN1 0 write raise no DMA request with DMAEN1, and clearing "
+    "DMAEN1 drops a high request, inferred")
+{
+  rig const r;
+  r.sources();
+  r.dma_channel3({0x222, 0x333});
+  r.write(dac1 + cr, dmaen1);
+  r.write(dac1 + dhr12r1, 0x111);
+  r.write(dac1 + cr, ten1 | software1 | dmaen1);
+  r.write(dac1 + swtrgr, 1);
+  r.write(dac1 + swtrgr, 1);
+  r.idle_to(r.now_ps() + 20 * cycle);
+  CHECK(r.read(dac1 + dor1) == 0x111);
+  CHECK(r.read(dma1 + cndtr3) == 2);
+  CHECK((r.read(dac1 + sr) & dmaudr1) == 0);
+  r.write(dma1 + ccr3, 0);
+  r.write(dac1 + cr, ten1 | dmaen1);
+  r.fire(0);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  r.write(dac1 + cr, ten1);
+  r.dma_channel3({0x222, 0x333});
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK(r.read(dma1 + cndtr3) == 2);
+  r.write(dac1 + cr, ten1 | dmaen1);
+  r.fire(0);
+  r.idle_to(r.now_ps() + 14 * cycle);
+  CHECK(r.read(dma1 + cndtr3) == 1);
+}
+
+TEST_CASE(
+    "DMAUDR1 with DMAUDRIE1 holds TIM6_DAC_IRQn 54 until DMAUDR1 is cleared, and the DAC and TIM6 "
+    "each hold the shared line alone")
+{
+  rig const r;
+  r.sources();
+  auto const tim6     = trigger_timers[0];
+  auto const underrun = [&r] {
+    r.fire(0);
+    r.idle_to(r.now_ps() + 4 * cycle);
+  };
+  r.write(dac1 + cr, ten1 | dmaen1 | dmaudrie1);
+  underrun();
+  CHECK_FALSE(r.irq_pending(tim6_dac));
+  underrun();
+  CHECK((r.read(dac1 + sr) & dmaudr1) != 0);
+  CHECK(r.irq_pending(tim6_dac));
+  r.clear_pending(tim6_dac);
+  CHECK(r.irq_pending(tim6_dac));
+  r.write(dac1 + sr, dmaudr1);
+  r.clear_pending(tim6_dac);
+  CHECK_FALSE(r.irq_pending(tim6_dac));
+  r.write(dac1 + cr, ten1 | dmaen1);
+  underrun();
+  CHECK((r.read(dac1 + sr) & dmaudr1) != 0);
+  CHECK_FALSE(r.irq_pending(tim6_dac));
+  r.write(tim6 + tim_dier, 1);
+  r.write(tim6 + tim_egr, 1);
+  CHECK(r.irq_pending(tim6_dac));
+  r.write(dac1 + cr, ten1 | dmaen1 | dmaudrie1);
+  r.write(tim6 + tim_sr, 0);
+  r.clear_pending(tim6_dac);
+  CHECK(r.irq_pending(tim6_dac));
+  r.write(tim6 + tim_egr, 1);
+  r.write(dac1 + sr, dmaudr1);
+  r.clear_pending(tim6_dac);
+  CHECK(r.irq_pending(tim6_dac));
+  r.write(tim6 + tim_sr, 0);
+  r.clear_pending(tim6_dac);
+  CHECK_FALSE(r.irq_pending(tim6_dac));
+}
+
+TEST_CASE(
+    "a snapshot with dac1_ch1_dma high and a trigger load pending keeps both, so the load sets "
+    "DMAUDR1 and DMA1 channel 3 serves the restored request, and DAC1RST drops a new one")
+{
+  rig const r;
+  r.sources();
+  r.write(dac1 + cr, ten1 | dmaen1 | dmaudrie1);
+  r.fire(0);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  r.fire(0);
+  auto const due   = r.now_ps() + 3 * cycle;
+  auto const bytes = r.encoded();
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.pending(0) == std::vector<std::uint64_t>{due});
+  fresh.idle_to(due - cycle);
+  CHECK((fresh.read(dac1 + sr) & dmaudr1) == 0);
+  fresh.idle_to(due);
+  CHECK((fresh.read(dac1 + sr) & dmaudr1) != 0);
+  CHECK(fresh.irq_pending(tim6_dac));
+  fresh.dma_channel3({0x111});
+  fresh.idle_to(fresh.now_ps() + 10 * cycle);
+  CHECK(fresh.read(dma1 + cndtr3) == 0);
+  CHECK(fresh.read(dac1 + dhr12r1) == 0x111);
+  fresh.write(dma1 + ccr3, 0);
+  fresh.fire(0);
+  fresh.idle_to(fresh.now_ps() + 4 * cycle);
+  fresh.write(apb1rstr1, dac1en);
+  fresh.write(apb1rstr1, 0);
+  fresh.clear_pending(tim6_dac);
+  CHECK_FALSE(fresh.irq_pending(tim6_dac));
+  CHECK(fresh.read(dac1 + sr) == 0);
+  fresh.dma_channel3({0x222});
+  fresh.idle_to(fresh.now_ps() + 10 * cycle);
+  CHECK(fresh.read(dma1 + cndtr3) == 1);
+}
+
+TEST_CASE(
+    "LL firmware, RM0351 19.4.7: TIM6 TRGO and DMA1 channel 3 play a 4-sample buffer into DOR1, "
+    "the fifth update holds the request and the sixth sets DMAUDR1")
+{
+  constexpr std::string_view    dac_ll = "l476_l4_dac_ll";
+  stm32_fixture                 f{l476rc(), dac_ll};
+  std::vector<core::log_record> warnings;
+  auto const sink    = f.target->add_log_sink([&warnings](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      warnings.push_back(record);
+    }
+  });
+  auto const stopped = f.run_to_stop({.max_instructions = icount{100'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(f.log() == std::vector<std::uint32_t>{0x100, 0x400, 0x800, 0xC00, 0xFFF, 0xFFF, 1, 0, 1});
+  CHECK(warnings.empty());
 }

@@ -471,13 +471,15 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
 - With TENx 1 and TSELx below 111, each rising edge of the RM0351 Table 128 source loads
   `DAC_DORx` three APB1 cycles after the edge, RM0351 19.4.4 and 19.4.6: `tim6_trgo`,
   `tim8_trgo`, `tim7_trgo`, `tim5_trgo`, `tim2_trgo`, `tim4_trgo` and `exti9`. A falling edge
-  loads nothing. Each load takes DHRx as it is at the load, inferred. Two edges before a load give
-  two loads in order, and a third edge before the first load replaces the second's load by its
-  own, inferred.
+  loads nothing. The three cycles count from the exact instant the source gives the edge. Each
+  load takes DHRx as it is at the load, inferred.
+- The model keeps three pending loads per channel, in order. A fourth before the first load moves
+  the third to its own due. Three cover the APB1 timer sources TIM2, TIM4, TIM5, TIM6 and TIM7:
+  an update needs ARR 1 or more, RM0351 33.4.8, so it comes at most once per APB1 cycle. TIM8 on
+  APB2 and EXTI9 can give edges closer than that, and then the fourth-edge rule applies.
 - Popcorn charges no APB wait states, so writes closer than one APB1 cycle happen only in the
   model. In that window a load takes DHRx as it is at the load, and a write while a load is
-  pending moves the next load to its own due, so of three such writes the second loses its own
-  load.
+  pending takes the next of the three slots.
 - While ENx is 1, a `DAC_CR` write keeps the old TSELx, RM0351 19.4.6 note, the old MAMPx, RM0351
   19.4.9, and the old CENx, RM0351 19.7.1. `DAC_MCR` keeps the old MODEx while ENx or CENx is 1,
   RM0351 19.7.16. ENx set while CENx is 1, which RM0351 19.4.11 does not allow, and WAVEx 11,
@@ -487,9 +489,18 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   the buffer, RM0351 19.4.11. It sets at the `DAC_CCR` write, with no tTRIM delay. With a buffer-off
   MODEx it reads 0, and with CENx 0 it keeps its value, inferred. The factory trim is 16 on both
   channels, inferred, as RM0351 19.7.15 gives 0x00XX 00XX. `DAC_CCR` resets to it.
-- WAVEx other than 00, DMAENx and DMAUDRIEx are not modelled. A
-  `DAC_CR` write that sets one logs one `model_warning` per function. MODEx 1xx, the sample and
-  hold mode, is not modelled the same way on `DAC_MCR`. Under strict_peripherals each raises
+- With DMAENx 1, a load from a hardware trigger raises `dac1_ch<x>_dma` at the load instant,
+  RM0351 19.4.7, the instant inferred. A load from a holding register write or SWTRIGx raises none.
+  The request drops when a DMA transfer serving it acknowledges it, or when DMAENx is cleared,
+  inferred. A hardware load while the request is high raises no new request and sets DMAUDRx,
+  RM0351 19.4.7, decided at the load, inferred, and `DAC_DORx` still loads DHRx.
+- DMAUDRx with DMAUDRIEx holds the DAC's share of `TIM6_DAC_IRQn`, position 54, which TIM6 also
+  drives.
+- ES0250 2.9.1, the DMA underrun flag missed for an internal trigger on the cycle of the DMA
+  acknowledge, applies only with software and hardware triggers mixed. Popcorn sets DMAUDRx by the
+  rule above.
+- WAVEx other than 00 is not modelled. A `DAC_CR` write that sets it logs one `model_warning`.
+  MODEx 1xx, the sample and hold mode, is not modelled the same way on `DAC_MCR`. Under strict_peripherals each raises
   `ModelError` and leaves the register as before the write. The sample and hold registers
   `DAC_SHSRx`, `DAC_SHHR` and `DAC_SHRR` report as unmodelled registers.
 - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
