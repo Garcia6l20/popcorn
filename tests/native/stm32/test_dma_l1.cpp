@@ -583,16 +583,16 @@ TEST_CASE("the DMA model refuses a variant past its request slots or naming a ch
     options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(variant));
     CHECK_THROWS_AS(parked(l152re(), firmware, std::move(options)), popcorn::config_error);
   };
-  std::array<stm32::dma_classic_request, 49> many{};
+  std::array<stm32::dma_classic_request, 65> many{};
   std::ranges::fill(many, stm32::dma_classic_request{.signal = "usart1_tx_dma", .channel = 4});
   refused({.channels = 7, .requests = many});
-  refused({.channels = 3, .requests = std::span{many}.first(48)});
+  refused({.channels = 3, .requests = std::span{many}.first(64)});
   constexpr std::array<stm32::dma_classic_request, 1> zero{
       {{.signal = "usart1_tx_dma", .channel = 0}}};
   refused({.channels = 7, .requests = zero});
   auto options = popcorn::testing::stm32_options();
   options.models.insert_or_assign(
-      "DMA1", stm32::dma_classic_factory({.channels = 7, .requests = std::span{many}.first(48)}));
+      "DMA1", stm32::dma_classic_factory({.channels = 7, .requests = std::span{many}.first(64)}));
   CHECK_NOTHROW(parked(l152re(), firmware, std::move(options)));
 }
 
@@ -1101,4 +1101,18 @@ TEST_CASE(
   write(f, gpioa_odr, 0);
   copy(0, gpioa_odr + 1, 0xB0);
   CHECK(read(f, gpioa_odr) == 0x0000'B000u);
+}
+
+TEST_CASE("an L1 DMA takes a firmware byte write to CNDTR1 with no warning, under strict too")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  auto const        f        = parked(l152re(), firmware, std::move(options));
+  log_capture const logs{f};
+  CHECK(f.target->model("DMA1")
+            ->on_write(
+                f.target->peripheral("DMA1"), cndtr(1), 1, 0, 0x12, {.pc = 0, .now = icount{0}})
+            .has_value());
+  CHECK(read(f, dma1 + cndtr(1)) == 0x12u);
+  CHECK(logs.records.empty());
 }

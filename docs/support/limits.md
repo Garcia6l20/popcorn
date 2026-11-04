@@ -670,6 +670,21 @@ Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native
   per pass of a circular channel. This is the EOT_1 signal the I2C reads with CR2.LAST, RM0038
   26.3.7. A memory-to-memory copy tells none.
 - The channels run whatever `RCC_AHBENR.DMAxEN` holds.
+- STM32L4 DMA1 and DMA2, RM0351 section 11, follow the STM32L1 rules above, the inferred ones
+  inferred on the STM32L4 too, with the APB windows of RM0351 Table 1 and `RCC_AHB1ENR`.
+- STM32L4: `DMA_CSELR` routes each request of RM0351 Tables 46 and 47 to its channel while the
+  channel's `CxS` holds the request's code. A request with another code reaches nothing. A
+  signal the tables list on two channels, such as `SAI1_A` on DMA2 channels 1 and 6, reaches
+  both. The I2C4, DCMI and HASH requests of the STM32L49x/L4Ax have no row.
+- STM32L4: a firmware byte or halfword write to a DMA register logs one `model_warning` per
+  controller and, under `strict`, raises `ModelError` before the store, after RM0351 11.6 "The DMA
+  registers have to be accessed by words (32-bit)". Without `strict` it lands. ES0250 2.4.2
+  states the same as a description correction.
+- STM32L4: ES0250 2.4.1. A transfer error sets `TEIFx` and clears `EN` whatever `CGIFx` the
+  firmware writes in the same cycle.
+- STM32L4: ES0250 2.8.14, 2.8.16 and 2.8.17. The ADC2 and ADC3 requests on DMA2 channels 4 and 5
+  need no request 0 on channels 2 and 3, and DMA2 channels 4 and 5 hand their acknowledge and end
+  of transfer to their own requests only, while DMA1 serves ADC2 or ADC3.
 
 ## GPDMA and LPDMA
 

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <format>
 #include <memory>
 #include <optional>
@@ -26,7 +27,7 @@ namespace popcorn::periph::stm32
 namespace
 {
 constexpr std::size_t   max_channels   = 7;
-constexpr std::size_t   max_requests   = 48;
+constexpr std::size_t   max_requests   = 64;
 constexpr std::uint32_t transfer_due   = 0;
 constexpr std::uint64_t latency_cycles = 4;
 
@@ -78,6 +79,7 @@ struct channel_fields
   field_ref          clear_complete;
   field_ref          clear_half;
   field_ref          clear_error;
+  field_ref          selection{};
   irq_line*          line{};
   core::memory_grant read_grant{};
   core::memory_grant write_grant{};
@@ -131,6 +133,14 @@ enum class unsupported : std::uint8_t
  *        tells every peer each request of the channel through dma_requester::count_ended(), at
  *        the end of a normal channel and at each circular reload. A request held high across a
  *        machine reset is cleared, one held across the RCC reset of the controller is kept.
+ *        The STM32L47x/L48x DMA1 and DMA2, RM0351 section 11, add DMA_CSELR: a request of RM0351
+ *        Tables 46 and 47 is ORed into its channel only while the channel's C<n>S holds the
+ *        request's code, and a CSELR write re-arbitrates. A signal the tables list on two
+ *        channels raises its row on each, and its requester sees the number of its first row.
+ *        A firmware byte or halfword write to a register logs one model_warning per controller
+ *        and raises model_error under strict_peripherals before it is stored, popcorn policy
+ *        after RM0351 11.6, "The DMA registers have to be accessed by words (32-bit)". Without
+ *        strict the write lands as the bus merges it.
  */
 class dma_classic final : public dispatch_model<dma_classic, dma_classic_state>,
                           public dma_controller
@@ -142,20 +152,30 @@ public:
       dma_classic_variant const&                variant,
       std::span<write_entry<dma_classic> const> table);
 
-  void               reset(register_file& regs, reset_kind kind) override;
-  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void               on_request(std::uint32_t request, bool level) override;
-  void               load(std::span<std::byte const> in) override;
+  void reset(register_file& regs, reset_kind kind) override;
+  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void on_request(std::uint32_t request, bool level) override;
+  void load(std::span<std::byte const> in) override;
+  auto on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
   [[nodiscard]] auto request_of(std::string_view signal) const
       -> std::optional<std::uint32_t> override;
 
   template <std::size_t Ch> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Ch> void count_written(std::uint32_t old, std::uint32_t now);
   void                           clear_written(std::uint32_t old, std::uint32_t now);
+  void                           selection_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto ready(std::size_t ch) const -> bool;
   [[nodiscard]] auto requested(std::size_t ch) const -> bool;
+  [[nodiscard]] auto routed(std::size_t r, std::size_t ch) const -> bool;
+  [[nodiscard]] auto first_of(std::size_t r) const -> std::uint32_t;
   [[nodiscard]] auto winner() const -> std::optional<std::size_t>;
   [[nodiscard]] auto width(std::size_t ch, field_ref size) -> std::uint8_t;
   [[nodiscard]] auto on_apb(std::uint32_t at) const -> bool;
@@ -175,6 +195,7 @@ private:
   core::clock_domain                       hclk_;
   std::array<bool, 2>                      unsupported_logged_{};
   bool                                     stopped_clock_logged_{};
+  bool                                     narrow_logged_{};
   dma_requester_list                       requesters_;
 };
 
@@ -271,6 +292,10 @@ dma_classic::dma_classic(
     c.clear_half           = field("IFCR", std::format("CHTIF{}", n));
     c.clear_error          = field("IFCR", std::format("CTEIF{}", n));
     c.line                 = &irq(std::format("{}_Channel{}_IRQn", desc.name, n));
+    if(not variant_.selection_register.empty())
+    {
+      c.selection = field(variant_.selection_register, std::format("C{}S", n));
+    }
   }
   if(variant_.channels < max_channels)
   {
@@ -315,11 +340,25 @@ void dma_classic::drop_grants()
   }
 }
 
+auto dma_classic::routed(std::size_t r, std::size_t ch) const -> bool
+{
+  auto const& row = variant_.requests[r];
+  return row.channel == ch + 1
+     and (ch_[ch].selection.width == 0 or get(regs_, ch_[ch].selection) == row.code);
+}
+
+auto dma_classic::first_of(std::size_t r) const -> std::uint32_t
+{
+  auto const found = std::ranges::find(
+      variant_.requests, variant_.requests[r].signal, &dma_classic_request::signal);
+  return static_cast<std::uint32_t>(found - variant_.requests.begin());
+}
+
 auto dma_classic::requested(std::size_t ch) const -> bool
 {
   for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
   {
-    if(variant_.requests[r].channel == ch + 1 and state_.request[r] != 0)
+    if(routed(r, ch) and state_.request[r] != 0)
     {
       return true;
     }
@@ -479,11 +518,11 @@ void dma_classic::transfer(std::size_t ch)
   {
     for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
     {
-      if(variant_.requests[r].channel == ch + 1 and state_.request[r] != 0)
+      if(routed(r, ch) and state_.request[r] != 0)
       {
         for(auto* const requester : requesters_.resolve(ctx_.peers))
         {
-          requester->acknowledged(*this, static_cast<std::uint32_t>(r));
+          requester->acknowledged(*this, first_of(r));
         }
       }
     }
@@ -526,11 +565,11 @@ void dma_classic::tell(
 {
   for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
   {
-    if(variant_.requests[r].channel == ch + 1)
+    if(routed(r, ch))
     {
       for(auto* const requester : requesters_.resolve(ctx_.peers))
       {
-        (requester->*signal)(*this, static_cast<std::uint32_t>(r));
+        (requester->*signal)(*this, first_of(r));
       }
     }
   }
@@ -610,6 +649,33 @@ void dma_classic::clear_written(std::uint32_t, std::uint32_t now)
   regs_.poke(ch_[0].clear_global.offset, 0);
 }
 
+void dma_classic::selection_written(std::uint32_t, std::uint32_t)
+{
+  schedule();
+}
+
+auto dma_classic::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     ctx) -> std::expected<void, bus_error>
+{
+  if(variant_.word_only and size != 4 and ctx.by != initiator::debugger)
+  {
+    auto const word  = offset & ~3u;
+    auto const named = std::ranges::find_if(
+        desc_.registers, [&](register_desc const& r) { return r.offset == word; });
+    auto const name = named != desc_.registers.end() ? named->name : std::string{};
+    warn_once_or_refuse(narrow_logged_, name, word, [&] {
+      return std::format(
+          "a {}-byte write to {}: the DMA registers take 32-bit accesses, RM0351 11.6", size, name);
+    });
+  }
+  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+}
+
 auto dma_classic::request_of(std::string_view signal) const -> std::optional<std::uint32_t>
 {
   auto const found = std::ranges::find(variant_.requests, signal, &dma_classic_request::signal);
@@ -626,7 +692,14 @@ void dma_classic::on_request(std::uint32_t request, bool level)
   {
     return;
   }
-  state_.request[request] = level ? 1 : 0;
+  auto const signal = variant_.requests[request].signal;
+  for(std::size_t r = 0; r < variant_.requests.size(); ++r)
+  {
+    if(variant_.requests[r].signal == signal)
+    {
+      state_.request[r] = level ? 1 : 0;
+    }
+  }
   if(level)
   {
     schedule();
@@ -637,7 +710,12 @@ void dma_classic::on_request(std::uint32_t request, bool level)
 auto dma_classic_factory(dma_classic_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    auto const table = writes_by_count(variant.channels, std::make_index_sequence<max_channels>{});
+    auto const base = writes_by_count(variant.channels, std::make_index_sequence<max_channels>{});
+    std::vector<write_entry<dma_classic>> table{base.begin(), base.end()};
+    if(not variant.selection_register.empty())
+    {
+      table.push_back({variant.selection_register, &dma_classic::selection_written});
+    }
     return std::make_shared<dma_classic>(ctx, desc, variant, table);
   };
 }
