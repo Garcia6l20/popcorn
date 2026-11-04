@@ -7,6 +7,6 @@ here = Path(__file__).resolve().parent
 add_ll_firmware(
     "l4_adc_ll",
     [here / "l4_adc_ll.c"],
-    entries=["idle", "aden_at_once", "injected", "auto_injected"],
+    entries=["idle", "aden_at_once", "injected", "auto_injected", "dma_scan"],
     chipset=STM32L476XX,
 )

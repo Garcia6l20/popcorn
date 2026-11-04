@@ -3252,3 +3252,12 @@ TEST_CASE(
   CHECK(run.log == std::vector<std::uint32_t>{2048, 0, 0});
   CHECK(run.warnings.empty());
 }
+
+TEST_CASE(
+    "LL firmware, RM0351 18.4.26: a continuous scan with DMA_TRANSFER_LIMITED fills DMA1 channel 1 "
+    "with PA0, VREFINT and TS, then holds ADSTART with no OVR and no new EOS, inferred")
+{
+  auto const run = run_adc_ll("dma_scan");
+  CHECK(run.log == std::vector<std::uint32_t>{2048, vrefint_cal, ts_cal1, 0, 1, 0, 0, 0});
+  CHECK(run.warnings.empty());
+}
