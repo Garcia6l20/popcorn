@@ -48,6 +48,9 @@ popcorn build that lacked a model the current build has is refused. Take it agai
 A saved snapshot carries its format version. popcorn reads format 13 and raises `ConfigError` on
 the key `format` for a file of any other format. Take the snapshot again with the current build.
 
+A snapshot keeps the analog levels on the pins: the board drive of each GPIO pin and the level a
+peripheral output drives on it.
+
 ## What a restore leaves out
 
 Host side state that the machine cannot rewind is dropped or kept as follows:

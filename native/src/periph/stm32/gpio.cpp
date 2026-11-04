@@ -84,13 +84,15 @@ struct pending_edge
 
 struct gpio_state
 {
-  std::uint32_t             driven{};
-  std::uint32_t             driven_high{};
-  std::uint32_t             lock_step{};
-  std::uint32_t             lock_value{};
-  std::vector<pending_edge> edges;
-  std::uint32_t             fired{};
-  std::uint64_t             next_edge{};
+  std::uint32_t                                driven{};
+  std::uint32_t                                driven_high{};
+  std::uint32_t                                lock_step{};
+  std::uint32_t                                lock_value{};
+  std::vector<pending_edge>                    edges;
+  std::uint32_t                                fired{};
+  std::uint64_t                                next_edge{};
+  std::array<std::optional<std::uint32_t>, 16> analog_board{};
+  std::array<std::optional<std::uint32_t>, 16> analog_chip{};
 
   friend auto operator==(gpio_state const&, gpio_state const&) -> bool = default;
 };
@@ -102,6 +104,15 @@ struct listener_table
 {
   std::uint64_t               next{};
   std::vector<listener_entry> entries;
+};
+
+using analog_entry =
+    std::pair<std::uint64_t, std::shared_ptr<std::move_only_function<void(std::uint8_t)>>>;
+
+struct analog_table
+{
+  std::uint64_t             next{};
+  std::vector<analog_entry> entries;
 };
 
 /**
@@ -134,6 +145,19 @@ struct listener_table
  *        release that changes the board level of a pin, the drive else the PUPDR pull-up,
  *        reaches every board_input_listener peer whatever the pin mode, for the RTC inputs, and
  *        board_input_source gives the drive and the board level of a pin on request.
+ *
+ *        Each pin has two analog slots in microvolts, separate from its digital drive. The
+ *        board slot, drive_analog(), is board state: it survives every MCU reset and a GPIOx bus
+ *        reset, and only a release clears it. The chip slot, drive_chip_analog(), belongs to the
+ *        model that drives it, such as a DAC output: the GPIO model keeps it through a GPIOx
+ *        bus reset, as RM0351 19.3 connects DAC1_OUT1 to PA4 outside the GPIO registers, and
+ *        through a machine reset, after which the driver's own reset releases it. Keeping it
+ *        through the machine reset is a model choice, the reference manuals describe no pad
+ *        state of their own, inferred. analog_level() is the chip slot when set, else the board
+ *        slot, else 0. The chip slot wins an overlap, and the first overlap on a pin logs one
+ *        model_warning per machine life, also under strict_peripherals. The analog level comes
+ *        from the two slots alone, in every pin mode, an output pin's level included. Listeners
+ *        run before a slot changes. Snapshots save both slots.
  *
  *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
  *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER, OSPEEDR,
@@ -168,6 +192,12 @@ public:
   [[nodiscard]] auto on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
       -> subscription override;
   [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
+  void drive_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) override;
+  [[nodiscard]] auto analog_drive(std::uint8_t pin) const -> std::optional<std::uint32_t> override;
+  void drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) override;
+  [[nodiscard]] auto analog_level(std::uint8_t pin) const -> std::uint32_t override;
+  [[nodiscard]] auto on_analog_changing(std::move_only_function<void(std::uint8_t pin)> listener)
+      -> subscription override;
   [[nodiscard]] auto edge_ps() const -> std::uint64_t override;
   void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto secure_function() const -> bool override;
@@ -196,6 +226,10 @@ private:
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
   void               route_pins();
   void               check_pin(std::uint8_t pin) const;
+  void               set_analog(
+      std::array<std::optional<std::uint32_t>, 16>& slots,
+      std::uint8_t                                  pin,
+      std::optional<std::uint32_t>                  microvolts);
   void               supply_check(std::string_view name, std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto supply_valid() const -> bool;
   [[nodiscard]] auto pin_count() const noexcept -> std::uint8_t override
@@ -235,7 +269,9 @@ private:
   std::vector<std::pair<std::uint32_t, std::array<std::uint32_t, pins>>> pin_bits_;
   std::uint32_t                                                          reported_{};
   std::uint32_t                                                          notifying_{};
-  std::shared_ptr<listener_table>           listeners_ = std::make_shared<listener_table>();
+  std::shared_ptr<listener_table>           listeners_        = std::make_shared<listener_table>();
+  std::shared_ptr<analog_table>             analog_listeners_ = std::make_shared<analog_table>();
+  std::uint16_t                             analog_warned_{};
   std::vector<std::string>                  signals_;
   std::vector<std::array<std::uint16_t, 3>> alternates_;
   std::vector<std::uint8_t>                 forwarded_;
@@ -1021,6 +1057,81 @@ void gpio::apply(std::uint8_t pin, std::optional<bool> level)
       listener->board_input_changed(desc_.name, pin, after);
     }
   }
+}
+
+void gpio::drive_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts)
+{
+  check_pin(pin);
+  set_analog(state_.analog_board, pin, microvolts);
+}
+
+auto gpio::analog_drive(std::uint8_t pin) const -> std::optional<std::uint32_t>
+{
+  check_pin(pin);
+  return state_.analog_board[pin];
+}
+
+void gpio::drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts)
+{
+  check_pin(pin);
+  set_analog(state_.analog_chip, pin, microvolts);
+}
+
+auto gpio::analog_level(std::uint8_t pin) const -> std::uint32_t
+{
+  check_pin(pin);
+  return state_.analog_chip[pin].value_or(state_.analog_board[pin].value_or(0));
+}
+
+void gpio::set_analog(
+    std::array<std::optional<std::uint32_t>, 16>& slots,
+    std::uint8_t                                  pin,
+    std::optional<std::uint32_t>                  microvolts)
+{
+  if(slots[pin] == microvolts)
+  {
+    return;
+  }
+  std::vector<std::uint64_t> ids;
+  for(auto const& [id, listener] : analog_listeners_->entries)
+  {
+    ids.push_back(id);
+  }
+  for(auto const id : ids)
+  {
+    auto const found = std::ranges::find(analog_listeners_->entries, id, &analog_entry::first);
+    if(found != analog_listeners_->entries.end())
+    {
+      auto const listener = found->second;
+      (*listener)(pin);
+    }
+  }
+  slots[pin]     = microvolts;
+  auto const bit = static_cast<std::uint16_t>(1u << pin);
+  if(state_.analog_board[pin] and state_.analog_chip[pin] and (analog_warned_ & bit) == 0)
+  {
+    analog_warned_ |= bit;
+    warn(
+        "", std::format(
+                "P{}{} has a board analog drive of {} uV and a chip drive of {} uV, the chip drive "
+                "wins",
+                static_cast<char>('A' + port_), pin, *state_.analog_board[pin],
+                *state_.analog_chip[pin]));
+  }
+}
+
+auto gpio::on_analog_changing(std::move_only_function<void(std::uint8_t pin)> listener)
+    -> subscription
+{
+  auto const id = analog_listeners_->next++;
+  analog_listeners_->entries.emplace_back(
+      id, std::make_shared<std::move_only_function<void(std::uint8_t)>>(std::move(listener)));
+  return subscription{[table = std::weak_ptr<analog_table>{analog_listeners_}, id] {
+    if(auto const live = table.lock())
+    {
+      std::erase_if(live->entries, [id](auto const& entry) { return entry.first == id; });
+    }
+  }};
 }
 
 auto gpio::on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)

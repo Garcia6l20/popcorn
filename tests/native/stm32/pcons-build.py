@@ -382,6 +382,23 @@ for _, target in (*firmwares.values(), *h573_firmwares.values(), *l1_firmwares.v
     if target is not None:
         unregistered.depends(target)
 
+gpio_analog = add_doctest(
+    "stm32-gpio-analog",
+    [here / "test_gpio_analog.cpp"],
+    static,
+    env={**u575_env, **h573_env, **l1_env, **l4_env},
+    register=all(desc is not None for desc in (u575, h573, l152re, l152rb, l476rc)),
+)
+gpio_analog.private.include_dirs.append(private_dir)
+for _, target in (
+    *firmwares.values(),
+    *h573_firmwares.values(),
+    *l1_firmwares.values(),
+    *l4_firmwares.values(),
+):
+    if target is not None:
+        gpio_analog.depends(target)
+
 flash_geometry = add_doctest(
     "stm32-flash-geometry",
     [here / "test_flash_geometry.cpp"],

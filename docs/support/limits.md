@@ -497,6 +497,12 @@ Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   firmware store to offset 0x28 is an unmodelled access and changes no pin. The absence on Cat.3
   is inferred from RM0038 7.4.11 and its revision history.
 - STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
+- Every family: the analog level of a pin, which an ADC channel on its pad converts, is the chip
+  slot a peripheral output drives, else the board slot, else 0, in every pin mode. A push-pull
+  output driving high reads 0 there unless a slot holds VDD. With both slots set the chip slot
+  wins and the first overlap on a pin logs one `model_warning` per machine life, also under
+  `strict_peripherals`. The chip slot is kept through a machine reset and its driver's reset
+  releases it, inferred: the reference manuals describe no pad state of their own.
 - STM32L4: `GPIOx_ASCR`, RM0351 8.5.12, stores the switch between each pin and its ADC input,
   which the GPIO model gives its peers. `GPIOx_OSPEEDR` is storage.
 - STM32L4: PG2 to PG15 are powered by VDDIO2, RM0351 5.4.2. A CPU or DMA write that changes a

@@ -184,6 +184,56 @@ public:
       on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
           -> subscription = 0;
 
+  /**
+   * @brief Drives the analog level of a pin from outside the MCU, or releases it. The board
+   *        slot is board state: it survives an MCU reset of any kind and a GPIOx bus reset, a
+   *        snapshot restores it, and only a release clears it. It is separate from the digital
+   *        drive of drive().
+   * @param pin Pin number, a pin of the port, 0 to 15 on a full port.
+   * @param microvolts Level driven, empty to release the board slot.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  virtual void drive_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) = 0;
+
+  /**
+   * @brief The board slot of a pin, the level drive_analog() drives.
+   * @param pin Pin number, a pin of the port.
+   * @return The level in microvolts, empty when the board drives none.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  [[nodiscard]] virtual auto analog_drive(std::uint8_t pin) const
+      -> std::optional<std::uint32_t> = 0;
+
+  /**
+   * @brief Drives the analog level of a pin from a model of the MCU, such as a DAC output, or
+   *        releases it. The chip slot belongs to its driver: the GPIO model keeps it through a
+   *        GPIOx bus reset, a machine reset and a pin mode change, and the driver clears it.
+   * @param pin Pin number, a pin of the port.
+   * @param microvolts Level driven, empty to release the chip slot.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  virtual void drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) = 0;
+
+  /**
+   * @brief Analog level of a pin, as an ADC channel on its pad converts it: the chip slot when
+   *        set, else the board slot when set, else 0. With both slots set the chip slot wins and
+   *        the first overlap on a pin logs one model_warning per machine life.
+   * @param pin Pin number, a pin of the port.
+   * @return The level in microvolts.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  [[nodiscard]] virtual auto analog_level(std::uint8_t pin) const -> std::uint32_t = 0;
+
+  /**
+   * @brief Adds a listener called before a slot of a pin changes, so a converting ADC can catch
+   *        up with the old level first. A call that leaves the slot unchanged calls nothing.
+   * @param listener Called with the pin whose level is about to change.
+   * @return Handle whose destruction removes the listener.
+   */
+  [[nodiscard]] virtual auto
+      on_analog_changing(std::move_only_function<void(std::uint8_t pin)> listener)
+          -> subscription = 0;
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   virtual ~gpio_port();
