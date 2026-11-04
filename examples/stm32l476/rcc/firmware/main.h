@@ -1,0 +1,9 @@
+#ifndef MAIN_H
+#define MAIN_H
+
+#include "stm32l4xx_hal.h"
+
+/** @brief Stops the firmware on an unrecoverable HAL error. */
+void Error_Handler(void);
+
+#endif

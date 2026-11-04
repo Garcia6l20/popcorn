@@ -318,6 +318,12 @@ CDC ACM device on the USB full-speed controller enumerated by a virtual host, Ti
 The same layout on the STM32L476, a Cortex-M4F without TrustZone, from
 `examples/stm32l476/<name>`.
 
+### l476 rcc
+
+4 MHz MSI to an 80 MHz PLL in voltage range 1, MCO on PA8, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/rcc).
+
+--8<-- "stm32l476/rcc/README.md:3:15"
+
 ### l476 usb_cdc
 
 CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).

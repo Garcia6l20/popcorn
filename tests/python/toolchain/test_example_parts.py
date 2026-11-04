@@ -21,6 +21,7 @@ from popcorn.stm32 import mcu, shipped_parts
 from popcorn_build.example_parts import (
     EXAMPLE_PARTS,
     L1_GROUP_A,
+    L4_GROUP_A,
     PartClass,
     extra_runs,
     part_class,
@@ -44,8 +45,13 @@ def description(part: str) -> popcorn.PartDescription:
 
 
 def example_scope() -> list[str]:
-    """The shipped parts the examples cover: every U5 and H5 part and the STM32L1 group A."""
-    return [p for p in shipped_parts() if p.startswith(("STM32U5", "STM32H5")) or p in L1_GROUP_A]
+    """The shipped parts the examples cover: every U5 and H5 part, the STM32L1 group A and the
+    STM32L4 group A."""
+    return [
+        p
+        for p in shipped_parts()
+        if p.startswith(("STM32U5", "STM32H5")) or p in L1_GROUP_A or p in L4_GROUP_A
+    ]
 
 
 def classes() -> dict[PartClass, list[str]]:
@@ -75,9 +81,9 @@ def flash_kib(part: str) -> int:
     return sum(r.size for r in description(part).regions if r.name in FLASH_REGIONS) // 1024
 
 
-def test_the_classes_of_the_shipped_parts_number_56_on_seven_dies() -> None:
+def test_the_classes_of_the_shipped_parts_number_57_on_eight_dies() -> None:
     found = classes()
-    assert len(found) == 56
+    assert len(found) == 57
     assert collections.Counter(c.die for c in found) == {
         "U575/U585": 30,
         "H56x/H573": 21,
@@ -86,6 +92,7 @@ def test_the_classes_of_the_shipped_parts_number_56_on_seven_dies() -> None:
         "DIE427": 1,
         "DIE436": 1,
         "DIE437": 1,
+        "DIE415": 1,
     }
 
 
@@ -169,6 +176,14 @@ def test_the_l1_group_a_is_one_lqfp64_part_per_die_of_the_shipped_l1_names() -> 
     assert {part_class(p).package for p in L1_GROUP_A} == {"LQFP64"}
     assert {part_class(p).die for p in L1_GROUP_A} == {part_class(p).die for p in shipped}
     assert len({part_class(p).die for p in L1_GROUP_A}) == len(L1_GROUP_A)
+
+
+def test_the_l4_group_a_is_the_lqfp64_part_of_each_die_of_the_shipped_l4_names() -> None:
+    shipped = [p for p in shipped_parts() if p.startswith("STM32L4")]
+    assert set(L4_GROUP_A) <= set(shipped)
+    assert {part_class(p).package for p in L4_GROUP_A} == {"LQFP64"}
+    assert {part_class(p).die for p in L4_GROUP_A} == {part_class(p).die for p in shipped}
+    assert [part_class(p) for p in L4_GROUP_A] == [PartClass("DIE415", 256, "LQFP64", False)]
 
 
 def test_the_l1_part_classes_split_the_cat3_parts_by_die() -> None:
