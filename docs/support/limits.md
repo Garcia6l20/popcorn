@@ -282,7 +282,10 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   26:16, RM0351 18.8.1. ADC3 has no `ADC_CSR` bits.
 - `ADC_DR` holds one result. Under OVRMOD 0 a result that finds EOC set sets OVR and is
   discarded, and so is every result while OVR stays set, RM0351 18.4.26.
-- ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD clear.
+- Deviation: ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD clear. DS10198 Table 76
+  gives a tSTAB of one conversion cycle.
+- With ROVSE, AWD1 compares `ADC_DR[15:4]`, RM0351 18.4.30. AWD2 and AWD3 compare `ADC_DR[15:8]`,
+  the STM32H5 rule, inferred: RM0351 18.4.29 and 18.4.30 give no oversampled rule for them.
 - VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`. The ADC2 channels 17 and 18
   and the ADC3 channels 14 and 15, the DAC1 outputs, read 0.
 - The trigger from EXTI line 11 reaches the ADC whatever the EXTI interrupt configuration, ES0250

@@ -6,6 +6,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <doctest/doctest.h>
@@ -59,6 +60,16 @@ constexpr std::uint32_t adc3_irq    = 47;
 [[nodiscard]] constexpr auto extsel(std::uint32_t code) -> std::uint32_t
 {
   return code << 6;
+}
+
+[[nodiscard]] constexpr auto ckmode(std::uint32_t code) -> std::uint32_t
+{
+  return code << 16;
+}
+
+[[nodiscard]] constexpr auto presc(std::uint32_t code) -> std::uint32_t
+{
+  return code << 18;
 }
 
 struct rig
@@ -241,6 +252,22 @@ struct rig
     auto const started = now();
     write(unit, "CR1", 1u);
     return started + (ccr.empty() ? ms : 400 * us);
+  }
+
+  [[nodiscard]] auto last_due(std::string_view unit = "ADC1") const -> std::uint64_t
+  {
+    auto const& units = f->target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, unit, &popcorn::peripheral_desc::name) - units.begin());
+    auto latest = std::uint64_t{};
+    for(auto const& event : f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner)
+      {
+        latest = std::max(latest, event.due_ps);
+      }
+    }
+    return latest;
   }
 };
 
@@ -439,6 +466,85 @@ TEST_CASE(
     r.start(1);
     r.ends_at(trigger + edge_after(trigger, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8);
     CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+    CHECK(r.warnings().empty());
+  }
+}
+
+TEST_CASE("RM0351 Table 111: EXTSEL 6 starts a conversion at a rising edge of EXTI line 11")
+{
+  rig const r;
+  r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+  r.set("GPIOA", "MODER", "MODER11", 0);
+  r.enable();
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(6));
+  r.start(1);
+  r.run_until(r.now() + 10 * us);
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  auto const edge = r.now();
+  pins->drive(11, true);
+  r.ends_at(edge + edge_after(edge, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8);
+  CHECK(r.warnings().empty());
+}
+
+TEST_CASE(
+    "RM0351 Table 111: EXTSEL 8 tim8_trgo2 and 10 tim1_trgo2 log one warning each, no conversion")
+{
+  rig const r;
+  r.enable();
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(8));
+  r.start(1);
+  r.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(10));
+  r.start(1);
+  r.settle();
+  auto const logged = r.warnings();
+  REQUIRE(logged.size() == 2);
+  CHECK(logged[0].message.contains("EXTSEL 8: trigger tim8_trgo2"));
+  CHECK(logged[1].message.contains("EXTSEL 10: trigger tim1_trgo2"));
+  CHECK(r.isr("EOC") == 0);
+}
+
+TEST_CASE(
+    "DS10198 Table 76: tLATR at CKMODE 01, 10 and 11 is 2, 2.25 and 2.125 cycles of HCLK / 1, 2 "
+    "and 4, at CKMODE 00 the next ADC clock edge then 1.5 cycles, inferred")
+{
+  struct setting
+  {
+    std::uint32_t mode;
+    std::uint32_t prescaler;
+    std::uint64_t divider;
+    std::uint64_t eighths;
+    std::uint64_t offset_ps;
+  };
+  for(auto const [mode, prescaler, divider, eighths, offset] : {
+          setting{0, 0, 1, 12, 0       },
+          setting{0, 1, 2, 12, 0       },
+          setting{0, 1, 2, 12, cycle_ps},
+          setting{1, 0, 1, 16, 0       },
+          setting{2, 0, 2, 18, 0       },
+          setting{3, 0, 4, 17, 0       },
+  })
+  {
+    CAPTURE(mode);
+    CAPTURE(divider);
+    CAPTURE(offset);
+    rig const r;
+    r.write("ADC_Common", "ADC_CCR", ckmode(mode) | presc(prescaler));
+    r.enable();
+    r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(14));
+    if(offset != 0)
+    {
+      r.run_until(r.now() + offset);
+    }
+    auto const trigger = r.timer("TIM15", "");
+    r.start(1);
+    auto const period = cycle_ps * divider;
+    auto const edge   = mode == 0 ? edge_after(trigger, period) : 0;
+    auto const end    = trigger + edge + (eighths + 8 * 15) * period / 8;
+    r.run_until(trigger + us);
+    CHECK(r.last_due() == end);
+    r.ends_at(end);
     CHECK(r.warnings().empty());
   }
 }

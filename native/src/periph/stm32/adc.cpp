@@ -1007,23 +1007,25 @@ struct adc_clock
  *        with these differences. ADC_DR holds one result, RM0351 18.4.26: with OVRMOD 0 a result
  *        finding EOC set sets OVR and is discarded, and every result while OVR stays set. ADC1 and
  *        ADC2 raise ADC1_2_IRQn, ADC3 ADC3_IRQn. The kernel clock is the RCC_CCIPR.ADCSEL clock,
- *        common to the three ADCs. ADRDY sets at the ADEN write with ADVREGEN set and DEEPPWD
- *        clear. The external channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3,
- *        RM0351 Figures 68 to 70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the
- *        temperature sensor on 17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000
- *        / VDDA, RM0351 18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15
- *        of ADC3, and the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19
- *        converts 0 with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes
- *        0 to 15: EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line
- *        SYSCFG_EXTICR3 selects, and the TRGO2 selections 8 and 10, which no L4 timer model
- *        produces, log a warning once, a model_error under strict_peripherals. At CKMODE 00 a
- *        trigger waits for the next ADC clock edge, counted from virtual time 0, then tLATR 1.5
- *        cycles, which spans the 1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01,
- *        10 and 11 tLATR is 2, 2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA
- *        transfer leaves ADSTART set, which RM0351 18.4.15 does not list among its hardware clears,
- *        and drops the conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the
- *        ADC clock outside 0.14 to 80 MHz logs a warning. AWDFILT, BULB, SMPTRIG and SMPPLUS do not
- *        exist.
+ *        common to the three ADCs. Deviation: ADRDY sets at the ADEN write with ADVREGEN set and
+ *        DEEPPWD clear, where DS10198 Table 76 gives a tSTAB of one conversion cycle. The external
+ *        channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3, RM0351 Figures 68 to
+ *        70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the temperature sensor on
+ *        17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000 / VDDA, RM0351
+ *        18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15 of ADC3, and
+ *        the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19 converts 0
+ *        with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes 0 to 15:
+ *        EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line SYSCFG_EXTICR3
+ *        selects, and the TRGO2 selections 8 and 10, which no L4 timer model produces, log a
+ *        warning once, a model_error under strict_peripherals. At CKMODE 00 a trigger waits for the
+ *        next ADC clock edge, counted from virtual time 0, then tLATR 1.5 cycles, which spans the
+ *        1.5 to 2.5 cycles DS10198 Table 76 gives, inferred. At CKMODE 01, 10 and 11 tLATR is 2,
+ *        2.25 and 2.125 cycles, DS10198 Table 76. The end of a one-shot DMA transfer leaves ADSTART
+ *        set, which RM0351 18.4.15 does not list among its hardware clears, and drops the
+ *        conversion in progress as on the U5, RM0351 18.4.26. Each ADEN edge with the ADC clock
+ *        outside 0.14 to 80 MHz logs a warning. With ROVSE AWD1 compares ADC_DR[15:4], RM0351
+ *        18.4.30, and AWD2 and AWD3 ADC_DR[15:8] as on the H5, inferred. AWDFILT, BULB, SMPTRIG and
+ *        SMPPLUS do not exist.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
