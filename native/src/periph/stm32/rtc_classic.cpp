@@ -10,6 +10,7 @@
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/core_hold.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <algorithm>
 #include <array>
@@ -35,8 +36,9 @@ using rtc_calendar::first_key;
 using rtc_calendar::init_cycles;
 using rtc_calendar::second_key;
 
-constexpr std::uint64_t sync_cycles       = 2;
-constexpr std::uint64_t stamp_apre_cycles = 2;
+constexpr std::uint64_t sync_cycles        = 2;
+constexpr std::uint64_t stamp_apre_cycles  = 2;
+constexpr std::uint64_t tamper_apre_cycles = 3;
 
 enum classic_event : std::uint8_t
 {
@@ -49,6 +51,10 @@ enum classic_event : std::uint8_t
   alarm_a_write,
   alarm_b_write,
   timestamp_ready,
+  tamper1_ready,
+  tamper2_ready,
+  tamper3_ready,
+  tamper_sample,
   classic_events,
 };
 
@@ -81,6 +87,8 @@ struct rtc_classic_state
   std::uint32_t                             stamp_time{};
   std::uint32_t                             stamp_date{};
   std::uint32_t                             stamp_subsecond{};
+  std::uint8_t                              tamper_pending{};
+  std::array<std::uint8_t, 3>               tamper_samples{};
 
   friend auto operator==(rtc_classic_state const&, rtc_classic_state const&) -> bool = default;
 };
@@ -205,11 +213,26 @@ struct unmodelled_entry
  *        bits 15:0 without the year and SSR into RTC_TSTR, RTC_TSDR and RTC_TSSSR at the edge,
  *        and sets TSF 2 ck_apre cycles later, 2 x (PREDIV_A + 1) RTCCLK cycles, inferred. An edge
  *        while TSF is set or that set is pending sets TSOVF at once and keeps the stamp, the
- *        pending case inferred from the TSOVF note of 38.3.13. A TSF clear writes 0 to the three
+ *        pending case from the TSOVF note of 38.3.13. A TSF clear writes 0 to the three
  *        registers, 38.6.12 to 38.6.14. TSF and TSIE drive the tamper EXTI line of the variant,
  *        line 19, RM0351 Table 62. RTC_TS reads the variant's pin, PC13, whatever its GPIO mode,
  *        RM0351 38.3.2: the board drive, else the PUPDR pull-up, inferred. A PUPDR write and a
  *        TSEDGE write make no edge.
+ *        Tampers, RM0351 38.3.14, with `rtc_classic_variant::tampers`: RTC_TAMP1 to RTC_TAMP3 on
+ *        the variant's pins, PC13, PA0 and PE6, an unbonded pin never active. With TAMPFLT 0 an
+ *        edge of the TAMPxTRG polarity with TAMPxE set is an event, with TAMPFLT 1 to 3 the
+ *        input is sampled every 2^(15 - TAMPFREQ) RTCCLK cycles, on multiples of that period,
+ *        and 2, 4 or 8 consecutive samples at the TAMPxTRG level make an event, the phase and
+ *        the count restart after an event inferred. A sample of an undriven input reads high
+ *        with TAMPPUDIS 0, the precharge, else its PUPDR pull-up. An event while TAMPxF is set
+ *        with TAMPxMF 0, or while one is pending, is lost. TAMPxF sets at the event with
+ *        TAMPFLT 0 and TAMPTS 0, else 3 ck_apre cycles later, and the backup registers are
+ *        erased then unless TAMPxNOERASE, inferred. With TAMPxMF set no flag sets and nothing is
+ *        erased.
+ *        TAMPTS stamps the calendar of the event as a timestamp does, TSF with TAMPxF. A tamper
+ *        flag with TAMPIE or its TAMPxIE drives the tamper EXTI line. ES0250 2.19.1: clearing
+ *        TAMPxE of an enabled falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1, while its input is
+ *        high is an event, with the TAMPxNOERASE of the previous write.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
@@ -289,45 +312,68 @@ private:
   void alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle);
   void settle(std::uint64_t cycle);
   void refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now);
-  void stamp();
-  void clear_stamp();
+  void stamp(std::uint64_t delay);
+  [[nodiscard]] auto tamper_count() const -> std::size_t;
+  [[nodiscard]] auto tamper_input(std::size_t which, bool precharged) const -> std::optional<bool>;
+  [[nodiscard]] auto tamper_raised() const -> bool;
+  void               detect(std::size_t which);
+  void               tamper_fire(std::size_t which);
+  void               raise_tamper(std::size_t which, bool erase);
+  void               sample_tampers();
+  void               plan_samples();
+  void               clear_stamp();
 
-  std::optional<std::chrono::sys_seconds>            initial_;
-  rtc_classic_variant                                variant_;
-  register_file&                                     regs_;
-  reg_ref                                            time_;
-  reg_ref                                            date_;
-  std::optional<reg_ref>                             subsecond_;
-  reg_ref                                            status_;
-  reg_ref                                            control_;
-  reg_ref                                            key_;
-  field_ref                                          init_;
-  field_ref                                          init_flag_;
-  field_ref                                          init_status_;
-  field_ref                                          shadow_flag_;
-  std::optional<field_ref>                           bypass_;
-  field_ref                                          prediv_a_;
-  field_ref                                          prediv_s_;
-  field_ref                                          format_;
-  field_ref                                          add_hour_;
-  field_ref                                          sub_hour_;
-  std::uint32_t                                      init_only_{};
-  std::uint32_t                                      open_flags_{};
-  std::uint32_t                                      keyed_flags_{};
-  std::vector<std::uint32_t>                         storage_;
-  std::vector<std::uint32_t>                         backups_;
-  std::array<classic_alarm, 2>                       alarms_{};
-  field_ref                                          wakeup_reload_;
-  field_ref                                          wakeup_clock_;
-  field_ref                                          wakeup_enable_;
-  field_ref                                          wakeup_interrupt_;
-  field_ref                                          wakeup_flag_;
-  field_ref                                          wakeup_write_;
-  field_ref                                          stamp_enable_;
-  field_ref                                          stamp_edge_;
-  field_ref                                          stamp_interrupt_;
-  field_ref                                          stamp_flag_;
-  field_ref                                          stamp_overflow_;
+  std::optional<std::chrono::sys_seconds> initial_;
+  rtc_classic_variant                     variant_;
+  register_file&                          regs_;
+  reg_ref                                 time_;
+  reg_ref                                 date_;
+  std::optional<reg_ref>                  subsecond_;
+  reg_ref                                 status_;
+  reg_ref                                 control_;
+  reg_ref                                 key_;
+  field_ref                               init_;
+  field_ref                               init_flag_;
+  field_ref                               init_status_;
+  field_ref                               shadow_flag_;
+  std::optional<field_ref>                bypass_;
+  field_ref                               prediv_a_;
+  field_ref                               prediv_s_;
+  field_ref                               format_;
+  field_ref                               add_hour_;
+  field_ref                               sub_hour_;
+  std::uint32_t                           init_only_{};
+  std::uint32_t                           open_flags_{};
+  std::uint32_t                           keyed_flags_{};
+  std::vector<std::uint32_t>              storage_;
+  std::vector<std::uint32_t>              backups_;
+  std::array<classic_alarm, 2>            alarms_{};
+  field_ref                               wakeup_reload_;
+  field_ref                               wakeup_clock_;
+  field_ref                               wakeup_enable_;
+  field_ref                               wakeup_interrupt_;
+  field_ref                               wakeup_flag_;
+  field_ref                               wakeup_write_;
+  field_ref                               stamp_enable_;
+  field_ref                               stamp_edge_;
+  field_ref                               stamp_interrupt_;
+  field_ref                               stamp_flag_;
+  field_ref                               stamp_overflow_;
+  struct tamper_fields
+  {
+    field_ref enable;
+    field_ref trigger;
+    field_ref interrupt;
+    field_ref no_erase;
+    field_ref mask;
+    field_ref flag;
+  };
+  std::array<tamper_fields, 3>                       tamper_{};
+  field_ref                                          tamper_interrupt_;
+  field_ref                                          tamper_stamp_;
+  field_ref                                          tamper_frequency_;
+  field_ref                                          tamper_filter_;
+  field_ref                                          tamper_pull_up_off_;
   std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
   std::array<bool, unmodelled_functions>             logged_{};
   rtc_calendar::counter<rtc_classic_state>           count_;
@@ -509,7 +555,30 @@ rtc_classic::rtc_classic(
   }
   unmodelled_[timestamp_function] = {
       "CR", variant.timestamps ? "the internal timestamp" : "timestamps", stamps};
-  unmodelled_[tamper_function] = {variant.tamper_register, "tamper detection", tampers};
+  unmodelled_[tamper_function] = {
+      variant.tamper_register, "tamper detection", variant.tampers ? std::uint32_t{} : tampers};
+  if(variant.tampers)
+  {
+    auto const& tamper_reg = variant.tamper_register;
+    for(std::size_t which = 0; which < tamper_count(); ++which)
+    {
+      auto const name = [&](std::string_view suffix) {
+        return std::format("TAMP{}{}", which + 1, suffix);
+      };
+      tamper_[which] = {
+          .enable    = field(tamper_reg, name("E")),
+          .trigger   = field(tamper_reg, name("TRG")),
+          .interrupt = field(tamper_reg, name("IE")),
+          .no_erase  = field(tamper_reg, name("NOERASE")),
+          .mask      = field(tamper_reg, name("MF")),
+          .flag      = field("ISR", name("F"))};
+    }
+    tamper_interrupt_   = field(tamper_reg, "TAMPIE");
+    tamper_stamp_       = field(tamper_reg, "TAMPTS");
+    tamper_frequency_   = field(tamper_reg, "TAMPFREQ");
+    tamper_filter_      = field(tamper_reg, "TAMPFLT");
+    tamper_pull_up_off_ = field(tamper_reg, "TAMPPUDIS");
+  }
   unmodelled_[coarse_function] = {
       "CR", "coarse digital calibration",
       variant.coarse_calibration ? bits("CR", {"DCE"}) : std::uint32_t{}};
@@ -688,7 +757,7 @@ void rtc_classic::update_lines()
   {
     levels |= 2u;
   }
-  if(variant_.timestamps and raised(stamp_flag_, stamp_interrupt_))
+  if((variant_.timestamps and raised(stamp_flag_, stamp_interrupt_)) or tamper_raised())
   {
     levels |= 4u;
   }
@@ -925,6 +994,15 @@ void rtc_classic::on_event(std::uint32_t kind, std::uint64_t payload)
         update(regs_, stamp_flag_, 1);
       }
       break;
+    case tamper1_ready:
+    case tamper2_ready:
+    case tamper3_ready:
+      tamper_fire(static_cast<std::size_t>(kind - tamper1_ready));
+      break;
+    case tamper_sample:
+      sample_tampers();
+      plan_samples();
+      break;
     case alarm_a_write:
     case alarm_b_write:
     {
@@ -953,20 +1031,168 @@ void rtc_classic::on_core_hold(bool held)
 
 void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, bool level)
 {
-  if(not variant_.timestamps or port != variant_.timestamp_port or pin != variant_.timestamp_pin)
+  if(not variant_.timestamps and not variant_.tampers)
   {
     return;
   }
   settle(count_.cycle_at(now_ps()));
-  if(get(regs_, stamp_enable_) == 0 or level == (get(regs_, stamp_edge_) != 0))
+  if(variant_.tampers and get(regs_, tamper_filter_) == 0)
   {
-    return;
+    for(std::size_t which = 0; which < tamper_count(); ++which)
+    {
+      auto const& t = tamper_[which];
+      if(port == variant_.tamper_ports[which]
+         and pin == variant_.tamper_pins[which]
+         and get(regs_, t.enable) != 0
+         and level != (get(regs_, t.trigger) != 0))
+      {
+        detect(which);
+      }
+    }
   }
-  stamp();
+  if(variant_.timestamps
+     and port == variant_.timestamp_port
+     and pin == variant_.timestamp_pin
+     and get(regs_, stamp_enable_) != 0
+     and level != (get(regs_, stamp_edge_) != 0))
+  {
+    stamp(stamp_apre_cycles);
+  }
   update_lines();
 }
 
-void rtc_classic::stamp()
+auto rtc_classic::tamper_count() const -> std::size_t
+{
+  return variant_.three_tampers ? 3 : 1;
+}
+
+auto rtc_classic::tamper_input(std::size_t which, bool precharged) const -> std::optional<bool>
+{
+  auto const* const peer   = ctx_.peers.find(variant_.tamper_ports[which]);
+  auto const* const source = dynamic_cast<board_input_source const*>(peer);
+  auto const* const port   = dynamic_cast<gpio_port const*>(peer);
+  auto const        pin    = variant_.tamper_pins[which];
+  if(source == nullptr or port == nullptr or (port->bonded_pins() >> pin & 1u) == 0)
+  {
+    return std::nullopt;
+  }
+  if(auto const drive = source->board_drive(pin))
+  {
+    return drive;
+  }
+  return (precharged and get(regs_, tamper_pull_up_off_) == 0) or source->board_level(pin);
+}
+
+auto rtc_classic::tamper_raised() const -> bool
+{
+  if(not variant_.tampers)
+  {
+    return false;
+  }
+  auto const all = get(regs_, tamper_interrupt_) != 0;
+  for(std::size_t which = 0; which < tamper_count(); ++which)
+  {
+    auto const& t = tamper_[which];
+    if(get(regs_, t.flag) != 0 and (all or get(regs_, t.interrupt) != 0))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+void rtc_classic::detect(std::size_t which)
+{
+  auto const& t   = tamper_[which];
+  auto const  bit = static_cast<std::uint8_t>(1u << which);
+  if((state_.tamper_pending & bit) != 0 or (get(regs_, t.flag) != 0 and get(regs_, t.mask) == 0))
+  {
+    return;
+  }
+  auto const filtered = get(regs_, tamper_filter_) != 0;
+  auto const stamped  = get(regs_, tamper_stamp_) != 0;
+  if(stamped)
+  {
+    stamp(tamper_apre_cycles);
+  }
+  if(not filtered and not stamped)
+  {
+    tamper_fire(which);
+    return;
+  }
+  state_.tamper_pending |= bit;
+  arm(static_cast<classic_event>(tamper1_ready + which),
+      count_.cycle_at(now_ps()) + tamper_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
+}
+
+void rtc_classic::tamper_fire(std::size_t which)
+{
+  auto const& t = tamper_[which];
+  state_.tamper_pending &= static_cast<std::uint8_t>(~(1u << which));
+  if(get(regs_, t.mask) != 0)
+  {
+    return;
+  }
+  raise_tamper(which, get(regs_, t.no_erase) == 0);
+}
+
+void rtc_classic::raise_tamper(std::size_t which, bool erase)
+{
+  update(regs_, tamper_[which].flag, 1);
+  if(erase)
+  {
+    for(auto const offset : backups_)
+    {
+      regs_.poke(offset, 0);
+    }
+  }
+}
+
+void rtc_classic::sample_tampers()
+{
+  auto const needed = std::uint8_t{1} << get(regs_, tamper_filter_);
+  for(std::size_t which = 0; which < tamper_count(); ++which)
+  {
+    auto const& t     = tamper_[which];
+    auto const  input = tamper_input(which, true);
+    auto&       count = state_.tamper_samples[which];
+    if(get(regs_, t.enable) == 0 or not input or *input != (get(regs_, t.trigger) != 0))
+    {
+      count = 0;
+      continue;
+    }
+    count = static_cast<std::uint8_t>(std::min<unsigned>(count + 1u, needed));
+    if(count >= needed)
+    {
+      count = 0;
+      detect(which);
+    }
+  }
+}
+
+void rtc_classic::plan_samples()
+{
+  state_.armed[tamper_sample] = 0;
+  ++state_.generation[tamper_sample];
+  if(not variant_.tampers or get(regs_, tamper_filter_) == 0)
+  {
+    return;
+  }
+  auto enabled = false;
+  for(std::size_t which = 0; which < tamper_count(); ++which)
+  {
+    enabled = enabled or get(regs_, tamper_[which].enable) != 0;
+  }
+  if(not enabled)
+  {
+    return;
+  }
+  auto const period = std::uint64_t{1} << (15u - get(regs_, tamper_frequency_));
+  auto const cycle  = count_.cycle_at(now_ps());
+  arm(tamper_sample, (cycle / period + 1) * period);
+}
+
+void rtc_classic::stamp(std::uint64_t delay)
 {
   if(get(regs_, stamp_flag_) != 0 or state_.stamp_pending != 0)
   {
@@ -979,7 +1205,7 @@ void rtc_classic::stamp()
   state_.stamp_date      = count_.date_register(position);
   state_.stamp_subsecond = subsecond_ ? count_.subsecond_register(position) : 0;
   state_.stamp_pending   = 1;
-  arm(timestamp_ready, cycle + stamp_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
+  arm(timestamp_ready, cycle + delay * (std::uint64_t{state_.prediv_a} + 1));
 }
 
 void rtc_classic::clear_stamp()
@@ -1165,6 +1391,27 @@ void rtc_classic::shift_written(std::uint32_t old, std::uint32_t now)
 void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
 {
   refuse_unmodelled(variant_.tamper_register, old, now);
+  if(not variant_.tampers)
+  {
+    return;
+  }
+  for(std::size_t which = 0; which < tamper_count(); ++which)
+  {
+    auto const& t = tamper_[which];
+    if(t.enable.of(old) != 0
+       and t.enable.of(now) == 0
+       and tamper_filter_.of(old) == 0
+       and t.trigger.of(old) != 0
+       and tamper_input(which, false).value_or(false))
+    {
+      if(get(regs_, t.flag) == 0 and t.mask.of(old) == 0)
+      {
+        raise_tamper(which, t.no_erase.of(old) == 0);
+      }
+    }
+  }
+  plan_samples();
+  update_lines();
 }
 
 template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old, std::uint32_t)

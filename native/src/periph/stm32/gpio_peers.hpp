@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace popcorn::periph::stm32
@@ -91,5 +92,43 @@ public:
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~board_input_listener() = default;
+};
+
+/**
+ * @brief A GPIO port as the RTC sees it, found by `dynamic_cast` over the machine's peers: the
+ *        levels the board gives a pin whatever its mode, for the RTC tamper inputs, RM0351
+ *        38.3.14.
+ */
+class board_input_source
+{
+public:
+  /** @brief Creates the interface. */
+  board_input_source() = default;
+  /** @brief Not copyable. */
+  board_input_source(board_input_source const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(board_input_source const&) -> board_input_source& = delete;
+  /** @brief Not movable. */
+  board_input_source(board_input_source&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(board_input_source&&) -> board_input_source& = delete;
+
+  /**
+   * @brief The level the board drives on a pin.
+   * @param pin Pin of the port, 0 to 15.
+   * @return The drive, empty for a pin the board leaves undriven.
+   */
+  [[nodiscard]] virtual auto board_drive(std::uint8_t pin) const -> std::optional<bool> = 0;
+
+  /**
+   * @brief The board level of a pin.
+   * @param pin Pin of the port, 0 to 15.
+   * @return The drive, else the `GPIOx_PUPDR` pull-up.
+   */
+  [[nodiscard]] virtual auto board_level(std::uint8_t pin) const -> bool = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~board_input_source() = default;
 };
 }

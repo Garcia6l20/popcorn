@@ -9,11 +9,13 @@
 static volatile uint32_t wakeups;
 static volatile uint32_t alarms;
 static volatile uint32_t stamps;
+static volatile uint32_t tampers;
 
 void RTC_Alarm_IRQHandler(void);
 void RTC_WKUP_IRQHandler(void);
 void TAMP_STAMP_IRQHandler(void);
 void timestamp(void);
+void tamper(void);
 void idle(void);
 void alarm(void);
 void wakeup(void);
@@ -74,6 +76,12 @@ void TAMP_STAMP_IRQHandler(void)
     LOG(RTC->TSDR);
     LL_RTC_ClearFlag_TS(RTC);
     ++stamps;
+  }
+  if(LL_RTC_IsActiveFlag_TAMP2(RTC))
+  {
+    LOG(LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR0));
+    LL_RTC_ClearFlag_TAMP2(RTC);
+    ++tampers;
   }
   LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_19);
 }
@@ -197,6 +205,24 @@ void timestamp(void)
     __WFI();
   }
   LOG(stamps);
+  DONE();
+}
+
+void tamper(void)
+{
+  start_clock();
+  LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR0, 0xCAFE1234u);
+  LOG(LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR0));
+  LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_19);
+  LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_19);
+  NVIC_EnableIRQ(TAMP_STAMP_IRQn);
+  LL_RTC_EnableIT_TAMP(RTC);
+  LL_RTC_TAMPER_Enable(RTC, LL_RTC_TAMPER_2);
+  while(tampers < 1)
+  {
+    __WFI();
+  }
+  LOG(tampers);
   DONE();
 }
 

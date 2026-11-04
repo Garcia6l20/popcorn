@@ -132,7 +132,8 @@ struct listener_table
  *        at its value before the write. Without strict the pin behaves as a powered one, where
  *        RM0351 5.1.2 isolates it, the isolated register behaviour inferred. A drive or a
  *        release that changes the board level of a pin, the drive else the PUPDR pull-up,
- *        reaches every board_input_listener peer whatever the pin mode, for the RTC inputs.
+ *        reaches every board_input_listener peer whatever the pin mode, for the RTC inputs, and
+ *        board_input_source gives the drive and the board level of a pin on request.
  *
  *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
  *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER, OSPEEDR,
@@ -146,6 +147,7 @@ struct listener_table
 class gpio final : public dispatch_model<gpio, gpio_state>,
                    public gpio_port,
                    public analog_switch_source,
+                   public board_input_source,
                    public pin_edge_clock,
                    public trustzone_aware,
                    public bus_reset_listener
@@ -187,7 +189,8 @@ private:
   [[nodiscard]] auto board_base() const -> std::uint64_t;
   [[nodiscard]] auto pending() const -> std::span<pending_edge const>;
   void               apply(std::uint8_t pin, std::optional<bool> level);
-  [[nodiscard]] auto board_level(std::uint8_t pin) const -> bool;
+  [[nodiscard]] auto board_level(std::uint8_t pin) const -> bool override;
+  [[nodiscard]] auto board_drive(std::uint8_t pin) const -> std::optional<bool> override;
   void               settle(bool notify);
   void               restore_reset_values();
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
@@ -981,6 +984,16 @@ void gpio::check_pin(std::uint8_t pin) const
   {
     throw config_error(desc_.name, 0, "pin", pin_range_text(port_pins_));
   }
+}
+
+auto gpio::board_drive(std::uint8_t pin) const -> std::optional<bool>
+{
+  auto const bit = std::uint32_t{1} << pin;
+  if((state_.driven & bit) == 0)
+  {
+    return std::nullopt;
+  }
+  return (state_.driven_high & bit) != 0;
 }
 
 auto gpio::board_level(std::uint8_t pin) const -> bool

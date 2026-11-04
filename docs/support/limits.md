@@ -1400,14 +1400,43 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
   STM32L1 Cat.2 to Cat.6, whose flags are always set. `RTC_ALRMxSSR` takes writes with ALRxE clear
   or in init mode, RM0351 38.6.17 and 38.6.18.
 - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: the internal
-  timestamp `CR.ITSE`, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
-  the outputs and the reference clock detection.
+  timestamp `CR.ITSE`, smooth calibration, the shift control, the outputs and the reference clock
+  detection.
+- Tampers, RM0351 38.3.14: RTC_TAMP1 on PC13, RTC_TAMP2 on PA0 and RTC_TAMP3 on PE6, DS10198
+  Table 16. A pin the package does not bond, such as PE6 on the 64-pin parts, is never active.
+  With TAMPFLT 0 an edge of the TAMPxTRG polarity is an event. With TAMPFLT 1 to 3 the input is
+  sampled every 2^(15 - TAMPFREQ) RTCCLK cycles, on multiples of that period counted from the
+  calendar's RTCCLK origin, and 2, 4 or 8 consecutive samples at the TAMPxTRG level make an
+  event. The sample phase, and the count restarting after each event, are inferred.
+- A sample of an undriven tamper input reads high with TAMPPUDIS 0, the precharge, and its PUPDR
+  pull-up with TAMPPUDIS 1. TAMPPRCH sets no timing: the board drive is ideal.
+- TAMPxF sets at the event with TAMPFLT 0 and TAMPTS 0, else 3 ck_apre cycles later, RM0351
+  38.3.14, counted from the event, inferred. The backup registers are erased when TAMPxF sets,
+  unless TAMPxNOERASE, inferred: RM0351 38.3.14 erases at the tamper event and gives the latency
+  for TAMPxF only. An event while TAMPxF is set, or while one is pending, is lost.
+- TAMPxMF masks TAMPxF and the erase. The tamper trigger to the LPTIM is not connected. A TAMPIE
+  or TAMPxIE write with a TAMPxMF set is stored as written. With TAMPxMF an event is lost during
+  the latency only, where RM0351 38.3.14 adds 2.5 ck_rtc cycles to that window.
+- TAMPTS stamps the calendar of the tamper event as a timestamp does. TSF sets with TAMPxF, and
+  TSOVF at once when a stamp is set or pending, RM0351 38.3.13. TAMPIE, or TAMPxIE, with TAMPxF
+  drives EXTI line 19.
+- ES0250 2.19.1 is modelled: clearing TAMPxE of a falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1,
+  while its input is high is a tamper event. It erases unless TAMPxNOERASE was set by an earlier
+  write.
+- ES0250 2.19.5: with DBG_RTC_STOP a held core stops the alarms, the subsecond alarm included,
+  and no flag repeats during the hold.
+- ES0250 2.19.6: a tamper event right after a TSF clear stamps as any other event, with no APB
+  cycle window.
+- ES0250 2.19.7: Stop 2 is not modelled, and RTC_REFIN and RTC_OUT on PB2 are outputs and inputs
+  the model does not drive.
 - Timestamps, RM0351 38.3.13: with `CR.TSE` an edge of RTC_TS on PC13, rising with TSEDGE 0 and
   falling with 1, captures the calendar of the edge into `RTC_TSTR`, `RTC_TSDR` and `RTC_TSSSR`
   and sets TSF 2 x (PREDIV_A + 1) RTCCLK cycles later, the "2 ck_apre cycles" of 38.3.13 counted
   from the edge, inferred. An edge while TSF is set or still pending sets TSOVF at once and keeps
-  the stamp, the pending case inferred. A TSF clear zeroes the three registers. TSF with TSIE
-  drives EXTI line 19 and TAMP_STAMP_IRQn.
+  the stamp, the 38.3.13 note "TSOVF can be seen as '1' while TSF is still '0'". A TSF clear
+  zeroes the three registers. TSF with TSIE drives EXTI line 19 and TAMP_STAMP_IRQn.
+- An edge right after a TSF clear records a new stamp with TSF set and TSOVF 0, where the
+  38.3.13 Caution sets both TSF and TSOVF for an event immediately after the clear.
 - RTC_TS reads PC13 whatever its GPIO mode, RM0351 38.3.2: the board drive, else the PUPDR pull-up,
   inferred for an undriven pin. A PUPDR write and a TSEDGE write make no timestamp edge.
 - The 32 backup registers keep their value through a system reset. `RCC_BDCR.BDRST`, a power-on

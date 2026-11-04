@@ -8,6 +8,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -507,9 +508,6 @@ TEST_CASE(
           row{"CR",     1u << 23, false},
           row{"CR",     1u << 21, false},
           row{"CR",     1u << 4,  true },
-          row{"TAMPCR", 1u << 0,  false},
-          row{"TAMPCR", 1u << 3,  false},
-          row{"TAMPCR", 1u << 5,  false},
           row{"CALR",   0x100,    false},
           row{"SHIFTR", 0x10,     false}
   })
@@ -1117,4 +1115,305 @@ TEST_CASE("RM0351 38.5: LL timestamp on a PC13 rise runs TAMP_STAMP_IRQHandler t
   CHECK(
       finish(f, 2'000'000'000)
       == std::vector<std::uint32_t>{0, 0, 0, 0x23'5959, feb_28 & 0xFF3Fu, 1});
+}
+
+namespace
+{
+constexpr std::uint32_t tamp1e       = 1u << 0;
+constexpr std::uint32_t tamp1trg     = 1u << 1;
+constexpr std::uint32_t tampie       = 1u << 2;
+constexpr std::uint32_t tamp2e       = 1u << 3;
+constexpr std::uint32_t tamp2trg     = 1u << 4;
+constexpr std::uint32_t tamp3e       = 1u << 5;
+constexpr std::uint32_t tamp3trg     = 1u << 6;
+constexpr std::uint32_t tampts       = 1u << 7;
+constexpr std::uint32_t freq_256     = 7u << 8;
+constexpr std::uint32_t filter_2     = 1u << 11;
+constexpr std::uint32_t tamppudis    = 1u << 15;
+constexpr std::uint32_t tamp1ie      = 1u << 16;
+constexpr std::uint32_t tamp1noerase = 1u << 17;
+constexpr std::uint32_t tamp1mf      = 1u << 18;
+constexpr std::uint32_t tamp2noerase = 1u << 20;
+constexpr std::uint32_t tamp1f       = 1u << 13;
+constexpr std::uint32_t tamp2f       = 1u << 14;
+constexpr std::uint32_t tamp3f       = 1u << 15;
+constexpr std::uint64_t tamper_delay = 3 * 128;
+
+auto pa(rig const& r) -> stm32::gpio_port&
+{
+  auto* const found = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+void fill_backups(rig const& r)
+{
+  r.write("BKP0R", 0x1111'0000);
+  r.write("BKP31R", 0x1111'0031);
+}
+
+auto backups_kept(rig const& r) -> bool
+{
+  return r.read("BKP0R") == 0x1111'0000 and r.read("BKP31R") == 0x1111'0031;
+}
+}
+
+TEST_CASE(
+    "RM0351 38.3.14: a rising PC13 edge with TAMP1E sets TAMP1F at once, erases the backup "
+    "registers and with TAMPIE raises TAMP_STAMP on EXTI 19, strict or not")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{strict};
+    r.start_clock();
+    fill_backups(r);
+    exti_rising(r, stamp_line);
+    r.cpu_write("TAMPCR", tamp1e | tampie);
+    CHECK((r.read("ISR") & tamp1f) == 0);
+    pc(r).drive(13, true);
+    CHECK((r.read("ISR") & tamp1f) == tamp1f);
+    CHECK(r.read("BKP0R") == 0);
+    CHECK(r.read("BKP31R") == 0);
+    CHECK(nvic_pending(r, stamp_irq));
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0351 38.6.16: TAMPxTRG 1 detects the falling edge, TAMPxNOERASE keeps the backup "
+    "registers, a set TAMPxF blocks the next event until cleared")
+{
+  rig r;
+  r.start_clock();
+  pa(r).drive(0, true);
+  fill_backups(r);
+  r.write("TAMPCR", tamp2e | tamp2trg | tamp2noerase);
+  pa(r).drive(0, false);
+  CHECK((r.read("ISR") & (tamp1f | tamp2f | tamp3f)) == tamp2f);
+  CHECK(backups_kept(r));
+  r.write("TAMPCR", tamp2e | tamp2trg);
+  pa(r).drive(0, true);
+  pa(r).drive(0, false);
+  CHECK(backups_kept(r));
+  r.write("ISR", ~tamp2f & ~init_bit);
+  CHECK((r.read("ISR") & tamp2f) == 0);
+  pa(r).drive(0, true);
+  CHECK((r.read("ISR") & tamp2f) == 0);
+  pa(r).drive(0, false);
+  CHECK((r.read("ISR") & tamp2f) == tamp2f);
+  CHECK(r.read("BKP0R") == 0);
+}
+
+TEST_CASE("RM0351 38.6.16: TAMPxMF masks TAMPxF and keeps the backup registers")
+{
+  rig r;
+  r.start_clock();
+  fill_backups(r);
+  r.write("TAMPCR", tamp1e | tamp1mf);
+  pc(r).drive(13, true);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & tamp1f) == 0);
+  CHECK(backups_kept(r));
+}
+
+TEST_CASE(
+    "RM0351 38.3.14, inferred: TAMPTS stamps the calendar of the edge, TSF and TAMP2F set 3 "
+    "ck_apre cycles later, TSE 0")
+{
+  rig r;
+  running_at_midnight(r);
+  r.write("TAMPCR", tamp2e | tamp2noerase | tampts);
+  auto const subsecond = r.read("SSR");
+  auto const edge      = r.now();
+  pa(r).drive(0, true);
+  r.run_until(edge + (tamper_delay - 1) * rtc_cycle - us);
+  CHECK((r.read("ISR") & (tsf | tamp2f)) == 0);
+  r.run_until(edge + tamper_delay * rtc_cycle + us);
+  CHECK((r.read("ISR") & (tsf | tamp2f)) == (tsf | tamp2f));
+  CHECK(r.read("TSTR") == 0x00'0001);
+  CHECK(r.read("TSSSR") == subsecond);
+}
+
+TEST_CASE(
+    "RM0351 38.3.14, inferred: TAMPFLT 1 detects after 2 samples at the active level, sampled at "
+    "TAMPFREQ 7, TAMPxF 3 ck_apre cycles after the second sample")
+{
+  rig r;
+  r.start_clock();
+  fill_backups(r);
+  pa(r).drive(0, true);
+  r.write("TAMPCR", tamp2e | tamp2trg | filter_2 | freq_256);
+  auto const written = r.now();
+  r.run_until(written + (256 + tamper_delay) * rtc_cycle - us);
+  CHECK((r.read("ISR") & tamp2f) == 0);
+  CHECK(backups_kept(r));
+  r.run_until(written + (2 * 256 + tamper_delay + 1) * rtc_cycle + us);
+  CHECK((r.read("ISR") & tamp2f) == tamp2f);
+  CHECK(r.read("BKP0R") == 0);
+}
+
+TEST_CASE(
+    "RM0351 38.3.14: the precharge pulls an undriven tamper input high before each sample, "
+    "TAMPPUDIS 1 leaves it at its PUPDR pull")
+{
+  for(auto const precharge : {true, false})
+  {
+    CAPTURE(precharge);
+    rig r;
+    r.start_clock();
+    r.write("TAMPCR", tamp2e | tamp2trg | filter_2 | freq_256 | (precharge ? 0 : tamppudis));
+    r.later(4 * 256 * rtc_cycle);
+    CHECK((r.read("ISR") & tamp2f) == (precharge ? tamp2f : 0));
+  }
+}
+
+TEST_CASE(
+    "DS10198 Table 16: RTC_TAMP3 on PE6 never fires on the 64-pin L476RC, where PE6 is not "
+    "bonded, while RTC_TAMP2 on PA0 does")
+{
+  rig         r;
+  auto* const porte = r.f->model_of<stm32::gpio_port>("GPIOE");
+  REQUIRE(porte != nullptr);
+  REQUIRE(porte->bonded_pins() == 0);
+  r.start_clock();
+  r.write("TAMPCR", tamp2e | tamp2trg | tamp3e | tamp3trg | filter_2 | freq_256 | tamp2noerase);
+  r.later(4 * 256 * rtc_cycle);
+  CHECK((r.read("ISR") & (tamp2f | tamp3f)) == tamp2f);
+}
+
+TEST_CASE(
+    "ES0250 2.19.1: clearing TAMPxE of a falling-edge tamper with the pin high sets TAMPxF and "
+    "erases, unless an earlier write set TAMPxNOERASE, an undriven pin reads low")
+{
+  enum class leg : std::uint8_t
+  {
+    plain,
+    earlier,
+    same_write,
+    undriven,
+  };
+  for(auto const which : {leg::plain, leg::earlier, leg::same_write, leg::undriven})
+  {
+    CAPTURE(static_cast<int>(which));
+    rig r;
+    r.start_clock();
+    fill_backups(r);
+    r.write("TAMPCR", tamp1e | tamp1trg);
+    if(which == leg::undriven)
+    {
+      r.write("TAMPCR", 0);
+      CHECK((r.read("ISR") & tamp1f) == 0);
+      CHECK(backups_kept(r));
+      continue;
+    }
+    pc(r).drive(13, true);
+    CHECK((r.read("ISR") & tamp1f) == 0);
+    if(which == leg::earlier)
+    {
+      r.write("TAMPCR", tamp1e | tamp1trg | tamp1noerase);
+    }
+    r.write("TAMPCR", which == leg::same_write ? tamp1noerase : 0);
+    CHECK((r.read("ISR") & tamp1f) == tamp1f);
+    CHECK(backups_kept(r) == (which == leg::earlier));
+  }
+}
+
+TEST_CASE("RM0351 38.6.16: TAMP1IE alone raises the tamper line, TAMPIE 0")
+{
+  rig r;
+  r.start_clock();
+  exti_rising(r, stamp_line);
+  r.write("TAMPCR", tamp1e | tamp1ie | tamp1noerase);
+  pc(r).drive(13, true);
+  CHECK((exti_read(r, 0x14) & (1u << stamp_line)) == 1u << stamp_line);
+  CHECK(nvic_pending(r, stamp_irq));
+}
+
+TEST_CASE("RM0351 38.5: LL tamper 2 on a PA0 rise runs TAMP_STAMP_IRQHandler, BKP0R erased")
+{
+  auto f = entered("tamper");
+  run_to_idle(f);
+  auto* const port = f.model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(port != nullptr);
+  port->drive_at(0, true, vtime{f.target->virtual_clock().time().ps + 10 * ms});
+  CHECK(finish(f, 200'000'000) == std::vector<std::uint32_t>{0xCAFE'1234, 0, 1});
+}
+
+namespace
+{
+auto restored(rig const& from) -> std::unique_ptr<rig>
+{
+  auto const saved = from.f->target->snapshot();
+  auto       to    = std::make_unique<rig>();
+  to->f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  return to;
+}
+}
+
+TEST_CASE(
+    "checklist 66: a snapshot between the PC13 edge and TSF restores the pending stamp, TSF at "
+    "the same cycle, TSOVF on a second edge")
+{
+  rig r;
+  running_at_midnight(r);
+  r.write("CR", tse);
+  auto const subsecond = r.read("SSR");
+  auto const edge      = r.now();
+  pc(r).drive(13, true);
+  r.run_until(edge + 100 * rtc_cycle);
+  auto const copy = restored(r);
+  REQUIRE(copy->now() == r.now());
+  copy->run_until(edge + (stamp_delay - 1) * rtc_cycle - us);
+  CHECK((copy->read("ISR") & (tsf | tsovf)) == 0);
+  pc(*copy).drive(13, false);
+  pc(*copy).drive(13, true);
+  CHECK((copy->read("ISR") & (tsf | tsovf)) == tsovf);
+  copy->run_until(edge + stamp_delay * rtc_cycle + us);
+  CHECK((copy->read("ISR") & (tsf | tsovf)) == (tsf | tsovf));
+  CHECK(copy->read("TSTR") == 0x00'0001);
+  CHECK(copy->read("TSSSR") == subsecond);
+}
+
+TEST_CASE(
+    "checklist 66: a snapshot after the first of two tamper samples restores the count, TAMP2F "
+    "and the erase in the same window")
+{
+  rig r;
+  r.start_clock();
+  fill_backups(r);
+  pa(r).drive(0, true);
+  r.write("TAMPCR", tamp2e | tamp2trg | filter_2 | freq_256);
+  auto const written = r.now();
+  r.run_until(written + 257 * rtc_cycle);
+  auto const copy = restored(r);
+  copy->run_until(written + (256 + tamper_delay) * rtc_cycle - us);
+  CHECK((copy->read("ISR") & tamp2f) == 0);
+  CHECK(backups_kept(*copy));
+  copy->run_until(written + (2 * 256 + tamper_delay + 1) * rtc_cycle + us);
+  CHECK((copy->read("ISR") & tamp2f) == tamp2f);
+  CHECK(copy->read("BKP0R") == 0);
+}
+
+TEST_CASE(
+    "checklist 66: a snapshot inside the TAMPTS latency restores the pending tamper and stamp, "
+    "TSF and TAMP2F at the same cycle")
+{
+  rig r;
+  running_at_midnight(r);
+  r.write("TAMPCR", tamp2e | tampts);
+  fill_backups(r);
+  auto const subsecond = r.read("SSR");
+  auto const edge      = r.now();
+  pa(r).drive(0, true);
+  r.run_until(edge + 100 * rtc_cycle);
+  auto const copy = restored(r);
+  copy->run_until(edge + (tamper_delay - 1) * rtc_cycle - us);
+  CHECK((copy->read("ISR") & (tsf | tamp2f)) == 0);
+  CHECK(backups_kept(*copy));
+  copy->run_until(edge + tamper_delay * rtc_cycle + us);
+  CHECK((copy->read("ISR") & (tsf | tamp2f)) == (tsf | tamp2f));
+  CHECK(copy->read("TSSSR") == subsecond);
+  CHECK(copy->read("BKP0R") == 0);
 }

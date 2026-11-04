@@ -1137,6 +1137,14 @@ struct rtc_classic_variant
   std::uint8_t timestamp_pin = 13;
   /** @brief EXTI line of the tamper and timestamp interrupt, RM0038 20.5, RM0351 Table 62. */
   std::uint8_t tamper_line = 19;
+  /** @brief Whether tamper detection on RTC_TAMP1 to RTC_TAMP3 is modelled with the RTC_TAMPCR
+   *         field names of RM0351 38.6.16. Without it a firmware TAMPxE write logs once as
+   *         storage, a model_error under strict_peripherals. */
+  bool tampers = false;
+  /** @brief GPIO ports of RTC_TAMP1 to RTC_TAMP3, RM0351 38.3.2 and DS10198 Table 16. */
+  std::array<std::string_view, 3> tamper_ports{"GPIOC", "GPIOA", "GPIOE"};
+  /** @brief Pins of RTC_TAMP1 to RTC_TAMP3 in their ports. */
+  std::array<std::uint8_t, 3> tamper_pins{13, 0, 6};
 };
 
 /** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
@@ -1153,7 +1161,8 @@ inline constexpr rtc_classic_variant l1_cat1_rtc{
 /** @brief STM32L4 RTC, `rtc2_v2_4_Cube`, RM0351 section 38: RTC_TAMPCR and RTC_OR, no
  *         RTC_CALIBR and no CR.DCE, CR.ITSE, RTC_ISR[31:8] outside the key, a shadow copy every
  *         RTCCLK period, a backup domain a brown-out keeps, RM0351 6.1.3, the alarm interrupt
- *         on EXTI line 18, RM0351 Table 62, and the timestamp on PC13, RM0351 38.3.13. */
+ *         on EXTI line 18, RM0351 Table 62, the timestamp on PC13, RM0351 38.3.13, and the
+ *         tampers on PC13, PA0 and PE6, RM0351 38.3.14. */
 inline constexpr rtc_classic_variant l4_rtc{
     .brown_out_resets   = false,
     .tamper_register    = "TAMPCR",
@@ -1163,7 +1172,8 @@ inline constexpr rtc_classic_variant l4_rtc{
     .keyed_tamper_flags = false,
     .shadow_copy_cycles = 1,
     .alarm_line         = 18,
-    .timestamps         = true};
+    .timestamps         = true,
+    .tampers            = true};
 
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant

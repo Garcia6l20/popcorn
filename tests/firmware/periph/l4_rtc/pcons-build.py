@@ -19,6 +19,7 @@ add_ll_firmware(
         "alarm",
         "wakeup",
         "timestamp",
+        "tamper",
     ],
     chipset=STM32L476XX,
 )
