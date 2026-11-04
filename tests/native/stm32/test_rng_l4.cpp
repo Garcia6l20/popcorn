@@ -9,6 +9,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -25,6 +26,7 @@ using popcorn::vtime;
 using popcorn::periph::stm32::rng_word_at;
 using popcorn::testing::l476rc;
 using popcorn::testing::stm32_fixture;
+using popcorn::testing::sym;
 
 constexpr auto             firmware = std::string_view{"l476_l4_smoke"};
 constexpr address          stub     = 0x2000'8000;
@@ -48,6 +50,7 @@ constexpr std::uint32_t    msi      = 3;
 constexpr std::uint32_t    pll_msi  = 1;
 constexpr std::uint32_t    pll_r_en = 1u << 24;
 constexpr std::uint32_t    pll_sw   = 3;
+constexpr std::uint32_t    hal_rdy  = 1;
 constexpr std::string_view config_fields[]{"CONFIGLOCK",  "CONDRST", "RNG_CONFIG1", "CLKDIV",
                                            "RNG_CONFIG2", "NISTC",   "RNG_CONFIG3", "ARDIS"};
 
@@ -489,4 +492,84 @@ TEST_CASE("checklist 39: the L4 RNG row needs CED, the RM0351 27.7.1 patch field
   auto& fields = cr_of(rng_of(desc)).fields;
   REQUIRE(std::erase_if(fields, [](auto const& one) { return one.name == "CED"; }) == 1);
   CHECK_THROWS_WITH_AS((rig{false, desc}), doctest::Contains("CED"), popcorn::config_error);
+}
+
+namespace
+{
+auto firmware_log(std::string_view elf, std::string_view entry) -> std::vector<std::uint32_t>
+{
+  stm32_fixture const f{l476rc(), elf, options(true)};
+  if(entry != "main")
+  {
+    f.set("pc", sym(elf, entry));
+  }
+  auto const stopped = f.run_to_stop({.max_instructions = icount{1'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  return f.log();
+}
+
+auto words(std::uint64_t count) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint64_t position = 0; position < count; ++position)
+  {
+    out.push_back(rng_word_at(0, position));
+  }
+  return out;
+}
+}
+
+TEST_CASE("LL RNG: eight words of seed 0 after DRDY polls, CR back to 0, under strict")
+{
+  auto const log = firmware_log("l476_l4_rng_ll", "main");
+  REQUIRE(log.size() == 25);
+  std::vector<std::uint32_t> got;
+  for(std::size_t word = 0; word < 8; ++word)
+  {
+    CHECK(log[3 * word] == drdy);
+    CHECK(log[3 * word + 1] < 2000);
+    got.push_back(log[3 * word + 2]);
+  }
+  CHECK(got == words(8));
+  CHECK(log[24] == 0);
+}
+
+TEST_CASE("LL RNG: RNG_IRQHandler on IRQ 80 reads four words in order")
+{
+  auto const log      = firmware_log("l476_l4_rng_ll", "interrupts");
+  auto       expected = words(4);
+  expected.push_back(4);
+  CHECK(log == expected);
+}
+
+TEST_CASE(
+    "LL RNG at HCLK 80 MHz on a 4 MHz MSI: CECS and CEIS at RNGEN, "
+    "words keep coming, ES0250 2.15.1")
+{
+  auto const log = firmware_log("l476_l4_rng_ll", "clock_error");
+  REQUIRE(log.size() == 7);
+  CHECK(log[0] == (cecs | ceis));
+  CHECK(log[1] < 2000);
+  CHECK(log[2] == (drdy | cecs | ceis));
+  CHECK(log[3] == rng_word_at(0, 0));
+  CHECK(log[4] == cecs);
+  CHECK(log[5] < 2000);
+  CHECK(log[6] == rng_word_at(0, 1));
+}
+
+TEST_CASE("LL RNG at HCLK 80 MHz with CED 1: no clock error and CR keeps CED")
+{
+  auto const log = firmware_log("l476_l4_rng_ll", "clock_error_ced_off");
+  CHECK(log == std::vector<std::uint32_t>{0, log.at(1), drdy, rng_word_at(0, 0), ced | rngen});
+  CHECK(log.at(1) < 2000);
+}
+
+TEST_CASE("HAL_RNG_Init and HAL_RNG_GenerateRandomNumber give four words of seed 0")
+{
+  auto const log      = firmware_log("l476_l4_rng_hal", "main");
+  auto       expected = words(4);
+  expected.push_back(hal_rdy);
+  expected.push_back(rngen);
+  CHECK(log == expected);
 }
