@@ -1,6 +1,7 @@
 #include "backup_domain.hpp"
 #include "exti_classic.hpp"
 #include "factories.hpp"
+#include "gpio_peers.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"
 #include "rtc_calendar.hpp"
@@ -34,7 +35,8 @@ using rtc_calendar::first_key;
 using rtc_calendar::init_cycles;
 using rtc_calendar::second_key;
 
-constexpr std::uint64_t sync_cycles = 2;
+constexpr std::uint64_t sync_cycles       = 2;
+constexpr std::uint64_t stamp_apre_cycles = 2;
 
 enum classic_event : std::uint8_t
 {
@@ -46,6 +48,7 @@ enum classic_event : std::uint8_t
   alarm_b,
   alarm_a_write,
   alarm_b_write,
+  timestamp_ready,
   classic_events,
 };
 
@@ -74,6 +77,10 @@ struct rtc_classic_state
   std::array<std::uint32_t, classic_events> generation{};
   std::uint8_t                              held{};
   std::uint64_t                             held_ps{};
+  std::uint8_t                              stamp_pending{};
+  std::uint32_t                             stamp_time{};
+  std::uint32_t                             stamp_date{};
+  std::uint32_t                             stamp_subsecond{};
 
   friend auto operator==(rtc_classic_state const&, rtc_classic_state const&) -> bool = default;
 };
@@ -181,7 +188,8 @@ struct unmodelled_entry
  *        and the read-only rules, `storage_only` to coverage and host views. PWR_CR.DBP gates no
  *        write.
  *        The STM32L4 RTC runs the same rules on its own register set: RTC_TAMPCR in place of
- *        RTC_TAFCR, RTC_OR, no RTC_CALIBR and no CR.DCE, and CR.ITSE logged with the timestamps.
+ *        RTC_TAFCR, RTC_OR, no RTC_CALIBR and no CR.DCE, and CR.ITSE, the internal timestamp,
+ *        logged as not modelled.
  *        Its key leaves RTC_ISR[31:8], RTC_TAMPCR, RTC_OR and the backup registers open, RM0351
  *        38.3.7, so TAMP2F and TAMP3F clear by a 0 without it. RSF sets at the first RTCCLK edge
  *        after a clear, the end of init mode, a BYPSHAD clear or a system reset, inferred from the
@@ -192,12 +200,23 @@ struct unmodelled_entry
  *        RM0351 38.3.7 programs the alarm with no ALRxWF poll. RTC_TAMPCR and RTC_OR are storage.
  *        A read protection regression from level 1 to level 0, which the STM32L4 FLASH reports,
  *        writes 0 to every backup register, RM0351 3.5.1.
+ *        Timestamps, RM0351 38.3.13, with `rtc_classic_variant::timestamps`: with CR.TSE set, an
+ *        edge of the RTC_TS input, rising with CR.TSEDGE 0 and falling with 1, captures TR, DR
+ *        bits 15:0 without the year and SSR into RTC_TSTR, RTC_TSDR and RTC_TSSSR at the edge,
+ *        and sets TSF 2 ck_apre cycles later, 2 x (PREDIV_A + 1) RTCCLK cycles, inferred. An edge
+ *        while TSF is set or that set is pending sets TSOVF at once and keeps the stamp, the
+ *        pending case inferred from the TSOVF note of 38.3.13. A TSF clear writes 0 to the three
+ *        registers, 38.6.12 to 38.6.14. TSF and TSIE drive the tamper EXTI line of the variant,
+ *        line 19, RM0351 Table 62. RTC_TS reads the variant's pin, PC13, whatever its GPIO mode,
+ *        RM0351 38.3.2: the board drive, else the PUPDR pull-up, inferred. A PUPDR write and a
+ *        TSEDGE write make no edge.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
                           public backup_domain,
                           public core_hold_listener,
                           public read_protection_listener,
+                          public board_input_listener,
                           public rtc_core
 {
   friend rtc_core;
@@ -226,6 +245,7 @@ public:
   void backup_reset() override;
   void on_core_hold(bool held) override;
   void on_read_protection_regression() override;
+  void board_input_changed(std::string_view port, std::uint8_t pin, bool level) override;
   void time_written(std::uint32_t old, std::uint32_t now)
   {
     rtc_core::time_written(old, now);
@@ -269,6 +289,8 @@ private:
   void alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle);
   void settle(std::uint64_t cycle);
   void refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now);
+  void stamp();
+  void clear_stamp();
 
   std::optional<std::chrono::sys_seconds>            initial_;
   rtc_classic_variant                                variant_;
@@ -301,6 +323,11 @@ private:
   field_ref                                          wakeup_interrupt_;
   field_ref                                          wakeup_flag_;
   field_ref                                          wakeup_write_;
+  field_ref                                          stamp_enable_;
+  field_ref                                          stamp_edge_;
+  field_ref                                          stamp_interrupt_;
+  field_ref                                          stamp_flag_;
+  field_ref                                          stamp_overflow_;
   std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
   std::array<bool, unmodelled_functions>             logged_{};
   rtc_calendar::counter<rtc_classic_state>           count_;
@@ -358,6 +385,9 @@ rtc_classic::rtc_classic(
       wakeup_reload_{field("WUTR", "WUT")}, wakeup_clock_{field("CR", "WCKSEL")},
       wakeup_enable_{field("CR", "WUTE")}, wakeup_interrupt_{field("CR", "WUTIE")},
       wakeup_flag_{field("ISR", "WUTF")}, wakeup_write_{field("ISR", "WUTWF")},
+      stamp_enable_{field("CR", "TSE")}, stamp_edge_{field("CR", "TSEDGE")},
+      stamp_interrupt_{field("CR", "TSIE")}, stamp_flag_{field("ISR", "TSF")},
+      stamp_overflow_{field("ISR", "TSOVF")},
       count_{
           state_, ctx.regs, [this](std::string_view r, std::string_view f) { return field(r, f); }},
       domain_{ctx.clock.domain("rtc")}
@@ -435,6 +465,10 @@ rtc_classic::rtc_classic(
        std::string_view{"CALIBR"}, std::string_view{"CALR"}, std::string_view{"SHIFTR"},
        variant.tamper_register, std::string_view{"OR"}})
   {
+    if(variant.timestamps and name.starts_with("TS"))
+    {
+      continue;
+    }
     if(has_register(name))
     {
       storage_.push_back(reg(name).offset);
@@ -468,14 +502,15 @@ rtc_classic::rtc_classic(
   {
     tampers |= bits(variant.tamper_register, {"TAMP2E", "TAMP3E"});
   }
-  auto stamps = bits("CR", {"TSE"});
+  auto stamps = variant.timestamps ? std::uint32_t{} : bits("CR", {"TSE"});
   if(variant.internal_timestamp)
   {
     stamps |= bits("CR", {"ITSE"});
   }
-  unmodelled_[timestamp_function] = {"CR", "timestamps", stamps};
-  unmodelled_[tamper_function]    = {variant.tamper_register, "tamper detection", tampers};
-  unmodelled_[coarse_function]    = {
+  unmodelled_[timestamp_function] = {
+      "CR", variant.timestamps ? "the internal timestamp" : "timestamps", stamps};
+  unmodelled_[tamper_function] = {variant.tamper_register, "tamper detection", tampers};
+  unmodelled_[coarse_function] = {
       "CR", "coarse digital calibration",
       variant.coarse_calibration ? bits("CR", {"DCE"}) : std::uint32_t{}};
   unmodelled_[smooth_function] = {"CALR", "smooth digital calibration", ~std::uint32_t{}};
@@ -653,6 +688,10 @@ void rtc_classic::update_lines()
   {
     levels |= 2u;
   }
+  if(variant_.timestamps and raised(stamp_flag_, stamp_interrupt_))
+  {
+    levels |= 4u;
+  }
   auto const changed = static_cast<std::uint8_t>(levels ^ state_.lines);
   state_.lines       = levels;
   if(changed == 0)
@@ -671,6 +710,10 @@ void rtc_classic::update_lines()
   if((changed & 2u) != 0)
   {
     exti->line_changed(variant_.wakeup_line, (levels & 2u) != 0);
+  }
+  if((changed & 4u) != 0)
+  {
+    exti->line_changed(variant_.tamper_line, (levels & 4u) != 0);
   }
 }
 
@@ -870,6 +913,18 @@ void rtc_classic::on_event(std::uint32_t kind, std::uint64_t payload)
       plan_alarm(which);
       break;
     }
+    case timestamp_ready:
+      if(std::exchange(state_.stamp_pending, 0) != 0)
+      {
+        regs_.poke(reg("TSTR").offset, state_.stamp_time);
+        regs_.poke(reg("TSDR").offset, state_.stamp_date);
+        if(subsecond_)
+        {
+          regs_.poke(reg("TSSSR").offset, state_.stamp_subsecond);
+        }
+        update(regs_, stamp_flag_, 1);
+      }
+      break;
     case alarm_a_write:
     case alarm_b_write:
     {
@@ -894,6 +949,48 @@ void rtc_classic::on_core_hold(bool held)
     return;
   }
   hold_core(held);
+}
+
+void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, bool level)
+{
+  if(not variant_.timestamps or port != variant_.timestamp_port or pin != variant_.timestamp_pin)
+  {
+    return;
+  }
+  settle(count_.cycle_at(now_ps()));
+  if(get(regs_, stamp_enable_) == 0 or level == (get(regs_, stamp_edge_) != 0))
+  {
+    return;
+  }
+  stamp();
+  update_lines();
+}
+
+void rtc_classic::stamp()
+{
+  if(get(regs_, stamp_flag_) != 0 or state_.stamp_pending != 0)
+  {
+    update(regs_, stamp_overflow_, 1);
+    return;
+  }
+  auto const cycle       = count_.cycle_at(now_ps());
+  auto const position    = count_.position_at(cycle);
+  state_.stamp_time      = count_.time_register(position);
+  state_.stamp_date      = count_.date_register(position);
+  state_.stamp_subsecond = subsecond_ ? count_.subsecond_register(position) : 0;
+  state_.stamp_pending   = 1;
+  arm(timestamp_ready, cycle + stamp_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
+}
+
+void rtc_classic::clear_stamp()
+{
+  for(auto const name : {"TSTR", "TSDR", "TSSSR"})
+  {
+    if(has_register(name))
+    {
+      regs_.poke(reg(name).offset, 0);
+    }
+  }
 }
 
 void rtc_classic::on_read_protection_regression()
@@ -925,6 +1022,10 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
   }
   word &= ~(clears & ~now);
   regs_.poke(status_.offset, word);
+  if(variant_.timestamps and stamp_flag_.of(old) != 0 and stamp_flag_.of(word) == 0)
+  {
+    clear_stamp();
+  }
   auto const cycle = count_.cycle_at(now_ps());
   if(init_.of(old) == 0 and init_.of(word) != 0)
   {

@@ -1126,6 +1126,17 @@ struct rtc_classic_variant
   std::uint8_t alarm_line = 17;
   /** @brief EXTI line of the wakeup interrupt, RM0038 20.5. */
   std::uint8_t wakeup_line = 20;
+  /** @brief Whether the timestamp on the RTC_TS input is modelled: TSE, TSEDGE, TSF, TSOVF, the
+   *         RTC_TSTR, RTC_TSDR and RTC_TSSSR capture and TSIE on the tamper line, RM0351 38.3.13.
+   *         Without it a firmware TSE write logs once as storage, a model_error under
+   *         strict_peripherals. */
+  bool timestamps = false;
+  /** @brief GPIO port of the RTC_TS input, RM0351 38.3.2. */
+  std::string_view timestamp_port = "GPIOC";
+  /** @brief Pin of the RTC_TS input in its port, RM0351 38.3.2. */
+  std::uint8_t timestamp_pin = 13;
+  /** @brief EXTI line of the tamper and timestamp interrupt, RM0038 20.5, RM0351 Table 62. */
+  std::uint8_t tamper_line = 19;
 };
 
 /** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
@@ -1141,8 +1152,8 @@ inline constexpr rtc_classic_variant l1_cat1_rtc{
     .alarm_write_wait   = true};
 /** @brief STM32L4 RTC, `rtc2_v2_4_Cube`, RM0351 section 38: RTC_TAMPCR and RTC_OR, no
  *         RTC_CALIBR and no CR.DCE, CR.ITSE, RTC_ISR[31:8] outside the key, a shadow copy every
- *         RTCCLK period, a backup domain a brown-out keeps, RM0351 6.1.3, and the alarm interrupt
- *         on EXTI line 18, RM0351 Table 62. */
+ *         RTCCLK period, a backup domain a brown-out keeps, RM0351 6.1.3, the alarm interrupt
+ *         on EXTI line 18, RM0351 Table 62, and the timestamp on PC13, RM0351 38.3.13. */
 inline constexpr rtc_classic_variant l4_rtc{
     .brown_out_resets   = false,
     .tamper_register    = "TAMPCR",
@@ -1151,7 +1162,8 @@ inline constexpr rtc_classic_variant l4_rtc{
     .internal_timestamp = true,
     .keyed_tamper_flags = false,
     .shadow_copy_cycles = 1,
-    .alarm_line         = 18};
+    .alarm_line         = 18,
+    .timestamps         = true};
 
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant

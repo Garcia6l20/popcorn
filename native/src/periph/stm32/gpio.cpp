@@ -130,7 +130,9 @@ struct listener_table
  *        write that changes a bonded one of these pins while `PWR_CR2.IOSV` is 0 logs one warning
  *        per machine life, and under strict_peripherals raises model_error with the register kept
  *        at its value before the write. Without strict the pin behaves as a powered one, where
- *        RM0351 5.1.2 isolates it, the isolated register behaviour inferred.
+ *        RM0351 5.1.2 isolates it, the isolated register behaviour inferred. A drive or a
+ *        release that changes the board level of a pin, the drive else the PUPDR pull-up,
+ *        reaches every board_input_listener peer whatever the pin mode, for the RTC inputs.
  *
  *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
  *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER, OSPEEDR,
@@ -185,6 +187,7 @@ private:
   [[nodiscard]] auto board_base() const -> std::uint64_t;
   [[nodiscard]] auto pending() const -> std::span<pending_edge const>;
   void               apply(std::uint8_t pin, std::optional<bool> level);
+  [[nodiscard]] auto board_level(std::uint8_t pin) const -> bool;
   void               settle(bool notify);
   void               restore_reset_values();
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
@@ -980,12 +983,31 @@ void gpio::check_pin(std::uint8_t pin) const
   }
 }
 
+auto gpio::board_level(std::uint8_t pin) const -> bool
+{
+  auto const bit = std::uint32_t{1} << pin;
+  return (state_.driven & bit) != 0 ? (state_.driven_high & bit) != 0 : get(regs_, pull_[pin]) == 1;
+}
+
 void gpio::apply(std::uint8_t pin, std::optional<bool> level)
 {
+  auto const before  = board_level(pin);
   auto const bit     = std::uint32_t{1} << pin;
   state_.driven      = level ? state_.driven | bit : state_.driven & ~bit;
   state_.driven_high = level and *level ? state_.driven_high | bit : state_.driven_high & ~bit;
   settle(true);
+  auto const after = board_level(pin);
+  if(after == before)
+  {
+    return;
+  }
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto* const listener = dynamic_cast<board_input_listener*>(peer))
+    {
+      listener->board_input_changed(desc_.name, pin, after);
+    }
+  }
 }
 
 auto gpio::on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)

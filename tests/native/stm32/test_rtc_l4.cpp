@@ -10,6 +10,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
@@ -502,7 +503,6 @@ TEST_CASE(
     bool             init;
   };
   for(auto const& [reg, value, init] : {
-          row{"CR",     1u << 11, false},
           row{"CR",     1u << 24, false},
           row{"CR",     1u << 23, false},
           row{"CR",     1u << 21, false},
@@ -550,7 +550,7 @@ TEST_CASE("RM0351 38.6.3: CR bit 7 has no DCE, a CPU write in init mode under st
   CHECK(r.warnings() == before);
 }
 
-TEST_CASE("coverage reports CPU reads of TSTR, TAMPCR and OR as storage_only and TR as served")
+TEST_CASE("coverage reports CPU reads of TAMPCR and OR as storage_only, TSTR and TR as served")
 {
   rig r;
   r.f->target->enable_coverage({}, true);
@@ -566,7 +566,7 @@ TEST_CASE("coverage reports CPU reads of TSTR, TAMPCR and OR as storage_only and
     names.push_back(entry.reg);
   }
   std::ranges::sort(names);
-  CHECK(names == std::vector<std::string>{"OR", "TAMPCR", "TSTR"});
+  CHECK(names == std::vector<std::string>{"OR", "TAMPCR"});
 }
 
 TEST_CASE("RM0351 48.16.4: with DBG_RTC_STOP of DBGMCU_APB1FZR1 a held core stops the calendar")
@@ -988,4 +988,133 @@ TEST_CASE(
   REQUIRE(log.size() == 7u);
   CHECK(std::vector(log.begin(), log.begin() + 3) == std::vector<std::uint32_t>{0, 0, 0});
   CHECK(std::vector(log.end() - 3, log.end()) == std::vector<std::uint32_t>{0x00'0001, march_1, 3});
+}
+
+namespace
+{
+constexpr std::uint32_t tse         = 1u << 11;
+constexpr std::uint32_t tsedge      = 1u << 3;
+constexpr std::uint32_t tsie        = 1u << 15;
+constexpr std::uint32_t tsf         = 1u << 11;
+constexpr std::uint32_t tsovf       = 1u << 12;
+constexpr std::uint32_t stamp_line  = 19;
+constexpr std::uint32_t stamp_irq   = 2;
+constexpr std::uint64_t stamp_delay = 2 * 128;
+
+auto pc(rig const& r) -> stm32::gpio_port&
+{
+  auto* const found = r.f->model_of<stm32::gpio_port>("GPIOC");
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+void running_at_midnight(rig const& r)
+{
+  midnight(r);
+  r.write("ISR", 0);
+  r.later(1'500 * ms);
+}
+}
+
+TEST_CASE(
+    "RM0351 38.3.13, inferred: a rising PC13 edge with TSE sets TSF 2 ck_apre cycles later, TSTR, "
+    "TSDR and TSSSR hold the calendar of the edge, TSIE raises TAMP_STAMP on EXTI 19")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{strict};
+    running_at_midnight(r);
+    exti_rising(r, stamp_line);
+    r.cpu_write("CR", tse | tsie);
+    auto const moder = r.f->target->peripheral("GPIOC").peek(r.reg("GPIOC", "MODER").offset);
+    REQUIRE((moder >> 26 & 3u) == 3u);
+    auto const subsecond = r.read("SSR");
+    auto const edge      = r.now();
+    pc(r).drive(13, true);
+    r.run_until(edge + (stamp_delay - 1) * rtc_cycle - us);
+    CHECK((r.read("ISR") & tsf) == 0);
+    CHECK(r.read("TSTR") == 0);
+    CHECK_FALSE(nvic_pending(r, stamp_irq));
+    r.run_until(edge + stamp_delay * rtc_cycle + us);
+    CHECK((r.read("ISR") & (tsf | tsovf)) == tsf);
+    CHECK(r.read("TSTR") == 0x00'0001);
+    CHECK(r.read("TSDR") == (feb_28 & 0xFF3Fu));
+    CHECK(r.read("TSSSR") == subsecond);
+    CHECK((exti_read(r, 0x14) & (1u << stamp_line)) == 1u << stamp_line);
+    CHECK(nvic_pending(r, stamp_irq));
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE("RM0351 38.6.3: TSEDGE 1 stamps on a falling PC13 edge only, TSE 0 stamps nothing")
+{
+  rig r;
+  running_at_midnight(r);
+  pc(r).drive(13, true);
+  pc(r).drive(13, false);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & tsf) == 0);
+  r.write("CR", tse | tsedge);
+  pc(r).drive(13, true);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & tsf) == 0);
+  pc(r).drive(13, false);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & tsf) == tsf);
+}
+
+TEST_CASE(
+    "RM0351 38.3.13 and 38.6.13: an edge while TSF is set or pending sets TSOVF and keeps the "
+    "stamp, a TSF clear clears TSTR, TSDR and TSSSR")
+{
+  rig r;
+  running_at_midnight(r);
+  r.write("CR", tse);
+  pc(r).drive(13, true);
+  pc(r).drive(13, false);
+  r.later(ms);
+  pc(r).drive(13, true);
+  CHECK((r.read("ISR") & (tsf | tsovf)) == tsovf);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & (tsf | tsovf)) == (tsf | tsovf));
+  auto const first = r.read("TSSSR");
+  r.later(second);
+  pc(r).drive(13, false);
+  pc(r).drive(13, true);
+  r.later(10 * ms);
+  CHECK(r.read("TSTR") == 0x00'0001);
+  CHECK(r.read("TSSSR") == first);
+  r.write("ISR", ~(tsf | tsovf) & ~init_bit);
+  CHECK(r.read("TSTR") == 0);
+  CHECK(r.read("TSDR") == 0);
+  CHECK(r.read("TSSSR") == 0);
+  pc(r).drive(13, false);
+  pc(r).drive(13, true);
+  r.later(10 * ms);
+  CHECK((r.read("ISR") & (tsf | tsovf)) == tsf);
+  CHECK(r.read("TSTR") == 0x00'0002);
+}
+
+TEST_CASE("RM0351 38.3.13: TSE is modelled, a CPU write of it under strict logs nothing")
+{
+  rig r{true};
+  r.start_clock();
+  r.unlock();
+  auto const before = r.warnings();
+  r.cpu_write("CR", tse);
+  CHECK(r.warnings() == before);
+  CHECK(r.read("CR") == tse);
+}
+
+TEST_CASE("RM0351 38.5: LL timestamp on a PC13 rise runs TAMP_STAMP_IRQHandler through EXTI 19")
+{
+  auto f = entered("timestamp");
+  run_to_idle(f);
+  auto* const port = f.model_of<stm32::gpio_port>("GPIOC");
+  REQUIRE(port != nullptr);
+  port->drive_at(13, true, vtime{f.target->virtual_clock().time().ps + 1'500 * ms});
+  CHECK(
+      finish(f, 2'000'000'000)
+      == std::vector<std::uint32_t>{0, 0, 0, 0x23'5959, feb_28 & 0xFF3Fu, 1});
 }

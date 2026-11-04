@@ -8,9 +8,12 @@
 
 static volatile uint32_t wakeups;
 static volatile uint32_t alarms;
+static volatile uint32_t stamps;
 
 void RTC_Alarm_IRQHandler(void);
 void RTC_WKUP_IRQHandler(void);
+void TAMP_STAMP_IRQHandler(void);
+void timestamp(void);
 void idle(void);
 void alarm(void);
 void wakeup(void);
@@ -61,6 +64,18 @@ void RTC_WKUP_IRQHandler(void)
     ++wakeups;
   }
   LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_20);
+}
+
+void TAMP_STAMP_IRQHandler(void)
+{
+  if(LL_RTC_IsActiveFlag_TS(RTC))
+  {
+    LOG(RTC->TSTR);
+    LOG(RTC->TSDR);
+    LL_RTC_ClearFlag_TS(RTC);
+    ++stamps;
+  }
+  LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_19);
 }
 
 static void log_calendar(void)
@@ -163,6 +178,25 @@ void alarm(void)
     __WFI();
   }
   LOG(alarms);
+  DONE();
+}
+
+void timestamp(void)
+{
+  start_calendar();
+  LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_19);
+  LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_19);
+  NVIC_EnableIRQ(TAMP_STAMP_IRQn);
+  LL_RTC_DisableWriteProtection(RTC);
+  LL_RTC_TS_SetActiveEdge(RTC, LL_RTC_TIMESTAMP_EDGE_RISING);
+  LL_RTC_EnableIT_TS(RTC);
+  LL_RTC_TS_Enable(RTC);
+  LL_RTC_EnableWriteProtection(RTC);
+  while(stamps < 1)
+  {
+    __WFI();
+  }
+  LOG(stamps);
   DONE();
 }
 

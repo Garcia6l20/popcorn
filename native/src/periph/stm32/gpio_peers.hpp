@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace popcorn::periph::stm32
 {
@@ -58,5 +59,37 @@ public:
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~analog_switch_source() = default;
+};
+
+/**
+ * @brief A model the GPIO model calls, found by `dynamic_cast` over the machine's peers, when the
+ *        board drive of a pin changes the level it gives: the input an RTC additional function
+ *        reads whatever the pin mode, RM0351 38.3.2.
+ */
+class board_input_listener
+{
+public:
+  /** @brief Creates the interface. */
+  board_input_listener() = default;
+  /** @brief Not copyable. */
+  board_input_listener(board_input_listener const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(board_input_listener const&) -> board_input_listener& = delete;
+  /** @brief Not movable. */
+  board_input_listener(board_input_listener&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(board_input_listener&&) -> board_input_listener& = delete;
+
+  /**
+   * @brief Called after a drive or a scheduled edge changed the board level of a pin.
+   * @param port Port name, such as `GPIOC`.
+   * @param pin Pin of the port, 0 to 15.
+   * @param level The drive, else the `GPIOx_PUPDR` pull-up.
+   */
+  virtual void board_input_changed(std::string_view port, std::uint8_t pin, bool level) = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~board_input_listener() = default;
 };
 }

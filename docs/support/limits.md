@@ -1399,9 +1399,17 @@ The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own regi
   RM0351 38.3.7 programs the alarm with no ALRxWF poll, where RM0038 20.3.5 skips the poll on the
   STM32L1 Cat.2 to Cat.6, whose flags are always set. `RTC_ALRMxSSR` takes writes with ALRxE clear
   or in init mode, RM0351 38.6.17 and 38.6.18.
-- Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: timestamps,
-  `CR.ITSE` included, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
+- Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: the internal
+  timestamp `CR.ITSE`, tamper detection on `RTC_TAMPCR`, smooth calibration, the shift control,
   the outputs and the reference clock detection.
+- Timestamps, RM0351 38.3.13: with `CR.TSE` an edge of RTC_TS on PC13, rising with TSEDGE 0 and
+  falling with 1, captures the calendar of the edge into `RTC_TSTR`, `RTC_TSDR` and `RTC_TSSSR`
+  and sets TSF 2 x (PREDIV_A + 1) RTCCLK cycles later, the "2 ck_apre cycles" of 38.3.13 counted
+  from the edge, inferred. An edge while TSF is set or still pending sets TSOVF at once and keeps
+  the stamp, the pending case inferred. A TSF clear zeroes the three registers. TSF with TSIE
+  drives EXTI line 19 and TAMP_STAMP_IRQn.
+- RTC_TS reads PC13 whatever its GPIO mode, RM0351 38.3.2: the board drive, else the PUPDR pull-up,
+  inferred for an undriven pin. A PUPDR write and a TSEDGE write make no timestamp edge.
 - The 32 backup registers keep their value through a system reset. `RCC_BDCR.BDRST`, a power-on
   and a read protection regression from level 1 to level 0 clear them, RM0351 38.6.20, 6.1.3 and
   3.5.1.
