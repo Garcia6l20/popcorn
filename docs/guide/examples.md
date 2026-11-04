@@ -324,6 +324,18 @@ The same layout on the STM32L476, a Cortex-M4F without TrustZone, from
 
 --8<-- "stm32l476/rcc/README.md:3:15"
 
+### l476 gpio
+
+A push button on PC13 toggling an LED on PA5 through EXTI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/gpio).
+
+--8<-- "stm32l476/gpio/README.md:3:11"
+
+### l476 usart
+
+printf banner and line echo on USART2, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usart).
+
+--8<-- "stm32l476/usart/README.md:3:10"
+
 ### l476 usb_cdc
 
 CDC ACM device on the OTG_FS core enumerated by a virtual host under strict, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/usb_cdc).

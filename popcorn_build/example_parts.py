@@ -410,8 +410,14 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
     ),
+    "stm32l476/gpio": ExampleParts(
+        "STM32L476RCTx", (), pins=("PA5", "PC13"), adc_channels=(), flash_kib=None
+    ),
     "stm32l476/rcc": ExampleParts(
         "STM32L476RCTx", (), pins=("PA8",), adc_channels=(), flash_kib=None
+    ),
+    "stm32l476/usart": ExampleParts(
+        "STM32L476RCTx", (), pins=("PA2", "PA3"), adc_channels=(), flash_kib=None
     ),
     "stm32l476/usb_cdc": ExampleParts(
         "STM32L476RCTx",
