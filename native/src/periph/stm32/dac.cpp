@@ -29,6 +29,14 @@ using wide = unsigned __int128;
 constexpr std::size_t   channels  = 2;
 constexpr std::size_t   depth     = 3;
 constexpr std::uint32_t data_mask = 0xFFF;
+constexpr std::uint16_t lfsr_seed = 0xAAA;
+
+enum class load_kind : std::uint8_t
+{
+  write,
+  software,
+  hardware,
+};
 
 enum class holding : std::uint8_t
 {
@@ -50,6 +58,9 @@ struct dac_state
   std::array<std::uint8_t, channels * depth>  triggered{};
   std::array<std::uint16_t, channels>         dhr{};
   std::array<std::uint8_t, channels>          requested{};
+  std::array<std::uint16_t, channels>         lfsr{lfsr_seed, lfsr_seed};
+  std::array<std::uint16_t, channels>         triangle{};
+  std::array<std::uint8_t, channels>          falling{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -63,19 +74,8 @@ enum class rule : std::uint8_t
   wave_reserved,
   mode_locked,
   sample_hold,
+  wave_untriggered,
   count,
-};
-
-struct unmodelled_use
-{
-  std::string_view field;
-  std::string_view what;
-};
-
-constexpr std::array<unmodelled_use, 1> unmodelled_table{
-    {
-     {"WAVE", "WAVE, the noise and triangle waves"},
-     }
 };
 
 using selection = std::array<std::optional<std::uint32_t>, channels>;
@@ -123,11 +123,24 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        is still high raises no new request and sets DMAUDRx, RM0351 19.4.7, decided at the
  *        load, inferred, and DORx still loads DHRx. DMAUDRx with DMAUDRIEx holds the DAC's
  *        contribution to TIM6_DAC_IRQn, position 54 of RM0351 Table 61, which TIM6 shares.
- *        WAVEx other than 00 is not modelled: a DAC_CR write that sets it logs one
- *        model_warning, and under strict_peripherals raises model_error and leaves DAC_CR as
- *        before the write. MODEx 1xx, the sample and hold mode, is not modelled the same way on
- *        DAC_MCR. The output is DAC_DORx only, no pin or ADC channel sees it, so MODEx selects
- *        nothing else.
+ *        WAVEx 01 adds the LFSR of RM0351 Figure 141, masked to the MAMPx + 1 low bits, to DHRx
+ *        at each SWTRIGx or hardware load, then steps it, RM0351 19.4.8 and 19.4.12, from the
+ *        preload 0xAAA, Figure 142 giving 0xAAA then 0xD55. WAVEx 1x adds the triangle counter,
+ *        then steps it up to 2^(MAMPx + 1) - 1 and back down to 0, RM0351 19.4.9 and 19.4.12,
+ *        Figure 144 giving DHRx + 0, + 1, + 2. RM0351 19.4.9 reads the increment before the add,
+ *        and the model follows 19.4.12 and Figure 144. A MAMPx above 1011 acts as 1011. The sum
+ *        saturates at 0xFFF, the reading of the RM0351 "without overflow", inferred. WAVEx 00
+ *        resets the LFSR to 0xAAA and the triangle counter to 0, RM0351 19.4.8 and 19.4.9. The
+ *        LFSR runs the 4095 states from 0xAAA and never reaches 0, so the antilock-up injection
+ *        of RM0351 19.4.8 never applies. The RM0351 19.4.8 and 19.4.9 notes require TENx for a
+ *        wave. A holding register write with TENx 0 and WAVEx set logs one model_warning and
+ *        loads DHRx with no wave, the load inferred, and under strict_peripherals raises
+ *        model_error and leaves the holding registers as before the write. A DAC_CR write that
+ *        sets WAVEx with TENx 0 is accepted, as LL_DAC_Init writes WAVEx before
+ *        LL_DAC_EnableTrigger sets TENx. MODEx 1xx, the sample and hold mode, is not modelled:
+ *        a DAC_MCR write that sets it logs one model_warning, and under strict_peripherals
+ *        raises model_error and leaves DAC_MCR as before the write. The output is DAC_DORx only,
+ *        no pin or ADC channel sees it, so MODEx selects nothing else.
  *        A Stop 2 entry with ENx 1, which RM0351 19.5 Table 131 forbids, reaches the model as
  *        nothing: the PWR model has no Stop entry for a peripheral to see.
  *        DAC1RST and a machine reset restore the claimed registers, drop the pending loads and
@@ -194,9 +207,10 @@ private:
   void               retune(selection const& was);
   void               store(std::size_t channel, std::uint32_t data);
   void               mirror();
-  void               request(std::size_t channel, std::uint64_t due, bool hardware);
+  void               request(std::size_t channel, std::uint64_t due, load_kind kind);
   void               catch_up(std::size_t channel, std::uint64_t ps);
-  void               transfer(std::size_t channel, bool hardware);
+  void               transfer(std::size_t channel, load_kind kind);
+  [[nodiscard]] auto wave_term(std::size_t channel) -> std::uint32_t;
   void               release(std::size_t channel);
   void               refresh_line();
   void               restore_reset_values();
@@ -212,11 +226,9 @@ private:
   reg_ref                                           status_;
   std::array<reg_ref, 9>                            holding_;
   std::array<channel_fields, 2>                     channel_;
-  std::array<field_ref, 2>                          unmodelled_fields_;
   core::clock_domain                                bus_;
   irq_line*                                         line_;
   std::array<dma_signal, channels>                  requests_;
-  std::array<bool, unmodelled_table.size()>         unmodelled_logged_{};
   std::array<bool, std::to_underlying(rule::count)> rule_logged_{};
 };
 
@@ -249,7 +261,6 @@ dac::dac(model_context& ctx, peripheral_desc const& desc, dac_variant const& var
       status_{reg("SR")},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
-      unmodelled_fields_{field("CR", "WAVE1"), field("CR", "WAVE2")},
       bus_{ctx.clock.domain("pclk1")}, line_{&irq("TIM6_DAC_IRQn")},
       requests_{
           dma_signal{ctx.peers, lower(desc.name) + "_ch1_dma"},
@@ -360,7 +371,7 @@ void dac::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
     if(which[channel] and variant_.hardware_triggers[*which[channel]] == signal)
     {
       catch_up(channel, at.ps);
-      request(channel, at.ps + load_delay_ps(at), true);
+      request(channel, at.ps + load_delay_ps(at), load_kind::hardware);
     }
   }
 }
@@ -452,17 +463,13 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
           std::format("WAVE{} 11, reserved by RM0351 19.7.1", n));
     }
   }
-  for(std::size_t use = 0; use < unmodelled_table.size(); ++use)
+  for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    if(unmodelled_fields_[2 * use].of(word) != 0 or unmodelled_fields_[2 * use + 1].of(word) != 0)
+    if(get(regs_, channel_[channel].wave) == 0)
     {
-      if(ctx_.strict_peripherals)
-      {
-        regs_.poke(control_.offset, old);
-      }
-      warn_once_or_refuse(
-          unmodelled_logged_[use], "CR", control_.offset,
-          std::format("{} is not modelled", unmodelled_table[use].what));
+      state_.lfsr[channel]     = lfsr_seed;
+      state_.triangle[channel] = 0;
+      state_.falling[channel]  = 0;
     }
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
@@ -555,7 +562,7 @@ void dac::trigger_written(std::uint32_t, std::uint32_t now)
        and get(regs_, channel_[channel].trigger_enable) != 0
        and software_selected(channel))
     {
-      request(channel, now_ps() + cycles_ps(1), false);
+      request(channel, now_ps() + cycles_ps(1), load_kind::software);
     }
   }
   regs_.poke(channel_[0].software.offset, 0);
@@ -564,38 +571,60 @@ void dac::trigger_written(std::uint32_t, std::uint32_t now)
 template <holding Which> void dac::holding_written(std::uint32_t, std::uint32_t now)
 {
   using enum holding;
+  std::array<std::optional<std::uint32_t>, channels> data;
   switch(Which)
   {
     case right12_1:
-      store(0, now & data_mask);
+      data[0] = now & data_mask;
       break;
     case left12_1:
-      store(0, now >> 4 & data_mask);
+      data[0] = now >> 4 & data_mask;
       break;
     case right8_1:
-      store(0, (now & 0xFF) << 4);
+      data[0] = (now & 0xFF) << 4;
       break;
     case right12_2:
-      store(1, now & data_mask);
+      data[1] = now & data_mask;
       break;
     case left12_2:
-      store(1, now >> 4 & data_mask);
+      data[1] = now >> 4 & data_mask;
       break;
     case right8_2:
-      store(1, (now & 0xFF) << 4);
+      data[1] = (now & 0xFF) << 4;
       break;
     case right12_dual:
-      store(0, now & data_mask);
-      store(1, now >> 16 & data_mask);
+      data = {now & data_mask, now >> 16 & data_mask};
       break;
     case left12_dual:
-      store(0, now >> 4 & data_mask);
-      store(1, now >> 20 & data_mask);
+      data = {now >> 4 & data_mask, now >> 20 & data_mask};
       break;
     case right8_dual:
-      store(0, (now & 0xFF) << 4);
-      store(1, (now >> 8 & 0xFF) << 4);
+      data = {(now & 0xFF) << 4, (now >> 8 & 0xFF) << 4};
       break;
+  }
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
+    auto const& unit = channel_[channel];
+    if(data[channel] and get(regs_, unit.trigger_enable) == 0 and get(regs_, unit.wave) != 0)
+    {
+      if(ctx_.strict_peripherals)
+      {
+        mirror();
+      }
+      warn_once_or_refuse(
+          rule_logged_[std::to_underlying(rule::wave_untriggered)], "CR", control_.offset,
+          std::format(
+              "a holding register write with WAVE{0} set and TEN{0} 0, which RM0351 19.4.8 and "
+              "19.4.9 require for a wave: the load adds no wave",
+              channel + 1));
+    }
+  }
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
+    if(data[channel])
+    {
+      store(channel, *data[channel]);
+    }
   }
   mirror();
 }
@@ -605,7 +634,7 @@ void dac::store(std::size_t channel, std::uint32_t data)
   state_.dhr[channel] = static_cast<std::uint16_t>(data);
   if(get(regs_, channel_[channel].trigger_enable) == 0)
   {
-    request(channel, now_ps() + cycles_ps(1), false);
+    request(channel, now_ps() + cycles_ps(1), load_kind::write);
   }
 }
 
@@ -629,7 +658,7 @@ void dac::mirror()
   }
 }
 
-void dac::request(std::size_t channel, std::uint64_t due, bool hardware)
+void dac::request(std::size_t channel, std::uint64_t due, load_kind kind)
 {
   auto const first = channel * depth;
   auto       slot  = first;
@@ -638,7 +667,7 @@ void dac::request(std::size_t channel, std::uint64_t due, bool hardware)
     ++slot;
   }
   state_.due_ps[slot]    = due;
-  state_.triggered[slot] = hardware ? 1 : 0;
+  state_.triggered[slot] = std::to_underlying(kind);
   if(slot == first)
   {
     ctx_.events.schedule_at(
@@ -651,7 +680,7 @@ void dac::catch_up(std::size_t channel, std::uint64_t ps)
   auto const first = channel * depth;
   while(state_.due_ps[first] != 0 and state_.due_ps[first] <= ps)
   {
-    auto const hardware = state_.triggered[first] != 0;
+    auto const kind = static_cast<load_kind>(state_.triggered[first]);
     for(auto slot = first; slot + 1 < first + depth; ++slot)
     {
       state_.due_ps[slot]    = state_.due_ps[slot + 1];
@@ -659,7 +688,7 @@ void dac::catch_up(std::size_t channel, std::uint64_t ps)
     }
     state_.due_ps[first + depth - 1]    = 0;
     state_.triggered[first + depth - 1] = 0;
-    transfer(channel, hardware);
+    transfer(channel, kind);
     if(state_.due_ps[first] != 0)
     {
       ctx_.events.schedule_at(
@@ -669,11 +698,45 @@ void dac::catch_up(std::size_t channel, std::uint64_t ps)
   }
 }
 
-void dac::transfer(std::size_t channel, bool hardware)
+auto dac::wave_term(std::size_t channel) -> std::uint32_t
+{
+  auto const& unit  = channel_[channel];
+  auto const  wave  = get(regs_, unit.wave);
+  auto const  width = std::min<std::uint32_t>(get(regs_, unit.amplitude), 11);
+  auto const  top   = (2u << width) - 1u;
+  if(wave == 1)
+  {
+    auto const value     = std::uint32_t{state_.lfsr[channel]};
+    auto const tapped    = (value ^ value >> 1 ^ value >> 4 ^ value >> 6) & 1u;
+    state_.lfsr[channel] = static_cast<std::uint16_t>(value >> 1 | tapped << 11);
+    return value & top;
+  }
+  if(wave == 0)
+  {
+    return 0;
+  }
+  auto const value = std::uint32_t{state_.triangle[channel]};
+  if(state_.falling[channel] == 0)
+  {
+    auto const next          = std::min(value + 1, top);
+    state_.triangle[channel] = static_cast<std::uint16_t>(next);
+    state_.falling[channel]  = next == top ? 1 : 0;
+  }
+  else
+  {
+    auto const next          = value == 0 ? 0 : value - 1;
+    state_.triangle[channel] = static_cast<std::uint16_t>(next);
+    state_.falling[channel]  = next == 0 ? 0 : 1;
+  }
+  return value;
+}
+
+void dac::transfer(std::size_t channel, load_kind kind)
 {
   auto const& unit = channel_[channel];
-  regs_.poke(unit.output.offset, state_.dhr[channel]);
-  if(not hardware or get(regs_, unit.dma) == 0)
+  auto const  term = kind == load_kind::write ? 0u : wave_term(channel);
+  regs_.poke(unit.output.offset, std::min(data_mask, std::uint32_t{state_.dhr[channel]} + term));
+  if(kind != load_kind::hardware or get(regs_, unit.dma) == 0)
   {
     return;
   }

@@ -385,41 +385,14 @@ TEST_CASE(
   CHECK(r.read(dac1 + dor1) == 0x333);
 }
 
-TEST_CASE(
-    "WAVE logs once as not modelled, a model_error when strict that leaves DAC_CR as before the "
-    "write, and DMAEN, DMAUDRIE and a hardware TSEL log nothing")
+TEST_CASE("DMAEN, DMAUDRIE, a hardware TSEL and WAVE with TEN log nothing, also under strict")
 {
-  struct leg
-  {
-    std::string_view what;
-    std::uint32_t    word;
-  };
-  for(auto const& [what, word] : {
-          leg{"WAVE", 1u << 6 },
-          leg{"WAVE", 1u << 22},
-  })
-  {
-    CAPTURE(what);
-    CAPTURE(word);
-    {
-      rig const r;
-      r.write(dac1 + cr, word);
-      r.write(dac1 + cr, word);
-      REQUIRE(r.logged.size() == 1);
-      CHECK(r.logged[0].message.contains(what));
-      CHECK(r.read(dac1 + cr) == word);
-    }
-    rig const strict{true};
-    strict.write(dac1 + cr, 1u);
-    CHECK_THROWS_AS(
-        static_cast<void>(strict.f->target->mem().write(dac1 + cr, 4, word | 1u)),
-        popcorn::model_error);
-    CHECK(strict.read(dac1 + cr) == 1u);
-  }
   rig const quiet{true};
   quiet.write(dac1 + cr, ten1 | ten2 | 6u << 19);
   quiet.write(dac1 + cr, 1u | ten1 | software1 | 1u << 16 | ten2 | software2);
   quiet.write(dac1 + cr, quiet.read(dac1 + cr) | dmaen1 | dmaudrie1 | dmaen2 | dmaudrie2);
+  quiet.write(dac1 + cr, 1u | ten1 | software1 | 1u << 6 | 1u << 16 | ten2 | software2 | 2u << 22);
+  quiet.write(dac1 + swtrgr, 3);
   CHECK(quiet.logged.empty());
 }
 
@@ -1110,4 +1083,199 @@ TEST_CASE(
   REQUIRE(stopped.reason == stop_reason::user);
   CHECK(f.log() == std::vector<std::uint32_t>{0x100, 0x400, 0x800, 0xC00, 0xFFF, 0xFFF, 1, 0, 1});
   CHECK(warnings.empty());
+}
+
+namespace
+{
+constexpr std::uint32_t noise1    = 1u << 6;
+constexpr std::uint32_t triangle1 = 2u << 6;
+constexpr std::uint32_t noise2    = 1u << 22;
+constexpr std::uint32_t triangle2 = 2u << 22;
+
+auto software_loads(rig const& r, std::uint32_t count, std::uint32_t select = 1)
+    -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < count; ++index)
+  {
+    r.write(dac1 + swtrgr, select);
+    r.idle_to(r.now_ps() + cycle);
+    out.push_back(r.read(dac1 + (select == 2 ? dor2 : dor1)));
+  }
+  return out;
+}
+}
+
+TEST_CASE(
+    "RM0351 19.4.8, 19.4.12 and Figures 141 and 142: noise adds the LFSR from 0xAAA, then steps "
+    "it, masked by MAMP, MAMP above 1011 as 1011")
+{
+  struct leg
+  {
+    std::uint32_t              amplitude;
+    std::uint32_t              base;
+    std::vector<std::uint32_t> loads;
+  };
+  for(auto const& [amplitude, base, loads] : {
+          leg{11, 0,     {0xAAA, 0xD55, 0xEAA, 0xF55, 0xFAA, 0xFD5}},
+          leg{15, 0,     {0xAAA, 0xD55, 0xEAA, 0xF55, 0xFAA, 0xFD5}},
+          leg{7,  0x100, {0x1AA, 0x155, 0x1AA, 0x155, 0x1AA, 0x1D5}},
+  })
+  {
+    CAPTURE(amplitude);
+    rig const r;
+    r.write(dac1 + cr, ten1 | software1 | noise1 | amplitude << 8);
+    r.write(dac1 + dhr12r1, base);
+    CHECK(software_loads(r, 6) == loads);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("the LFSR returns to 0xAAA after 4095 loads and never reads 0 on the way")
+{
+  rig const r;
+  r.write(dac1 + cr, ten1 | software1 | noise1 | 11u << 8);
+  auto const loads = software_loads(r, 4096);
+  CHECK(loads.front() == 0xAAA);
+  CHECK(loads.back() == 0xAAA);
+  CHECK(std::ranges::count(loads, 0xAAAu) == 2);
+  CHECK(std::ranges::count(loads, 0u) == 0);
+}
+
+TEST_CASE(
+    "RM0351 19.4.9, 19.4.12 and Figure 144: the triangle adds its counter, then steps it up to "
+    "2^(MAMP+1)-1 and down to 0")
+{
+  struct leg
+  {
+    std::uint32_t              amplitude;
+    std::vector<std::uint32_t> loads;
+  };
+  for(auto const& [amplitude, loads] : {
+          leg{1, {0xABE, 0xABF, 0xAC0, 0xAC1, 0xAC0, 0xABF, 0xABE, 0xABF}},
+          leg{0, {0xABE, 0xABF, 0xABE, 0xABF}                            },
+  })
+  {
+    CAPTURE(amplitude);
+    rig const r;
+    r.write(dac1 + cr, ten1 | software1 | triangle1 | amplitude << 8);
+    r.write(dac1 + dhr12r1, 0xABE);
+    CHECK(software_loads(r, static_cast<std::uint32_t>(loads.size())) == loads);
+  }
+}
+
+TEST_CASE("a triangle at MAMP above 1011 peaks at 0xFFF as at 1011, then turns down")
+{
+  rig const r;
+  r.write(dac1 + cr, ten1 | software1 | triangle1 | 15u << 8);
+  auto const loads = software_loads(r, 4097);
+  CHECK(loads[4094] == 0xFFE);
+  CHECK(loads[4095] == 0xFFF);
+  CHECK(loads[4096] == 0xFFE);
+}
+
+TEST_CASE("DHR plus a wave saturates at 0xFFF, inferred")
+{
+  rig const triangle;
+  triangle.write(dac1 + cr, ten1 | software1 | triangle1 | 1u << 8);
+  triangle.write(dac1 + dhr12r1, 0xFFE);
+  CHECK(
+      software_loads(triangle, 8)
+      == std::vector<std::uint32_t>{0xFFE, 0xFFF, 0xFFF, 0xFFF, 0xFFF, 0xFFF, 0xFFE, 0xFFF});
+  rig const noise;
+  noise.write(dac1 + cr, ten1 | software1 | noise1 | 11u << 8);
+  noise.write(dac1 + dhr12r1, 0xFF0);
+  CHECK(software_loads(noise, 1) == std::vector<std::uint32_t>{0xFFF});
+}
+
+TEST_CASE(
+    "RM0351 19.4.8 and 19.4.9: WAVE written 00 resets the LFSR to 0xAAA and the triangle to 0, a "
+    "DAC_CR write keeping WAVE resets nothing")
+{
+  rig const  r;
+  auto const noise = ten1 | software1 | noise1 | 11u << 8;
+  r.write(dac1 + cr, noise);
+  CHECK(software_loads(r, 3) == std::vector<std::uint32_t>{0xAAA, 0xD55, 0xEAA});
+  r.write(dac1 + cr, noise);
+  CHECK(software_loads(r, 1) == std::vector<std::uint32_t>{0xF55});
+  r.write(dac1 + cr, ten1 | software1);
+  r.write(dac1 + cr, noise);
+  CHECK(software_loads(r, 1) == std::vector<std::uint32_t>{0xAAA});
+  auto const triangle = ten1 | software1 | triangle1 | 2u << 8;
+  r.write(dac1 + cr, ten1 | software1);
+  r.write(dac1 + cr, triangle);
+  CHECK(software_loads(r, 3) == std::vector<std::uint32_t>{0, 1, 2});
+  r.write(dac1 + cr, triangle);
+  CHECK(software_loads(r, 1) == std::vector<std::uint32_t>{3});
+  r.write(dac1 + cr, ten1 | software1);
+  r.write(dac1 + cr, triangle);
+  CHECK(software_loads(r, 1) == std::vector<std::uint32_t>{0});
+}
+
+TEST_CASE("each channel steps its own wave, and a TIM6 edge adds the wave as SWTRIG does")
+{
+  rig const r;
+  r.write(dac1 + cr, ten1 | software1 | noise1 | 11u << 8 | ten2 | software2 | noise2 | 11u << 24);
+  CHECK(software_loads(r, 2, 1) == std::vector<std::uint32_t>{0xAAA, 0xD55});
+  CHECK(software_loads(r, 1, 2) == std::vector<std::uint32_t>{0xAAA});
+  r.write(dac1 + swtrgr, 3);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.read(dac1 + dor1) == 0xEAA);
+  CHECK(r.read(dac1 + dor2) == 0xD55);
+  rig const timed;
+  timed.sources();
+  timed.write(dac1 + cr, ten1 | triangle1 | 1u << 8);
+  timed.write(dac1 + dhr12r1, 0x100);
+  for(auto const value : {0x100u, 0x101u, 0x102u})
+  {
+    timed.fire(0);
+    timed.idle_to(timed.now_ps() + 4 * cycle);
+    CHECK(timed.read(dac1 + dor1) == value);
+  }
+}
+
+TEST_CASE(
+    "RM0351 19.4.8 and 19.4.9 notes: a holding register write with TEN 0 and WAVE set loads DHR "
+    "with no wave and logs once, a model_error when strict that leaves the holding registers")
+{
+  rig const r;
+  r.write(dac1 + cr, noise1 | 11u << 8);
+  r.write(dac1 + dhr12r1, 0x123);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.read(dac1 + dor1) == 0x123);
+  r.write(dac1 + dhr12r1, 0x124);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.read(dac1 + dor1) == 0x124);
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].message.contains("TEN1 0"));
+
+  rig const strict{true};
+  strict.write(dac1 + dhr12rd, 0x0222'0111);
+  strict.idle_to(strict.now_ps() + cycle);
+  strict.write(dac1 + cr, noise1 | 11u << 8);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(dac1 + dhr12rd, 4, 0x0444'0333)),
+      popcorn::model_error);
+  CHECK(strict.read(dac1 + dhr12rd) == 0x0222'0111u);
+  CHECK(strict.read(dac1 + dhr12r1) == 0x111);
+  CHECK(strict.pending(0).empty());
+  strict.idle_to(strict.now_ps() + cycle);
+  CHECK(strict.read(dac1 + dor1) == 0x111);
+  strict.write(dac1 + dhr12r2, 0x555);
+  strict.idle_to(strict.now_ps() + cycle);
+  CHECK(strict.read(dac1 + dor2) == 0x555);
+}
+
+TEST_CASE("a snapshot mid-wave restores the LFSR and the triangle counter and direction")
+{
+  rig const r;
+  r.write(
+      dac1 + cr, ten1 | software1 | noise1 | 11u << 8 | ten2 | software2 | triangle2 | 1u << 24);
+  CHECK(software_loads(r, 3, 1) == std::vector<std::uint32_t>{0xAAA, 0xD55, 0xEAA});
+  CHECK(software_loads(r, 4, 2) == std::vector<std::uint32_t>{0, 1, 2, 3});
+  auto const bytes = r.encoded();
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(software_loads(fresh, 1, 1) == std::vector<std::uint32_t>{0xF55});
+  CHECK(software_loads(fresh, 2, 2) == std::vector<std::uint32_t>{2, 1});
 }

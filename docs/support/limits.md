@@ -499,9 +499,22 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
 - ES0250 2.9.1, the DMA underrun flag missed for an internal trigger on the cycle of the DMA
   acknowledge, applies only with software and hardware triggers mixed. Popcorn sets DMAUDRx by the
   rule above.
-- WAVEx other than 00 is not modelled. A `DAC_CR` write that sets it logs one `model_warning`.
-  MODEx 1xx, the sample and hold mode, is not modelled the same way on `DAC_MCR`. Under strict_peripherals each raises
-  `ModelError` and leaves the register as before the write. The sample and hold registers
+- WAVEx 01 adds the LFSR of RM0351 Figure 141, masked to the MAMPx + 1 low bits, at each SWTRIGx
+  or hardware load, then steps it, RM0351 19.4.8 and 19.4.12, from the preload 0xAAA. WAVEx 1x
+  adds the triangle counter, then steps it up to 2^(MAMPx + 1) - 1 and back down to 0, RM0351
+  19.4.9, 19.4.12 and Figure 144. RM0351 19.4.9 reads the increment before the add, and the model
+  follows 19.4.12 and Figure 144. A MAMPx above 1011 acts as 1011. The sum saturates at 0xFFF,
+  the reading of "without overflow", inferred. WAVEx 00 resets both generators.
+- The LFSR runs the 4095 states from 0xAAA and never reaches 0, so the antilock-up injection of
+  RM0351 19.4.8 never applies.
+- The RM0351 19.4.8 and 19.4.9 notes require TENx for a wave. A holding register write with TENx 0
+  and WAVEx set logs one `model_warning` and loads DHRx with no wave, the load inferred. Under
+  strict_peripherals it raises `ModelError` and leaves the holding registers as before the write.
+  A `DAC_CR` write that sets WAVEx with TENx 0 is accepted, as `LL_DAC_Init` writes WAVEx before
+  `LL_DAC_EnableTrigger` sets TENx.
+- MODEx 1xx, the sample and hold mode, is not modelled. A `DAC_MCR` write that sets it logs one
+  `model_warning`, and under strict_peripherals raises `ModelError` and leaves the register as
+  before the write. The sample and hold registers
   `DAC_SHSRx`, `DAC_SHHR` and `DAC_SHRR` report as unmodelled registers.
 - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
