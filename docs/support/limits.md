@@ -318,8 +318,18 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   tLATR of a regular trigger. With JDISCEN and JEXTEN 0 each JADSTART converts the next channel and
   JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware triggers only.
 - These injected settings are logged once, a model_error under strict_peripherals: an injection
-  into a ROVSE conversion with ROVSM 0 converts every sample of the dropped rank again, JQDIS 0
-  converts as JQDIS 1 and JOVSE converts without oversampling.
+  into a ROVSE conversion with ROVSM 0 converts every sample of the dropped rank again, JQM 1 with
+  JQDIS 0 converts as JQM 0 and JOVSE converts without oversampling.
+- With JQDIS 0 a CPU or DMA `ADC_JSQR` write goes through the queue of context with one stage at
+  JQM 0, ES0250 2.8.1, where RM0351 18.4.21 describes two. A write before the waiting context is
+  consumed sets JQOVF, an interrupt with JQOVFIE, and is ignored. `ADC_JSQR` reads the active
+  context. JEOS consumes it, and with JDISCEN the first trigger does, RM0351 18.4.21 note: a write
+  after that waits and becomes the context at JEOS. Otherwise a write after the consumption
+  applies at once, and so does the first write after JADSTP, ADDIS or ADCRST drop the wait,
+  inferred. A set or reset of JQDIS flushes the queue and clears `ADC_JSQR`, RM0351 18.7.4. A
+  debugger write stores the word with no queue effect. Only hardware triggers start a sequence
+  with the queue on, RM0351 18.4.21: JADSTART with JEXTEN 0 is ignored and logged once, a
+  model_error under strict_peripherals.
 - With JAUTO the injected group converts after the last regular rank, RM0351 18.4.19, with no
   delay, inferred, and with CONT the regular sequence starts again at JEOS. With CONT 0 and
   EXTEN 0 ADSTART clears at EOS, as the RM0351 18.7.3 ADSTART bit says, and JADSTART reads 0 while

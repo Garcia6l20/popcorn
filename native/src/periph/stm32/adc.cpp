@@ -773,6 +773,9 @@ struct l4_adc_state
   std::uint8_t                        injected_rank{};
   bool                                regular_resume{};
   bool                                regular_pending{};
+  bool                                queue_pending{};
+  std::uint8_t                        queue_count{};
+  std::array<std::uint32_t, 2>        queue_next{};
   std::array<adc_edge, 2>             injected_edges{};
   std::uint32_t                       injected_edge_generation{};
 
@@ -1026,6 +1029,8 @@ struct injected_fields
   field_ref                             select;
   field_ref                             discontinuous;
   field_ref                             queue_disable;
+  field_ref                             queue_mode;
+  field_ref                             queue_overflow;
   field_ref                             automatic;
   field_ref                             watchdog1;
   field_ref                             resumed_oversampling;
@@ -1255,9 +1260,19 @@ struct adc_clock
  *        with JEXTEN set ignores the injected triggers, JAUTO with DISCEN or JDISCEN converts as
  *        JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0 oversamples the regular ranks only,
  *        RM0351 18.4.31, each logged once, a model_error under strict_peripherals.
+ *        With JQDIS 0 a CPU or DMA ADC_JSQR write goes through the queue of context, RM0351
+ *        18.4.21, with the one stage of ES0250 2.8.1 at JQM 0: a write before the waiting
+ *        context is consumed sets JQOVF and is ignored. ADC_JSQR reads the active context. JEOS
+ *        consumes it, and with JDISCEN the first trigger does, RM0351 18.4.21 note: a write
+ *        after that waits and becomes the context at JEOS. Otherwise a write after the
+ *        consumption applies at once, and so does the first write after JADSTP, ADDIS or ADCRST
+ *        drop the wait, inferred. A set or reset of JQDIS flushes the queue and clears ADC_JSQR,
+ *        RM0351 18.7.4. A debugger write stores the word with no queue effect. Only hardware
+ *        triggers start a sequence with the queue on, RM0351 18.4.21: JADSTART with JEXTEN 0 is
+ *        ignored, logged once, a model_error under strict_peripherals.
  *        These log a warning once, a model_error under strict_peripherals: an injection into a
  *        ROVSE conversion with ROVSM 0, which converts every sample of the dropped rank again,
- *        JQDIS 0, converted as JQDIS 1, and JOVSE, converted without oversampling.
+ *        JQM 1 with JQDIS 0, converted as JQM 0, and JOVSE, converted without oversampling.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,
@@ -1375,6 +1390,10 @@ private:
   void abort_injected();
   void latch_regular();
   [[nodiscard]] auto automatic() const -> bool;
+  [[nodiscard]] auto queue_on() const -> bool;
+  void               apply_context(std::uint32_t word);
+  void               advance_queue();
+  void               flush_queue();
   [[nodiscard]] auto regular_discontinuous() const -> bool;
   [[nodiscard]] auto injected_discontinuous() const -> bool;
   void               check_automatic();
@@ -1508,7 +1527,8 @@ private:
   std::array<bool, trigger_selections>             injected_unproduced_logged_{};
   bool                                             injected_refused_logged_{};
   bool                                             resumed_oversampling_logged_{};
-  bool                                             queue_logged_{};
+  bool                                             queue_mode_logged_{};
+  bool                                             queue_software_logged_{};
   bool                                             automatic_start_logged_{};
   bool                                             automatic_trigger_logged_{};
   bool                                             automatic_discontinuous_logged_{};
@@ -1673,6 +1693,8 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
         .select               = field("ADC_JSQR", "JEXTSEL"),
         .discontinuous        = field(Traits::config, "JDISCEN"),
         .queue_disable        = field(Traits::config, "JQDIS"),
+        .queue_mode           = field(Traits::config, "JQM"),
+        .queue_overflow       = field("ADC_ISR", "JQOVF"),
         .automatic            = field(Traits::config, "JAUTO"),
         .watchdog1            = field(Traits::config, "JAWD1EN"),
         .resumed_oversampling = field("ADC_CFGR2", "ROVSM"),
@@ -1968,6 +1990,8 @@ template <typename Traits> void adc_model<Traits>::restore_reset_values()
   {
     abort_injected();
     state_.injected_edges = {};
+    state_.queue_pending  = false;
+    state_.queue_count    = 0;
   }
   request_.resolve();
   signal();
@@ -2036,6 +2060,21 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
           "JADSTART or JADSTP with JAUTO, forbidden by RM0351 18.4.19: ignored, converted as "
           "JAUTO alone");
     }
+    if(injected_start_.of(now) != 0
+       and injected_start_.of(old) == 0
+       and queue_on()
+       and get(regs_, injected_->trigger) == 0)
+    {
+      now = injected_start_.with(now, 0);
+      if(ctx_.strict_peripherals)
+      {
+        regs_.poke(enable_.offset, old);
+      }
+      forbidden(
+          queue_software_logged_, "ADC_CR",
+          "JADSTART with JQDIS 0 and JEXTEN 0, forbidden by RM0351 18.4.21: the queue of context "
+          "starts only on hardware triggers, the write is ignored");
+    }
   }
   if(deep_power_down_.of(now) != 0)
   {
@@ -2090,6 +2129,7 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
       update(regs_, injected_start_, 0);
       update(regs_, injected_->stop, 0);
       abort_injected();
+      flush_queue();
     }
     abort();
     signal();
@@ -2187,6 +2227,10 @@ auto adc_model<Traits>::calibration_written(std::uint32_t old, std::uint32_t now
   }
   if(enable_.of(old) != 0 or deep_power_down_.of(now) != 0 or regulator_.of(now) == 0)
   {
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(enable_.offset, old);
+    }
     forbidden(
         calibration_refused_logged_, "ADC_CR",
         "ADCAL written with ADEN 1, DEEPPWD 1 or ADVREGEN 0, RM0351 18.4.8: the write is ignored");
@@ -2883,10 +2927,38 @@ auto adc_model<Traits>::on_write(
             "ADC_JSQR written with JADSTART 1 and JQDIS 1, RM0351 18.7.16 as corrected by ES0250 "
             "2.8.2: the write applies to the next injected sequence");
       }
+      auto const queued = word != start_.offset and queue_on() and access.by != initiator::debugger;
+      auto const held   = (state_.queue_pending ? 1u : 0u) + state_.queue_count;
+      if(queued and held >= 1u)
+      {
+        update(regs_, injected_->queue_overflow, 1);
+        signal();
+        return {};
+      }
+      if(queued and injected_discontinuous() and (state_.injecting or state_.injected_rank != 0))
+      {
+        state_.queue_next[state_.queue_count++] = merge_write(old, offset, size, value);
+        return {};
+      }
       auto const was = injected_listened();
       injected_notify(was);
       auto const result = write_word(regs, offset, size, old, value, access);
       retune_injected(was);
+      if(queued)
+      {
+        state_.queue_pending = true;
+      }
+      return result;
+    }
+    if(word == trigger_.offset)
+    {
+      auto const before = get(regs_, injected_->queue_disable);
+      auto const result = write_word(regs, offset, size, old, value, access);
+      if(get(regs_, injected_->queue_disable) != before)
+      {
+        flush_queue();
+        apply_context(describe("ADC_JSQR").reset);
+      }
       return result;
     }
   }
@@ -3110,6 +3182,7 @@ void adc_model<Traits>::injected_written(std::uint32_t old, std::uint32_t now)
       update(regs_, injected_->stop, 0);
       update(regs_, injected_start_, 0);
       abort_injected();
+      flush_queue();
       resume_regular(ctx_.clock.time().ps);
       signal();
       return;
@@ -3136,9 +3209,10 @@ template <typename Traits> void adc_model<Traits>::prepare_injected()
 {
   if constexpr(injected_group)
   {
-    if(get(regs_, injected_->queue_disable) == 0)
+    if(get(regs_, injected_->queue_disable) == 0 and get(regs_, injected_->queue_mode) != 0)
     {
-      unmodelled(queue_logged_, Traits::config, "JQDIS 0: the injected context queue");
+      unmodelled(
+          queue_mode_logged_, Traits::config, "JQM 1: the injected context queue emptied at JEOS");
     }
     if(injected_oversampling_ and get(regs_, *injected_oversampling_) != 0)
     {
@@ -3161,6 +3235,10 @@ template <typename Traits> void adc_model<Traits>::begin_injected(std::uint64_t 
     if(not injected_discontinuous() or state_.injected_rank >= injected_length())
     {
       state_.injected_rank = 0;
+    }
+    if(queue_on() and injected_discontinuous() and state_.injected_rank == 0)
+    {
+      state_.queue_pending = false;
     }
     state_.injecting = true;
     begin_rank(start_ps);
@@ -3186,6 +3264,7 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
     if(last)
     {
       update(regs_, injected_->end_of_sequence, 1);
+      advance_queue();
     }
     state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(rank + 1u);
     if(last or injected_discontinuous())
@@ -3238,6 +3317,52 @@ template <typename Traits> auto adc_model<Traits>::automatic() const -> bool
     return get(regs_, injected_->automatic) != 0;
   }
   return false;
+}
+
+template <typename Traits> auto adc_model<Traits>::queue_on() const -> bool
+{
+  if constexpr(injected_group)
+  {
+    return get(regs_, injected_->queue_disable) == 0;
+  }
+  return false;
+}
+
+template <typename Traits> void adc_model<Traits>::apply_context(std::uint32_t word)
+{
+  if constexpr(injected_group)
+  {
+    auto const was = injected_listened();
+    injected_notify(was);
+    regs_.poke(injected_->sequence_register.offset, word);
+    retune_injected(was);
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::advance_queue()
+{
+  if constexpr(injected_group)
+  {
+    state_.queue_pending = false;
+    if(state_.queue_count == 0)
+    {
+      return;
+    }
+    auto const next      = state_.queue_next[0];
+    state_.queue_next[0] = state_.queue_next[1];
+    --state_.queue_count;
+    state_.queue_pending = true;
+    apply_context(next);
+  }
+}
+
+template <typename Traits> void adc_model<Traits>::flush_queue()
+{
+  if constexpr(injected_group)
+  {
+    state_.queue_pending = false;
+    state_.queue_count   = 0;
+  }
 }
 
 template <typename Traits> auto adc_model<Traits>::regular_discontinuous() const -> bool
