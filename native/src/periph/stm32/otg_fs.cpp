@@ -1,6 +1,7 @@
 #include "factories.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
+#include "pwr_peers.hpp"
 #include "secure_config.hpp"
 #include "usb_device_link.hpp"
 
@@ -68,6 +69,7 @@ enum warning : std::uint32_t
   fifo_ram         = 1u << 10,
   iso_dropped      = 1u << 11,
   iso_packets      = 1u << 12,
+  usb_supply       = 1u << 13,
 };
 
 struct rx_packet
@@ -204,8 +206,11 @@ struct out_fields
  *
  * Link: B-valid is GOTGCTL.BVALOVAL while BVALOEN is set, else the attached host's VBUS while
  * GCCFG.VBDEN is set. BSVLD reads it, its fall sets GOTGINT.SEDET. The device pulls D+ up while
- * a host is attached, B-valid holds, GCCFG.PWRDWN powers the transceiver and DCTL.SDIS is clear,
- * and tells the host of every change. Without a host nothing attaches.
+ * a host is attached, B-valid holds, GCCFG.PWRDWN powers the transceiver, DCTL.SDIS is clear and
+ * the PWR model declares VDDUSB valid, `PWR_SVMCR.USV` on the STM32U5, RM0456 10.4.6, and
+ * `PWR_CR2.USV` on the STM32L4, RM0351 5.1.3. It tells the host of every change, a USV write
+ * included. With every other condition met and USV 0 the device stays disconnected and logs one
+ * warning per machine life. Without a host nothing attaches.
  *
  * Bus: a bus reset raises USBRST, then ENUMDNE 10 us later with DSTS.ENUMSPD 3, full speed. The
  * device answers DCFG.DAD, except after a SET_ADDRESS SETUP: it keeps the old address until the
@@ -271,7 +276,8 @@ struct out_fields
  */
 class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>,
                      public usb_device_link<otg_fs>,
-                     public bus_reset_listener
+                     public bus_reset_listener,
+                     public usb_supply_listener
 {
   friend usb_device_link<otg_fs>;
 
@@ -301,6 +307,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
+  void               usb_supply_changed() override;
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
   void               bus_reset_end(vtime at) override;
@@ -337,6 +344,8 @@ private:
   [[nodiscard]] auto in_fields_of(std::size_t n) const -> in_fields;
   [[nodiscard]] auto out_fields_of(std::size_t n) const -> out_fields;
   [[nodiscard]] auto b_valid() const -> bool;
+  [[nodiscard]] auto supplied() const -> bool;
+  [[nodiscard]] auto connectable() const -> bool;
   [[nodiscard]] auto on_bus(std::uint8_t address) const -> bool;
   [[nodiscard]] auto rx_used() const -> std::size_t;
   [[nodiscard]] auto tx_depth(std::size_t n) const -> std::size_t;
@@ -707,12 +716,29 @@ auto otg_fs::b_valid() const -> bool
   return host() != nullptr and get(regs_, vbus_detection_) != 0;
 }
 
-auto otg_fs::pulled_up() const -> bool
+auto otg_fs::supplied() const -> bool
+{
+  auto const* const supply = dynamic_cast<usb_supply_source const*>(ctx_.peers.find("PWR"));
+  return supply == nullptr or supply->usb_supply_valid();
+}
+
+auto otg_fs::connectable() const -> bool
 {
   return host() != nullptr
      and b_valid()
      and get(regs_, power_up_) != 0
      and get(regs_, soft_disconnect_) == 0;
+}
+
+auto otg_fs::pulled_up() const -> bool
+{
+  return connectable() and supplied();
+}
+
+void otg_fs::usb_supply_changed()
+{
+  link(false);
+  refresh();
 }
 
 auto otg_fs::on_bus(std::uint8_t address) const -> bool
@@ -811,6 +837,14 @@ void otg_fs::link(bool report_session_end)
     update(regs_, session_end_, 1);
   }
   state_.b_valid = valid;
+  if(connectable() and not supplied())
+  {
+    notice(
+        "GCCFG",
+        "the transceiver stays disconnected while the PWR USV bit leaves VDDUSB isolated, "
+        "HAL_PWREx_EnableVddUSB sets it",
+        usb_supply);
+  }
   tell_pull_up(pulled_up());
 }
 

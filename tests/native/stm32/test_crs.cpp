@@ -260,6 +260,7 @@ template <typename Family> struct rig
   {
     if constexpr(Family::usb_name == std::string_view{"OTG_FS"})
     {
+      set_field("PWR", "SVMCR", "USV", 1);
       set_field("OTG_FS", "GCCFG", "PWRDWN", 1);
       set_field("OTG_FS", "GOTGCTL", "BVALOEN", 1);
       set_field("OTG_FS", "GOTGCTL", "BVALOVAL", 1);

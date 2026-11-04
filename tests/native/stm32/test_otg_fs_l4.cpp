@@ -3,13 +3,18 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/periph/usb.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -44,6 +49,34 @@ constexpr std::uint32_t otgint     = 1u << 2;
 constexpr std::uint32_t global_irq = 1u << 0;
 constexpr std::uint32_t otg_irq    = 67;
 constexpr std::uint32_t u5_otg_irq = 73;
+
+constexpr std::uint32_t pwr_cr2       = 0x4000'7004;
+constexpr std::uint32_t rcc_apb1rstr1 = 0x4002'1038;
+constexpr std::uint32_t pwrrst        = 1u << 28;
+constexpr std::uint32_t usv           = 1u << 10;
+constexpr std::uint32_t pwrdwn        = 1u << 16;
+constexpr std::uint32_t gccfg         = 0x38;
+constexpr std::uint32_t dctl          = 0x804;
+constexpr std::uint32_t sdis          = 1u << 1;
+
+struct pull_up_host final : popcorn::periph::usb::host_side
+{
+  std::vector<bool> changes;
+
+  void pull_up_changed(bool on, popcorn::vtime) override
+  {
+    changes.push_back(on);
+  }
+
+  void on_time(popcorn::vtime) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+};
 
 auto options(bool strict) -> core::machine_options
 {
@@ -92,6 +125,21 @@ struct otg_rig
     auto const word = f.target->mem().read(0xE000'E200u + 4 * (irq / 32), 4);
     REQUIRE(word.has_value());
     return (*word >> (irq % 32) & 1u) != 0;
+  }
+
+  void supply(bool valid) const
+  {
+    auto const word = f.target->mem().read(pwr_cr2, 4);
+    REQUIRE(word.has_value());
+    auto const now = valid ? *word | usv : *word & ~std::uint64_t{usv};
+    REQUIRE(f.target->mem().write(pwr_cr2, 4, now).has_value());
+  }
+
+  [[nodiscard]] auto port() const -> popcorn::periph::usb::device_port&
+  {
+    auto* const found = f.model_of<popcorn::periph::usb::device_port>("OTG_FS");
+    REQUIRE(found != nullptr);
+    return *found;
   }
 
   [[nodiscard]] auto warnings() const -> std::ptrdiff_t
@@ -172,4 +220,65 @@ TEST_CASE("RM0351 Table 61: a session end with GINTMSK.OTGINT and GAHBCFG.GINTMS
   r.write(gahbcfg, global_irq);
   CHECK(r.nvic_pending(otg_irq));
   CHECK_FALSE(r.nvic_pending(u5_otg_irq));
+}
+
+TEST_CASE(
+    "RM0351 5.1.3 and 5.4.2: with PWR_CR2.USV 0 a connectable device stays disconnected and "
+    "warns once, a USV write connects it, a PWRRST pulse disconnects it")
+{
+  otg_rig const r;
+  auto const    host = std::make_shared<pull_up_host>();
+  r.write(gccfg, pwrdwn);
+  r.write(gotgctl, bvaloen | bvaloval);
+  r.port().attach(host);
+  r.write(dctl, r.read(dctl) & ~sdis);
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(host->changes.empty());
+  auto const usv_warnings = [&] {
+    return std::ranges::count_if(r.logged, [](core::log_record const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.message.find("USV") != std::string::npos;
+    });
+  };
+  CHECK(usv_warnings() == 1);
+  r.supply(true);
+  CHECK(r.port().pulled_up());
+  CHECK(host->changes == std::vector<bool>{true});
+  r.supply(false);
+  CHECK(host->changes == std::vector<bool>{true, false});
+  r.supply(true);
+  CHECK(host->changes == std::vector<bool>{true, false, true});
+  CHECK(usv_warnings() == 1);
+  REQUIRE(r.f.target->mem().write(rcc_apb1rstr1, 4, pwrrst).has_value());
+  REQUIRE(r.f.target->mem().write(rcc_apb1rstr1, 4, 0).has_value());
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(host->changes == std::vector<bool>{true, false, true, false});
+}
+
+TEST_CASE(
+    "RM0351 5.4.2: a machine reset of a connected device logs no USV warning, a later start "
+    "with USV 0 warns once")
+{
+  otg_rig const r;
+  auto const    host         = std::make_shared<pull_up_host>();
+  auto const    usv_warnings = [&] {
+    return std::ranges::count_if(r.logged, [](core::log_record const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.message.find("USV") != std::string::npos;
+    });
+  };
+  r.supply(true);
+  r.write(gccfg, pwrdwn);
+  r.write(gotgctl, bvaloen | bvaloval);
+  r.port().attach(host);
+  r.write(dctl, r.read(dctl) & ~sdis);
+  REQUIRE(r.port().pulled_up());
+  r.f.target->reset();
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(usv_warnings() == 0);
+  r.write(gccfg, pwrdwn);
+  r.write(gotgctl, bvaloen | bvaloval);
+  r.write(dctl, r.read(dctl) & ~sdis);
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(usv_warnings() == 1);
 }

@@ -3,6 +3,7 @@
 #include "gpio_peers.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
+#include "pwr_peers.hpp"
 #include "secure_config.hpp"
 #include "voltage_range.hpp"
 
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <format>
 #include <memory>
 #include <optional>
@@ -74,6 +76,7 @@ enum class pwr_role : std::uint8_t
   regulator_select,
   regulator_status,
   io_supply_valid,
+  usb_supply_valid,
 };
 
 enum class guard_source : std::uint8_t
@@ -228,6 +231,10 @@ struct pwr_variant
  *        model_error and `PWR_CR3` keeps its value before the write. Otherwise REGSEL holds the
  *        written value.
  *
+ *        USB supply, RM0456 10.4.6 and 10.10.5: `PWR_SVMCR.USV` declares VDDUSB valid. The
+ *        OTG_FS model reads it through usb_supply_source and is told of every change through
+ *        usb_supply_listener. The other `PWR_SVMCR` fields are storage.
+ *
  *        TrustZone, RM0456 10.8 and Table 109: the bits a `PWR_SECCFGR` bit secures, the VOSR
  *        bits `RCC_SECCFGR.SYSCLKSEC` secures, the PUCRx and PDCRx bits of the Secure pins of
  *        GPIOx and `PWR_UCPDR` while the TZSC makes UCPD1 Secure are RAZ/WI to a Non-secure
@@ -264,13 +271,15 @@ struct pwr_variant
  *        write that sets LPR, PVDE, a PVMEx, an EWUPx or APC from 0 logs one warning per field
  *        per machine life, and under strict_peripherals raises model_error with the register
  *        kept at its value before the write. IOSV is storage the GPIO model reads through
- *        io_supply_source. DBP, USV, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and PWR_PDCRx
- *        are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the wakeup and Standby flags
- *        stay 0.
+ *        io_supply_source, USV the OTG_FS model reads through usb_supply_source and is told of
+ *        through usb_supply_listener. DBP, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and
+ *        PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the wakeup and
+ *        Standby flags stay 0.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
                   public io_supply_source,
+                  public usb_supply_source,
                   public trustzone_aware
 {
 public:
@@ -283,8 +292,17 @@ public:
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto active_level() const -> std::uint32_t override;
   [[nodiscard]] auto io_supply_valid() const -> bool override;
+  [[nodiscard]] auto usb_supply_valid() const -> bool override;
+  auto               on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
+  void tell_usb_supply(bool before);
   void cr1_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
   void cr3_written(std::uint32_t old, std::uint32_t now);
@@ -321,11 +339,12 @@ private:
   std::vector<field_ref>     peripheral_kept_;
 };
 
-constexpr std::array<write_entry<pwr>, 5> u5_writes{
+constexpr std::array<write_entry<pwr>, 6> u5_writes{
     {
      {"PWR_CR1", &pwr::cr1_written},
      {"PWR_CR3", &pwr::cr3_written},
      {"PWR_VOSR", &pwr::vosr_written},
+     {"PWR_SVMCR", nullptr},
      {"PWR_SVMSR", nullptr},
      {"PWR_SECCFGR", nullptr},
      }
@@ -333,7 +352,6 @@ constexpr std::array<write_entry<pwr>, 5> u5_writes{
 
 constexpr auto u5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_CR2",      nullptr},
-    {"PWR_SVMCR",    nullptr},
     {"PWR_WUCR1",    nullptr},
     {"PWR_WUCR2",    nullptr},
     {"PWR_WUCR3",    nullptr},
@@ -404,6 +422,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
      {pwr_role::regulator_select, {"PWR_CR3", "REGSEL"}},
      {pwr_role::regulator_status, {"PWR_SVMSR", "REGS"}},
      {pwr_role::io_supply_valid, {"", ""}},
+     {pwr_role::usb_supply_valid, {"PWR_SVMCR", "USV"}},
      }
 };
 
@@ -423,6 +442,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
      {pwr_role::io_supply_valid, {"", ""}},
+     {pwr_role::usb_supply_valid, {"", ""}},
      }
 };
 
@@ -487,6 +507,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l1_names{
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
      {pwr_role::io_supply_valid, {"", ""}},
+     {pwr_role::usb_supply_valid, {"", ""}},
      }
 };
 
@@ -537,6 +558,7 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l4_names{
      {pwr_role::regulator_select, {"", ""}},
      {pwr_role::regulator_status, {"", ""}},
      {pwr_role::io_supply_valid, {"CR2", "IOSV"}},
+     {pwr_role::usb_supply_valid, {"CR2", "USV"}},
      }
 };
 
@@ -803,6 +825,38 @@ auto pwr::io_supply_valid() const -> bool
   return not valid or get(regs_, *valid) != 0;
 }
 
+auto pwr::usb_supply_valid() const -> bool
+{
+  auto const valid = names_.find(pwr_role::usb_supply_valid);
+  return not valid or get(regs_, *valid) != 0;
+}
+
+void pwr::tell_usb_supply(bool before)
+{
+  if(usb_supply_valid() == before)
+  {
+    return;
+  }
+  if(auto* const usb = dynamic_cast<usb_supply_listener*>(ctx_.peers.find("OTG_FS")))
+  {
+    usb->usb_supply_changed();
+  }
+}
+
+auto pwr::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     ctx) -> std::expected<void, bus_error>
+{
+  auto const before = usb_supply_valid();
+  auto       result = dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  tell_usb_supply(before);
+  return result;
+}
+
 auto pwr::secure_function() const -> bool
 {
   return secure_word() != 0;
@@ -848,11 +902,12 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
 
 void pwr::reset(register_file& regs, reset_kind kind)
 {
-  auto const kept = kind == reset_kind::peripheral
-                      ? peripheral_kept_ | std::views::transform([&](field_ref const& bits) {
+  auto const supplied = usb_supply_valid();
+  auto const kept     = kind == reset_kind::peripheral
+                          ? peripheral_kept_ | std::views::transform([&](field_ref const& bits) {
                           return bits.of(regs.peek(bits.offset));
-                        }) | std::ranges::to<std::vector>()
-                      : std::vector<std::uint32_t>{};
+                            }) | std::ranges::to<std::vector>()
+                          : std::vector<std::uint32_t>{};
   for(auto const& name : claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
@@ -862,6 +917,10 @@ void pwr::reset(register_file& regs, reset_kind kind)
     regs.poke(bits.offset, bits.with(regs.peek(bits.offset), value));
   }
   state_.settled_level = variant_.vos_levels[get(regs, names_[pwr_role::active_vos])];
+  if(kind == reset_kind::peripheral)
+  {
+    tell_usb_supply(supplied);
+  }
 }
 
 void pwr::vosr_written(std::uint32_t old, std::uint32_t now)

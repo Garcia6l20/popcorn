@@ -1141,6 +1141,14 @@ Not modelled, logged:
 On every family the timing is full speed whatever the 48 MHz kernel clock source and its
 frequency, `CCIPR1.ICLKSEL` on the STM32U5 and `CCIPR.CLK48SEL` on the STM32L4.
 
+The device connects only once firmware declares VDDUSB valid, `PWR_SVMCR.USV` on the STM32U5,
+RM0456 10.4.6, and `PWR_CR2.USV` on the STM32L4, RM0351 5.1.3. `HAL_PWREx_EnableVddUSB` sets
+it. With USV 0 and every other connect condition met the device stays disconnected and logs one
+`model_warning` per machine life. A USV change, a PWR reset included, connects or disconnects
+the device at once. Everything driven by the host's SOF stops with it, so on the STM32U5 a CRS
+synchronised on the USB SOF, `CRS_CFGR.SYNCSRC` 2, gets no SYNC, no SYNCOKF and no trim until USV
+is set. A test rig that attaches a host to the U5 OTG_FS sets USV first.
+
 The STM32L47x/L48x core, RM0351 section 47, is the STM32U5 core with these differences:
 
 - GRSTCTL bit 2 is FCRST, RM0351 47.15.5, read 0 again as soon as it is written, as FSRST on the

@@ -33,8 +33,10 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
 
-constexpr std::uint64_t us      = 1'000'000;
-constexpr std::uint32_t otg_irq = 73;
+constexpr std::uint64_t us        = 1'000'000;
+constexpr std::uint32_t otg_irq   = 73;
+constexpr std::uint32_t pwr_svmcr = 0x4602'0810;
+constexpr std::uint32_t usv       = 1u << 28;
 
 constexpr std::uint32_t bulk        = 2;
 constexpr std::uint32_t isochronous = 1;
@@ -183,8 +185,17 @@ struct rig
     REQUIRE(f->target->mem().write(0xe000'e280u + 4 * (otg_irq / 32), 4, 1u << (otg_irq % 32)));
   }
 
+  void supply(bool valid) const
+  {
+    auto const word = f->target->mem().read(pwr_svmcr, 4);
+    REQUIRE(word.has_value());
+    auto const now = valid ? *word | usv : *word & ~std::uint64_t{usv};
+    REQUIRE(f->target->mem().write(pwr_svmcr, 4, now).has_value());
+  }
+
   void power_up(bool forced_b_valid = true) const
   {
+    supply(true);
     set("GCCFG", "PWRDWN", 1);
     if(forced_b_valid)
     {
@@ -367,6 +378,7 @@ TEST_CASE("without VBUS clearing SDIS never attaches")
   SUBCASE("a host but no VBUS sensing and no B-valid override")
   {
     rig const r;
+    r.supply(true);
     r.set("GCCFG", "PWRDWN", 1);
     r.port().attach(r.host);
     r.set("DCTL", "SDIS", 0);
@@ -379,6 +391,7 @@ TEST_CASE("without VBUS clearing SDIS never attaches")
 TEST_CASE("B-valid forced with VBDEN clear reads BSVLD and attaches on SDIS clear")
 {
   rig const r;
+  r.supply(true);
   r.set("GCCFG", "PWRDWN", 1);
   r.set("GCCFG", "VBDEN", 0);
   r.write(
@@ -1545,4 +1558,65 @@ TEST_CASE("OTGRST moves every event generation past the events queued before it,
     }
   }
   CHECK(seen[1] > seen[0]);
+}
+
+TEST_CASE(
+    "RM0456 10.4.6: with PWR_SVMCR.USV 0 a connectable device stays disconnected and warns "
+    "once, a USV write connects it")
+{
+  rig const                     r;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const warned = [&] {
+    return std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.message.find("USV") != std::string::npos;
+    });
+  };
+  r.set("GCCFG", "PWRDWN", 1);
+  r.write(
+      "GOTGCTL", r.read("GOTGCTL") | r.mask("GOTGCTL", "BVALOEN") | r.mask("GOTGCTL", "BVALOVAL"));
+  r.port().attach(r.host);
+  r.set("DCTL", "SDIS", 0);
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(r.host->changes.empty());
+  CHECK(warned() == 1);
+  r.supply(true);
+  CHECK(r.port().pulled_up());
+  REQUIRE(r.host->changes.size() == 1);
+  CHECK(r.host->changes[0].first);
+  r.supply(false);
+  CHECK_FALSE(r.port().pulled_up());
+  REQUIRE(r.host->changes.size() == 2);
+  CHECK_FALSE(r.host->changes[1].first);
+  r.supply(true);
+  r.supply(false);
+  CHECK(warned() == 1);
+}
+
+TEST_CASE(
+    "a machine reset of a connected device logs no USV warning, "
+    "a later start with USV 0 warns once")
+{
+  rig const                     r;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const warned = [&] {
+    return std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.message.find("USV") != std::string::npos;
+    });
+  };
+  r.connect();
+  r.f->target->reset();
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(warned() == 0);
+  r.set("GCCFG", "PWRDWN", 1);
+  r.write(
+      "GOTGCTL", r.read("GOTGCTL") | r.mask("GOTGCTL", "BVALOEN") | r.mask("GOTGCTL", "BVALOVAL"));
+  r.set("DCTL", "SDIS", 0);
+  CHECK_FALSE(r.port().pulled_up());
+  CHECK(warned() == 1);
 }
