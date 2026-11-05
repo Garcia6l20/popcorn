@@ -837,6 +837,14 @@ public:
       held_in_reset(std::string const& peripheral) -> bool;
 
   /**
+   * @brief Whether a peripheral's bus clock is gated, such as its RCC enable bit at 0.
+   * @param peripheral Peripheral name.
+   * @throws config_error when the peripheral is unknown.
+   */
+  [[= py::doc{"Whether the peripheral's bus clock is gated."}]] [[nodiscard]] auto
+      clock_gated(std::string const& peripheral) -> bool;
+
+  /**
    * @brief Stores a peripheral register value, without write effects.
    * @param peripheral Peripheral name.
    * @param offset Byte offset of the register.

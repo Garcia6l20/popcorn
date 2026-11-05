@@ -14,6 +14,13 @@ void machine_services::do_hold_in_reset(std::string_view peripheral, bool)
       "an implementation with peripherals");
 }
 
+void machine_services::do_gate_bus_clock(std::string_view peripheral, bool)
+{
+  throw config_error(
+      "machine_services", 0, std::format("gate_bus_clock of {}", peripheral),
+      "an implementation with peripherals");
+}
+
 void machine_services::do_watch_reads(address at, std::uint32_t size, bool)
 {
   throw config_error(

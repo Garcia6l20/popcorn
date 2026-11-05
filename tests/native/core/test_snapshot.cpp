@@ -123,13 +123,13 @@ TEST_CASE("a saved form with a future format is a config_error")
   CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
 }
 
-TEST_CASE("a saved form of format 12 is a config_error naming the format")
+TEST_CASE("a saved form of format 13 is a config_error naming the format")
 {
   auto data   = filled();
-  data.format = 12;
+  data.format = 13;
   CHECK_THROWS_WITH_AS(
       std::ignore = core::decode_snapshot(core::encode_snapshot(data)),
-      doctest::Contains("format, expected snapshot_format_version 13, bytes have 12"),
+      doctest::Contains("format, expected snapshot_format_version 14, bytes have 13"),
       popcorn::config_error);
 }
 
@@ -229,6 +229,15 @@ TEST_CASE("a peripheral held in reset survives the saved form")
   data.peripherals.front().held_in_reset = 1;
   auto const back                        = core::decode_snapshot(core::encode_snapshot(data));
   CHECK(back.peripherals.front().held_in_reset == 1);
+  CHECK(back == data);
+}
+
+TEST_CASE("a gated bus clock survives the saved form")
+{
+  auto data                            = filled();
+  data.peripherals.front().clock_gated = 1;
+  auto const back                      = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.peripherals.front().clock_gated == 1);
   CHECK(back == data);
 }
 

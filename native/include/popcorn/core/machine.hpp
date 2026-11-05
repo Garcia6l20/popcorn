@@ -866,6 +866,14 @@ public:
    */
   [[nodiscard]] auto held_in_reset(std::string_view name) const -> bool;
 
+  /**
+   * @brief Whether a peripheral's bus clock is gated, machine_services::gate_bus_clock().
+   * @param name Peripheral name, as the description spells it.
+   * @return True while CPU and DMA accesses to it are lost.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[nodiscard]] auto clock_gated(std::string_view name) const -> bool;
+
 private:
   struct engine_closer
   {
@@ -880,6 +888,7 @@ private:
   void do_request_stop(stop_reason reason, std::string detail) override;
   void do_request_reset(reset_kind kind) override;
   void do_hold_in_reset(std::string_view peripheral, bool held) override;
+  void do_gate_bus_clock(std::string_view peripheral, bool gated) override;
   void do_end_slice() override;
   void do_end_after_instruction() override;
   auto do_read(address addr, std::uint8_t size, bus_attrs attrs)

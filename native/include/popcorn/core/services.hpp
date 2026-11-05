@@ -192,6 +192,32 @@ public:
   }
 
   /**
+   * @brief Gates or ungates the bus clock of a peripheral, as an STM32 RCC_xxxENR enable bit
+   *        does. Applies at once. While gated, every CPU and DMA access to the peripheral's
+   *        window is lost after the bus firewall: a read returns 0 and a write changes nothing,
+   *        no model handler runs, and each leaves a trace record as a firewall-ignored access
+   *        does. The first such access of the machine's life logs one model_warning naming
+   *        the peripheral, the register and the pc. Under `machine_options::strict_peripherals`
+   *        the access then throws model_error. Debugger accesses, a model's own accesses made
+   *        as `initiator::debugger`, and `periph::register_file::poke` are served as usual. The
+   *        gate comes before a bus reset hold, so a gated write reaches no model guard, neither
+   *        `periph::bus_reset_listener::on_held_write` nor a model's own illegal-access check.
+   *        That order is inferred: the reference manuals leave an access to an unclocked
+   *        peripheral unsupported. The gate stops no model activity: events and lines go on. A
+   *        snapshot keeps the gate. A machine reset ungates every peripheral before any model
+   *        reset runs, so a model may drive the gate of any peripheral from
+   *        `periph::model::reset`.
+   * @param peripheral Instance name as the description spells it.
+   * @param gated True while the enable bit is 0.
+   * @throws config_error for a name the description lacks, or from an implementation without
+   *         peripherals.
+   */
+  void gate_bus_clock(std::string_view peripheral, bool gated)
+  {
+    do_gate_bus_clock(peripheral, gated);
+  }
+
+  /**
    * @brief Ends the current slice without a stop report. Deferred. An arch-private hook, such as
    *        the Arm WFI instruction hook, calls it after entering the idle state. A slice that
    *        ends with `arch::idle()` true and no stop request moves the clock to the next event.
@@ -495,6 +521,7 @@ private:
   virtual void do_log(log_record record)            = 0;
   virtual void do_watch_reads(address at, std::uint32_t size, bool on);
   virtual void do_hold_in_reset(std::string_view peripheral, bool held);
+  virtual void do_gate_bus_clock(std::string_view peripheral, bool gated);
   virtual void do_install_firewall(periph::bus_firewall& firewall);
   virtual void do_memory_policy_changed();
   virtual auto do_emulated_instruction(address at) -> emulated_arrival;

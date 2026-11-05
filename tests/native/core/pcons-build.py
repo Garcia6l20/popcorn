@@ -176,6 +176,16 @@ for _, target in core_firmware.values():
     if target is not None:
         test_coverage.depends(target)
 
+test_clock_gate = add_doctest(
+    "core-clock-gate",
+    [here / "test_clock_gate.cpp"],
+    [test_support_static, core_static],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_clock_gate.depends(target)
+
 test_spin = add_doctest(
     "core-spin", [here / "test_spin.cpp"], [test_support_static, core_static], env=m33_env
 )

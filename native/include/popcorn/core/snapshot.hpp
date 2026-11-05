@@ -17,7 +17,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 13;
+inline constexpr std::uint32_t snapshot_format_version = 14;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -81,6 +81,8 @@ struct peripheral_image
   std::vector<std::uint32_t> write_locked{};
   /** @brief 1 while the peripheral is held in a bus reset, machine_services::hold_in_reset(). */
   std::uint8_t held_in_reset{};
+  /** @brief 1 while the peripheral's bus clock is gated, machine_services::gate_bus_clock(). */
+  std::uint8_t clock_gated{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_image const&, peripheral_image const&) -> bool = default;

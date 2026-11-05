@@ -444,6 +444,12 @@ class PeripheralView:
         return self._access.handle.held_in_reset(self._name)
 
     @property
+    def clock_gated(self) -> bool:
+        """Whether this peripheral's bus clock is gated, such as its STM32 RCC enable bit at 0.
+        While gated, firmware and DMA reads of the peripheral give 0 and their writes are lost."""
+        return self._access.handle.clock_gated(self._name)
+
+    @property
     def port(self) -> UartStream:
         """The host end of this UART, connected on first use, replacing its board endpoint.
 

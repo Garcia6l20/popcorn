@@ -1,4 +1,5 @@
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
 
@@ -507,4 +508,32 @@ TEST_CASE("a bit_band region round-trips through the description JSON as kind bi
   auto const parsed = popcorn::parse_description(dumped, "dumped");
   CHECK(parsed.regions == desc.regions);
   CHECK(popcorn::description_digest(parsed) == popcorn::description_digest(desc));
+}
+
+TEST_CASE("a CPU alias store and load to a gated peripheral are lost, read 0 and warn as a write")
+{
+  core::machine_options options;
+  options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+  rig                           r{banded(), std::move(options)};
+  std::vector<core::log_record> logged;
+  auto const        sink = r.target->add_log_sink([&logged](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      logged.push_back(record);
+    }
+  });
+  constexpr address data = testdev + popcorn::testing::test_model::data_offset;
+  REQUIRE(r.target->mem().write(data, 4, 0x10));
+  r.services().gate_bus_clock("TESTDEV", true);
+  auto const alias = alias_of(periph_alias, periph, data, 0);
+  r.cpu(str_r2_r1, alias, 1);
+  CHECK(r.peek(data) == 0x10);
+  CHECK(r.cpu(ldr_r0_r1, alias_of(periph_alias, periph, data, 4)) == 0);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].write);
+  CHECK(logged[0].reg == "DATA");
+  r.services().gate_bus_clock("TESTDEV", false);
+  CHECK(r.cpu(ldr_r0_r1, alias_of(periph_alias, periph, data, 4)) == 1);
+  r.cpu(str_r2_r1, alias, 1);
+  CHECK(r.peek(data) == 0x11);
 }

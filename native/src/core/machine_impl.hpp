@@ -209,6 +209,10 @@ struct machine::peripheral_slot
   std::vector<std::uint8_t> claimed;
   /** @brief Whether a bus reset holds the peripheral, machine_services::hold_in_reset(). */
   bool held_in_reset{};
+  /** @brief Whether the bus clock is gated, machine_services::gate_bus_clock(). */
+  bool clock_gated{};
+  /** @brief Whether a gated access was logged, once per machine life. */
+  bool gate_warned{};
   /** @brief Non-zero for each word whose unmodelled access was logged, once per machine life. */
   std::vector<std::uint8_t> logged = std::vector<std::uint8_t>(claimed.size(), 0);
   /** @brief Offsets without a register whose access was logged. */
@@ -1536,6 +1540,20 @@ struct machine::run_state
    * @throws model_error under strict_peripherals, on every CPU or DMA access.
    */
   void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
+
+  /**
+   * @brief Serves a CPU or DMA access to a peripheral whose bus clock is gated: logs the first
+   *        one of the machine's life, then leaves a trace record and a watch hit as a
+   *        firewall-ignored access does. A read gives 0, a write is lost.
+   * @throws model_error under strict_peripherals, before the trace record.
+   */
+  void note_gated(
+      mmio_window const& window,
+      std::uint32_t      offset,
+      std::uint8_t       size,
+      std::uint32_t      value,
+      bool               write,
+      initiator          by);
 
   /**
    * @brief Counts a CPU access to the word @p word of @p window when the word is unmodelled,

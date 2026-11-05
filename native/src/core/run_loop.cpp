@@ -265,18 +265,16 @@ void machine::run_state::reset_notified(reset_kind kind)
       {
         line.level_ = false;
       }
+      periph::layer_reset(slot->layout, slot->regs, slot->layer, slot->claimed);
+      slot->held_in_reset = false;
+      slot->clock_gated   = false;
     }
   }
   for(auto const& slot : owner.peripherals_)
   {
-    if(slot)
+    if(slot and slot->model)
     {
-      periph::layer_reset(slot->layout, slot->regs, slot->layer, slot->claimed);
-      slot->held_in_reset = false;
-      if(slot->model)
-      {
-        slot->model->reset(slot->regs, kind);
-      }
+      slot->model->reset(slot->regs, kind);
     }
   }
   owner.trace_.rebase(icount{0});

@@ -121,3 +121,9 @@ def test_a_host_access_to_an_unmodelled_register_is_a_model_error_and_poke_still
     assert (caught.value.register, caught.value.offset) == ("RW", rw)
     device.RW.poke(0x55)
     assert device.RW.value == 0x55
+
+
+def test_a_peripheral_starts_with_its_bus_clock_ungated(machines: Machines) -> None:
+    m = machines(models={"TESTDEV": StorageModel})
+    assert m.periph.TESTDEV.clock_gated is False
+    assert m.periph["TESTDEV"].clock_gated is False

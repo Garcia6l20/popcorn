@@ -109,6 +109,7 @@ auto machine::snapshot() const -> core::snapshot
         .nmi_level     = slot->nmi.level_ ? std::uint8_t{1} : std::uint8_t{0},
         .write_locked  = slot->layer.write_locked,
         .held_in_reset = slot->held_in_reset ? std::uint8_t{1} : std::uint8_t{0},
+        .clock_gated   = slot->clock_gated ? std::uint8_t{1} : std::uint8_t{0},
     };
     for(std::uint32_t offset = 0; offset < slot->desc.size; offset += 4)
     {
@@ -370,6 +371,7 @@ void machine::restore(core::snapshot const& saved)
     }
     slot->nmi.level_    = image.nmi_level != 0;
     slot->held_in_reset = image.held_in_reset != 0;
+    slot->clock_gated   = image.clock_gated != 0;
     run.lines.nmi_active += slot->nmi.level_ ? 1u : 0u;
     for(auto const& [line, level] : std::views::zip(slot->dma, image.dma_levels))
     {

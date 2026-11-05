@@ -268,6 +268,11 @@ void machine::do_hold_in_reset(std::string_view peripheral, bool held)
   }
 }
 
+void machine::do_gate_bus_clock(std::string_view peripheral, bool gated)
+{
+  run_->slot(peripheral).clock_gated = gated;
+}
+
 auto machine::peripheral(std::string_view name) -> periph::register_file&
 {
   return run_->slot(name).regs;
@@ -281,5 +286,10 @@ auto machine::model(std::string_view name) -> periph::model*
 auto machine::held_in_reset(std::string_view name) const -> bool
 {
   return run_->slot(name).held_in_reset;
+}
+
+auto machine::clock_gated(std::string_view name) const -> bool
+{
+  return run_->slot(name).clock_gated;
 }
 }

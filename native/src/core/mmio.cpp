@@ -326,12 +326,17 @@ auto machine::run_state::bit_band_write(
     return std::unexpected(bus_error::unmapped);
   }
   auto const [unit, bit] = bit_band_target(*band.desc, addr, size);
-  auto const old         = owner.do_read(unit, size, attrs);
+  auto const mask        = std::uint32_t{1} << bit;
+  if(auto const* const window = window_at(unit, size);
+     window != nullptr and window->slot->clock_gated and attrs.by != initiator::debugger)
+  {
+    return owner.do_write(unit, size, (value & 1u) != 0 ? mask : 0u, attrs);
+  }
+  auto const old = owner.do_read(unit, size, attrs);
   if(not old)
   {
     return std::unexpected(old.error());
   }
-  auto const mask = std::uint32_t{1} << bit;
   return owner.do_write(unit, size, (value & 1u) != 0 ? *old | mask : *old & ~mask, attrs);
 }
 
@@ -672,6 +677,11 @@ auto machine::run_state::dispatch_read(
       return 0u;
     }
   }
+  if(slot.clock_gated and by != initiator::debugger) [[unlikely]]
+  {
+    note_gated(window, offset, size, 0, false, by);
+    return 0u;
+  }
   if(record_unmodelled and by == initiator::cpu)
   {
     count_unmodelled(window, word, false);
@@ -755,6 +765,11 @@ auto machine::run_state::dispatch_write(
       note_watched(window.base + offset, size, value, true, by);
       return {};
     }
+  }
+  if(slot.clock_gated and by != initiator::debugger) [[unlikely]]
+  {
+    note_gated(window, offset, size, value, true, by);
+    return {};
   }
   if(record_unmodelled and by == initiator::cpu)
   {
@@ -1027,6 +1042,48 @@ void machine::run_state::note_unmodelled(
   {
     throw model_error(name, reg, offset);
   }
+}
+
+void machine::run_state::note_gated(
+    mmio_window const& window,
+    std::uint32_t      offset,
+    std::uint8_t       size,
+    std::uint32_t      value,
+    bool               write,
+    initiator          by)
+{
+  auto&      slot   = *window.slot;
+  auto const word   = offset / 4;
+  auto const strict = owner.options_.strict_peripherals;
+  if(not slot.gate_warned or strict) [[unlikely]]
+  {
+    auto const& name = window.unit->name;
+    auto const  reg  = register_name(slot.desc, word);
+    if(not std::exchange(slot.gate_warned, true))
+    {
+      owner.hooks_->log(
+          {.kind       = log_kind::model_warning,
+           .pc         = arch->pc(),
+           .peripheral = name,
+           .reg        = reg,
+           .offset     = offset,
+           .write      = write,
+           .message    = std::format(
+               "{} of {}{}{} at offset {:#x} with its bus clock gated: {}",
+               write ? "write" : "read", name, reg.empty() ? "" : ".", reg, offset,
+               write ? "the write is lost" : "the read gives 0")});
+    }
+    if(strict)
+    {
+      throw model_error(name, reg, offset);
+    }
+  }
+  auto const shown = write ? value & size_mask(size) : 0u;
+  if(word < slot.layout.words())
+  {
+    trace_mmio(slot, window.base + offset, offset, size, shown, write, by);
+  }
+  note_watched(window.base + offset, size, value, write, by);
 }
 
 auto machine::run_state::raz_name(std::size_t index) const -> std::string

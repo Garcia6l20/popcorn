@@ -119,7 +119,10 @@ public:
 
   /**
    * @brief Brings the model to its reset state and pokes the reset values of its claimed
-   *        registers.
+   *        registers. On a machine reset, models reset in description order, and before the
+   *        first one runs every peripheral's unclaimed registers are at their reset values and
+   *        every bus reset hold and bus clock gate is clear. A model may then drive the hold or
+   *        the gate of any peripheral from here.
    * @param regs Storage of the peripheral.
    * @param kind Cause of the reset, as the machine received it through
    *        `core::machine_services::request_reset` or chose it at power-up, or
