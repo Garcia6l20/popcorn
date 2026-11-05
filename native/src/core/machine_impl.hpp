@@ -1361,6 +1361,9 @@ struct machine::run_state
   /** @brief Peripheral whose model attach_peripherals is building, the only time a firewall may
    * be installed, null otherwise. */
   peripheral_desc const* building{};
+  /** @brief Clock gates set by models while attach_peripherals builds them, applied once every
+   * peripheral is named. */
+  std::vector<std::pair<std::string, bool>> early_gates{};
   /** @brief Whether the firewall filters memory, its engine filter installed by install_hooks. */
   bool memory_filter{};
   /** @brief Whether the arch reset runs, before the models reset: its vector reads are not

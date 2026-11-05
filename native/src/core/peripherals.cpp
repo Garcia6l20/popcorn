@@ -188,6 +188,10 @@ void machine::run_state::attach_peripherals()
     peripheral_index.emplace_back(unit.name, serving);
   }
   std::ranges::sort(peripheral_index);
+  for(auto const& [name, gated] : std::exchange(early_gates, {}))
+  {
+    slot(name).clock_gated = gated;
+  }
 
   std::vector<std::pair<std::string_view, periph::model*>> by_name;
   for(auto const& [name, serving] : peripheral_index)
@@ -270,6 +274,11 @@ void machine::do_hold_in_reset(std::string_view peripheral, bool held)
 
 void machine::do_gate_bus_clock(std::string_view peripheral, bool gated)
 {
+  if(run_->building != nullptr)
+  {
+    run_->early_gates.emplace_back(peripheral, gated);
+    return;
+  }
   run_->slot(peripheral).clock_gated = gated;
 }
 

@@ -401,6 +401,23 @@ for _, target in (
     if target is not None:
         gpio_analog.depends(target)
 
+rcc_gate = add_doctest(
+    "stm32-rcc-gate",
+    [here / "test_rcc_gate.cpp"],
+    static,
+    env={**u575_env, **h573_env, **l1_env, **l4_env},
+    register=all(desc is not None for desc in (u575, h573, l152re, l476rc)),
+)
+rcc_gate.private.include_dirs.append(private_dir)
+for _, target in (
+    *firmwares.values(),
+    *h573_firmwares.values(),
+    *l1_firmwares.values(),
+    *l4_firmwares.values(),
+):
+    if target is not None:
+        rcc_gate.depends(target)
+
 flash_geometry = add_doctest(
     "stm32-flash-geometry",
     [here / "test_flash_geometry.cpp"],

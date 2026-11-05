@@ -192,21 +192,24 @@ public:
   }
 
   /**
-   * @brief Gates or ungates the bus clock of a peripheral, as an STM32 RCC_xxxENR enable bit
-   *        does. Applies at once. While gated, every CPU and DMA access to the peripheral's
-   *        window is lost after the bus firewall: a read returns 0 and a write changes nothing,
-   *        no model handler runs, and each leaves a trace record as a firewall-ignored access
-   *        does. The first such access of the machine's life logs one model_warning naming
-   *        the peripheral, the register and the pc. Under `machine_options::strict_peripherals`
-   *        the access then throws model_error. Debugger accesses, a model's own accesses made
-   *        as `initiator::debugger`, and `periph::register_file::poke` are served as usual. The
-   *        gate comes before a bus reset hold, so a gated write reaches no model guard, neither
-   *        `periph::bus_reset_listener::on_held_write` nor a model's own illegal-access check.
-   *        That order is inferred: the reference manuals leave an access to an unclocked
-   *        peripheral unsupported. The gate stops no model activity: events and lines go on. A
-   *        snapshot keeps the gate. A machine reset ungates every peripheral before any model
-   *        reset runs, so a model may drive the gate of any peripheral from
-   *        `periph::model::reset`.
+   * @brief Gates or ungates the bus clock of a peripheral, as an STM32 RCC_xxxENR enable bit does.
+   *        Applies at once, or from a model's constructor once the machine has built every model.
+   *        The STM32 RCC model owns the gate of every instance it finds an enable for and sets it
+   *        again when it is built, after each reset and restore, and on each enable write, so
+   *        another model's call on such an instance holds until then. While gated, every CPU and
+   *        DMA access to the peripheral's window is lost after the bus firewall: a read returns 0
+   *        and a write changes nothing, no model handler runs, and each leaves a trace record as a
+   *        firewall-ignored access does. The first such access of the machine's life logs one
+   *        model_warning naming the peripheral, the register and the pc. Under
+   *        `machine_options::strict_peripherals` the access then throws model_error. Debugger
+   *        accesses, a model's own accesses made as `initiator::debugger`, and
+   *        `periph::register_file::poke` are served as usual. The gate comes before a bus reset
+   *        hold, so a gated write reaches no model guard, neither
+   *        `periph::bus_reset_listener::on_held_write` nor a model's own illegal-access check. That
+   *        order is inferred: the reference manuals leave an access to an unclocked peripheral
+   *        unsupported. The gate stops no model activity: events and lines go on. A snapshot keeps
+   *        the gate. A machine reset ungates every peripheral before any model reset runs, so a
+   *        model may drive the gate of any peripheral from `periph::model::reset`.
    * @param peripheral Instance name as the description spells it.
    * @param gated True while the enable bit is 0.
    * @throws config_error for a name the description lacks, or from an implementation without

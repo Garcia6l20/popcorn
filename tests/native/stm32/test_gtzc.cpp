@@ -888,14 +888,20 @@ TEST_CASE(
   }
   {
     rig const r{true};
-    popcorn::testing::enable_clocks(*r.target, {{"AHB1ENR", "GTZC1EN"}});
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"AHB1ENR", "GTZC1EN"}
+    });
     auto const opened = nonsecure_load(r, past_ppb, true);
     REQUIRE(opened.reason == popcorn::stop_reason::fault);
     CHECK(opened.fault->kind == popcorn::fault_kind::bus);
   }
   {
     rig const r{true};
-    popcorn::testing::enable_clocks(*r.target, {{"AHB1ENR", "GTZC1EN"}});
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"AHB1ENR", "GTZC1EN"}
+    });
     auto const closed = nonsecure_load(r, past_ppb, false);
     REQUIRE(closed.reason == popcorn::stop_reason::fault);
     CHECK(closed.fault->kind == popcorn::fault_kind::secure);
@@ -1480,7 +1486,10 @@ TEST_CASE_TEMPLATE(
   enter_state(r, false);
 
   rig const handled{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
-  popcorn::testing::enable_clocks(*handled.target, {{"AHB1ENR", "GTZC1EN"}});
+  popcorn::testing::enable_clocks(
+      *handled.target, {
+                           {"AHB1ENR", "GTZC1EN"}
+  });
   block_bits(handled, block_1, false, true);
   put_code(handled, block_1, {nop, bkpt});
   put_code(handled, handler_at, {bkpt});
@@ -1519,7 +1528,10 @@ TEST_CASE_TEMPLATE(
   enter_state(r, false);
 
   rig const back{true};
-  popcorn::testing::enable_clocks(*back.target, {{"AHB1ENR", "GTZC1EN"}});
+  popcorn::testing::enable_clocks(
+      *back.target, {
+                        {"AHB1ENR", "GTZC1EN"}
+  });
   block_bits(back, block_3, false, true);
   put_code(back, block_3, {adds_r3_1, 0xe6fd});
   put_code(back, block_2, {adds_r3_1, bkpt});

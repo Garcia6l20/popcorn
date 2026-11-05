@@ -5,6 +5,7 @@
 #include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
+#include "rcc_enables.hpp"
 #include "rcc_h5.hpp"
 #include "rcc_l1.hpp"
 #include "rcc_l4.hpp"
@@ -23,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <memory>
 #include <meta>
@@ -185,6 +187,13 @@ struct reset_entry
   field_ref   bit;
 };
 
+struct enable_entry
+{
+  std::string      instance;
+  std::string_view reg;
+  field_ref        bit;
+};
+
 template <typename Signal> struct timer
 {
   core::clock_domain domain;
@@ -215,7 +224,15 @@ template <typename Signal> struct timer
  *        which resets its storage and calls its model's
  *        `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or the name of
  *        `reset_bit_names`. The STM32H5 reset registers are RM0481 11.8.19 to 11.8.25, its reset
- *        flags `RCC_RSR`, RM0481 11.8.46.
+ *        flags `RCC_RSR`, RM0481 11.8.46. An instance's bus clock enable gates its register
+ *        access through `core::machine_services::gate_bus_clock()`: CPU and DMA accesses to it
+ *        read 0 and lose their writes while the bit is 0. The bit is `<instance>EN`, or the name
+ *        of `enable_bit_names`, in an RCC_xxxENR register, or the RTCEN of the STM32L1 RCC_CSR
+ *        and STM32L4 RCC_BDCR for the RTC. The RCC drives every gate when it is built, from the
+ *        description reset values, after each machine reset and restore, from the registers, and
+ *        on every write that changes the bit. An instance without such a bit, such as EXTI,
+ *        IWDG or DBGMCU, is never gated. Read 0 and write lost are inferred: the reference
+ *        manuals say only that such an access is not supported.
  *
  *        The PLL fractional modulator loads `PLLxFRACN` when `PLLxON` sets with `PLLxFRACEN` 1,
  *        and 0 with `PLLxFRACEN` 0, in either write order, as measured on an STM32H573. While
@@ -354,8 +371,15 @@ public:
       -> std::uint32_t;
   void                            cicr_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Reg> void resets_written(std::uint32_t old, std::uint32_t now);
-  [[nodiscard]] auto              secure_function() const -> bool override;
-  [[nodiscard]] auto              secure_word() const -> std::uint32_t override;
+  auto                            on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
+  [[nodiscard]] auto secure_function() const -> bool override;
+  [[nodiscard]] auto secure_word() const -> std::uint32_t override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
@@ -388,6 +412,8 @@ private:
   void publish(bool notify);
   void load(std::span<std::byte const> in) override;
   void refuse_stopped_clock();
+  void enables_written(std::uint32_t word, std::uint32_t old, std::uint32_t now);
+  void drive_enables(bool from_reset_values);
 
   bool                                                 core_stop_logged_{};
   rcc_options                                          options_;
@@ -408,6 +434,7 @@ private:
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel<signal>>                          kernels_;
   std::vector<reset_entry>                             resets_;
+  std::vector<enable_entry>                            enables_;
   std::vector<std::string>                             reset_registers_;
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer<signal>>                           timers_;
@@ -671,6 +698,48 @@ rcc_model<Traits>::rcc_model(
            .bit      = field(found->reg, found->field)});
     }
   }
+  constexpr auto enable_extra =
+      std::to_array<std::string_view>({Traits::reset_flags_register, Traits::backup_register});
+  for(auto const& peripheral : ctx.part.peripherals)
+  {
+    if(peripheral.alias_of)
+    {
+      continue;
+    }
+    auto const found = enable_bit_of(desc, peripheral.name, enable_extra);
+    if(not found)
+    {
+      if(has_enable_row(peripheral.name))
+      {
+        throw config_error(
+            ctx.part.part, 0,
+            std::format(
+                "peripherals.RCC.registers.RCC_xxxENR.fields.{}",
+                enable_bit_candidates(peripheral.name)
+                    | std::views::join_with(std::string_view{" or "})
+                    | std::ranges::to<std::string>()),
+            std::format("the RCC bus clock enable of {}", peripheral.name));
+      }
+      continue;
+    }
+    auto const& described = describe(found->reg);
+    enables_.push_back(
+        {.instance = peripheral.name,
+         .reg      = described.name,
+         .bit      = field(found->reg, found->field)});
+  }
+  auto const claimed = this->claims();
+  for(auto const& entry : enables_)
+  {
+    if(std::ranges::none_of(
+           claimed, [&](std::string const& held) { return reg(held).offset == entry.bit.offset; }))
+    {
+      throw config_error(
+          ctx.part.part, 0, std::format("peripherals.RCC.registers.{}", entry.reg),
+          std::format(
+              "a register the RCC model claims, for the bus clock enable of {}", entry.instance));
+    }
+  }
   if(has_register("RCC_SECCFGR"))
   {
     constexpr std::array<write_entry<rcc_model>, 1> secure_writes{
@@ -795,6 +864,7 @@ rcc_model<Traits>::rcc_model(
            .enable = enable_field(entry.enable)});
     }
   }
+  drive_enables(true);
 }
 
 template <typename Traits>
@@ -1455,6 +1525,7 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     }
   }
   publish(false);
+  drive_enables(false);
 }
 
 template <typename Traits> void rcc_model<Traits>::cicr_written(std::uint32_t, std::uint32_t now)
@@ -1643,6 +1714,73 @@ template <typename Traits> void rcc_model<Traits>::load(std::span<std::byte cons
   for(auto const& entry : kernels_)
   {
     kernel_enables_.push_back(get(regs_, entry.enable) != 0 ? 1 : 0);
+  }
+  drive_enables(false);
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     ctx) -> std::expected<void, bus_error>
+{
+  auto const                     word   = offset & ~3u;
+  auto const                     before = regs.peek(word);
+  std::expected<void, bus_error> done{};
+  try
+  {
+    done = base::on_write(regs, offset, size, old, value, ctx);
+  }
+  catch(...)
+  {
+    enables_written(word, before, regs.peek(word));
+    throw;
+  }
+  enables_written(word, before, regs.peek(word));
+  return done;
+}
+
+template <typename Traits>
+void rcc_model<Traits>::enables_written(std::uint32_t word, std::uint32_t old, std::uint32_t now)
+{
+  if(old == now)
+  {
+    return;
+  }
+  std::exception_ptr first;
+  for(auto const& entry : enables_)
+  {
+    if(entry.bit.offset != word or entry.bit.of(old) == entry.bit.of(now))
+    {
+      continue;
+    }
+    try
+    {
+      ctx_.services.gate_bus_clock(entry.instance, entry.bit.of(now) == 0);
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  if(first)
+  {
+    std::rethrow_exception(first);
+  }
+}
+
+template <typename Traits> void rcc_model<Traits>::drive_enables(bool from_reset_values)
+{
+  for(auto const& entry : enables_)
+  {
+    auto const word = from_reset_values ? describe(entry.reg).reset : regs_.peek(entry.bit.offset);
+    ctx_.services.gate_bus_clock(entry.instance, entry.bit.of(word) == 0);
   }
 }
 

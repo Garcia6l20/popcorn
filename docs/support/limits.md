@@ -301,7 +301,7 @@ On the STM32L1, RM0038 section 12:
   ignored, RM0038 12.9 and Figure 47.
 - `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
   with `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of
-  `RCC_APB2ENR` holds.
+  `RCC_APB2ENR` holds, which gates only its register access, see RCC.
 - A `SWSTART` while a conversion runs is cleared and ignored, inferred. A `JSWSTART` or an
   injected trigger while the injected group runs is cleared and ignored, inferred.
 - With `SCAN` 0 the injected group is one conversion of JSQ(4 - `JL`), the first of the `JL`
@@ -472,7 +472,6 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   logged.
 - A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 and STM32L4
   `CRC_IDR`, is ignored and logged. Such a read is logged.
-- The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
 - The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from 0xFFFFFFFF,
   with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its byte lanes
   repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4 states the
@@ -505,7 +504,6 @@ Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   the counter stops, and the next SYNC latches 128 x `FELIM`. With `SYNCSRC` 2, `RELOAD` 47999
   matches `SYNCDIV` 0 only.
 - `TRIM` keeps what the firmware wrote, with or without `AUTOTRIMEN`, and `TRIMOVF` stays 0.
-  The RCC clock enable of the CRS gates nothing.
 
 ## DAC
 
@@ -970,7 +968,8 @@ Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native
 - A peripheral-requested transfer that leaves one item tells every request of the channel, once
   per pass of a circular channel. This is the EOT_1 signal the I2C reads with CR2.LAST, RM0038
   26.3.7. A memory-to-memory copy tells none.
-- The channels run whatever `RCC_AHBENR.DMAxEN` holds.
+- The channels run whatever `RCC_AHBENR.DMAxEN` holds, which gates only their register access,
+  see RCC.
 - STM32L4 DMA1 and DMA2, RM0351 section 11, follow the STM32L1 rules above, the inferred ones
   inferred on the STM32L4 too, with the APB windows of RM0351 Table 1 and `RCC_AHB1ENR`.
 - STM32L4: `DMA_CSELR` routes each request of RM0351 Tables 46 and 47 to its channel while the
@@ -1068,7 +1067,6 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - A CSR0 write other than popcorn's tag, or a CSR1 write that does not match the state latched at
   INIT, is refused and logged.
 - A DIN write while BUSY does not stall the bus. The CPU runs on.
-- The RCC clock gate is not modelled.
 
 ## I2C
 
@@ -1565,6 +1563,25 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp), [rcc_l1.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_l1.hpp)
 
+- A peripheral's bus clock enable, `<instance>EN` or its RM spelling in an `RCC_xxxENR` register,
+  gates its register access: while the bit is 0 a CPU or DMA read gives 0 and a write is lost, no
+  model handler runs, one `model_warning` per peripheral per machine life names the first such
+  access, and under `strict_peripherals` the access raises `model_error`. Debugger accesses are
+  served. Read 0 and write lost are inferred: RM0456, RM0481, RM0351 and RM0038 say only that
+  the access is not supported. The enable gates no activity of the peripheral: its timers,
+  transfers and events run on. A gated write reaches no model check, such as an illegal-access
+  event of a TrustZone-aware model, inferred.
+- The STM32L1 and STM32L4 RTC is gated on `RTCEN` of `RCC_CSR` or `RCC_BDCR`, which a system
+  reset keeps, as RM0038 5.1.3 and RM0351 5.1.5 list it among the steps of RTC register access.
+  The STM32U5 and STM32H5 RTC and TAMP are gated on `RTCAPBEN`.
+- Instances whose clock the reference manual names only through their host block are gated on the
+  host's bit, inferred: the GTZC TZIC and MPCBB blocks on the GTZC or TZSC enable, the OCTOSPI
+  delay blocks on the OCTOSPI enable, the STM32U5 SDMMC delay blocks on the SDMMC enable,
+  STM32U5 FDCAN1_RAM on `FDCAN1EN`, STM32L1 OPAMP on `COMPEN` and STM32L1 USB_SRAM on `USBEN`.
+  The STM32H563 and STM32H573 ETH is gated on `ETHEN`, `ETHTXEN` and `ETHRXEN` are storage,
+  inferred.
+- RCC, EXTI, IWDG and DBGMCU, the STM32H5 PWR and the STM32U5 and STM32H5 ICACHE have no enable
+  and are never gated. FLASH and the STM32U5 and STM32H5 DCACHE enables reset to 1.
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
 - A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets every
@@ -1674,9 +1691,9 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   keep. A PLL is ready after the board's `ready_delay`. The PLLSAI1 and PLLSAI2 outputs reach
   no kernel clock until the `RCC_CCIPR` muxes select them.
 - STM32L47x/L48x: `ADCRST` holds ADC1, ADC2, ADC3 and ADC_Common in reset together, RM0351
-  6.4.11. The enable bits gate the timer clocks and the kernel clocks `RCC_CCIPR` selects, the
-  other enables are storage. `MCOSEL` and `MCOPRE` are storage, no clock reaches the MCO pin.
-  The sleep and stop enables of `RCC_xxxSMENR` are storage.
+  6.4.11. The enable bits gate the register access of their peripherals, the timer clocks and the
+  kernel clocks `RCC_CCIPR` selects. `MCOSEL` and `MCOPRE` are storage, no clock reaches the MCO
+  pin. The sleep and stop enables of `RCC_xxxSMENR` are storage.
 - STM32L47x/L48x: `SAIxSEL` 11 selects `SAIx_EXTCLK`, which runs the SAI kernel clock at 0 Hz.
   `LSCOSEL` and `LSCOEN` are storage, no clock reaches the LSCO pin, and keep their value
   through `BDRST`, RM0351 6.4.29. `FWRSTF` stays 0, the firewall raises no reset.
@@ -1693,7 +1710,7 @@ Source: [rng.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 The words come from a seed in the machine description or a queue the test fills, never from a
 noise source. The model differs from RM0456 Rev 7 chapter 48 here:
 
-- Register accesses are served with `RCC_AHB2ENR1.RNGEN` 0. Only generation stops.
+- `RCC_AHB2ENR1.RNGEN` 0 gates the register access, see RCC, and stops generation.
 - `RCC_AHB2RSTR1.RNGRST` written from 0 to 1 resets the RNG, CONFIGLOCK included, and keeps
   the entropy test controls, as every other reset kind does. While the bit is 1, writes are
   ignored as the RCC section says, and a debugger read of DR shows the empty FIFO.
@@ -1878,8 +1895,8 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - STM32L1 SPI1 to SPI3, RM0038 section 28, run SPI mode with one transmit buffer, one receive
   buffer and frames of 8 or 16 bits by CR1.DFF. The frame time is DFF bits of the APB clock of
   the instance, PCLK2 for SPI1, PCLK1 for SPI2 and SPI3, divided by 2 << BR, whatever
-  `RCC_APBxENR` holds. A frame starts at the DR write, without the 2 APB clock delay of the
-  RM0038 28.3.5 note.
+  `RCC_APBxENR` holds, which gates only the register access, see RCC. A frame starts at the DR
+  write, without the 2 APB clock delay of the RM0038 28.3.5 note.
 - `SPI_I2SCFGR` and `SPI_I2SPR` are storage: the I2S mode is not modelled. On Cat.3 to Cat.6
   CR2.FRF 1 with SPE 1 logs one `model_warning`, raises `model_error` under `strict_peripherals`
   at the CR1 or CR2 write, and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF
@@ -2215,7 +2232,8 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 - STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
   way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
 - The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,
-  USART3, UART4 and UART5, whatever `RCC_APBxENR` holds.
+  USART3, UART4 and UART5, whatever `RCC_APBxENR` holds, which gates only the register access,
+  see RCC.
 - The first frame after TE is set starts at its DR write, without the idle preamble and the
   1 bit-time delay of the RM0038 27.6.4 TE note. Clearing UE lets the frame in flight end, then
   stops the output, RM0038 27.6.4, and drops the word waiting in TDR.

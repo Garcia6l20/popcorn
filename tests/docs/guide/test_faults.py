@@ -141,6 +141,7 @@ async def test_a_load_at_address_0_is_a_precise_busfault(stops: popcorn.Machine)
 
 
 async def test_a_bus_error_of_a_model_is_imprecise(failing: popcorn.Machine) -> None:
+    failing.periph.RCC.AHB2ENR1.RNGEN = 1
     stop = await run_code(failing, LOAD, 0x420C_0808)
     assert stop.fault is not None
     assert stop.fault.kind is FaultKind.BUS
