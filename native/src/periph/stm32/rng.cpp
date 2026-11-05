@@ -1,6 +1,6 @@
-#include "factories.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
+#include "rng_rows.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
@@ -969,5 +969,20 @@ auto rng_factory(rng_options options, rng_variant variant) -> model_factory
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<rng>(ctx, desc, options, variant);
   };
+}
+
+namespace
+{
+constexpr auto rng_row_table = std::to_array<builtin>({
+    row_of<^^rng_factory, ^^u5_rng, ^^board::rng>(
+        {.ip = "RNG", .ip_version_glob = "rng1_v4_1", .part_globs = u5_h5_parts}),
+    row_of<^^rng_factory, ^^l4_rng, ^^board::rng>(
+        {.ip = "RNG", .ip_version_glob = "rng1_v1_1", .part_globs = l4_parts}),
+});
+}
+
+auto rng_rows() -> std::span<builtin const>
+{
+  return rng_row_table;
 }
 }

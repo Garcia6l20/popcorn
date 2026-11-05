@@ -94,4 +94,7 @@ inline constexpr gtzc_variant h5_gtzc{h5_gtzc_renames, h5_gtzc_companions};
  * @param variant Field stems of the family the row serves.
  */
 [[nodiscard]] auto gtzc_factory(gtzc_variant variant) -> model_factory;
+
+/** @brief The GTZC model rows. */
+[[nodiscard]] auto gtzc_rows() -> std::span<builtin const>;
 }

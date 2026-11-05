@@ -1,6 +1,6 @@
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
+#include "sai_rows.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
@@ -1324,9 +1324,9 @@ void sai::flags()
 }
 }
 
-auto sai_factory(board const& b, sai_variant variant) -> model_factory
+auto sai_factory(decltype(board::audio) const& audio_, sai_variant variant) -> model_factory
 {
-  return [audio = b.audio,
+  return [audio = audio_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     std::array<audio_attachment, 2> wired{};
     for(std::size_t index = 0; index < wired.size(); ++index)
@@ -1339,5 +1339,22 @@ auto sai_factory(board const& b, sai_variant variant) -> model_factory
     }
     return std::make_shared<sai>(ctx, desc, std::move(wired), variant);
   };
+}
+
+namespace
+{
+constexpr auto sai_row_table = std::to_array<builtin>({
+    row_of<^^sai_factory, ^^u5_sai, ^^board::audio>(
+        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .part_globs = u5_parts}),
+    row_of<^^sai_factory, ^^h5_sai, ^^board::audio>(
+        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .part_globs = h5_parts}),
+    row_of<^^sai_factory, ^^l4_sai, ^^board::audio>(
+        {.ip = "SAI", .ip_version_glob = "sai1_v1_*", .part_globs = l4_parts}),
+});
+}
+
+auto sai_rows() -> std::span<builtin const>
+{
+  return sai_row_table;
 }
 }

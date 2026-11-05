@@ -1,7 +1,7 @@
 #include "adc_pads.hpp"
+#include "adc_rows.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "factory_data.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"

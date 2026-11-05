@@ -1,4 +1,4 @@
-#include "factories.hpp"
+#include "crc_rows.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -374,5 +374,22 @@ auto crc_factory(crc_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<crc>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto crc_row_table = std::to_array<builtin>({
+    row_of<^^crc_factory, ^^l4_crc>(
+        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .part_globs = l4_parts}),
+    row_of<^^crc_factory, ^^u5_crc>(
+        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .part_globs = u5_h5_parts}),
+    row_of<^^crc_factory, ^^l1_crc>(
+        {.ip = "CRC", .ip_version_glob = "integtest1_v1*", .part_globs = l1_parts}),
+});
+}
+
+auto crc_rows() -> std::span<builtin const>
+{
+  return crc_row_table;
 }
 }

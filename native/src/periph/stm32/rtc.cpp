@@ -1,9 +1,9 @@
 #include "backup_domain.hpp"
-#include "factories.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "rtc_calendar.hpp"
 #include "rtc_core.hpp"
+#include "rtc_rows.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/core_hold.hpp>
@@ -894,5 +894,30 @@ auto tamp_factory(rtc_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<tamp>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto rtc_row_table = std::to_array<builtin>({
+    row_of<^^rtc_factory, ^^u5_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .part_globs = u5_parts}),
+    row_of<^^rtc_factory, ^^h5_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .part_globs = h5_parts}),
+    row_of<^^rtc_classic_factory, ^^l1_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_5*", .part_globs = l1_parts}),
+    row_of<^^rtc_classic_factory, ^^l1_cat1_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "STM32L1_rtc_cat1", .part_globs = l1_parts}),
+    row_of<^^rtc_classic_factory, ^^l4_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_4*", .part_globs = l4_parts}),
+    row_of<^^tamp_factory, ^^u5_rtc>(
+        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .part_globs = u5_parts}),
+    row_of<^^tamp_factory, ^^h5_rtc>(
+        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .part_globs = h5_parts}),
+});
+}
+
+auto rtc_rows() -> std::span<builtin const>
+{
+  return rtc_row_table;
 }
 }

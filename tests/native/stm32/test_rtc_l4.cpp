@@ -1,7 +1,6 @@
 #include "../support/inert_model.hpp"
-#include "factories.hpp"
+#include "rtc_rows.hpp"
 #include "stm32_fixture.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/core/description.hpp>

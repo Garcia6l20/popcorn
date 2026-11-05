@@ -1,17 +1,27 @@
+#include "adc_rows.hpp"
 #include "caches_rows.hpp"
+#include "crc_rows.hpp"
 #include "crs_rows.hpp"
+#include "dac_rows.hpp"
+#include "dbgmcu_rows.hpp"
 #include "dma_rows.hpp"
 #include "exti_rows.hpp"
-#include "factories.hpp"
 #include "flash_rows.hpp"
 #include "gpio_rows.hpp"
 #include "gtzc_rows.hpp"
+#include "hash_rows.hpp"
 #include "i2c_rows.hpp"
+#include "iwdg_rows.hpp"
 #include "lptim_rows.hpp"
+#include "mdf_rows.hpp"
 #include "pwr_rows.hpp"
 #include "rcc_rows.hpp"
+#include "rng_rows.hpp"
 #include "row_of.hpp"
 #include "rows.hpp"
+#include "rtc_rows.hpp"
+#include "sai_rows.hpp"
+#include "sbs_rows.hpp"
 #include "spi_rows.hpp"
 #include "syscfg_rows.hpp"
 #include "tim_rows.hpp"
@@ -40,154 +50,17 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr auto hash_sha2_parts =
-    std::to_array<std::string_view>({"STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"});
-constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
-
-constexpr auto rest_rows = std::to_array<builtin>({
-    {.ip              = "DAC",
-     .ip_version_glob = "dacif_v2_0_Cube",
-     .make            = [](board const& b) { return dac_factory(b.supply, l4_dac); },
-     .part_globs      = l4_parts},
-    {.ip              = "IWDG",
-     .ip_version_glob = "iwdg1_v3*",
-     .make            = [](board const&) { return iwdg_factory(u5_iwdg); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "IWDG",
-     .ip_version_glob = "iwdg1_v1*",
-     .make            = [](board const&) { return iwdg_factory(l1_iwdg); },
-     .part_globs      = l1_parts},
-    {.ip              = "IWDG",
-     .ip_version_glob = "iwdg1_v2*",
-     .make            = [](board const&) { return iwdg_factory(l4_iwdg); },
-     .part_globs      = l4_parts},
-    {.ip              = "RTC",
-     .ip_version_glob = "rtc2_v2_U5*",
-     .make            = [](board const& b) { return rtc_factory(b.rtc_initial, u5_rtc); },
-     .part_globs      = u5_parts},
-    {.ip              = "RTC",
-     .ip_version_glob = "rtc2_v2_U5*",
-     .make            = [](board const& b) { return rtc_factory(b.rtc_initial, h5_rtc); },
-     .part_globs      = h5_parts},
-    {.ip              = "RTC",
-     .ip_version_glob = "rtc2_v2_5*",
-     .make            = [](board const& b) { return rtc_classic_factory(b.rtc_initial, l1_rtc); },
-     .part_globs      = l1_parts},
-    {.ip              = "RTC",
-     .ip_version_glob = "STM32L1_rtc_cat1",
-     .make       = [](board const& b) { return rtc_classic_factory(b.rtc_initial, l1_cat1_rtc); },
-     .part_globs = l1_parts},
-    {.ip              = "RTC",
-     .ip_version_glob = "rtc2_v2_4*",
-     .make            = [](board const& b) { return rtc_classic_factory(b.rtc_initial, l4_rtc); },
-     .part_globs      = l4_parts},
-    {.ip              = "TAMP",
-     .ip_version_glob = "STM32L5_rtc2_v2_8*",
-     .make            = [](board const&) { return tamp_factory(u5_rtc); },
-     .part_globs      = u5_parts},
-    {.ip              = "TAMP",
-     .ip_version_glob = "STM32L5_rtc2_v2_8*",
-     .make            = [](board const&) { return tamp_factory(h5_rtc); },
-     .part_globs      = h5_parts},
-    {.ip              = "SAI",
-     .ip_version_glob = "sai1_L5*",
-     .make            = [](board const& b) { return sai_factory(b, u5_sai); },
-     .part_globs      = u5_parts},
-    {.ip              = "SAI",
-     .ip_version_glob = "sai1_L5*",
-     .make            = [](board const& b) { return sai_factory(b, h5_sai); },
-     .part_globs      = h5_parts},
-    {.ip              = "SAI",
-     .ip_version_glob = "sai1_v1_*",
-     .make            = [](board const& b) { return sai_factory(b, l4_sai); },
-     .part_globs      = l4_parts},
-    {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }, every, u5_parts},
-    {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }, every,
-     u5_parts},
-    {.ip              = "ADC12",
-     .ip_version_glob = "*",
-     .make            = [](board const&) { return adc_common_factory(); },
-     .part_globs      = u5_parts},
-    {.ip              = "ADC",
-     .ip_version_glob = "aditf5_v3_0_H5*",
-     .make            = [](board const& b) { return adc_h5_factory(b.supply); },
-     .part_globs      = h5_parts},
-    {.ip              = "ADCC",
-     .ip_version_glob = "*",
-     .make            = [](board const&) { return adc_common_h5_factory(); },
-     .part_globs      = h5_parts},
-    {.ip              = "ADC",
-     .ip_version_glob = "aditf5_v2_0*",
-     .make            = [](board const& b) { return adc_l4_factory(b.supply); },
-     .part_globs      = l4_parts},
-    {.ip              = "ADC_Common",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return adc_common_l4_factory(); },
-     .part_globs      = l4_parts},
-    {.ip              = "ADC",
-     .ip_version_glob = "aditf3_v1*",
-     .make            = [](board const& b) { return adc_l1_factory(b.supply, l1_adc); },
-     .part_globs      = l1_parts},
-    {.ip              = "ADC",
-     .ip_version_glob = "STM32L1_adc_cat12",
-     .make            = [](board const& b) { return adc_l1_factory(b.supply, l1_cat12_adc); },
-     .part_globs      = l1_parts},
-    {.ip              = "DBGMCU",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return dbgmcu_factory(); },
-     .part_globs      = u5_h5_l1_l4_parts},
-    {.ip              = "DBG",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return dbgmcu_factory(); },
-     .part_globs      = h5_parts},
-    {.ip              = "CRC",
-     .ip_version_glob = "integtest1_v2_0",
-     .make            = [](board const&) { return crc_factory(l4_crc); },
-     .part_globs      = l4_parts},
-    {.ip              = "CRC",
-     .ip_version_glob = "integtest1_v2_0",
-     .make            = [](board const&) { return crc_factory(u5_crc); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "CRC",
-     .ip_version_glob = "integtest1_v1*",
-     .make            = [](board const&) { return crc_factory(l1_crc); },
-     .part_globs      = l1_parts},
-    {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }, every, u5_parts},
-    {.ip              = "HASH",
-     .ip_version_glob = "hash1_v4*",
-     .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
-     .part_globs      = hash_sha2_parts},
-    {.ip              = "HASH",
-     .ip_version_glob = "hash1_v4*",
-     .make            = [](board const&) { return hash_h5_factory(hash_h5_sha3); },
-     .part_globs      = hash_sha3_parts},
-    {.ip              = "RNG",
-     .ip_version_glob = "rng1_v4_1",
-     .make            = [](board const& b) { return rng_factory(b.rng, u5_rng); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "RNG",
-     .ip_version_glob = "rng1_v1_1",
-     .make            = [](board const& b) { return rng_factory(b.rng, l4_rng); },
-     .part_globs      = l4_parts},
-    {.ip              = "GTZC",
-     .ip_version_glob = "tzsc1_v2_2*",
-     .make            = [](board const&) { return gtzc_factory(u5_gtzc); },
-     .part_globs      = u5_parts},
-    {.ip              = "GTZC",
-     .ip_version_glob = "tzsc1_v2_2*",
-     .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
-     .part_globs      = h5_parts},
-    {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }, every, h5_parts},
-});
 
 auto builtins() -> std::span<builtin const>
 {
   static auto const table = [] {
     std::vector<builtin> all;
     for(auto const rows :
-        {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(), gpio_rows(), exti_rows(),
-         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(), tim_rows(), usart_rows(),
-         i2c_rows(), spi_rows(), usb_rows(), std::span<builtin const>{rest_rows}})
+        {rcc_rows(),   pwr_rows(),    flash_rows(),       caches_rows(), crs_rows(),    gpio_rows(),
+         exti_rows(),  syscfg_rows(), dma_classic_rows(), gpdma_rows(),  lptim_rows(),  tim_rows(),
+         usart_rows(), i2c_rows(),    spi_rows(),         usb_rows(),    adc_rows(),    dac_rows(),
+         iwdg_rows(),  rtc_rows(),    sai_rows(),         mdf_rows(),    dbgmcu_rows(), crc_rows(),
+         hash_rows(),  rng_rows(),    gtzc_rows(),        sbs_rows()})
     {
       all.insert(all.end(), rows.begin(), rows.end());
     }

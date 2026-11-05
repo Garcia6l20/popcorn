@@ -152,3 +152,8 @@ def test_a_listed_glob_exception_is_served_by_its_row_for_the_part(
 
     labels = {r.row_label for r in _core.resolve_rows(mcu(exception["part"]))}
     assert exception["row"] in labels, exception["reason"]
+
+
+def test_every_row_is_built_by_name() -> None:
+    unnamed = {r.row_label for r in walked_resolutions() if r.row_label and r.factory in ("", "?")}
+    assert unnamed == set()

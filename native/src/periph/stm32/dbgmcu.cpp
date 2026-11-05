@@ -1,5 +1,5 @@
+#include "dbgmcu_rows.hpp"
 #include "debug_freeze.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -107,5 +107,19 @@ auto dbgmcu_factory() -> model_factory
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<dbgmcu>(ctx, desc);
   };
+}
+
+namespace
+{
+constexpr auto dbgmcu_row_table = std::to_array<builtin>({
+    row_of<^^dbgmcu_factory>(
+        {.ip = "DBGMCU", .ip_version_glob = "", .part_globs = u5_h5_l1_l4_parts}),
+    row_of<^^dbgmcu_factory>({.ip = "DBG", .ip_version_glob = "", .part_globs = h5_parts}),
+});
+}
+
+auto dbgmcu_rows() -> std::span<builtin const>
+{
+  return dbgmcu_row_table;
 }
 }

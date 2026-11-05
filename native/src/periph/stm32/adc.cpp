@@ -1,8 +1,8 @@
 #include "adc_pads.hpp"
+#include "adc_rows.hpp"
 #include "analog_peers.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "factory_data.hpp"
 #include "gpio_peers.hpp"
 #include "model_base.hpp"
@@ -4076,5 +4076,30 @@ auto adc_common_l4_factory() -> model_factory
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<adc_common_model<l4_adc>>(ctx, desc);
   };
+}
+
+namespace
+{
+constexpr auto adc_row_table = std::to_array<builtin>({
+    row_of<^^adc_factory, ^^void, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "aditf5_40v1_U5_Cube", .part_globs = u5_parts}),
+    row_of<^^adc_common_factory>({.ip = "ADC12", .ip_version_glob = "*", .part_globs = u5_parts}),
+    row_of<^^adc_h5_factory, ^^void, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "aditf5_v3_0_H5*", .part_globs = h5_parts}),
+    row_of<^^adc_common_h5_factory>({.ip = "ADCC", .ip_version_glob = "*", .part_globs = h5_parts}),
+    row_of<^^adc_l4_factory, ^^void, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "aditf5_v2_0*", .part_globs = l4_parts}),
+    row_of<^^adc_common_l4_factory>(
+        {.ip = "ADC_Common", .ip_version_glob = "", .part_globs = l4_parts}),
+    row_of<^^adc_l1_factory, ^^l1_adc, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "aditf3_v1*", .part_globs = l1_parts}),
+    row_of<^^adc_l1_factory, ^^l1_cat12_adc, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "STM32L1_adc_cat12", .part_globs = l1_parts}),
+});
+}
+
+auto adc_rows() -> std::span<builtin const>
+{
+  return adc_row_table;
 }
 }

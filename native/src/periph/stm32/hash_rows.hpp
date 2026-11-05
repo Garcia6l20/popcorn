@@ -1,0 +1,40 @@
+#pragma once
+
+#include "row_of.hpp"
+
+#include <popcorn/periph/stm32/board.hpp>
+
+#include <array>
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+namespace popcorn::periph::stm32
+{
+/** @brief Differences between the STM32H5 HASH processors the model rows serve, RM0481 40.3.
+ *         A code outside the variant's set reads 0000 after a CR write and the hash runs SHA-1,
+ *         as read back on an STM32H573. */
+struct hash_variant
+{
+  /** @brief ALGO also keeps the SHA-3 and SHAKE codes 0100 to 1001. */
+  bool sha3 = false;
+};
+
+/** @brief STM32H52x, H53x, H56x and H57x, SHA-1 and SHA-2 only, RM0481 Table 397: ALGO keeps
+ *         0000, 0010, 0011 and 1100 to 1111. */
+inline constexpr hash_variant hash_h5_sha2{};
+/** @brief STM32H543 and H553, SHA-3 and SHAKE too, RM0481 Table 397. */
+inline constexpr hash_variant hash_h5_sha3{.sha3 = true};
+
+/** @brief Factory of the HASH model, RM0456 section 51. */
+[[nodiscard]] auto hash_factory() -> model_factory;
+
+/**
+ * @brief Factory of the STM32H5 HASH model, RM0481 section 40, SHA-2, and SHA-3 and SHAKE where
+ *        @p variant has them.
+ */
+[[nodiscard]] auto hash_h5_factory(hash_variant variant) -> model_factory;
+
+/** @brief The HASH model rows. */
+[[nodiscard]] auto hash_rows() -> std::span<builtin const>;
+}

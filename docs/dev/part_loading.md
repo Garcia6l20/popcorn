@@ -35,8 +35,8 @@ flowchart TD
 | Machine | `Machine` in `python/popcorn/_machine.py`, `options_of` in `native/src/bind/machine.cpp` | Board options and per-name models become `machine_options::models`, a map from instance name to factory |
 | Registry | `register_builtin_models` in `native/src/periph/stm32/models.cpp`, `find_model` in `native/src/periph/registry.cpp` | Importing `popcorn._core` loads `libpopcorn_stm32`, whose entry point registers one closure per distinct `(ip, ip_version glob)` pair of the row table |
 | Attach | `machine::run_state::attach_peripherals` in `native/src/core/peripherals.cpp` | Per peripheral, in description order: the machine option for the name wins, else `find_model` |
-| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, part globs and instance globs all match. The table is the row sets of the models (`rcc_rows()`, `pwr_rows()`, `flash_rows()`, `caches_rows()`, `crs_rows()`, `gpio_rows()`, `exti_rows()`, `syscfg_rows()`, `dma_classic_rows()`, `gpdma_rows()`, `lptim_rows()`, `tim_rows()`, `usart_rows()`, `i2c_rows()`, `spi_rows()`, `usb_rows()`), then `rest_rows` in `models.cpp` |
-| Factory | `<ip>_rows.hpp` next to the model, `native/src/periph/stm32/factories.hpp` for the rows in `rest_rows` | The row's `make` calls a factory, often with a `*_variant` from `variants.hpp` or the model's `<ip>_rows.hpp` |
+| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, part globs and instance globs all match. The table is the row set of each model, `rcc_rows()`, `pwr_rows()`, `flash_rows()` and so on, one `<ip>_rows()` per `<ip>_rows.hpp` |
+| Factory | `<ip>_rows.hpp` next to the model | The row's `make` calls a factory, often with a `*_variant` from the same header |
 | Model | `stm32_model` in `native/src/periph/stm32/model_base.hpp` | `reg` and `field` bind registers by name, `expect_register` and `expect_field` check the description against the variant |
 
 After all models exist the machine checks claims, served ranges and cross rules. A peripheral
@@ -45,7 +45,7 @@ through the model directory, by instance name or by interface.
 
 ### The row table
 
-The row table is a `std::to_array<builtin>` per IP, in selection order within the IP. The rows of the RCC, PWR, FLASH, ICACHE, DCACHE, CRS, GPIO, EXTI, SYSCFG, DMA, LPTIM, TIM, USART, I2C, SPI and USB models are in their models' `.cpp`, built by `row_of`, and the other rows are in `rest_rows` of `models.cpp`:
+The row table is a `std::to_array<builtin>` per model, in selection order within the IP, in the model's own `.cpp` and built by `row_of`:
 
 ```cpp
 {.ip              = "RCC",
@@ -93,9 +93,9 @@ model. Every other variant goes through the row's `make` into its factory.
   deltas. They compose into a description.
 - **row**: one `builtin` entry of the row table. It maps an ip, version, part and
   instance to a factory.
-- **variant**: a runtime descriptor struct named `*_variant` in
-  `native/src/periph/stm32/variants.hpp` or the model's `<ip>_rows.hpp`, such as `hash_variant` or
-  `flash_variant`. A row passes one to a shared factory to set behaviour parameters.
+- **variant**: a runtime descriptor struct named `*_variant` in the model's `<ip>_rows.hpp`, such
+  as `hash_variant` or `flash_variant`. A row passes one to a shared factory to set behaviour
+  parameters.
 - **traits**: a compile-time parameter of a model template. `rcc_model<Traits>` takes `u5_rcc`,
   `h5_rcc` or `l1_rcc`, `adc_model<Traits>` takes `u5_adc` or `h5_adc`, and
   `flash_model<Traits>` takes `u5_flash` or `h5_flash`.

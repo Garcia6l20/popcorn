@@ -1,6 +1,5 @@
 #include "gtzc.hpp"
 
-#include "factories.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/periph/firewall.hpp>
@@ -1684,5 +1683,20 @@ auto gtzc_factory(gtzc_variant variant) -> model_factory
     }
     return nullptr;
   };
+}
+
+namespace
+{
+constexpr auto gtzc_row_table = std::to_array<builtin>({
+    row_of<^^gtzc_factory, ^^u5_gtzc>(
+        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .part_globs = u5_parts}),
+    row_of<^^gtzc_factory, ^^h5_gtzc>(
+        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .part_globs = h5_parts}),
+});
+}
+
+auto gtzc_rows() -> std::span<builtin const>
+{
+  return gtzc_row_table;
 }
 }

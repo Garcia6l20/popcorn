@@ -1,6 +1,6 @@
-#include "factories.hpp"
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
+#include "sbs_rows.hpp"
 #include "secure_config.hpp"
 #include "temporal_isolation.hpp"
 
@@ -296,5 +296,17 @@ auto sbs_factory() -> model_factory
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<sbs>(ctx, desc);
   };
+}
+
+namespace
+{
+constexpr auto sbs_row_table = std::to_array<builtin>({
+    row_of<^^sbs_factory>({.ip = "SBS", .ip_version_glob = "sbs_v1_1*", .part_globs = h5_parts}),
+});
+}
+
+auto sbs_rows() -> std::span<builtin const>
+{
+  return sbs_row_table;
 }
 }

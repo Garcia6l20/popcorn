@@ -1,6 +1,6 @@
 #include "dfilter_chain.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
+#include "mdf_rows.hpp"
 #include "model_base.hpp"
 #include "sigma_delta.hpp"
 
@@ -2078,5 +2078,17 @@ void mdf::reschedule()
     ctx_.events.schedule_at(vtime{*earliest}, sample_event, state_.sample_generation, ctx_.clock);
   }
 }
+}
+
+namespace
+{
+constexpr auto mdf_row_table = std::to_array<builtin>({
+    row_of<^^mdf_factory>({.ip = "MDF", .ip_version_glob = "v1_0_Cube", .part_globs = u5_parts}),
+});
+}
+
+auto mdf_rows() -> std::span<builtin const>
+{
+  return mdf_row_table;
 }
 }

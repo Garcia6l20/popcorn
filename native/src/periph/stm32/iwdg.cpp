@@ -1,5 +1,5 @@
 #include "debug_freeze.hpp"
-#include "factories.hpp"
+#include "iwdg_rows.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 
@@ -610,5 +610,22 @@ auto iwdg_factory(iwdg_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<iwdg>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto iwdg_row_table = std::to_array<builtin>({
+    row_of<^^iwdg_factory, ^^u5_iwdg>(
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v3*", .part_globs = u5_h5_parts}),
+    row_of<^^iwdg_factory, ^^l1_iwdg>(
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v1*", .part_globs = l1_parts}),
+    row_of<^^iwdg_factory, ^^l4_iwdg>(
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v2*", .part_globs = l4_parts}),
+});
+}
+
+auto iwdg_rows() -> std::span<builtin const>
+{
+  return iwdg_row_table;
 }
 }

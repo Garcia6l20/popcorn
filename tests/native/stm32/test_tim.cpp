@@ -1,6 +1,5 @@
 #include "../support/inert_model.hpp"
 #include "dma.hpp"
-#include "factories.hpp"
 #include "reserved_slave_word.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"

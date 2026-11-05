@@ -1,11 +1,11 @@
 #include "backup_domain.hpp"
 #include "exti_classic.hpp"
-#include "factories.hpp"
 #include "gpio_peers.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"
 #include "rtc_calendar.hpp"
 #include "rtc_core.hpp"
+#include "rtc_rows.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>

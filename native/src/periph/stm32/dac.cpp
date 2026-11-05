@@ -1,7 +1,7 @@
 #include "analog_peers.hpp"
+#include "dac_rows.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -1349,5 +1349,18 @@ auto dac_factory(supply_options supply, dac_variant variant) -> model_factory
       [variant, supply](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
         return std::make_shared<dac>(ctx, desc, variant, supply);
       };
+}
+
+namespace
+{
+constexpr auto dac_row_table = std::to_array<builtin>({
+    row_of<^^dac_factory, ^^l4_dac, ^^board::supply>(
+        {.ip = "DAC", .ip_version_glob = "dacif_v2_0_Cube", .part_globs = l4_parts}),
+});
+}
+
+auto dac_rows() -> std::span<builtin const>
+{
+  return dac_row_table;
 }
 }

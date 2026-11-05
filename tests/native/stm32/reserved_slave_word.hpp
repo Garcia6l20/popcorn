@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../support/inert_model.hpp"
-#include "factories.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -9,6 +8,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
