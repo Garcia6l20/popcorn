@@ -523,3 +523,22 @@ registers = ["RCC_APB3RSTR"]
 fields = ["SBSRST"]
 drop = true
 source = "Silicon read-back on an STM32H573 (DBGMCU_IDCODE 0x10076484), 2026-10-28: RCC_APB3RSTR bit 1 written 1 reads 0, the register reads 0x0, and SBS_CNSLCKR, SBS_CFGR2, SBS_FPUIMR and SBS_EPOCHSELCR keep their values across the write. RM0481 Rev 5, 11.8.25 RCC_APB3RSTR marks bit 1 reserved. ST's STM32H562, H563 and H573 SVDs name it SBSRST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_AHB2ENR"]
+fields = ["SRAM2EN", "SRAM3EN"]
+drop = true
+source = "RM0481 Rev 5, 11.8.27 RCC_AHB2ENR: bit 31 SRAM3EN, bit 30 SRAM2EN, both reset 1. ST's STM32H562, H563 and H573 SVDs name bit 31 SRAM2EN and bit 30 SRAM3EN, the STM32H523, H533, H543, H553, H5E and H5F SVDs have them as RM0481 and RM0517 do. Dropped and added again at the RM positions"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_AHB2ENR"]
+add = { name = "SRAM2EN", lsb = 30, width = 1, acc = "read_write", reset = 1 }
+source = "RM0481 Rev 5, 11.8.27 RCC_AHB2ENR bit 30 SRAM2EN, reset 1. See the drop rule above"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_AHB2ENR"]
+add = { name = "SRAM3EN", lsb = 31, width = 1, acc = "read_write", reset = 1 }
+source = "RM0481 Rev 5, 11.8.27 RCC_AHB2ENR bit 31 SRAM3EN, reset 1. See the drop rule above"

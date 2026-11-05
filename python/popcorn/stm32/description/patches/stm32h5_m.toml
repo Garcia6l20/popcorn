@@ -1,0 +1,15 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the UART row is 5 for the STM32H563MI and H573MI, 6 for the larger packages. The pin db bonds UART4, UART5, UART7, UART9 and UART12 only. The SVDs carry UART8"
+
+[match]
+parts = ["STM32H563M*", "STM32H573M*"]
+
+[peripherals]
+drop = ["UART8", "SEC_UART8"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, UART row 5 for the MI package: UART4, UART5, UART7, UART9 and UART12 as the pin db bonds them"
+
+[irqs]
+drop = ["UART8"]
+add = [
+  { number = 99, name = "UART8", peripheral = "EXTI" },
+]

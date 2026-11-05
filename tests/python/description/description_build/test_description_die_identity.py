@@ -92,9 +92,9 @@ def test_a_part_listing_every_instance_of_its_reference_has_no_donor(part: str) 
             "STM32H562RGTx",
             "STM32H562IIKx",
             {
-                "SPI4": ("SPI", "spi2s3_v2_1_Cube"),
                 "UART8": ("UART", "sci2_v3_0_Cube"),
-                "USART10": ("USART", "sci3_v2_0_Cube"),
+                "UART9": ("UART", "sci2_v3_0_Cube"),
+                "UART12": ("UART", "sci2_v3_0_Cube"),
             },
         ),
     ],
@@ -129,7 +129,7 @@ def _description(part: str) -> popcorn.PartDescription:
     ("part", "firmware", "registers"),
     [
         ("STM32U575CGTx", "rcc_ll.elf", {"UART5": 0x1C}),
-        ("STM32H562RGTx", "h573/rcc_ll.elf", {"SPI4": 0x14, "UART8": 0x1C, "USART10": 0x1C}),
+        ("STM32H562RGTx", "h573/rcc_ll.elf", {"UART8": 0x1C, "UART9": 0x1C, "UART12": 0x1C}),
     ],
 )
 def test_a_dropped_instance_gets_its_builtin_model(

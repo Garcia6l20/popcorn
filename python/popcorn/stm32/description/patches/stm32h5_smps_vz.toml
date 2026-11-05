@@ -1,0 +1,16 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the Ethernet (legacy / SMPS) row is Yes / No for the STM32H563 and H573 VI/G and ZI/G, so the SMPS variants have no Ethernet. The pin db bonds no ETH signal on STM32H563VITxQ, H563ZITxQ, H573VITxQ and H573ZITxQ"
+
+[match]
+parts = ["STM32H563VITxQ", "STM32H563ZITxQ", "STM32H573VITxQ", "STM32H573ZITxQ"]
+
+[peripherals]
+drop = ["ETH", "SEC_ETH"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, Ethernet row Yes / No: no Ethernet MAC on the SMPS variant of the VI and ZI packages"
+
+[irqs]
+drop = ["ETH", "ETH_WKUP"]
+add = [
+  { number = 106, name = "ETH", peripheral = "EXTI" },
+  { number = 107, name = "ETH_WKUP", peripheral = "EXTI" },
+]

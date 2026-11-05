@@ -1,0 +1,15 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the SPI / I2S row is 5 / 3 for the VI/G packages of the STM32H562, H563 and H573. The pin db bonds SPI1, SPI2, SPI3, SPI4 and SPI6. The SVDs carry SPI5"
+
+[match]
+parts = ["STM32H562V*", "STM32H563V*", "STM32H573V*"]
+
+[peripherals]
+drop = ["SPI5", "SEC_SPI5"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, SPI / I2S row 5 / 3 for the VI packages: SPI1, SPI2, SPI3, SPI4 and SPI6 as the pin db bonds them"
+
+[irqs]
+drop = ["SPI5"]
+add = [
+  { number = 83, name = "SPI5", peripheral = "EXTI" },
+]

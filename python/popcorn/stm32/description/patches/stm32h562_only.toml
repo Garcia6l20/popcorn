@@ -1,0 +1,17 @@
+format = 1
+source = "The STM32H562 has one SDMMC and one FDCAN. DS14258 Rev 6, Table 2, row FDCAN: 1 for every STM32H562 package, 2 for every STM32H563 package. The STM32H562 SVD carries FDCAN2 and its Secure window. SDMMC: DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts, row SDMMC: 1 for every STM32H562 package, 2 for the STM32H563VI/G, ZI/G, AI/G, II/G and LI. The STM32H562 SVD still carries the SDMMC2 delay block DLYBSD2 and its Secure window"
+
+[match]
+parts = ["STM32H562*"]
+svd = ["STM32H562*.svd"]
+
+[peripherals]
+drop = ["DLYBSD2", "SEC_DLYBSD2", "FDCAN2", "SEC_FDCAN2"]
+source = "DS14258 Rev 6, Table 2: the STM32H562 has one SDMMC and one FDCAN, so SDMMC2, its delay block DLYBSD2 and FDCAN2 do not exist. The STM32H562 SVD has no SDMMC2 peripheral"
+
+[irqs]
+drop = ["FDCAN2_IT0", "FDCAN2_IT1"]
+add = [
+  { number = 109, name = "FDCAN2_IT0", peripheral = "EXTI" },
+  { number = 110, name = "FDCAN2_IT1", peripheral = "EXTI" },
+]

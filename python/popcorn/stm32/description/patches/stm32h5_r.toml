@@ -1,0 +1,15 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the FMC row is No for the STM32H562RI/G, H563RI/G and H573RI. The SVDs carry the FMC and its Secure window"
+
+[match]
+parts = ["STM32H562R*", "STM32H563R*", "STM32H573R*"]
+
+[peripherals]
+drop = ["FMC", "SEC_FMC"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts, FMC row: No for the RI/G packages. DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, FMC row: No for the H573RI"
+
+[irqs]
+drop = ["FMC"]
+add = [
+  { number = 77, name = "FMC", peripheral = "EXTI" },
+]

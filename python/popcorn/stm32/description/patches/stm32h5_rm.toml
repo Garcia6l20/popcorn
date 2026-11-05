@@ -1,0 +1,17 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the SPI / I2S row is 4 / 3 and the USART row 5 for the STM32H562RI/G, H563RI/G, H563MI, H573RI and H573MI. The pin db bonds SPI1, SPI2, SPI3, SPI6 and USART1, USART2, USART3, USART6, USART11 only. The SVDs carry SPI4, SPI5 and USART10"
+
+[match]
+parts = ["STM32H562R*", "STM32H563R*", "STM32H563M*", "STM32H573R*", "STM32H573M*"]
+
+[peripherals]
+drop = ["SPI4", "SEC_SPI4", "SPI5", "SEC_SPI5", "USART10", "SEC_USART10"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, SPI / I2S row 4 / 3 and USART row 5 for these packages. The SPI instances are SPI1, SPI2, SPI3 and SPI6, the USART instances USART1, USART2, USART3, USART6 and USART11, as the pin db bonds them"
+
+[irqs]
+drop = ["SPI4", "SPI5", "USART10"]
+add = [
+  { number = 82, name = "SPI4", peripheral = "EXTI" },
+  { number = 83, name = "SPI5", peripheral = "EXTI" },
+  { number = 86, name = "USART10", peripheral = "EXTI" },
+]

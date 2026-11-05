@@ -1,0 +1,15 @@
+format = 1
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts: the SDMMC row is 1 for the STM32H563RI/G, H563MI, H573RI and H573MI, 2 for the larger packages. The SVDs carry SDMMC2 and its delay block DLYBSD2"
+
+[match]
+parts = ["STM32H563R*", "STM32H563M*", "STM32H573R*", "STM32H573M*"]
+
+[peripherals]
+drop = ["SDMMC2", "SEC_SDMMC2", "DLYBSD2", "SEC_DLYBSD2"]
+source = "DS14258 Rev 6, Table 2 STM32H56xxx features and peripheral counts and DS14121 Rev 5, Table 2 STM32H573xx features and peripheral counts, SDMMC row: 1 for these packages, so SDMMC2 and its delay block do not exist"
+
+[irqs]
+drop = ["SDMMC2"]
+add = [
+  { number = 102, name = "SDMMC2", peripheral = "EXTI" },
+]
