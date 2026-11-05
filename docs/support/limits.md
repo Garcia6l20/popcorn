@@ -99,6 +99,13 @@ ES0250:
 - ES0250 2.1.3: an exception return that overlaps a buffered store vectors to the interrupt the
   NVIC acknowledged.
 
+## STM32L485
+
+ST publishes no datasheet and no errata sheet that names the STM32L485. The two shipped order
+codes, STM32L485JCYx and STM32L485JEYx, are modelled from the STM32L486 documents: RM0351, the
+STM32L486 datasheet DS10199 and the errata sheet ES0250. Every STM32L485 behaviour is inferred from
+the STM32L486, and no STM32L485 board has been read back.
+
 ## STM32L4 instances without a model
 
 QUADSPI, DFSDM1, LCD, CAN1, COMP, OPAMP, TSC, SWPMI1, SDMMC1, FMC, FIREWALL, VREFBUF and WWDG

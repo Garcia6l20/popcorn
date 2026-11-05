@@ -29,10 +29,11 @@ order-code letter after the pin count gives the flash size, `C` 256 KiB, `E` 512
 | STM32L486 | 5 | STM32L486ZGTx |
 
 The instances of a code follow its line and package, and its peripheral page lists them. The
-STM32L471 has no OTG_FS and no LCD, the STM32L485 and STM32L486 carry the AES unit. The
-packages are LQFP64, LQFP100, LQFP144, UFBGA132, UFBGA144, WLCSP72, WLCSP81 and WLCSP99. The
-suffix `P` marks the codes with the external SMPS pinout, `STM32L476JGYxP`, `STM32L476QGIxP`,
-`STM32L476VGYxP` and `STM32L476ZGTxP`.
+STM32L471 has no OTG_FS and no LCD, the STM32L485 and STM32L486 carry the AES unit. The STM32L485
+follows the STM32L486 documents, see [Limits](limits.md#stm32l485). The packages are LQFP64,
+LQFP100, LQFP144, UFBGA132, UFBGA144, WLCSP72, WLCSP81 and WLCSP99. The suffix `P` marks the codes
+with the external SMPS pinout, `STM32L476JGYxP`, `STM32L476QGIxP`, `STM32L476VGYxP` and
+`STM32L476ZGTxP`.
 
 The examples classify a code by its die, flash size, package and SMPS supply. The 12 codes in
 the WLCSP72, WLCSP81, WLCSP99 and UFBGA144 packages classify through the `JY`, `MY`, `VY` and
