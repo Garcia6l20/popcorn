@@ -1,8 +1,8 @@
 #include "exti_classic.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"
 #include "secure_config.hpp"
+#include "syscfg_rows.hpp"
 
 #include <popcorn/periph/stm32/gpio.hpp>
 
@@ -436,5 +436,24 @@ auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<syscfg_classic>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto syscfg_table = std::to_array<builtin>({
+    row_of<^^syscfg_classic_factory, ^^l1_syscfg>(
+        {.ip = "SYSCFG", .ip_version_glob = "", .part_globs = l1_parts}),
+    row_of<^^syscfg_classic_factory, ^^l1_syscfg_cat12>(
+        {.ip = "SYSCFG", .ip_version_glob = "STM32L1_exti_23", .part_globs = l1_parts}),
+    row_of<^^syscfg_classic_factory, ^^l4_syscfg>(
+        {.ip = "SYS", .ip_version_glob = "STM32L47x_sys_*", .part_globs = l4_parts}),
+    row_of<^^syscfg_factory>(
+        {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .part_globs = u5_parts}),
+});
+}
+
+auto syscfg_rows() -> std::span<builtin const>
+{
+  return syscfg_table;
 }
 }

@@ -1,6 +1,6 @@
 #include "dma.hpp"
 #include "dma_data.hpp"
-#include "factories.hpp"
+#include "dma_rows.hpp"
 #include "gpdma_requests.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
@@ -1467,5 +1467,22 @@ auto lpdma_factory() -> model_factory
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<gpdma>(ctx, desc, lpdma_layout, writes<lpdma_layout>());
   };
+}
+
+namespace
+{
+constexpr auto gpdma_table = std::to_array<builtin>({
+    row_of<^^gpdma_factory>(
+        {.ip = "GPDMA", .ip_version_glob = "STM32U5_dma3_*", .part_globs = u5_parts}),
+    row_of<^^gpdma_h5_factory>(
+        {.ip = "GPDMA", .ip_version_glob = "*STM32H5_dma3_*", .part_globs = h5_parts}),
+    row_of<^^lpdma_factory>(
+        {.ip = "LPDMA", .ip_version_glob = "STM32U5_dma3_*", .part_globs = u5_parts}),
+});
+}
+
+auto gpdma_rows() -> std::span<builtin const>
+{
+  return gpdma_table;
 }
 }

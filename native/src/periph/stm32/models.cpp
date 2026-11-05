@@ -1,11 +1,16 @@
 #include "caches_rows.hpp"
 #include "crs_rows.hpp"
+#include "dma_rows.hpp"
+#include "exti_rows.hpp"
 #include "factories.hpp"
 #include "flash_rows.hpp"
+#include "gpio_rows.hpp"
+#include "lptim_rows.hpp"
 #include "pwr_rows.hpp"
 #include "rcc_rows.hpp"
 #include "row_of.hpp"
 #include "rows.hpp"
+#include "syscfg_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
@@ -29,97 +34,16 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr auto u575_gpio_parts = std::to_array<std::string_view>({"STM32U575*", "STM32U585*"});
 constexpr auto hash_sha2_parts =
     std::to_array<std::string_view>({"STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"});
 constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
-constexpr auto gpio_instances  = std::to_array<std::string_view>({"GPIO?"});
-constexpr auto dma1_instances  = std::to_array<std::string_view>({"DMA1"});
-constexpr auto dma2_instances  = std::to_array<std::string_view>({"DMA2"});
 constexpr auto l1_tim_instances =
     std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM9", "TIM10", "TIM11"});
 constexpr auto l1_cat3_tim_instances =
     std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5", "TIM9", "TIM10", "TIM11"});
 constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
-constexpr auto lptim1_instances       = std::to_array<std::string_view>({"LPTIM1"});
-constexpr auto lptim2_instances       = std::to_array<std::string_view>({"LPTIM2"});
 
 constexpr auto rest_rows = std::to_array<builtin>({
-    {.ip              = "GPIO",
-     .ip_version_glob = "STM32U5x_gpio_*",
-     .make            = [](board const&) { return gpio_factory(u575_gpio); },
-     .instance_globs  = gpio_instances,
-     .part_globs      = u575_gpio_parts},
-    {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(u5_gpio); }, gpio_instances,
-     u5_parts},
-    {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(h56x_gpio); },
-     gpio_instances, h5_parts},
-    {.ip              = "GPIO",
-     .ip_version_glob = "STM32L1_gpio_cat13",
-     .make            = [](board const&) { return gpio_factory(l1_gpio_cat13); },
-     .instance_globs  = gpio_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "GPIO",
-     .ip_version_glob = "STM32L1_gpio_cat46",
-     .make            = [](board const&) { return gpio_factory(l1_gpio_cat46); },
-     .instance_globs  = gpio_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "GPIO",
-     .ip_version_glob = "STM32L47x_gpio_*",
-     .make            = [](board const&) { return gpio_factory(l4_gpio); },
-     .instance_globs  = gpio_instances,
-     .part_globs      = l4_parts},
-    {.ip              = "EXTI",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return exti_factory(); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "EXTI",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return exti_classic_factory(l1_exti_24); },
-     .part_globs      = l1_parts},
-    {.ip              = "EXTI",
-     .ip_version_glob = "STM32L1_exti_23",
-     .make            = [](board const&) { return exti_classic_factory(l1_exti_23); },
-     .part_globs      = l1_parts},
-    {.ip              = "EXTI",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return exti_classic_factory(l4_exti); },
-     .part_globs      = l4_parts},
-    {.ip              = "SYSCFG",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return syscfg_classic_factory(l1_syscfg); },
-     .part_globs      = l1_parts},
-    {.ip              = "SYSCFG",
-     .ip_version_glob = "STM32L1_exti_23",
-     .make            = [](board const&) { return syscfg_classic_factory(l1_syscfg_cat12); },
-     .part_globs      = l1_parts},
-    {.ip              = "SYS",
-     .ip_version_glob = "STM32L47x_sys_*",
-     .make            = [](board const&) { return syscfg_classic_factory(l4_syscfg); },
-     .part_globs      = l4_parts},
-    {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }, every, u5_parts},
-    {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }, every, h5_parts},
-    {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }, every, u5_parts},
-    {.ip              = "DMA",
-     .ip_version_glob = "STM32L1*_dma_*",
-     .make            = [](board const&) { return dma_classic_factory(l1_dma1); },
-     .instance_globs  = dma1_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "DMA",
-     .ip_version_glob = "STM32L1*_dma_*",
-     .make            = [](board const&) { return dma_classic_factory(l1_dma2); },
-     .instance_globs  = dma2_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "DMA",
-     .ip_version_glob = "STM32L4*_dma_*",
-     .make            = [](board const&) { return dma_classic_factory(l4_dma1); },
-     .instance_globs  = dma1_instances,
-     .part_globs      = l4_parts},
-    {.ip              = "DMA",
-     .ip_version_glob = "STM32L4*_dma_*",
-     .make            = [](board const&) { return dma_classic_factory(l4_dma2); },
-     .instance_globs  = dma2_instances,
-     .part_globs      = l4_parts},
     {.ip              = "USART",
      .ip_version_glob = "sci3_v2*",
      .make            = [](board const& b) { return usart_factory(b, with_views_usart); },
@@ -203,16 +127,6 @@ constexpr auto rest_rows = std::to_array<builtin>({
     {.ip              = "DAC",
      .ip_version_glob = "dacif_v2_0_Cube",
      .make            = [](board const& b) { return dac_factory(b.supply, l4_dac); },
-     .part_globs      = l4_parts},
-    {.ip              = "LPTIM",
-     .ip_version_glob = "L4_lptimer1_v1*",
-     .make            = [](board const&) { return lptim_factory(l4_lptim1); },
-     .instance_globs  = lptim1_instances,
-     .part_globs      = l4_parts},
-    {.ip              = "LPTIM",
-     .ip_version_glob = "L4_lptimer1_v1*",
-     .make            = [](board const&) { return lptim_factory(l4_lptim2); },
-     .instance_globs  = lptim2_instances,
      .part_globs      = l4_parts},
     {.ip              = "IWDG",
      .ip_version_glob = "iwdg1_v3*",
@@ -392,7 +306,6 @@ constexpr auto rest_rows = std::to_array<builtin>({
      .ip_version_glob = "rng1_v1_1",
      .make            = [](board const& b) { return rng_factory(b.rng, l4_rng); },
      .part_globs      = l4_parts},
-    {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }, every, u5_parts},
     {.ip              = "GTZC",
      .ip_version_glob = "tzsc1_v2_2*",
      .make            = [](board const&) { return gtzc_factory(u5_gtzc); },
@@ -409,7 +322,8 @@ auto builtins() -> std::span<builtin const>
   static auto const table = [] {
     std::vector<builtin> all;
     for(auto const rows :
-        {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(),
+        {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(), gpio_rows(), exti_rows(),
+         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(),
          std::span<builtin const>{rest_rows}})
     {
       all.insert(all.end(), rows.begin(), rows.end());

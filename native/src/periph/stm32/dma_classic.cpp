@@ -1,6 +1,6 @@
 #include "dma.hpp"
 #include "dma_data.hpp"
-#include "factories.hpp"
+#include "dma_rows.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -718,5 +718,38 @@ auto dma_classic_factory(dma_classic_variant variant) -> model_factory
     }
     return std::make_shared<dma_classic>(ctx, desc, variant, table);
   };
+}
+
+namespace
+{
+constexpr auto dma1_instances    = std::to_array<std::string_view>({"DMA1"});
+constexpr auto dma2_instances    = std::to_array<std::string_view>({"DMA2"});
+constexpr auto dma_classic_table = std::to_array<builtin>({
+    row_of<^^dma_classic_factory, ^^l1_dma1>(
+        {.ip              = "DMA",
+         .ip_version_glob = "STM32L1*_dma_*",
+         .instance_globs  = dma1_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^dma_classic_factory, ^^l1_dma2>(
+        {.ip              = "DMA",
+         .ip_version_glob = "STM32L1*_dma_*",
+         .instance_globs  = dma2_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^dma_classic_factory, ^^l4_dma1>(
+        {.ip              = "DMA",
+         .ip_version_glob = "STM32L4*_dma_*",
+         .instance_globs  = dma1_instances,
+         .part_globs      = l4_parts}),
+    row_of<^^dma_classic_factory, ^^l4_dma2>(
+        {.ip              = "DMA",
+         .ip_version_glob = "STM32L4*_dma_*",
+         .instance_globs  = dma2_instances,
+         .part_globs      = l4_parts}),
+});
+}
+
+auto dma_classic_rows() -> std::span<builtin const>
+{
+  return dma_classic_table;
 }
 }

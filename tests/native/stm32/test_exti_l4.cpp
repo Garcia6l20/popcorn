@@ -1,9 +1,8 @@
 #include "debug_freeze.hpp"
 #include "exti_classic.hpp"
-#include "factories.hpp"
+#include "exti_rows.hpp"
 #include "read_protection.hpp"
 #include "stm32_fixture.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>

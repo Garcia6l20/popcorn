@@ -1,8 +1,7 @@
 #include "../support/inert_model.hpp"
-#include "factories.hpp"
 #include "gpio_peers.hpp"
+#include "gpio_rows.hpp"
 #include "stm32_fixture.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>

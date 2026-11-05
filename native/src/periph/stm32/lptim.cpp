@@ -1,4 +1,4 @@
-#include "factories.hpp"
+#include "lptim_rows.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -1575,5 +1575,28 @@ auto lptim_factory(lptim_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<lptim>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto lptim1_instances = std::to_array<std::string_view>({"LPTIM1"});
+constexpr auto lptim2_instances = std::to_array<std::string_view>({"LPTIM2"});
+constexpr auto lptim_table      = std::to_array<builtin>({
+    row_of<^^lptim_factory, ^^l4_lptim1>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "L4_lptimer1_v1*",
+         .instance_globs  = lptim1_instances,
+         .part_globs      = l4_parts}),
+    row_of<^^lptim_factory, ^^l4_lptim2>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "L4_lptimer1_v1*",
+         .instance_globs  = lptim2_instances,
+         .part_globs      = l4_parts}),
+});
+}
+
+auto lptim_rows() -> std::span<builtin const>
+{
+  return lptim_table;
 }
 }

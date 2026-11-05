@@ -1,5 +1,5 @@
-#include "factories.hpp"
 #include "gpio_peers.hpp"
+#include "gpio_rows.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "pin_range.hpp"
@@ -1158,5 +1158,48 @@ auto gpio_factory(gpio_variant variant) -> model_factory
     }
     return std::make_shared<gpio>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto u575_gpio_parts = std::to_array<std::string_view>({"STM32U575*", "STM32U585*"});
+constexpr auto gpio_instances  = std::to_array<std::string_view>({"GPIO?"});
+constexpr auto gpio_table      = std::to_array<builtin>({
+    row_of<^^gpio_factory, ^^u575_gpio>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32U5x_gpio_*",
+         .instance_globs  = gpio_instances,
+         .part_globs      = u575_gpio_parts}),
+    row_of<^^gpio_factory, ^^u5_gpio>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32U5x_gpio_*",
+         .instance_globs  = gpio_instances,
+         .part_globs      = u5_parts}),
+    row_of<^^gpio_factory, ^^h56x_gpio>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32H56x_gpio_*",
+         .instance_globs  = gpio_instances,
+         .part_globs      = h5_parts}),
+    row_of<^^gpio_factory, ^^l1_gpio_cat13>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32L1_gpio_cat13",
+         .instance_globs  = gpio_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^gpio_factory, ^^l1_gpio_cat46>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32L1_gpio_cat46",
+         .instance_globs  = gpio_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^gpio_factory, ^^l4_gpio>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32L47x_gpio_*",
+         .instance_globs  = gpio_instances,
+         .part_globs      = l4_parts}),
+});
+}
+
+auto gpio_rows() -> std::span<builtin const>
+{
+  return gpio_table;
 }
 }

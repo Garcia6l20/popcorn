@@ -1,9 +1,8 @@
 #include "../support/inert_model.hpp"
 #include "dma.hpp"
+#include "dma_rows.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "stm32_fixture.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>

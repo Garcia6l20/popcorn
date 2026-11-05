@@ -1,5 +1,5 @@
 #include "exti_classic.hpp"
-#include "factories.hpp"
+#include "exti_rows.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -382,5 +382,23 @@ auto exti_classic_factory(exti_classic_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<exti_classic>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto exti_table = std::to_array<builtin>({
+    row_of<^^exti_factory>({.ip = "EXTI", .ip_version_glob = "", .part_globs = u5_h5_parts}),
+    row_of<^^exti_classic_factory, ^^l1_exti_24>(
+        {.ip = "EXTI", .ip_version_glob = "", .part_globs = l1_parts}),
+    row_of<^^exti_classic_factory, ^^l1_exti_23>(
+        {.ip = "EXTI", .ip_version_glob = "STM32L1_exti_23", .part_globs = l1_parts}),
+    row_of<^^exti_classic_factory, ^^l4_exti>(
+        {.ip = "EXTI", .ip_version_glob = "", .part_globs = l4_parts}),
+});
+}
+
+auto exti_rows() -> std::span<builtin const>
+{
+  return exti_table;
 }
 }

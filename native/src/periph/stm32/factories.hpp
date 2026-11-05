@@ -16,40 +16,6 @@
 namespace popcorn::periph::stm32
 {
 /**
- * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7. Returns no model
- *        for LPGPIO1.
- * @param variant What differs between the ports of the family the row serves.
- */
-[[nodiscard]] auto gpio_factory(gpio_variant variant) -> model_factory;
-
-/** @brief Factory of the EXTI model, RM0456 section 23. */
-[[nodiscard]] auto exti_factory() -> model_factory;
-
-/**
- * @brief Factory of the classic EXTI model, RM0038 section 10.2.
- * @param variant Lines and NVIC lines of the family the row serves.
- */
-[[nodiscard]] auto exti_classic_factory(exti_classic_variant variant) -> model_factory;
-
-/**
- * @brief Factory of the classic channel DMA model, RM0038 section 11.
- * @param variant Channels and requests of the controller the row serves.
- */
-[[nodiscard]] auto dma_classic_factory(dma_classic_variant variant) -> model_factory;
-
-/** @brief Factory of the GPDMA1 model, RM0456 section 17. */
-[[nodiscard]] auto gpdma_factory() -> model_factory;
-
-/**
- * @brief Factory of the GPDMA1 and GPDMA2 model of the STM32H5, RM0481 section 16: 8 channels,
- *        2D addressing on 6 and 7, requests from Table 142, frozen by `DBG_GPDMA<n>_<ch>_STOP`.
- */
-[[nodiscard]] auto gpdma_h5_factory() -> model_factory;
-
-/** @brief Factory of the LPDMA1 model, the GPDMA engine with 4 channels, RM0456 section 18. */
-[[nodiscard]] auto lpdma_factory() -> model_factory;
-
-/**
  * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
  * @param b Board whose `uarts` give each instance its far end, copied: the endpoints stay
  *        shared.
@@ -75,12 +41,6 @@ namespace popcorn::periph::stm32
  * @param variant What differs between the DAC of the family the row serves.
  */
 [[nodiscard]] auto dac_factory(supply_options supply, dac_variant variant) -> model_factory;
-
-/**
- * @brief Factory of the LPTIM model, RM0351 section 34.
- * @param variant What differs between the LPTIM instances the row serves.
- */
-[[nodiscard]] auto lptim_factory(lptim_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the RTC model, RM0456 section 63.
@@ -214,15 +174,6 @@ namespace popcorn::periph::stm32
  * @param variant What differs between the CRC of the family the row serves.
  */
 [[nodiscard]] auto crc_factory(crc_variant variant) -> model_factory;
-
-/** @brief Factory of the SYSCFG model, RM0456 section 15. */
-[[nodiscard]] auto syscfg_factory() -> model_factory;
-
-/**
- * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
- * @param variant Register roles and EXTI port codes of the family the row serves.
- */
-[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the RNG model, RM0456 section 48 and RM0351 section 27.
