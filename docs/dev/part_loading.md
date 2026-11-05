@@ -139,7 +139,12 @@ Rules that follow:
 3. Add golden files and regenerate the shipped layers with
    `uv run python -m popcorn.stm32.description golden <part>` and `... ship <part>`.
 4. Give the rows of the family part globs in `builtins`, so the rows of another family do not
-   adopt it, and place each specific row above its generic row.
+   adopt it, and place each specific row above its generic row. Run
+   `uv run python -m popcorn_build.resolution_diff update` and read the diff of the goldens in
+   `tests/data/stm32/resolution`: a row that serves a new family shows there, and
+   `tests/python/stm32/test_resolution.py` fails for a row with a part glob that reaches two
+   families, a row whose part glob is `*`, a row no part serves and an instance
+   with two matching rows outside the listed overlaps.
 5. Add an entry for the family to `debug_maps` and `idau_maps` in `models.cpp`. A family
    without one has no debug blocks and no IDAU map.
 6. Write the name tables of the models that bind registers by name, and the traits or variants

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "part": "STM32BASE",
+  "part": "STM32U5BASE",
   "generator": "hand-written",
   "sources": {
     "svd": "0000000000000000000000000000000000000000000000000000000000000000",

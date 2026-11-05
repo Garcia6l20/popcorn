@@ -218,7 +218,7 @@ TEST_CASE("a name absent from the description is a config error naming part, pat
 {
   bench      b;
   auto const field = error_of(b, "RCC_CR", "NOPE");
-  CHECK(field.file() == "STM32BASE");
+  CHECK(field.file() == "STM32U5BASE");
   CHECK(field.key() == "peripherals.RCC.registers.RCC_CR.NOPE");
   CHECK(field.expected() == "a register the probe model needs");
   auto const reg = error_of(b, "RCC_NOPE", "HSION");

@@ -1,0 +1,14 @@
+[[probe]]
+name = "u535-flash-5bit-generic-gpio"
+base = "STM32U575ZITxQ"
+part = "STM32U535CBTx"
+
+[[probe]]
+name = "u599-flash-8bit"
+base = "STM32U575ZITxQ"
+part = "STM32U599NJHxQ"
+
+[[probe]]
+name = "h543-hash-sha3"
+base = "STM32H573IIKx"
+part = "STM32H543RETx"

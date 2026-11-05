@@ -67,4 +67,13 @@ auto resolve_rows(part_description const& description) -> std::vector<row_resolu
          })
        | std::ranges::to<std::vector>();
 }
+
+auto model_rows() -> std::vector<model_row>
+{
+  return periph::stm32::rows()
+       | std::views::transform([](periph::stm32::row_info const& row) {
+           return model_row{.label = row.label, .part_globs = row.part_globs};
+         })
+       | std::ranges::to<std::vector>();
+}
 }

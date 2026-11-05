@@ -42,6 +42,18 @@ struct resolution
   row_source source = row_source::none_no_row;
 };
 
+/** @brief One row of the built-in model table. */
+struct row_info
+{
+  /** @brief Label, as `resolution::row_label` spells it. */
+  std::string label;
+  /** @brief Part globs of the row. */
+  std::vector<std::string> part_globs;
+};
+
+/** @brief Every row of the built-in model table, in table order. */
+[[nodiscard]] POPCORN_API auto rows() -> std::vector<row_info>;
+
 /**
  * @brief Resolves each non-alias peripheral of @p part against the built-in model rows, as a
  *        machine does, and reports instead of throwing when no row serves the part.

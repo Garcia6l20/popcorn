@@ -61,8 +61,8 @@ struct builtin
 };
 
 constexpr auto builtins = std::to_array<builtin>({
-    {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
-    {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
+    {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }, every, u5_parts},
+    {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }, every, h5_parts},
     {.ip              = "RCC",
      .ip_version_glob = "STM32L1_rcc_*",
      .make            = [](board const& b) { return rcc_l1_factory(b.rcc); },
@@ -71,14 +71,20 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "STM32L4_rcc_*",
      .make            = [](board const& b) { return rcc_l4_factory(b.rcc); },
      .part_globs      = l4_parts},
-    {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
-    {"DCACHE", "STM32U5xx1_v0_0", [](board const& b) { return dcache_factory(b.caches); }},
+    {.ip              = "ICACHE",
+     .ip_version_glob = "Icache_v1_0_0*",
+     .make            = [](board const& b) { return icache_factory(b.caches); },
+     .part_globs      = u5_h5_parts},
+    {.ip              = "DCACHE",
+     .ip_version_glob = "STM32U5xx1_v0_0",
+     .make            = [](board const& b) { return dcache_factory(b.caches); },
+     .part_globs      = u5_h5_parts},
     {.ip              = "PWR",
      .ip_version_glob = "STM32U5_pwr_*",
      .make            = [](board const& b) { return pwr_smps_factory(b.pwr); },
      .part_globs      = u5_smps_parts},
-    {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
-    {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }},
+    {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }, every, u5_parts},
+    {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }, every, h5_parts},
     {.ip              = "PWR",
      .ip_version_glob = "",
      .make            = [](board const& b) { return pwr_l1_factory(b.pwr); },
@@ -100,10 +106,12 @@ constexpr auto builtins = std::to_array<builtin>({
     {.ip              = "flash",
      .ip_version_glob = "v1.0.0_U5_Cube",
      .make            = [](board const& b) { return flash_factory(b.flash); },
+     .part_globs      = u5_parts,
      .flash           = flash_u5},
     {.ip              = "flash",
      .ip_version_glob = "v1.0.0_H5_Cube",
      .make            = [](board const& b) { return flash_h5_factory(b.flash); },
+     .part_globs      = h5_parts,
      .flash           = flash_h5},
     {.ip              = "Flash",
      .ip_version_glob = "",
@@ -150,9 +158,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .make            = [](board const&) { return gpio_factory(u575_gpio); },
      .instance_globs  = gpio_instances,
      .part_globs      = u575_gpio_parts},
-    {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(u5_gpio); }, gpio_instances},
+    {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(u5_gpio); }, gpio_instances,
+     u5_parts},
     {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(h56x_gpio); },
-     gpio_instances},
+     gpio_instances, h5_parts},
     {.ip              = "GPIO",
      .ip_version_glob = "STM32L1_gpio_cat13",
      .make            = [](board const&) { return gpio_factory(l1_gpio_cat13); },
@@ -196,9 +205,9 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "STM32L47x_sys_*",
      .make            = [](board const&) { return syscfg_classic_factory(l4_syscfg); },
      .part_globs      = l4_parts},
-    {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
-    {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }},
-    {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }},
+    {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }, every, u5_parts},
+    {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }, every, h5_parts},
+    {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }, every, u5_parts},
     {.ip              = "DMA",
      .ip_version_glob = "STM32L1*_dma_*",
      .make            = [](board const&) { return dma_classic_factory(l1_dma1); },
@@ -313,7 +322,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .make            = [](board const&) { return lptim_factory(l4_lptim2); },
      .instance_globs  = lptim2_instances,
      .part_globs      = l4_parts},
-    {"IWDG", "iwdg1_v3*", [](board const&) { return iwdg_factory(u5_iwdg); }},
+    {.ip              = "IWDG",
+     .ip_version_glob = "iwdg1_v3*",
+     .make            = [](board const&) { return iwdg_factory(u5_iwdg); },
+     .part_globs      = u5_h5_parts},
     {.ip              = "IWDG",
      .ip_version_glob = "iwdg1_v1*",
      .make            = [](board const&) { return iwdg_factory(l1_iwdg); },
@@ -402,7 +414,7 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "sai1_v1_*",
      .make            = [](board const& b) { return sai_factory(b, l4_sai); },
      .part_globs      = l4_parts},
-    {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }},
+    {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }, every, u5_parts},
     {.ip              = "USB_OTG_FS",
      .ip_version_glob = "otgfs1_v3_0_Cube",
      .make            = [](board const& b) { return otg_fs_factory(b, u5_otg_fs); },
@@ -411,7 +423,8 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "otgfs1_v2_0_Cube",
      .make            = [](board const& b) { return otg_fs_factory(b, l4_otg_fs); },
      .part_globs      = l4_parts},
-    {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b, h5_usb); }},
+    {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b, h5_usb); }, every,
+     h5_parts},
     {.ip              = "USB",
      .ip_version_glob = "usb1_v1_2*",
      .make            = [](board const& b) { return usb_drd_factory(b, l1_usb); },
@@ -420,7 +433,8 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "",
      .make            = [](board const&) { return usb_packet_memory_factory("USB"); },
      .part_globs      = l1_parts},
-    {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
+    {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }, every,
+     u5_parts},
     {.ip              = "ADC12",
      .ip_version_glob = "*",
      .make            = [](board const&) { return adc_common_factory(); },
@@ -469,7 +483,7 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "integtest1_v1*",
      .make            = [](board const&) { return crc_factory(l1_crc); },
      .part_globs      = l1_parts},
-    {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
+    {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }, every, u5_parts},
     {.ip              = "HASH",
      .ip_version_glob = "hash1_v4*",
      .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
@@ -486,7 +500,7 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "rng1_v1_1",
      .make            = [](board const& b) { return rng_factory(b.rng, l4_rng); },
      .part_globs      = l4_parts},
-    {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},
+    {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }, every, u5_parts},
     {.ip              = "GTZC",
      .ip_version_glob = "tzsc1_v2_2*",
      .make            = [](board const&) { return gtzc_factory(u5_gtzc); },
@@ -495,7 +509,7 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "tzsc1_v2_2*",
      .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
      .part_globs      = h5_parts},
-    {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }},
+    {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }, every, h5_parts},
     {.ip              = "CRS",
      .ip_version_glob = "",
      .make            = [](board const&) { return crs_factory(); },
@@ -717,6 +731,17 @@ auto select_row(
   }
   return nullptr;
 }
+}
+
+auto rows() -> std::vector<row_info>
+{
+  return builtins
+       | std::views::transform([](builtin const& entry) {
+           return row_info{
+               .label      = row_label(entry),
+               .part_globs = entry.part_globs | std::ranges::to<std::vector<std::string>>()};
+         })
+       | std::ranges::to<std::vector>();
 }
 
 auto resolve(part_description const& part) -> std::vector<resolution>

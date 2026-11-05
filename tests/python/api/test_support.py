@@ -12,6 +12,8 @@ from popcorn import ConfigError, ModelError, OptionBytes, _core
 from popcorn.model import Model
 from popcorn.stm32 import PeripheralSupport, mcu, shipped_parts, support
 
+from popcorn_build import resolution_diff
+
 PART = "STM32U575QGIx"
 U575 = mcu(PART)
 INSTANCES = [p.name for p in U575.peripherals if p.alias_of is None]
@@ -235,7 +237,6 @@ def test_a_builtin_its_python_replacement_unregistered_shows_as_no_model() -> No
     assert run.stdout.split() == ["None", "False"]
 
 
-ROW_DUMPS = Path(__file__).parents[2] / "data" / "support"
 ROW_PARTS = [
     "STM32U575QGIx",
     "STM32U575ZITxQ",
@@ -246,14 +247,17 @@ ROW_PARTS = [
 
 
 @pytest.mark.parametrize("part", ROW_PARTS)
-def test_the_row_of_each_instance_is_pinned(part: str) -> None:
-    dump = [f"{s.name} {s.row or '-'} {s.source}" for s in support(mcu(part))]
-    assert dump == (ROW_DUMPS / f"rows_{part}.txt").read_text().splitlines()
+def test_the_row_of_each_instance_is_the_golden(part: str) -> None:
+    family = resolution_diff.family_of(part)
+    golden = json.loads((resolution_diff.GOLDEN_DIR / f"{family}.json").read_text())
+    expected = next(g["instances"] for g in golden["groups"] if part in g["parts"])
+    found = {s.name: [s.row or "", s.source] for s in support(mcu(part))}
+    assert found == {name: [entry[0], entry[1]] for name, entry in expected.items()}
 
 
 def test_a_row_names_the_instance_it_serves() -> None:
     found = {s.name: s for s in support(U575)}
-    assert found["RCC"].row == "RCC/STM32U5_rcc_*/*/*"
+    assert found["RCC"].row == "RCC/STM32U5_rcc_*/STM32U5*/*"
     assert found["RCC"].source == "row"
     assert found["GPIOA"].row == "GPIO/STM32U5x_gpio_*/STM32U575*,STM32U585*/GPIO?"
 
@@ -309,7 +313,7 @@ def test_explain_prints_one_line_per_instance() -> None:
     assert [line.split()[0] for line in lines[1:]] == INSTANCES
     assert next(line for line in lines if line.startswith("RCC ")).split()[3:] == [
         "builtin",
-        "RCC/STM32U5_rcc_*/*/*",
+        "RCC/STM32U5_rcc_*/STM32U5*/*",
         "row",
     ]
 
@@ -342,3 +346,28 @@ def test_a_machine_of_a_part_no_row_serves_refuses_the_first_instance() -> None:
     assert "no model row of the CRC version integtest1_v1_0 serves the part STM32F407VGTx" in str(
         caught.value
     )
+
+
+def answers_a_read(machine: popcorn.Machine, name: str) -> bool:
+    peripheral = next(p for p in machine.description.peripherals if p.name == name)
+    for register in peripheral.registers:
+        try:
+            machine.mem.u32[peripheral.base + register.offset]
+        except ModelError:
+            continue
+        return True
+    return False
+
+
+@pytest.mark.parametrize("part", ["STM32H573IIKx", "STM32L152RETx", "STM32L476RGTx"])
+def test_a_machine_models_exactly_the_instances_a_row_serves(part: str) -> None:
+    description = mcu(part)
+    machine = popcorn.Machine(description)
+    mismatched = [
+        s.name
+        for s in support(description)
+        if next(p for p in description.peripherals if p.name == s.name).registers
+        and s.ip != "GTZC"
+        and (s.row is not None) != answers_a_read(machine, s.name)
+    ]
+    assert mismatched == []
