@@ -158,16 +158,20 @@ static void MX_ADC_Init(void)
 
 static void MX_TIM6_Init(void)
 {
-  htim6.Instance               = TIM6;
-  htim6.Init.Prescaler         = SystemCoreClock / TIMER_HZ - 1u;
-  htim6.Init.CounterMode       = TIM_COUNTERMODE_UP;
-  htim6.Init.Period            = TIMER_HZ / UPDATE_HZ - 1u;
-  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if(HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  htim6.Instance                 = TIM6;
+  htim6.Init.Prescaler           = SystemCoreClock / TIMER_HZ - 1u;
+  htim6.Init.CounterMode         = TIM_COUNTERMODE_UP;
+  htim6.Init.Period              = TIMER_HZ / UPDATE_HZ - 1u;
+  htim6.Init.AutoReloadPreload   = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  TIM_MasterConfigTypeDef master = {
+      .MasterOutputTrigger = TIM_TRGO_UPDATE,
+      .MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE,
+  };
+  if(HAL_TIM_Base_Init(&htim6) != HAL_OK
+     || HAL_TIMEx_MasterConfigSynchronization(&htim6, &master) != HAL_OK)
   {
     Error_Handler();
   }
-  MODIFY_REG(TIM6->CR2, TIM_CR2_MMS, TIM_TRGO_UPDATE);
 }
 
 static uint32_t convert(void)

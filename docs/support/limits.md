@@ -1997,6 +1997,10 @@ Not modelled, logged:
   OC1CE set. OC1 holds low. Under `strict` the CCMR1 write that selects one while a slave
   listens, and the slave's SMCR or OR write that selects the OC1 output then, raise `ModelError`
   before the store.
+- Offset 0x08 of a timer whose description has no SMCR, TIM6 and TIM7 among them. A read gives
+  0 and logs nothing, inferred: RM0351 Table 215 marks it reserved and gives no read value.
+  `HAL_TIMEx_MasterConfigSynchronization` reads it on every timer. A write is dropped with one
+  `model_warning`, and under `strict` it raises `ModelError` before the store.
 
 A debugger write raises none of the `strict` errors of this model.
 

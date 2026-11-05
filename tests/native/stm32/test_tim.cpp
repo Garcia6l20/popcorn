@@ -1,6 +1,7 @@
 #include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "factories.hpp"
+#include "reserved_slave_word.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"
 #include "trigger_signal.hpp"
@@ -4236,4 +4237,19 @@ TEST_CASE("RM0456 TIMx_BDTR: a BDTR read alone sees AOE set MOE at a wrap, a MOE
   CHECK(d.b.bits("TIM1", "TIM1_BDTR", "MOE") == 0);
   d.at(35);
   CHECK(d.b.bits("TIM1", "TIM1_BDTR", "MOE") == 1);
+}
+
+TEST_CASE(
+    "a U575 timer with no SMCR reads offset 0x08 as 0 and drops a write there with one warning")
+{
+  popcorn::testing::serves_reserved_slave_word(
+      u575(), "rcc_ll", "CRC", {"TIM6", "TIM7", "TIM16", "TIM17"});
+}
+
+TEST_CASE(
+    "an H573 timer with no SMCR reads offset 0x08 as 0 and drops a write there with one warning")
+{
+  popcorn::testing::serves_reserved_slave_word(
+      popcorn::testing::h573(), "h573_rcc_ll", "CRC",
+      {"TIM6", "TIM7", "TIM13", "TIM14", "TIM16", "TIM17"});
 }

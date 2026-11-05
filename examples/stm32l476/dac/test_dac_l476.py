@@ -14,9 +14,10 @@ reads the pad. A board drive of PA4 yields to the DAC output with one warning. T
 `MachineDescription(strict=True)`.
 
 `HAL_TIM_Base_Init` sets TIM6_EGR.UG with CR2.MMS still 000, which sends UG as the TRGO, RM0351
-33.4.2, so the DAC loads 0x400 at init and the first update 0x401. The firmware writes CR2.MMS
-directly, since `HAL_TIMEx_MasterConfigSynchronization` reads TIM6_SMCR, an offset no TIM6
-register covers, which fails a strict run.
+33.4.2, so the DAC loads 0x400 at init and the first update 0x401, inferred: the model adds the
+triangle counter, then steps it, after RM0351 19.4.12 and Figure 144, where 19.4.9 steps before
+the add. `HAL_TIMEx_MasterConfigSynchronization` then selects MMS 010 and reads offset 0x08,
+reserved on TIM6, which the model reads as 0.
 """
 
 import logging

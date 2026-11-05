@@ -1,5 +1,6 @@
 #include "../support/inert_model.hpp"
 #include "factories.hpp"
+#include "reserved_slave_word.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"
 #include "trigger_signal.hpp"
@@ -1839,4 +1840,9 @@ TEST_CASE(
   r.write("TIM2", "ARR", 99);
   r.run_until(exact_ps(from, 80));
   CHECK(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 72)});
+}
+
+TEST_CASE("an L152RE TIM6 and TIM7 read offset 0x08 as 0 and drop a write there with one warning")
+{
+  popcorn::testing::serves_reserved_slave_word(l152re(), firmware, "DAC", {"TIM6", "TIM7"});
 }

@@ -1,5 +1,6 @@
 #include "../support/inert_model.hpp"
 #include "factories.hpp"
+#include "reserved_slave_word.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"
 #include "variants.hpp"
@@ -1370,4 +1371,11 @@ TEST_CASE("TIM15 to TIM17 BDTR has no BKF, OR2 break sources and CCxNE are stora
     CHECK(r.get(unit, "CCER", "CC1NE") == 1);
   }
   CHECK(r.warnings() == 0);
+}
+
+TEST_CASE(
+    "an L476RC timer with no SMCR reads offset 0x08 as 0 and drops a write there with one warning")
+{
+  popcorn::testing::serves_reserved_slave_word(
+      l476rc(), firmware, "TSC", {"TIM6", "TIM7", "TIM16", "TIM17"});
 }

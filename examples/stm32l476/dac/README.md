@@ -10,10 +10,12 @@ channel 17, `ADC_CHANNEL_DAC1CH1_ADC2`, into `samples`, and the firmware calls `
 16 updates.
 
 `HAL_TIM_Base_Init` sets TIM6_EGR.UG while CR2.MMS is still 000, and MMS 000 sends UG as the
-TRGO, RM0351 33.4.2. So the DAC loads 0x400 at init and the first update loads 0x401. The
-firmware writes CR2.MMS itself: `HAL_TIMEx_MasterConfigSynchronization` reads TIM6_SMCR, an
-offset no TIM6 register covers, and `MachineDescription(strict=True)` fails the run at such an
-access.
+TRGO, RM0351 33.4.2. `HAL_TIMEx_MasterConfigSynchronization` then selects the update, MMS 010.
+It reads offset 0x08 too, TIMx_SMCR on other timers and reserved on TIM6, which the model reads
+as 0. So the DAC loads 0x400 at init and the first update loads 0x401, inferred: the model adds
+the triangle counter, then steps it, after RM0351 19.4.12 and Figure 144, where 19.4.9 steps
+before the add. `MachineDescription(strict=True)` makes any register access the models do not
+serve fail the run.
 
 ## Run
 
@@ -29,7 +31,7 @@ uv run pytest -q examples/stm32l476/dac
   - ADC2 reads the 16 triangle steps back code for code, at the default 3.0 V and at 3.3 V
     VDDA;
   - DAC1EN, MODE1, EN1, TEN1, TSEL1, WAVE1, MAMP1, TIM6 MMS and PA4 in analog mode;
-  - DAC_DOR1 at 0x400 once TIM6 is set up, from the UG trigger at init;
+  - DAC_DOR1 at 0x400 once TIM6 is set up, from the UG trigger at init, the value inferred;
   - `m.periph.GPIOA.pin(4).volts` at DAC_DOR1 x VDDA / 4096;
   - a board drive of PA4 yielding to the DAC output with one warning.
 - `conftest.py`: the description and its `vdda_3v3` config, two fixtures.

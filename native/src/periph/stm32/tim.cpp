@@ -36,6 +36,7 @@ constexpr std::uint32_t master_enable        = 1;
 constexpr std::uint32_t master_update        = 2;
 constexpr std::uint32_t master_compare_pulse = 3;
 constexpr std::uint32_t burst_update         = 1;
+constexpr std::uint32_t slave_control_offset = 0x08;
 constexpr std::uint32_t burst_compare1       = 2;
 constexpr std::uint32_t burst_compare4       = 5;
 constexpr std::uint32_t burst_com            = 6;
@@ -363,7 +364,12 @@ struct interrupt_source
  *        logs once at the CCMR1, CCMR2, CR2 or SMCR write that selects it, and under
  *        strict_peripherals that write raises model_error. TDE logs once and raises no trigger DMA
  *        request, and under strict_peripherals the DIER write that sets it raises model_error. A
- *        debugger write raises none of the strict_peripherals errors of this model. DMA burst mode,
+ *        debugger write raises none of the strict_peripherals errors of this model. A timer whose
+ *        description has no SMCR, TIM6 and TIM7 among them, serves offset 0x08, the TIMx_SMCR
+ *        offset of the other timers, which `HAL_TIMEx_MasterConfigSynchronization` reads on any
+ *        timer. A read gives 0 and logs nothing, inferred, since RM0351 Table 215 marks 0x08
+ *        reserved and gives no read value. A write there is dropped and logs once, and under
+ *        strict_peripherals it raises model_error before the store. DMA burst mode,
  *        RM0456 55.4 "DMA burst mode" and TIMx_DCR: every CPU or DMA access to DMAR reaches the
  *        register at DBA + index words from CR1, in the same byte lane, then advances the index,
  *        which wraps after DBL + 1 accesses. A debugger access redirects without advancing, so a
@@ -424,6 +430,8 @@ public:
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   [[nodiscard]] auto takes_pin(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto served_ranges() const
+      -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
@@ -662,6 +670,8 @@ private:
   bool                                         up_only_{};
   bool                                         remap_logged_{};
   bool                                         reserved_logged_{};
+  bool                                         reserved_slave_{};
+  bool                                         reserved_slave_logged_{};
   bool                                         etr_input_logged_{};
   std::vector<input_route>                     input_remaps_;
   std::optional<field_ref>                     etr_filter_;
@@ -835,6 +845,11 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       external_clock2_{optional_field(name("SMCR"), "ECE")},
       trigger_dma_{optional_field(name("DIER"), "TDE")}
 {
+  reserved_slave_ = find_register(desc, name("SMCR")) == nullptr
+                and std::ranges::none_of(desc.registers, [](register_desc const& reg) {
+                      return reg.offset < slave_control_offset + 4
+                         and slave_control_offset < reg.offset + reg.width / 8u;
+                    });
   expect_field(name("CR1"), "UIFREMAP", variant.uif_remap);
   if(variant.uif_remap)
   {
@@ -2777,6 +2792,17 @@ void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx
   }
 }
 
+auto tim::served_ranges() const -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
+{
+  if(not reserved_slave_)
+  {
+    return {};
+  }
+  return {
+      {slave_control_offset, slave_control_offset + 4}
+  };
+}
+
 void tim::unmodelled(
     std::string_view reg,
     std::uint32_t    word,
@@ -2921,6 +2947,10 @@ void tim::restore_reset_values()
     tim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
         -> std::expected<std::uint32_t, bus_error>
 {
+  if(reserved_slave_ and (offset & ~3u) == slave_control_offset)
+  {
+    return read_lanes(regs.peek(slave_control_offset), offset, size);
+  }
   catch_up(now_ps());
   settle();
   if(not burst_word_ or (offset & ~3u) != *burst_word_)
@@ -2978,6 +3008,20 @@ auto tim::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
+  if(reserved_slave_ and (offset & ~3u) == slave_control_offset)
+  {
+    if(access.by == initiator::debugger)
+    {
+      return {};
+    }
+    unmodelled(
+        "", slave_control_offset, reserved_slave_logged_,
+        std::format(
+            "write of {} at offset {:#x}, reserved on a timer with no SMCR: the write is dropped",
+            desc_.name, slave_control_offset),
+        access);
+    return {};
+  }
   auto const burst = burst_word_ and (offset & ~3u) == *burst_word_;
   if(burst)
   {
