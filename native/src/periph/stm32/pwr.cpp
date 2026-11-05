@@ -1,9 +1,9 @@
-#include "factories.hpp"
 #include "family_names.hpp"
 #include "gpio_peers.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "pwr_peers.hpp"
+#include "pwr_rows.hpp"
 #include "secure_config.hpp"
 #include "voltage_range.hpp"
 
@@ -1164,5 +1164,27 @@ auto pwr_h5_factory(pwr_options options) -> model_factory
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, h5_pwr, options);
   };
+}
+
+namespace
+{
+constexpr auto u5_smps_parts = std::to_array<std::string_view>({"STM32U5*Q"});
+constexpr auto pwr_table     = std::to_array<builtin>({
+    row_of<^^pwr_smps_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_smps_parts}),
+    row_of<^^pwr_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_parts}),
+    row_of<^^pwr_h5_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32H5_pwr_*", .part_globs = h5_parts}),
+    row_of<^^pwr_l1_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "", .part_globs = l1_parts}),
+    row_of<^^pwr_l4_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "", .part_globs = l4_parts}),
+});
+}
+
+auto pwr_rows() -> std::span<builtin const>
+{
+  return pwr_table;
 }
 }

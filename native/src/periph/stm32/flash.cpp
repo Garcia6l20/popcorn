@@ -1,5 +1,5 @@
-#include "factories.hpp"
 #include "family_names.hpp"
+#include "flash_rows.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "memory_alias.hpp"
@@ -5341,4 +5341,77 @@ auto flash_h5_factory(flash_options options) -> model_factory
     return std::make_shared<flash_model<h5_flash>>(ctx, desc, options);
   };
 }
+namespace
+{
+constexpr auto u5_flash_5bit_parts = std::to_array<std::string_view>({"STM32U535*", "STM32U545*"});
+constexpr auto u5_flash_8bit_parts =
+    std::to_array<std::string_view>({"STM32U59*", "STM32U5A*", "STM32U5F*", "STM32U5G*"});
+
+struct flash_entry
+{
+  builtin       row;
+  flash_variant variant;
+};
+
+template <std::meta::info Factory, std::meta::info Variant>
+consteval auto flash_entry_of(row_key key) -> flash_entry
+{
+  if constexpr(std::meta::remove_cvref(std::meta::type_of(Variant)) == ^^flash_l1_variant)
+  {
+    return {row_of<Factory, Variant, ^^board::flash>(key), flash_l1_of<([:Variant:])>};
+  }
+  else
+  {
+    auto row    = row_of<Factory, ^^void, ^^board::flash>(key);
+    row.variant = std::meta::identifier_of(Variant);
+    return {row, [:Variant:]};
+  }
+}
+
+constexpr auto flash_entries = std::to_array<flash_entry>({
+    flash_entry_of<^^flash_factory, ^^flash_5bit>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_5bit_parts}),
+    flash_entry_of<^^flash_factory, ^^flash_8bit>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_8bit_parts}),
+    flash_entry_of<^^flash_factory, ^^flash_u5>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_parts}),
+    flash_entry_of<^^flash_h5_factory, ^^flash_h5>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_H5_Cube", .part_globs = h5_parts}),
+    flash_entry_of<^^flash_l4_factory, ^^flash_l4>(
+        {.ip = "Flash", .ip_version_glob = "", .part_globs = l4_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat1>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat1", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2_pcrop", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3_pcrop", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat46>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat46", .part_globs = l1_parts}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat5>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat5", .part_globs = l1_parts}),
+});
+
+constexpr auto flash_row_table = [] {
+  std::array<builtin, flash_entries.size()> table{};
+  std::ranges::transform(flash_entries, table.begin(), &flash_entry::row);
+  return table;
+}();
+}
+
+auto flash_rows() -> std::span<builtin const>
+{
+  return flash_row_table;
+}
+
+auto flash_variant_of(part_description const& part, peripheral_desc const& unit) -> flash_variant
+{
+  auto const* const row =
+      select_in(flash_row_table, unit.ip, unit.ip_version, part.part, unit.name);
+  return row == nullptr ? flash_variant{} : flash_entries[row - flash_row_table.data()].variant;
+}
+
 }

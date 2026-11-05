@@ -1,5 +1,4 @@
 #include "backup_domain.hpp"
-#include "factories.hpp"
 #include "family_names.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
@@ -10,6 +9,7 @@
 #include "rcc_l1.hpp"
 #include "rcc_l4.hpp"
 #include "rcc_resets.hpp"
+#include "rcc_rows.hpp"
 #include "rcc_u5.hpp"
 #include "secure_config.hpp"
 
@@ -1714,5 +1714,24 @@ auto rcc_l4_factory(rcc_options options) -> model_factory
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<rcc_model<l4_rcc>>(ctx, desc, options);
   };
+}
+
+namespace
+{
+constexpr auto rcc_table = std::to_array<builtin>({
+    row_of<^^rcc_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32U5_rcc_*", .part_globs = u5_parts}),
+    row_of<^^rcc_h5_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32H5_rcc_*", .part_globs = h5_parts}),
+    row_of<^^rcc_l1_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32L1_rcc_*", .part_globs = l1_parts}),
+    row_of<^^rcc_l4_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32L4_rcc_*", .part_globs = l4_parts}),
+});
+}
+
+auto rcc_rows() -> std::span<builtin const>
+{
+  return rcc_table;
 }
 }

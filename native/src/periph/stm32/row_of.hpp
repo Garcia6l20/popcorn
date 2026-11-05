@@ -1,11 +1,12 @@
 #pragma once
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
-#include "variants.hpp"
-
+#include <algorithm>
 #include <array>
+#include <format>
 #include <meta>
 #include <span>
 #include <string>
@@ -13,7 +14,14 @@
 
 namespace popcorn::periph::stm32
 {
-inline constexpr auto every = std::to_array<std::string_view>({"*"});
+inline constexpr auto every       = std::to_array<std::string_view>({"*"});
+inline constexpr auto u5_parts    = std::to_array<std::string_view>({"STM32U5*"});
+inline constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
+inline constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
+inline constexpr auto l4_parts    = std::to_array<std::string_view>({"STM32L4*"});
+inline constexpr auto u5_h5_parts = std::to_array<std::string_view>({"STM32U5*", "STM32H5*"});
+inline constexpr auto u5_h5_l1_l4_parts =
+    std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*", "STM32L4*"});
 
 /** @brief One row of the built-in model table: the model made for the instances it matches. */
 struct builtin
@@ -23,7 +31,6 @@ struct builtin
   auto (*make)(board const& b) -> model_factory;
   std::span<std::string_view const> instance_globs = every;
   std::span<std::string_view const> part_globs     = every;
-  flash_variant                     flash          = {};
   /** @brief Name of the factory function, `?` for a row not built by `row_of`. */
   std::string_view factory = "?";
   /** @brief Name of the variant the factory is given, empty for none. */
@@ -40,6 +47,69 @@ struct row_key
   std::span<std::string_view const> instance_globs = every;
   std::span<std::string_view const> part_globs     = every;
 };
+
+[[nodiscard]] inline auto any_glob(std::span<std::string_view const> globs, std::string_view text)
+    -> bool
+{
+  return std::ranges::any_of(globs, [&](std::string_view g) { return glob_match(g, text); });
+}
+
+/** @brief Whether @p entry matches an instance of an IP and version on a part. */
+[[nodiscard]] inline auto row_matches(
+    builtin const&   entry,
+    std::string_view ip,
+    std::string_view version,
+    std::string_view part,
+    std::string_view instance) -> bool
+{
+  return entry.ip == ip
+     and glob_match(entry.ip_version_glob, version)
+     and any_glob(entry.part_globs, part)
+     and any_glob(entry.instance_globs, instance);
+}
+
+/** @brief Whether some row of @p rows knows the ip and version and none serves @p part. */
+[[nodiscard]] inline auto part_refused(
+    std::span<builtin const> rows,
+    std::string_view         ip,
+    std::string_view         version,
+    std::string_view         part) -> bool
+{
+  auto const same_version = [&](builtin const& entry) {
+    return entry.ip == ip and glob_match(entry.ip_version_glob, version);
+  };
+  return std::ranges::any_of(rows, same_version)
+     and not std::ranges::any_of(rows, [&](builtin const& entry) {
+           return same_version(entry) and any_glob(entry.part_globs, part);
+         });
+}
+
+/**
+ * @brief The first row of @p rows matching an instance.
+ * @return The row, or null when none matches.
+ * @throws config_error when some row knows the ip and version and none serves @p part.
+ */
+[[nodiscard]] inline auto select_in(
+    std::span<builtin const> rows,
+    std::string_view         ip,
+    std::string_view         version,
+    std::string_view         part,
+    std::string_view         instance) -> builtin const*
+{
+  auto const found = std::ranges::find_if(
+      rows, [&](builtin const& entry) { return row_matches(entry, ip, version, part, instance); });
+  if(found != rows.end())
+  {
+    return &*found;
+  }
+  if(part_refused(rows, ip, version, part))
+  {
+    throw config_error(
+        std::string{part}, 0, std::format("peripherals.{}", instance),
+        std::format("no model row of the {} version {} serves the part {}", ip, version, part));
+  }
+  return nullptr;
+}
 
 namespace detail
 {

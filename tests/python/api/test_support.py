@@ -392,3 +392,11 @@ def test_a_flash_row_names_its_variant_and_the_member_it_reads() -> None:
     assert {r.instance: r for r in _core.resolve_rows(U575)}["FLASH"].reads == "flash"
     l1 = {s.name: s for s in support(mcu("STM32L152RETx"))}
     assert l1["FLASH"].variant == "l1_flash_cat5"
+
+
+def test_option_bytes_on_a_part_no_flash_row_serves_name_the_flash_row() -> None:
+    other = mcu(PART)
+    other.part = "STM32X575ZITxQ"
+    with pytest.raises(ConfigError) as caught:
+        popcorn.Machine(other, option_bytes=OptionBytes())
+    assert caught.value.key == "peripherals.FLASH"

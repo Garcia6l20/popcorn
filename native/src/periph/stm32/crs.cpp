@@ -1,4 +1,4 @@
-#include "factories.hpp"
+#include "crs_rows.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
 
@@ -392,5 +392,17 @@ auto crs_factory() -> model_factory
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<crs>(ctx, desc);
   };
+}
+
+namespace
+{
+constexpr auto crs_table = std::to_array<builtin>({
+    row_of<^^crs_factory, ^^void>({.ip = "CRS", .ip_version_glob = "", .part_globs = u5_h5_parts}),
+});
+}
+
+auto crs_rows() -> std::span<builtin const>
+{
+  return crs_table;
 }
 }

@@ -1,4 +1,4 @@
-#include "factories.hpp"
+#include "flash_rows.hpp"
 #include "memory_alias.hpp"
 #include "model_base.hpp"
 #include "voltage_range.hpp"

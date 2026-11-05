@@ -33,10 +33,10 @@ flowchart TD
 | Local build | `build_description_with_report` in `_builder.py` | `expand_svd` reads the SVD, `instance_ips` in `_cubemx.py` gives each peripheral its `ip` and `ip_version`, `resolve_ip` fills the gaps, `apply_patches` in `_patches.py` runs the patch files of `python/popcorn/stm32/description/patches` |
 | Load | `load_description` in `python/popcorn/_part_description.py` | The native side parses the JSON into a `part_description` |
 | Machine | `Machine` in `python/popcorn/_machine.py`, `options_of` in `native/src/bind/machine.cpp` | Board options and per-name models become `machine_options::models`, a map from instance name to factory |
-| Registry | `register_builtin_models` in `native/src/periph/stm32/models.cpp`, `find_model` in `native/src/periph/registry.cpp` | Importing `popcorn._core` loads `libpopcorn_stm32`, whose entry point registers one closure per distinct `(ip, ip_version glob)` pair of `builtins` |
+| Registry | `register_builtin_models` in `native/src/periph/stm32/models.cpp`, `find_model` in `native/src/periph/registry.cpp` | Importing `popcorn._core` loads `libpopcorn_stm32`, whose entry point registers one closure per distinct `(ip, ip_version glob)` pair of the row table |
 | Attach | `machine::run_state::attach_peripherals` in `native/src/core/peripherals.cpp` | Per peripheral, in description order: the machine option for the name wins, else `find_model` |
-| Row | `select_row` in `models.cpp` | The first row of `builtins` whose ip, version glob, part globs and instance globs all match |
-| Factory | `native/src/periph/stm32/factories.hpp` | The row's `make` calls a factory, often with a `*_variant` from `variants.hpp` |
+| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, part globs and instance globs all match. The table is the row sets `rcc_rows()`, `pwr_rows()`, `flash_rows()`, `caches_rows()` and `crs_rows()`, then `rest_rows` in `models.cpp` |
+| Factory | `<ip>_rows.hpp` next to the model, `native/src/periph/stm32/factories.hpp` for the rows in `rest_rows` | The row's `make` calls a factory, often with a `*_variant` from `variants.hpp` or the model's `<ip>_rows.hpp` |
 | Model | `stm32_model` in `native/src/periph/stm32/model_base.hpp` | `reg` and `field` bind registers by name, `expect_register` and `expect_field` check the description against the variant |
 
 After all models exist the machine checks claims, served ranges and cross rules. A peripheral
@@ -45,7 +45,7 @@ through the model directory, by instance name or by interface.
 
 ### The row table
 
-`builtins` in `models.cpp` is a `std::to_array<builtin>` in selection order:
+The row table is a `std::to_array<builtin>` per IP, in selection order within the IP. The RCC, PWR, FLASH, ICACHE, DCACHE and CRS rows are in their models' `.cpp`, built by `row_of`, and the other rows are in `rest_rows` of `models.cpp`:
 
 ```cpp
 {.ip              = "RCC",
@@ -71,8 +71,8 @@ as the RCC clock sources, the VDDA supply or the option bytes. `options_of` uses
 factories that shadow the registry for I2C, SPI, RCC, USB, RNG and ADC. `factories` skips
 peripherals with `alias_of` set, so an alias such as a secure alias gets no model of its own.
 
-A row can also carry a `flash` field, a `flash_variant` that `flash_variant_of` reads back for
-the FLASH model. Every other variant goes through the row's `make` into its factory.
+`flash_variant_of` in `flash.cpp` reads the `flash_variant` of the FLASH row back for the FLASH
+model. Every other variant goes through the row's `make` into its factory.
 
 ## Glossary
 
@@ -91,11 +91,11 @@ the FLASH model. Every other variant goes through the row's `make` into its fact
   description during a local build and its result ships in the layers.
 - **layer**: one of the three shipped file kinds, the family blocks, the line and the part
   deltas. They compose into a description.
-- **row**: one `builtin` entry of `builtins` in `models.cpp`. It maps an ip, version, part and
+- **row**: one `builtin` entry of the row table. It maps an ip, version, part and
   instance to a factory.
 - **variant**: a runtime descriptor struct named `*_variant` in
-  `native/src/periph/stm32/variants.hpp`, such as `hash_variant` or `flash_variant`. A row passes
-  one to a shared factory to set behaviour parameters.
+  `native/src/periph/stm32/variants.hpp` or the model's `<ip>_rows.hpp`, such as `hash_variant` or
+  `flash_variant`. A row passes one to a shared factory to set behaviour parameters.
 - **traits**: a compile-time parameter of a model template. `rcc_model<Traits>` takes `u5_rcc`,
   `h5_rcc` or `l1_rcc`, `adc_model<Traits>` takes `u5_adc` or `h5_adc`, and
   `flash_model<Traits>` takes `u5_flash` or `h5_flash`.
@@ -138,7 +138,7 @@ Rules that follow:
    its own model variant. Check each rule against the SVD of every part of the family.
 3. Add golden files and regenerate the shipped layers with
    `uv run python -m popcorn.stm32.description golden <part>` and `... ship <part>`.
-4. Give the rows of the family part globs in `builtins`, so the rows of another family do not
+4. Give the rows of the family part globs in the row table, so the rows of another family do not
    adopt it, and place each specific row above its generic row. Run
    `uv run python -m popcorn_build.resolution_diff update` and read the diff of the goldens in
    `tests/data/stm32/resolution`: a row that serves a new family shows there, and

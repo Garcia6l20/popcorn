@@ -1,4 +1,4 @@
-#include "factories.hpp"
+#include "caches_rows.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -302,5 +302,20 @@ auto dcache_factory(cache_options options) -> model_factory
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<dcache>(ctx, desc, options);
   };
+}
+
+namespace
+{
+constexpr auto caches_table = std::to_array<builtin>({
+    row_of<^^icache_factory, ^^void, ^^board::caches>(
+        {.ip = "ICACHE", .ip_version_glob = "Icache_v1_0_0*", .part_globs = u5_h5_parts}),
+    row_of<^^dcache_factory, ^^void, ^^board::caches>(
+        {.ip = "DCACHE", .ip_version_glob = "STM32U5xx1_v0_0", .part_globs = u5_h5_parts}),
+});
+}
+
+auto caches_rows() -> std::span<builtin const>
+{
+  return caches_table;
 }
 }

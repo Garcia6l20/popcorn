@@ -16,109 +16,6 @@
 namespace popcorn::periph::stm32
 {
 /**
- * @brief Factory of the RCC model, RM0456 section 11.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto rcc_factory(rcc_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32H5 RCC model, RM0481 section 11.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto rcc_h5_factory(rcc_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L1 RCC model, RM0038 section 6.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto rcc_l1_factory(rcc_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L47x/L48x RCC model, RM0351 section 6.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto rcc_l4_factory(rcc_options options) -> model_factory;
-
-/**
- * @brief Factory of the ICACHE model, RM0456 section 8.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto icache_factory(cache_options options) -> model_factory;
-
-/**
- * @brief Factory of the DCACHE model, RM0456 section 9.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto dcache_factory(cache_options options) -> model_factory;
-
-/**
- * @brief Factory of the PWR model, RM0456 section 10.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto pwr_factory(pwr_options options) -> model_factory;
-
-/**
- * @brief Factory of the PWR model of the STM32U5 packages with the SMPS, RM0456 section 10.5:
- *        PWR_SVMSR.REGS follows PWR_CR3.REGSEL.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto pwr_smps_factory(pwr_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32H5 PWR model, RM0481 section 10.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto pwr_h5_factory(pwr_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L1 PWR model, RM0038 section 5.4.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto pwr_l1_factory(pwr_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L47x/L48x PWR model, RM0351 section 5.4.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto pwr_l4_factory(pwr_options options) -> model_factory;
-
-/**
- * @brief Factory of the FLASH model, RM0456 section 7.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto flash_factory(flash_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32H5 FLASH model, RM0481 section 7.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L47x/L48x FLASH model, RM0351 section 3.
- * @param options Board configuration, copied into every model made.
- */
-[[nodiscard]] auto flash_l4_factory(flash_options options) -> model_factory;
-
-/**
- * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
- * @param options Board configuration: only `option_bytes` applies, the boot bank of a part with
- *        two banks.
- * @param variant What differs between the categories the row serves.
- */
-[[nodiscard]] auto flash_l1_factory(flash_options const& options, flash_l1_variant variant)
-    -> model_factory;
-
-/**
- * @brief The FLASH variant of the model row that serves a unit of @p part.
- * @param part Description the machine is built from.
- * @param unit FLASH unit of @p part.
- * @return The row's variant, the default one when no row serves the unit.
- */
-[[nodiscard]] auto flash_variant_of(part_description const& part, peripheral_desc const& unit)
-    -> flash_variant;
-
-/**
  * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7. Returns no model
  *        for LPGPIO1.
  * @param variant What differs between the ports of the family the row serves.
@@ -317,9 +214,6 @@ namespace popcorn::periph::stm32
  * @param variant What differs between the CRC of the family the row serves.
  */
 [[nodiscard]] auto crc_factory(crc_variant variant) -> model_factory;
-
-/** @brief Factory of the CRS model, RM0456 and RM0481 section 12. */
-[[nodiscard]] auto crs_factory() -> model_factory;
 
 /** @brief Factory of the SYSCFG model, RM0456 section 15. */
 [[nodiscard]] auto syscfg_factory() -> model_factory;

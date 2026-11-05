@@ -1,4 +1,9 @@
+#include "caches_rows.hpp"
+#include "crs_rows.hpp"
 #include "factories.hpp"
+#include "flash_rows.hpp"
+#include "pwr_rows.hpp"
+#include "rcc_rows.hpp"
 #include "row_of.hpp"
 #include "rows.hpp"
 
@@ -24,17 +29,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr auto u5_parts    = std::to_array<std::string_view>({"STM32U5*"});
-constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
-constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
-constexpr auto l4_parts    = std::to_array<std::string_view>({"STM32L4*"});
-constexpr auto u5_h5_parts = std::to_array<std::string_view>({"STM32U5*", "STM32H5*"});
-constexpr auto u5_h5_l1_l4_parts =
-    std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*", "STM32L4*"});
-constexpr auto u5_smps_parts       = std::to_array<std::string_view>({"STM32U5*Q"});
-constexpr auto u5_flash_5bit_parts = std::to_array<std::string_view>({"STM32U535*", "STM32U545*"});
-constexpr auto u5_flash_8bit_parts =
-    std::to_array<std::string_view>({"STM32U59*", "STM32U5A*", "STM32U5F*", "STM32U5G*"});
 constexpr auto u575_gpio_parts = std::to_array<std::string_view>({"STM32U575*", "STM32U585*"});
 constexpr auto hash_sha2_parts =
     std::to_array<std::string_view>({"STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"});
@@ -50,71 +44,7 @@ constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6",
 constexpr auto lptim1_instances       = std::to_array<std::string_view>({"LPTIM1"});
 constexpr auto lptim2_instances       = std::to_array<std::string_view>({"LPTIM2"});
 
-template <std::meta::info Factory, std::meta::info Variant>
-consteval auto flash_row(row_key key) -> builtin
-{
-  if constexpr(std::meta::remove_cvref(std::meta::type_of(Variant)) == ^^flash_l1_variant)
-  {
-    auto row  = row_of<Factory, Variant, ^^board::flash>(key);
-    row.flash = flash_l1_of<([:Variant:])>;
-    return row;
-  }
-  else
-  {
-    auto row    = row_of<Factory, ^^void, ^^board::flash>(key);
-    row.variant = std::meta::identifier_of(Variant);
-    row.flash   = [:Variant:];
-    return row;
-  }
-}
-
-constexpr auto builtins = std::to_array<builtin>({
-    {row_of<^^rcc_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32U5_rcc_*", .part_globs = u5_parts})},
-    {row_of<^^rcc_h5_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32H5_rcc_*", .part_globs = h5_parts})},
-    {row_of<^^rcc_l1_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32L1_rcc_*", .part_globs = l1_parts})},
-    {row_of<^^rcc_l4_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32L4_rcc_*", .part_globs = l4_parts})},
-    {row_of<^^icache_factory, ^^void, ^^board::caches>(
-        {.ip = "ICACHE", .ip_version_glob = "Icache_v1_0_0*", .part_globs = u5_h5_parts})},
-    {row_of<^^dcache_factory, ^^void, ^^board::caches>(
-        {.ip = "DCACHE", .ip_version_glob = "STM32U5xx1_v0_0", .part_globs = u5_h5_parts})},
-    {row_of<^^pwr_smps_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_smps_parts})},
-    {row_of<^^pwr_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_parts})},
-    {row_of<^^pwr_h5_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32H5_pwr_*", .part_globs = h5_parts})},
-    {row_of<^^pwr_l1_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "", .part_globs = l1_parts})},
-    {row_of<^^pwr_l4_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "", .part_globs = l4_parts})},
-    {flash_row<^^flash_factory, ^^flash_5bit>(
-        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_5bit_parts})},
-    {flash_row<^^flash_factory, ^^flash_8bit>(
-        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_8bit_parts})},
-    {flash_row<^^flash_factory, ^^flash_u5>(
-        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_parts})},
-    {flash_row<^^flash_h5_factory, ^^flash_h5>(
-        {.ip = "flash", .ip_version_glob = "v1.0.0_H5_Cube", .part_globs = h5_parts})},
-    {flash_row<^^flash_l4_factory, ^^flash_l4>(
-        {.ip = "Flash", .ip_version_glob = "", .part_globs = l4_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat1>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat1", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat2>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat2_pcrop>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2_pcrop", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat3_pcrop>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3_pcrop", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat3>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat46>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat46", .part_globs = l1_parts})},
-    {flash_row<^^flash_l1_factory, ^^l1_flash_cat5>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat5", .part_globs = l1_parts})},
+constexpr auto rest_rows = std::to_array<builtin>({
     {.ip              = "GPIO",
      .ip_version_glob = "STM32U5x_gpio_*",
      .make            = [](board const&) { return gpio_factory(u575_gpio); },
@@ -472,13 +402,21 @@ constexpr auto builtins = std::to_array<builtin>({
      .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
      .part_globs      = h5_parts},
     {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }, every, h5_parts},
-    {row_of<^^crs_factory, ^^void>(
-        {.ip = "CRS", .ip_version_glob = "", .part_globs = u5_h5_parts})},
 });
 
-auto any_glob(std::span<std::string_view const> globs, std::string_view text) -> bool
+auto builtins() -> std::span<builtin const>
 {
-  return std::ranges::any_of(globs, [&](std::string_view g) { return glob_match(g, text); });
+  static auto const table = [] {
+    std::vector<builtin> all;
+    for(auto const rows :
+        {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(),
+         std::span<builtin const>{rest_rows}})
+    {
+      all.insert(all.end(), rows.begin(), rows.end());
+    }
+    return all;
+  }();
+  return table;
 }
 
 /** @brief IDAU map of the STM32U5, RM0456 2.2 Table 3, and of the STM32H5, whose RM0481 2.2
@@ -632,32 +570,6 @@ auto default_board() -> board const&
   return instance;
 }
 
-auto same_version(builtin const& entry, std::string_view ip, std::string_view version) -> bool
-{
-  return entry.ip == ip and glob_match(entry.ip_version_glob, version);
-}
-
-auto row_matches(
-    builtin const&   entry,
-    std::string_view ip,
-    std::string_view version,
-    std::string_view part,
-    std::string_view instance) -> bool
-{
-  return same_version(entry, ip, version)
-     and any_glob(entry.part_globs, part)
-     and any_glob(entry.instance_globs, instance);
-}
-
-auto part_refused(std::string_view ip, std::string_view version, std::string_view part) -> bool
-{
-  return std::ranges::any_of(
-             builtins, [&](builtin const& entry) { return same_version(entry, ip, version); })
-     and not std::ranges::any_of(builtins, [&](builtin const& entry) {
-           return same_version(entry, ip, version) and any_glob(entry.part_globs, part);
-         });
-}
-
 auto scope_of(std::span<std::string_view const> globs) -> std::string
 {
   return globs | std::views::join_with(',') | std::ranges::to<std::string>();
@@ -676,26 +588,13 @@ auto select_row(
     std::string_view part,
     std::string_view instance) -> builtin const*
 {
-  auto const found = std::ranges::find_if(builtins, [&](builtin const& entry) {
-    return row_matches(entry, ip, version, part, instance);
-  });
-  if(found != builtins.end())
-  {
-    return &*found;
-  }
-  if(part_refused(ip, version, part))
-  {
-    throw config_error(
-        std::string{part}, 0, std::format("peripherals.{}", instance),
-        std::format("no model row of the {} version {} serves the part {}", ip, version, part));
-  }
-  return nullptr;
+  return select_in(builtins(), ip, version, part, instance);
 }
 }
 
 auto rows() -> std::vector<row_info>
 {
-  return builtins
+  return builtins()
        | std::views::transform([](builtin const& entry) {
            return row_info{
                .label      = row_label(entry),
@@ -717,9 +616,9 @@ auto resolve(part_description const& part) -> std::vector<resolution>
     found.instance   = unit.name;
     found.ip         = unit.ip;
     found.ip_version = unit.ip_version;
-    for(auto const index : std::views::iota(std::size_t{0}, builtins.size()))
+    for(auto const index : std::views::iota(std::size_t{0}, builtins().size()))
     {
-      if(row_matches(builtins[index], unit.ip, unit.ip_version, part.part, unit.name))
+      if(row_matches(builtins()[index], unit.ip, unit.ip_version, part.part, unit.name))
       {
         found.matches.push_back(index);
       }
@@ -727,15 +626,15 @@ auto resolve(part_description const& part) -> std::vector<resolution>
     if(not found.matches.empty())
     {
       found.row       = found.matches.front();
-      found.row_label = row_label(builtins[*found.row]);
-      found.factory   = builtins[*found.row].factory;
-      found.variant   = builtins[*found.row].variant;
-      found.reads     = builtins[*found.row].reads;
+      found.row_label = row_label(builtins()[*found.row]);
+      found.factory   = builtins()[*found.row].factory;
+      found.variant   = builtins()[*found.row].variant;
+      found.reads     = builtins()[*found.row].reads;
       found.source    = row_source::row;
     }
     else
     {
-      found.source = part_refused(unit.ip, unit.ip_version, part.part)
+      found.source = part_refused(builtins(), unit.ip, unit.ip_version, part.part)
                        ? row_source::none_part_refused
                        : row_source::none_no_row;
     }
@@ -749,13 +648,13 @@ void register_builtin_models()
   static std::once_flag once;
   std::call_once(once, [] {
     auto made = std::make_shared<std::vector<model_factory>>();
-    for(auto const& entry : builtins)
+    for(auto const& entry : builtins())
     {
       made->push_back(entry.make(default_board()));
     }
-    for(auto const& entry : builtins)
+    for(auto const& entry : builtins())
     {
-      auto const first = std::ranges::find_if(builtins, [&](builtin const& other) {
+      auto const first = std::ranges::find_if(builtins(), [&](builtin const& other) {
         return other.ip == entry.ip and other.ip_version_glob == entry.ip_version_glob;
       });
       if(&*first != &entry)
@@ -770,7 +669,7 @@ void register_builtin_models()
             {
               return nullptr;
             }
-            auto& make = (*made)[row - builtins.data()];
+            auto& make = (*made)[row - builtins().data()];
             return make ? make(ctx, desc) : nullptr;
           });
     }
@@ -796,12 +695,6 @@ auto factories(board const& b, part_description const& part)
     }
   }
   return out;
-}
-
-auto flash_variant_of(part_description const& part, peripheral_desc const& unit) -> flash_variant
-{
-  auto const* const row = select_row(unit.ip, unit.ip_version, part.part, unit.name);
-  return row == nullptr ? flash_variant{} : row->flash;
 }
 
 auto idau_map(part_description const& part) -> std::optional<std::span<idau_region const>>
