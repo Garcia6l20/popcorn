@@ -38,6 +38,13 @@ struct resolution
   std::optional<std::size_t> row;
   /** @brief Label of the row in `row`, empty when there is none. */
   std::string row_label;
+  /** @brief Name of the row's factory function, `?` for a row not built by `row_of`, empty for
+   *         no row. */
+  std::string factory;
+  /** @brief Name of the variant the row gives its factory, empty for none. */
+  std::string variant;
+  /** @brief Names of the board members the row reads, joined by `,`, empty for none. */
+  std::string reads;
   /** @brief Why there is or is no row. */
   row_source source = row_source::none_no_row;
 };

@@ -652,23 +652,9 @@ inline constexpr flash_variant flash_h5{.encode_options = h5_encode_options};
 
 /** @brief The STM32L47x/L48x FLASH row. */
 inline constexpr flash_variant flash_l4{.encode_options = l4_encode_options};
-/** @brief STM32L1 Cat.1. */
-inline constexpr flash_variant flash_l1_cat1{.encode_options = l1_encode_options_of<l1_flash_cat1>};
-/** @brief STM32L1 Cat.2. */
-inline constexpr flash_variant flash_l1_cat2{.encode_options = l1_encode_options_of<l1_flash_cat2>};
-/** @brief STM32L1 Cat.2 with PCROP. */
-inline constexpr flash_variant flash_l1_cat2_pcrop{
-    .encode_options = l1_encode_options_of<l1_flash_cat2_pcrop>};
-/** @brief STM32L1 Cat.3. */
-inline constexpr flash_variant flash_l1_cat3{.encode_options = l1_encode_options_of<l1_flash_cat3>};
-/** @brief STM32L1 Cat.3 with PCROP. */
-inline constexpr flash_variant flash_l1_cat3_pcrop{
-    .encode_options = l1_encode_options_of<l1_flash_cat3_pcrop>};
-/** @brief STM32L1 Cat.4 and Cat.6. */
-inline constexpr flash_variant flash_l1_cat46{
-    .encode_options = l1_encode_options_of<l1_flash_cat46>};
-/** @brief STM32L1 Cat.5. */
-inline constexpr flash_variant flash_l1_cat5{.encode_options = l1_encode_options_of<l1_flash_cat5>};
+/** @brief The FLASH row variant of an STM32L1 category, derived from its FLASH model variant. */
+template <flash_l1_variant const& Variant>
+inline constexpr flash_variant flash_l1_of{.encode_options = l1_encode_options_of<Variant>};
 
 /** @brief Differences between the STM32H5 HASH processors the model rows serve, RM0481 40.3.
  *         A code outside the variant's set reads 0000 after a CR write and the hash runs SHA-1,

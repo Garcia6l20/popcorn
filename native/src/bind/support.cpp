@@ -63,6 +63,9 @@ auto resolve_rows(part_description const& description) -> std::vector<row_resolu
                .matches    = found.matches,
                .row        = found.row,
                .row_label  = found.row_label,
+               .factory    = found.factory,
+               .variant    = found.variant,
+               .reads      = found.reads,
                .source     = std::string{reflex::enum_value_name(found.source)}};
          })
        | std::ranges::to<std::vector>();

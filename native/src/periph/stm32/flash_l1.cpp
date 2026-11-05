@@ -1667,7 +1667,7 @@ void flash_l1::on_voltage_range_change()
 }
 }
 
-auto flash_l1_factory(flash_l1_variant variant, flash_options const& options) -> model_factory
+auto flash_l1_factory(flash_options const& options, flash_l1_variant variant) -> model_factory
 {
   return [variant,
           options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {

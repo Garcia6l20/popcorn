@@ -1343,7 +1343,7 @@ void dac::restore_reset_values()
 }
 }
 
-auto dac_factory(dac_variant variant, supply_options supply) -> model_factory
+auto dac_factory(supply_options supply, dac_variant variant) -> model_factory
 {
   return
       [variant, supply](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {

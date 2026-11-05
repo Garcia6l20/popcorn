@@ -47,6 +47,12 @@ struct[[= reflex::py::rename{"RowResolution"}]] row_resolution
   [[= reflex::py::readonly]] std::optional<std::size_t> row{};
   /** @brief Label of that row, empty for no row. */
   [[= reflex::py::readonly]] std::string row_label{};
+  /** @brief Name of the row's factory function, `?` when the row is not built by name. */
+  [[= reflex::py::readonly]] std::string factory{};
+  /** @brief Name of the variant the row gives its factory, empty for none. */
+  [[= reflex::py::readonly]] std::string variant{};
+  /** @brief Names of the board members the row reads, joined by `,`, empty for none. */
+  [[= reflex::py::readonly]] std::string reads{};
   /** @brief `row`, `none_no_row` or `none_part_refused`. */
   [[= reflex::py::readonly]] std::string source{};
 };

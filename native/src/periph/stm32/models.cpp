@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "row_of.hpp"
 #include "rows.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -23,7 +24,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr auto every       = std::to_array<std::string_view>({"*"});
 constexpr auto u5_parts    = std::to_array<std::string_view>({"STM32U5*"});
 constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
 constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
@@ -50,109 +50,71 @@ constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6",
 constexpr auto lptim1_instances       = std::to_array<std::string_view>({"LPTIM1"});
 constexpr auto lptim2_instances       = std::to_array<std::string_view>({"LPTIM2"});
 
-struct builtin
+template <std::meta::info Factory, std::meta::info Variant>
+consteval auto flash_row(row_key key) -> builtin
 {
-  std::string_view ip;
-  std::string_view ip_version_glob;
-  auto (*make)(board const& b) -> model_factory;
-  std::span<std::string_view const> instance_globs = every;
-  std::span<std::string_view const> part_globs     = every;
-  flash_variant                     flash          = {};
-};
+  if constexpr(std::meta::remove_cvref(std::meta::type_of(Variant)) == ^^flash_l1_variant)
+  {
+    auto row  = row_of<Factory, Variant, ^^board::flash>(key);
+    row.flash = flash_l1_of<([:Variant:])>;
+    return row;
+  }
+  else
+  {
+    auto row    = row_of<Factory, ^^void, ^^board::flash>(key);
+    row.variant = std::meta::identifier_of(Variant);
+    row.flash   = [:Variant:];
+    return row;
+  }
+}
 
 constexpr auto builtins = std::to_array<builtin>({
-    {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }, every, u5_parts},
-    {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }, every, h5_parts},
-    {.ip              = "RCC",
-     .ip_version_glob = "STM32L1_rcc_*",
-     .make            = [](board const& b) { return rcc_l1_factory(b.rcc); },
-     .part_globs      = l1_parts},
-    {.ip              = "RCC",
-     .ip_version_glob = "STM32L4_rcc_*",
-     .make            = [](board const& b) { return rcc_l4_factory(b.rcc); },
-     .part_globs      = l4_parts},
-    {.ip              = "ICACHE",
-     .ip_version_glob = "Icache_v1_0_0*",
-     .make            = [](board const& b) { return icache_factory(b.caches); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "DCACHE",
-     .ip_version_glob = "STM32U5xx1_v0_0",
-     .make            = [](board const& b) { return dcache_factory(b.caches); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "PWR",
-     .ip_version_glob = "STM32U5_pwr_*",
-     .make            = [](board const& b) { return pwr_smps_factory(b.pwr); },
-     .part_globs      = u5_smps_parts},
-    {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }, every, u5_parts},
-    {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }, every, h5_parts},
-    {.ip              = "PWR",
-     .ip_version_glob = "",
-     .make            = [](board const& b) { return pwr_l1_factory(b.pwr); },
-     .part_globs      = l1_parts},
-    {.ip              = "PWR",
-     .ip_version_glob = "",
-     .make            = [](board const& b) { return pwr_l4_factory(b.pwr); },
-     .part_globs      = l4_parts},
-    {.ip              = "flash",
-     .ip_version_glob = "v1.0.0_U5_Cube",
-     .make            = [](board const& b) { return flash_factory(b.flash); },
-     .part_globs      = u5_flash_5bit_parts,
-     .flash           = flash_5bit},
-    {.ip              = "flash",
-     .ip_version_glob = "v1.0.0_U5_Cube",
-     .make            = [](board const& b) { return flash_factory(b.flash); },
-     .part_globs      = u5_flash_8bit_parts,
-     .flash           = flash_8bit},
-    {.ip              = "flash",
-     .ip_version_glob = "v1.0.0_U5_Cube",
-     .make            = [](board const& b) { return flash_factory(b.flash); },
-     .part_globs      = u5_parts,
-     .flash           = flash_u5},
-    {.ip              = "flash",
-     .ip_version_glob = "v1.0.0_H5_Cube",
-     .make            = [](board const& b) { return flash_h5_factory(b.flash); },
-     .part_globs      = h5_parts,
-     .flash           = flash_h5},
-    {.ip              = "Flash",
-     .ip_version_glob = "",
-     .make            = [](board const& b) { return flash_l4_factory(b.flash); },
-     .part_globs      = l4_parts,
-     .flash           = flash_l4},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat1",
-     .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat1, b.flash); },
-     .part_globs      = l1_parts,
-     .flash           = flash_l1_cat1},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat2",
-     .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat2, b.flash); },
-     .part_globs      = l1_parts,
-     .flash           = flash_l1_cat2},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat2_pcrop",
-     .make       = [](board const& b) { return flash_l1_factory(l1_flash_cat2_pcrop, b.flash); },
-     .part_globs = l1_parts,
-     .flash      = flash_l1_cat2_pcrop},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat3_pcrop",
-     .make       = [](board const& b) { return flash_l1_factory(l1_flash_cat3_pcrop, b.flash); },
-     .part_globs = l1_parts,
-     .flash      = flash_l1_cat3_pcrop},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat3",
-     .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat3, b.flash); },
-     .part_globs      = l1_parts,
-     .flash           = flash_l1_cat3},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat46",
-     .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat46, b.flash); },
-     .part_globs      = l1_parts,
-     .flash           = flash_l1_cat46},
-    {.ip              = "Flash",
-     .ip_version_glob = "STM32L1_flash_cat5",
-     .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat5, b.flash); },
-     .part_globs      = l1_parts,
-     .flash           = flash_l1_cat5},
+    {row_of<^^rcc_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32U5_rcc_*", .part_globs = u5_parts})},
+    {row_of<^^rcc_h5_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32H5_rcc_*", .part_globs = h5_parts})},
+    {row_of<^^rcc_l1_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32L1_rcc_*", .part_globs = l1_parts})},
+    {row_of<^^rcc_l4_factory, ^^void, ^^board::rcc>(
+        {.ip = "RCC", .ip_version_glob = "STM32L4_rcc_*", .part_globs = l4_parts})},
+    {row_of<^^icache_factory, ^^void, ^^board::caches>(
+        {.ip = "ICACHE", .ip_version_glob = "Icache_v1_0_0*", .part_globs = u5_h5_parts})},
+    {row_of<^^dcache_factory, ^^void, ^^board::caches>(
+        {.ip = "DCACHE", .ip_version_glob = "STM32U5xx1_v0_0", .part_globs = u5_h5_parts})},
+    {row_of<^^pwr_smps_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_smps_parts})},
+    {row_of<^^pwr_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_parts})},
+    {row_of<^^pwr_h5_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "STM32H5_pwr_*", .part_globs = h5_parts})},
+    {row_of<^^pwr_l1_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "", .part_globs = l1_parts})},
+    {row_of<^^pwr_l4_factory, ^^void, ^^board::pwr>(
+        {.ip = "PWR", .ip_version_glob = "", .part_globs = l4_parts})},
+    {flash_row<^^flash_factory, ^^flash_5bit>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_5bit_parts})},
+    {flash_row<^^flash_factory, ^^flash_8bit>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_flash_8bit_parts})},
+    {flash_row<^^flash_factory, ^^flash_u5>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_U5_Cube", .part_globs = u5_parts})},
+    {flash_row<^^flash_h5_factory, ^^flash_h5>(
+        {.ip = "flash", .ip_version_glob = "v1.0.0_H5_Cube", .part_globs = h5_parts})},
+    {flash_row<^^flash_l4_factory, ^^flash_l4>(
+        {.ip = "Flash", .ip_version_glob = "", .part_globs = l4_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat1>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat1", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat2>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat2_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2_pcrop", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat3_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3_pcrop", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat3>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat46>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat46", .part_globs = l1_parts})},
+    {flash_row<^^flash_l1_factory, ^^l1_flash_cat5>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat5", .part_globs = l1_parts})},
     {.ip              = "GPIO",
      .ip_version_glob = "STM32U5x_gpio_*",
      .make            = [](board const&) { return gpio_factory(u575_gpio); },
@@ -310,7 +272,7 @@ constexpr auto builtins = std::to_array<builtin>({
      .part_globs      = l4_parts},
     {.ip              = "DAC",
      .ip_version_glob = "dacif_v2_0_Cube",
-     .make            = [](board const& b) { return dac_factory(l4_dac, b.supply); },
+     .make            = [](board const& b) { return dac_factory(b.supply, l4_dac); },
      .part_globs      = l4_parts},
     {.ip              = "LPTIM",
      .ip_version_glob = "L4_lptimer1_v1*",
@@ -510,10 +472,8 @@ constexpr auto builtins = std::to_array<builtin>({
      .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
      .part_globs      = h5_parts},
     {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }, every, h5_parts},
-    {.ip              = "CRS",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return crs_factory(); },
-     .part_globs      = u5_h5_parts},
+    {row_of<^^crs_factory, ^^void>(
+        {.ip = "CRS", .ip_version_glob = "", .part_globs = u5_h5_parts})},
 });
 
 auto any_glob(std::span<std::string_view const> globs, std::string_view text) -> bool
@@ -768,6 +728,9 @@ auto resolve(part_description const& part) -> std::vector<resolution>
     {
       found.row       = found.matches.front();
       found.row_label = row_label(builtins[*found.row]);
+      found.factory   = builtins[*found.row].factory;
+      found.variant   = builtins[*found.row].variant;
+      found.reads     = builtins[*found.row].reads;
       found.source    = row_source::row;
     }
     else

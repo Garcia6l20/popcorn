@@ -102,11 +102,11 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
- * @param variant What differs between the categories the row serves.
  * @param options Board configuration: only `option_bytes` applies, the boot bank of a part with
  *        two banks.
+ * @param variant What differs between the categories the row serves.
  */
-[[nodiscard]] auto flash_l1_factory(flash_l1_variant variant, flash_options const& options)
+[[nodiscard]] auto flash_l1_factory(flash_options const& options, flash_l1_variant variant)
     -> model_factory;
 
 /**
@@ -174,10 +174,10 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the DAC model, RM0351 section 19.
- * @param variant What differs between the DAC of the family the row serves.
  * @param supply VDDA, the VREF+ the channel outputs scale to.
+ * @param variant What differs between the DAC of the family the row serves.
  */
-[[nodiscard]] auto dac_factory(dac_variant variant, supply_options supply) -> model_factory;
+[[nodiscard]] auto dac_factory(supply_options supply, dac_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the LPTIM model, RM0351 section 34.

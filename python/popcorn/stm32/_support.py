@@ -23,6 +23,8 @@ class PeripheralSupport:
             `<ip>/<ip version glob>/<part scope>/<instance scope>`, None when no row does. It
             names the selected row even where the row's factory declines the instance, so
             `model` is None with a `row` set for GTZC without TrustZone.
+        variant: Name of the variant the row gives its factory. None when the row names no
+            variant, or when no row serves the instance.
         source: `"row"` when a row serves the instance, `"none_no_row"` when no row matches and none
             refuses the part, such as an IP no row knows or an instance no row lists,
             `"none_part_refused"` when some row knows the IP and version and none serves the part.
@@ -34,6 +36,7 @@ class PeripheralSupport:
     model: Literal["builtin", "python"] | None
     row: str | None = None
     source: Literal["row", "none_no_row", "none_part_refused"] | None = None
+    variant: str | None = None
 
 
 def shipped_parts() -> list[str]:
@@ -87,6 +90,7 @@ def support(description: PartDescription, *, trustzone: bool = False) -> list[Pe
                 model,
                 resolution.row_label or None,
                 cast("Literal['row', 'none_no_row', 'none_part_refused']", resolution.source),
+                resolution.variant or None,
             )
         )
     return found

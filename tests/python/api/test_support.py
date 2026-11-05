@@ -251,8 +251,8 @@ def test_the_row_of_each_instance_is_the_golden(part: str) -> None:
     family = resolution_diff.family_of(part)
     golden = json.loads((resolution_diff.GOLDEN_DIR / f"{family}.json").read_text())
     expected = next(g["instances"] for g in golden["groups"] if part in g["parts"])
-    found = {s.name: [s.row or "", s.source] for s in support(mcu(part))}
-    assert found == {name: [entry[0], entry[1]] for name, entry in expected.items()}
+    found = {s.name: [s.row or "", s.source, s.variant or ""] for s in support(mcu(part))}
+    assert found == {name: [entry[0], entry[1], entry[3]] for name, entry in expected.items()}
 
 
 def test_a_row_names_the_instance_it_serves() -> None:
@@ -309,12 +309,25 @@ def test_explain_prints_one_line_per_instance() -> None:
         check=True,
     )
     lines = run.stdout.splitlines()
-    assert lines[0].split() == ["instance", "ip", "version", "model", "row", "source"]
+    assert lines[0].split() == [
+        "instance",
+        "ip",
+        "version",
+        "model",
+        "row",
+        "source",
+        "factory",
+        "variant",
+        "reads",
+    ]
     assert [line.split()[0] for line in lines[1:]] == INSTANCES
     assert next(line for line in lines if line.startswith("RCC ")).split()[3:] == [
         "builtin",
         "RCC/STM32U5_rcc_*/STM32U5*/*",
         "row",
+        "rcc_factory",
+        "-",
+        "rcc",
     ]
 
 
@@ -371,3 +384,11 @@ def test_a_machine_models_exactly_the_instances_a_row_serves(part: str) -> None:
         and (s.row is not None) != answers_a_read(machine, s.name)
     ]
     assert mismatched == []
+
+
+def test_a_flash_row_names_its_variant_and_the_member_it_reads() -> None:
+    found = {s.name: s for s in support(U575)}
+    assert found["FLASH"].variant == "flash_u5"
+    assert {r.instance: r for r in _core.resolve_rows(U575)}["FLASH"].reads == "flash"
+    l1 = {s.name: s for s in support(mcu("STM32L152RETx"))}
+    assert l1["FLASH"].variant == "l1_flash_cat5"

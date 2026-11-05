@@ -18,7 +18,7 @@ from typing import Any
 GOLDEN_DIR = Path(__file__).parents[1] / "tests" / "data" / "stm32" / "resolution"
 PROBES = GOLDEN_DIR / "probes.toml"
 FAMILIES = {"STM32U5": "u5", "STM32H5": "h5", "STM32L1": "l1", "STM32L4": "l4"}
-COLUMNS = ("label", "source")
+COLUMNS = ("label", "source", "factory", "variant", "reads")
 
 
 def family_of(part: str) -> str:
@@ -35,7 +35,7 @@ def probes() -> list[dict[str, str]]:
 
 
 def resolve_part(part: str, rename: str | None = None) -> dict[str, list[Any]]:
-    """Map each non-alias instance of @p part to `[row label, source]`.
+    """Map each non-alias instance of @p part to `[label, source, factory, variant, reads]`.
 
     @p rename resolves the description under another part name.
     """
@@ -45,7 +45,10 @@ def resolve_part(part: str, rename: str | None = None) -> dict[str, list[Any]]:
     description = mcu(part)
     if rename is not None:
         description.part = rename
-    return {r.instance: [r.row_label, r.source] for r in _core.resolve_rows(description)}
+    return {
+        r.instance: [r.row_label, r.source, r.factory, r.variant, r.reads]
+        for r in _core.resolve_rows(description)
+    }
 
 
 def compute(family: str) -> dict[str, Any]:
@@ -150,8 +153,10 @@ def changes(
         found["keys"][("present" if key in old else "absent", key.split("/")[0])] += 1
     for key in sorted(set(old) & set(new)):
         for number, column in enumerate(COLUMNS):
-            if old[key][number] != new[key][number]:
-                found[column][(str(old[key][number]), str(new[key][number]))] += 1
+            before = old[key][number] if number < len(old[key]) else None
+            after = new[key][number] if number < len(new[key]) else None
+            if before != after:
+                found[column][(str(before), str(after))] += 1
     return found
 
 
