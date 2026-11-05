@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
@@ -657,28 +658,58 @@ auto default_board() -> board const&
   return instance;
 }
 
+auto same_version(builtin const& entry, std::string_view ip, std::string_view version) -> bool
+{
+  return entry.ip == ip and glob_match(entry.ip_version_glob, version);
+}
+
+auto row_matches(
+    builtin const&   entry,
+    std::string_view ip,
+    std::string_view version,
+    std::string_view part,
+    std::string_view instance) -> bool
+{
+  return same_version(entry, ip, version)
+     and any_glob(entry.part_globs, part)
+     and any_glob(entry.instance_globs, instance);
+}
+
+auto part_refused(std::string_view ip, std::string_view version, std::string_view part) -> bool
+{
+  return std::ranges::any_of(
+             builtins, [&](builtin const& entry) { return same_version(entry, ip, version); })
+     and not std::ranges::any_of(builtins, [&](builtin const& entry) {
+           return same_version(entry, ip, version) and any_glob(entry.part_globs, part);
+         });
+}
+
+auto scope_of(std::span<std::string_view const> globs) -> std::string
+{
+  return globs | std::views::join_with(',') | std::ranges::to<std::string>();
+}
+
+auto row_label(builtin const& entry) -> std::string
+{
+  return std::format(
+      "{}/{}/{}/{}", entry.ip, entry.ip_version_glob.empty() ? "-" : entry.ip_version_glob,
+      scope_of(entry.part_globs), scope_of(entry.instance_globs));
+}
+
 auto select_row(
     std::string_view ip,
     std::string_view version,
     std::string_view part,
     std::string_view instance) -> builtin const*
 {
-  auto const same_version = [&](builtin const& entry) {
-    return entry.ip == ip and glob_match(entry.ip_version_glob, version);
-  };
   auto const found = std::ranges::find_if(builtins, [&](builtin const& entry) {
-    return same_version(entry)
-       and any_glob(entry.part_globs, part)
-       and any_glob(entry.instance_globs, instance);
+    return row_matches(entry, ip, version, part, instance);
   });
   if(found != builtins.end())
   {
     return &*found;
   }
-  if(std::ranges::any_of(builtins, same_version)
-     and not std::ranges::any_of(builtins, [&](builtin const& entry) {
-           return same_version(entry) and any_glob(entry.part_globs, part);
-         }))
+  if(part_refused(ip, version, part))
   {
     throw config_error(
         std::string{part}, 0, std::format("peripherals.{}", instance),
@@ -686,6 +717,43 @@ auto select_row(
   }
   return nullptr;
 }
+}
+
+auto resolve(part_description const& part) -> std::vector<resolution>
+{
+  std::vector<resolution> out;
+  for(auto const& unit : part.peripherals)
+  {
+    if(unit.alias_of)
+    {
+      continue;
+    }
+    resolution found;
+    found.instance   = unit.name;
+    found.ip         = unit.ip;
+    found.ip_version = unit.ip_version;
+    for(auto const index : std::views::iota(std::size_t{0}, builtins.size()))
+    {
+      if(row_matches(builtins[index], unit.ip, unit.ip_version, part.part, unit.name))
+      {
+        found.matches.push_back(index);
+      }
+    }
+    if(not found.matches.empty())
+    {
+      found.row       = found.matches.front();
+      found.row_label = row_label(builtins[*found.row]);
+      found.source    = row_source::row;
+    }
+    else
+    {
+      found.source = part_refused(unit.ip, unit.ip_version, part.part)
+                       ? row_source::none_part_refused
+                       : row_source::none_no_row;
+    }
+    out.push_back(std::move(found));
+  }
+  return out;
 }
 
 void register_builtin_models()

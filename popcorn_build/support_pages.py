@@ -65,8 +65,8 @@ def _memory(part: PartDescription, kind: str, name: str) -> int:
     )
 
 
-def _models(part: PartDescription) -> dict[str, str]:
-    """Map each peripheral to its model column."""
+def _models(part: PartDescription) -> tuple[dict[str, str], dict[str, str]]:
+    """Map each peripheral to its model column and to its row label, empty for no row."""
     plain = {s.name: s for s in support(part)}
     secured: dict[str, PeripheralSupport] = plain
     if part.core.trustzone:
@@ -79,7 +79,7 @@ def _models(part: PartDescription) -> dict[str, str]:
             found[name] = TRUSTZONE_ONLY
         else:
             found[name] = NONE
-    return found
+    return found, {name: entry.row or "" for name, entry in plain.items()}
 
 
 def _table(header: Iterable[str], rows: Iterable[Iterable[str]]) -> list[str]:
@@ -173,18 +173,25 @@ def _bonded(part: PartDescription) -> list[list[str]]:
 
 def part_page(part: PartDescription) -> str:
     """The peripheral page of one part: one row per IP and version, its instances and model."""
-    models = _models(part)
-    groups: dict[tuple[str, str, str], list[str]] = {}
+    models, labels = _models(part)
+    groups: dict[tuple[str, str, str, str], list[str]] = {}
     for p in part.peripherals:
         if p.alias_of is None:
-            groups.setdefault((p.ip, p.ip_version, models[p.name]), []).append(p.name)
+            key = (p.ip, p.ip_version, models[p.name], labels[p.name])
+            groups.setdefault(key, []).append(p.name)
     served = sum(1 for m in models.values() if m == BUILTIN)
     secured = sum(1 for m in models.values() if m == TRUSTZONE_ONLY)
     order = {BUILTIN: 0, TRUSTZONE_ONLY: 1, NONE: 2}
-    keys = sorted(groups, key=lambda key: (order[key[2]], key[0].lower(), key[1]))
+    keys = sorted(groups, key=lambda key: (order[key[2]], key[0].lower(), key[1], key[3]))
     rows = [
-        [f"`{ip}`", f"`{version}`" if version else "", ", ".join(groups[ip, version, model]), model]
-        for ip, version, model in keys
+        [
+            f"`{ip}`",
+            f"`{version}`" if version else "",
+            ", ".join(groups[ip, version, model, label]),
+            model,
+            f"`{label}`" if label else "",
+        ]
+        for ip, version, model, label in keys
     ]
     lines = [
         f"# {part.part}",
@@ -193,9 +200,11 @@ def part_page(part: PartDescription) -> str:
         f"model, {secured} more have one only with TrustZone enabled.",
         "",
         "Each row is one IP and version, as the description names them. Secure aliases are left "
-        "out. See [Limits](../limits.md) for what each model leaves out.",
+        "out. The last column names the model row that serves the instances, as "
+        "`python -m popcorn.stm32 explain` prints it. See [Limits](../limits.md) for what each "
+        "model leaves out.",
         "",
-        *_table(["IP", "Version", "Instances", "Model"], rows),
+        *_table(["IP", "Version", "Instances", "Model", "Row"], rows),
         "",
         "## Bonded pins",
         "",

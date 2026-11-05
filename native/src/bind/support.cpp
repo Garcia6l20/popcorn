@@ -5,6 +5,10 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
+#include "../periph/stm32/rows.hpp"
+
+#include <reflex/enum.hpp>
+
 #include <ranges>
 #include <utility>
 
@@ -45,6 +49,22 @@ auto builtin_models(part_description const& description, bool trustzone) -> std:
            return not unit.alias_of and target.model(unit.name) != nullptr;
          })
        | std::views::transform(&peripheral_desc::name)
+       | std::ranges::to<std::vector>();
+}
+
+auto resolve_rows(part_description const& description) -> std::vector<row_resolution>
+{
+  return periph::stm32::resolve(description)
+       | std::views::transform([](periph::stm32::resolution const& found) {
+           return row_resolution{
+               .instance   = found.instance,
+               .ip         = found.ip,
+               .ip_version = found.ip_version,
+               .matches    = found.matches,
+               .row        = found.row,
+               .row_label  = found.row_label,
+               .source     = std::string{reflex::enum_value_name(found.source)}};
+         })
        | std::ranges::to<std::vector>();
 }
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn import ConfigError, ModelError, OptionBytes
+from popcorn import ConfigError, ModelError, OptionBytes, _core
 from popcorn.model import Model
 from popcorn.stm32 import PeripheralSupport, mcu, shipped_parts, support
 
@@ -233,3 +233,112 @@ def test_a_builtin_its_python_replacement_unregistered_shows_as_no_model() -> No
         [sys.executable, "-c", UNREGISTERED_BUILTIN], capture_output=True, text=True, check=True
     )
     assert run.stdout.split() == ["None", "False"]
+
+
+ROW_DUMPS = Path(__file__).parents[2] / "data" / "support"
+ROW_PARTS = [
+    "STM32U575QGIx",
+    "STM32U575ZITxQ",
+    "STM32H573IIKx",
+    "STM32L152RETx",
+    "STM32L476RGTx",
+]
+
+
+@pytest.mark.parametrize("part", ROW_PARTS)
+def test_the_row_of_each_instance_is_pinned(part: str) -> None:
+    dump = [f"{s.name} {s.row or '-'} {s.source}" for s in support(mcu(part))]
+    assert dump == (ROW_DUMPS / f"rows_{part}.txt").read_text().splitlines()
+
+
+def test_a_row_names_the_instance_it_serves() -> None:
+    found = {s.name: s for s in support(U575)}
+    assert found["RCC"].row == "RCC/STM32U5_rcc_*/*/*"
+    assert found["RCC"].source == "row"
+    assert found["GPIOA"].row == "GPIO/STM32U5x_gpio_*/STM32U575*,STM32U585*/GPIO?"
+
+
+def test_an_instance_no_row_lists_has_no_row() -> None:
+    found = {s.name: s for s in support(U575)}
+    assert found["WWDG"].row is None
+    assert found["WWDG"].source == "none_no_row"
+    assert found["LPGPIO1"].row is None
+    assert found["LPGPIO1"].source == "none_no_row"
+
+
+def test_a_factory_that_declines_an_instance_keeps_its_row() -> None:
+    plain = {s.name: s for s in support(U575)}
+    secured = {s.name: s for s in support(U575, trustzone=True)}
+    assert plain["GTZC1_TZSC"].model is None
+    assert plain["GTZC1_TZSC"].row == secured["GTZC1_TZSC"].row == "GTZC/tzsc1_v2_2*/STM32U5*/*"
+    assert secured["GTZC1_TZSC"].model == "builtin"
+
+
+def test_a_part_no_row_of_the_version_serves_is_reported() -> None:
+    other = mcu("STM32L152RETx")
+    other.part = "STM32F407VGTx"
+    found = {r.instance: r for r in _core.resolve_rows(other)}
+    assert found["RCC"].source == "none_part_refused"
+    assert found["RCC"].row is None
+    assert found["RCC"].matches == []
+
+
+def test_the_u575_gpio_matches_its_row_and_the_generic_u5_row() -> None:
+    found = {r.instance: r for r in _core.resolve_rows(U575)}
+    assert len(found["GPIOA"].matches) == 2
+    assert found["GPIOA"].row == found["GPIOA"].matches[0]
+    assert len(found["RCC"].matches) == 1
+
+
+def test_the_smps_pwr_row_precedes_the_generic_u5_row() -> None:
+    smps = {r.instance: r for r in _core.resolve_rows(mcu("STM32U575ZITxQ"))}
+    assert smps["PWR"].row_label == "PWR/STM32U5_pwr_*/STM32U5*Q/*"
+    assert len(smps["PWR"].matches) == 2
+    assert len({r.instance: r for r in _core.resolve_rows(U575)}["PWR"].matches) == 1
+
+
+def test_explain_prints_one_line_per_instance() -> None:
+    run = subprocess.run(
+        [sys.executable, "-m", "popcorn.stm32", "explain", PART],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = run.stdout.splitlines()
+    assert lines[0].split() == ["instance", "ip", "version", "model", "row", "source"]
+    assert [line.split()[0] for line in lines[1:]] == INSTANCES
+    assert next(line for line in lines if line.startswith("RCC ")).split()[3:] == [
+        "builtin",
+        "RCC/STM32U5_rcc_*/*/*",
+        "row",
+    ]
+
+
+def test_explain_of_an_unknown_part_fails() -> None:
+    run = subprocess.run(
+        [sys.executable, "-m", "popcorn.stm32", "explain", "NOPE"], capture_output=True, text=True
+    )
+    assert run.returncode != 0
+    assert "NOPE" in run.stderr
+
+
+def test_explain_with_trustzone_lists_the_secured_models() -> None:
+    run = subprocess.run(
+        [sys.executable, "-m", "popcorn.stm32", "explain", PART, "--trustzone"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tzsc = next(line for line in run.stdout.splitlines() if line.startswith("GTZC1_TZSC "))
+    assert tzsc.split()[3] == "builtin"
+
+
+def test_a_machine_of_a_part_no_row_serves_refuses_the_first_instance() -> None:
+    other = mcu("STM32L152RETx")
+    other.part = "STM32F407VGTx"
+    with pytest.raises(ConfigError) as caught:
+        support(other)
+    assert caught.value.key == "peripherals.CRC"
+    assert "no model row of the CRC version integtest1_v1_0 serves the part STM32F407VGTx" in str(
+        caught.value
+    )

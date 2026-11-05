@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from popcorn._part_description import PartDescription
@@ -19,12 +19,21 @@ class PeripheralSupport:
         ip_version: IP version, as the description spells it.
         model: `"builtin"` for a built-in model, `"python"` for a class that
             `popcorn.model.register()` routes the IP to, None for no model.
+        row: Label of the built-in model row that serves the instance, as
+            `<ip>/<ip version glob>/<part scope>/<instance scope>`, None when no row does. It
+            names the selected row even where the row's factory declines the instance, so
+            `model` is None with a `row` set for GTZC without TrustZone.
+        source: `"row"` when a row serves the instance, `"none_no_row"` when no row matches and none
+            refuses the part, such as an IP no row knows or an instance no row lists,
+            `"none_part_refused"` when some row knows the IP and version and none serves the part.
     """
 
     name: str
     ip: str
     ip_version: str
     model: Literal["builtin", "python"] | None
+    row: str | None = None
+    source: Literal["row", "none_no_row", "none_part_refused"] | None = None
 
 
 def shipped_parts() -> list[str]:
@@ -42,8 +51,9 @@ def support(description: PartDescription, *, trustzone: bool = False) -> list[Pe
 
     It asks the native registry, as a machine built now with no board model would: the latest
     registration of the IP whose glob matches the IP version serves it. A built-in model whose
-    factory declines an instance, such as the GPIO model for LPGPIO1, counts as no model. Board
-    models and plugin models are set per machine and do not show here.
+    factory declines an instance, such as the GTZC models without TrustZone, counts as no model,
+    while `row` still names the selected row. An instance no row lists, such as LPGPIO1, has
+    no row either. Board models and plugin models are set per machine and do not show here.
 
     Args:
         description: The part, such as `mcu("STM32U575QGIx")`.
@@ -57,6 +67,7 @@ def support(description: PartDescription, *, trustzone: bool = False) -> list[Pe
     from popcorn._model_build import registered_classes
 
     builtin = set(_core.builtin_models(description, trustzone))
+    resolved = {r.instance: r for r in _core.resolve_rows(description)}
     found: list[PeripheralSupport] = []
     for peripheral in description.peripherals:
         if peripheral.alias_of is not None:
@@ -67,7 +78,15 @@ def support(description: PartDescription, *, trustzone: bool = False) -> list[Pe
             model = "python"
         elif glob is not None and peripheral.name in builtin:
             model = "builtin"
+        resolution = resolved[peripheral.name]
         found.append(
-            PeripheralSupport(peripheral.name, peripheral.ip, peripheral.ip_version, model)
+            PeripheralSupport(
+                peripheral.name,
+                peripheral.ip,
+                peripheral.ip_version,
+                model,
+                resolution.row_label or None,
+                cast("Literal['row', 'none_no_row', 'none_part_refused']", resolution.source),
+            )
         )
     return found
