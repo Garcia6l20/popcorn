@@ -1015,14 +1015,21 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block is
   64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family and the sponge rate
   for SHA-3.
-- The H5 HASH keeps SHA-3 and SHAKE on the STM32H543 and H553 only, RM0481 Table 397. On every
-  other H5 part, ALGO keeps 0000, 0010, 0011 and 1100 to 1111. A CR write of another code, with
-  or without INIT, stores ALGO 0000 and the hash runs SHA-1, as read back on an STM32H573 for
-  0001 and 0100 to 1011. The H543 and H553 store 0000 for 0001, 1010 and 1011 by the same rule,
-  which is the H573 reading applied there. The write logs once and raises a model_error under
-  strict_peripherals before CR changes.
-- The SHA-3 and SHAKE rules follow RM0481 and are served on the STM32H543 and H553 rows. Building
-  a description for those parts needs ST's DIE47C rzone file.
+- The H5 HASH keeps SHA-3 and SHAKE on the STM32H543, H553, H5E and H5F only, RM0481 Table 397
+  and RM0517 46.2. On the STM32H52x, H53x, H56x and H57x, ALGO keeps 0000, 0010, 0011 and 1100
+  to 1111. A CR write of another code, with or without INIT, stores ALGO 0000 and the hash runs
+  SHA-1, as read back on an STM32H573 for 0001 and 0100 to 1011. The H543, H553, H5E and H5F
+  store 0000 for 0001, 1010 and 1011 by the same rule, which is the H573 reading applied there,
+  inferred. The write logs once and raises a model_error under strict_peripherals before CR
+  changes.
+- The SHA-3 and SHAKE rules follow RM0481 and RM0517 and are served on the STM32H543, H553, H5E
+  and H5F rows. Building a description for the H543 and H553 needs ST's DIE47C rzone file, and
+  for the H5E and H5F the DIE47A file. The H5E and H5F parts need a CMSIS SVD, which ST's pack
+  does not hold. The SHA-3 variant refuses a description whose SR.NBWE is narrower than 6 bits.
+- The STM32H503 HASH is the U5 model without MD5: ALGO[1:0] and NBWE[4:0] as RM0492 25.6 give
+  them, with SHA-1, SHA-224 and SHA-256. ALGO 01 is reserved there. A CR write with it stores
+  ALGO 00 and the hash runs SHA-1, logged once and raised under strict_peripherals, inferred
+  from the H573 reading. A board check of ALGO 01 on an H503 would settle it.
 - The H5 BUSY time of one block, from its launching DIN write, is 67 HCLK cycles under SHA-1 and
   SHA2-512 and 51 under SHA2-256, as measured on an STM32H573 at 32 MHz. RM0481 Table 401 gives
   82, 98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS 1 cycle

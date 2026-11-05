@@ -91,6 +91,7 @@ struct hash_ip_variant
   std::span<algorithm const> algorithms;
   std::size_t                hr_count;
   std::size_t                csr_count;
+  std::uint8_t               nbwe_bits = 0;
 };
 
 constexpr std::array<chain, 4> initial_values{
@@ -177,9 +178,12 @@ constexpr std::array<algorithm, 16> h5_sha3_codes{
     sha384_code,   sha512_224_code, sha512_256_code, sha512_code,
 };
 
+constexpr std::array<algorithm, 4> h503_codes{sha1_code, absent_code, sha224_code, sha256_code};
+
 constexpr hash_ip_variant u5_hash{u5_codes, 8, 54};
-constexpr hash_ip_variant h5_hash{h5_codes, 42, 103};
-constexpr hash_ip_variant h5_sha3_hash{h5_sha3_codes, 42, 103};
+constexpr hash_ip_variant h503_hash{h503_codes, 8, 54};
+constexpr hash_ip_variant h5_hash{h5_codes, 42, 103, 6};
+constexpr hash_ip_variant h5_sha3_hash{h5_sha3_codes, 42, 103, 6};
 
 /**
  * @brief Compresses one 512-bit block into a SHA-1 chaining value, FIPS 180-4 6.1.2.
@@ -344,6 +348,7 @@ constexpr auto inner_clear(hash_ip_variant const& variant) noexcept -> bool
 }
 
 static_assert(inner_clear(u5_hash));
+static_assert(inner_clear(h503_hash));
 static_assert(inner_clear(h5_hash));
 static_assert(inner_clear(h5_sha3_hash));
 
@@ -413,8 +418,10 @@ struct hash_state
  * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256, and
  *        HMAC over them, on words written to DIN by the CPU or by DMA. The STM32H5 processor,
  *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224 and SHA2-512/256, on the
- *        STM32H543 and H553 also SHA3-224 to SHA3-512, SHAKE128 and SHAKE256, and drops MD5,
- *        see the H5 paragraph below.
+ *        STM32H543, H553, H5E and H5F also SHA3-224 to SHA3-512, SHAKE128 and SHAKE256, and drops
+ *        MD5, see the H5 paragraph below. The STM32H503 processor, RM0492 section 25, is the U5
+ *        one without MD5: ALGO 01 is reserved, stores 00 and runs SHA-1, inferred as on the
+ *        STM32H573.
  *
  *        Each DIN word is swapped by the DATATYPE in CR at the time of the write into message
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
@@ -488,7 +495,7 @@ struct hash_state
  *        STM32H5, RM0481 40.4: ALGO is four bits, selecting the algorithm of the variant's code
  *        table, RM0481 Table 397. A CR write of a code outside it stores ALGO 0000, with or without
  *        INIT, and the hash runs SHA-1, as read back on an STM32H573: 0001 and 0100 to 1011 there,
- *        0001, 1010 and 1011 on the STM32H543 and H553. The write logs once and raises a
+ *        0001, 1010 and 1011 on the STM32H543, H553, H5E and H5F. The write logs once and raises a
  *        model_error under strict_peripherals before CR changes. The SHA-2 block is 64 bytes for
  *        SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family with a 128-bit length
  *        field. The SHA-3 block is the sponge rate, Table 399: 144, 136, 104 and 72 bytes, SHAKE128
@@ -713,6 +720,12 @@ hash::hash(
         std::format(
             "a field of at most {} bits, the variant has {} codes",
             std::bit_width(variant_.algorithms.size() - 1), variant_.algorithms.size()));
+  }
+  if(nbwe_.width < variant_.nbwe_bits)
+  {
+    throw config_error(
+        desc.name, 0, "SR.NBWE",
+        std::format("a field of at least {} bits, NBWE counts up to 37 words", variant_.nbwe_bits));
   }
   for(std::size_t i = 0; i < variant_.hr_count; ++i)
   {
@@ -1727,10 +1740,14 @@ void hash::interrupts()
 
 }
 
-auto hash_factory() -> model_factory
+auto hash_factory(hash_u5_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<hash>(ctx, desc, u5_hash, hash_writes<u5_hash>());
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    if(variant.md5)
+    {
+      return std::make_shared<hash>(ctx, desc, u5_hash, hash_writes<u5_hash>());
+    }
+    return std::make_shared<hash>(ctx, desc, h503_hash, hash_writes<h503_hash>());
   };
 }
 
@@ -1747,14 +1764,18 @@ auto hash_h5_factory(hash_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
-constexpr auto hash_row_table  = std::to_array<builtin>({
-    row_of<^^hash_factory>(
+constexpr auto hash_h50_parts = std::to_array<std::string_view>({"STM32H50*"});
+constexpr auto hash_sha3_parts =
+    std::to_array<std::string_view>({"STM32H54*", "STM32H55*", "STM32H5E*", "STM32H5F*"});
+constexpr auto hash_row_table = std::to_array<builtin>({
+    row_of<^^hash_factory, ^^hash_u5>(
         {.ip = "HASH", .ip_version_glob = "hash1_v2_2*", .part_globs = u5_parts}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha2>(
         {.ip = "HASH", .ip_version_glob = "STM32H5_hash_sha2", .part_globs = h5_parts}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha3>(
         {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_sha3_parts}),
+    row_of<^^hash_factory, ^^hash_h503>(
+        {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_h50_parts}),
 });
 }
 

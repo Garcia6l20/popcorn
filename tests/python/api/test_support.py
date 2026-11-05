@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -406,3 +407,39 @@ def test_a_row_reading_two_board_members_names_both() -> None:
     assert found["SPI1"].reads == "spi,spi_controllers"
     assert found["I2C1"].reads == "i2c,i2c_controllers"
     assert found["USART1"].reads == "uarts"
+
+
+def h503_hash_only() -> popcorn.PartDescription:
+    try:
+        description = mcu("STM32H503RBTx")
+    except popcorn.MissingInput as exc:
+        pytest.skip(f"STM32H503RBTx sources not found: {exc}")
+    description.peripherals = [p for p in description.peripherals if p.name == "HASH"]
+    return description
+
+
+def test_the_h503_hash_is_served_by_the_u5_model_row() -> None:
+    found = {s.name: s for s in support(h503_hash_only())}
+    assert found["HASH"].row == "HASH/hash1_v4*/STM32H50*/*"
+    assert found["HASH"].model == "builtin"
+
+
+def test_the_h503_hash_stores_00_for_the_reserved_algo_01(caplog: pytest.LogCaptureFixture) -> None:
+    description = h503_hash_only()
+    base = next(p.base for p in description.peripherals if p.name == "HASH")
+    m = popcorn.Machine(description)
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m.mem.u32[base] = 1 << 17
+    assert m.mem.u32[base] == 0
+    assert [r.getMessage() for r in caplog.records if "ALGO 0x1" in r.getMessage()]
+    m.mem.u32[base] = 3 << 17
+    assert m.mem.u32[base] == 3 << 17
+
+
+def test_the_h503_hash_refuses_the_reserved_algo_01_under_strict() -> None:
+    description = h503_hash_only()
+    base = next(p.base for p in description.peripherals if p.name == "HASH")
+    m = popcorn.Machine(description, strict_peripherals=True)
+    with pytest.raises(ModelError):
+        m.mem.u32[base] = 1 << 17
+    assert m.mem.u32[base] == 0

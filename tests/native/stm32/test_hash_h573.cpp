@@ -490,7 +490,10 @@ auto renamed(std::string_view part) -> popcorn::part_description
 {
   auto desc = h573();
   desc.part = part;
-  if(part.starts_with("STM32H54") or part.starts_with("STM32H55"))
+  if(part.starts_with("STM32H54")
+     or part.starts_with("STM32H55")
+     or part.starts_with("STM32H5E")
+     or part.starts_with("STM32H5F"))
   {
     std::ranges::find(desc.peripherals, std::string_view{"HASH"}, &popcorn::peripheral_desc::name)
         ->ip_version = "hash1_v4_0_Cube";
@@ -743,7 +746,8 @@ TEST_CASE("the H5 HASH has ALGO in four bits and HR0 to HR41")
 TEST_CASE("a family with fewer codes than the ALGO field holds is a config_error")
 {
   auto options = popcorn::testing::stm32_options();
-  options.models.emplace("HASH", popcorn::periph::stm32::hash_factory());
+  options.models.emplace(
+      "HASH", popcorn::periph::stm32::hash_factory(popcorn::periph::stm32::hash_u5));
   CHECK_THROWS_WITH_AS(
       stm32_fixture(h573(), firmware, std::move(options)), doctest::Contains("CR.ALGO"),
       popcorn::config_error);
@@ -1354,16 +1358,18 @@ TEST_CASE("an absent ALGO code is refused under strict peripherals before CR cha
   }
 }
 
-TEST_CASE("RM0481 Table 397: only the STM32H543 and H553 rows keep the SHA-3 and SHAKE codes")
+TEST_CASE("RM0481 Table 397, RM0517 46.2: H543, H553, H5E and H5F keep the SHA-3 codes")
 {
   for(auto const& [part, sha3] : {
-          std::pair{"STM32H523CETx", false},
-          std::pair{"STM32H533CETx", false},
-          std::pair{"STM32H543ZGTx", true },
-          std::pair{"STM32H553ZGTx", true },
-          std::pair{"STM32H562VGTx", false},
-          std::pair{"STM32H563ZITx", false},
-          std::pair{"STM32H573AIIx", false}
+          std::pair{"STM32H523CETx",  false},
+          std::pair{"STM32H533CETx",  false},
+          std::pair{"STM32H543ZGTx",  true },
+          std::pair{"STM32H553ZGTx",  true },
+          std::pair{"STM32H5E4VJTx",  true },
+          std::pair{"STM32H5F5LJHxQ", true },
+          std::pair{"STM32H562VGTx",  false},
+          std::pair{"STM32H563ZITx",  false},
+          std::pair{"STM32H573AIIx",  false}
   })
   {
     CAPTURE(part);
@@ -1814,4 +1820,32 @@ TEST_CASE("HASHRST in the middle of a SHAKE squeeze leaves no stale BUSY end for
   r.until(end);
   CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
   CHECK(r.words(168) == unhex(shakes[0].digest.substr(0, 336)));
+}
+
+TEST_CASE("the H5 HASH refuses a description whose SR.NBWE is narrower than 6 bits")
+{
+  for(auto const* const part : {"STM32H543ZGTx", "STM32H5E4VJTx", "STM32H562VGTx"})
+  {
+    CAPTURE(part);
+    auto desc = renamed(part);
+    for(auto& peripheral : desc.peripherals)
+    {
+      if(peripheral.name != "HASH")
+      {
+        continue;
+      }
+      for(auto& reg : peripheral.registers)
+      {
+        for(auto& field : reg.fields)
+        {
+          if(reg.name == "SR" and field.name == "NBWE")
+          {
+            field.width = 5;
+          }
+        }
+      }
+    }
+    CHECK_THROWS_AS((rig{false, desc}), popcorn::config_error);
+  }
+  CHECK_NOTHROW((rig{false, renamed("STM32H573AIIx")}));
 }

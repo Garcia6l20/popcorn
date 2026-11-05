@@ -15,3 +15,21 @@ name = "h543-hash-sha3"
 base = "STM32H573IIKx"
 part = "STM32H543RETx"
 ip_versions = { "HASH" = "hash1_v4_0_Cube" }
+
+[[probe]]
+name = "h503-hash-sha2"
+base = "STM32H573IIKx"
+part = "STM32H503RBTx"
+ip_versions = { "HASH" = "hash1_v4_0_Cube" }
+
+[[probe]]
+name = "h5e4-hash-sha3"
+base = "STM32H573IIKx"
+part = "STM32H5E4VJTx"
+ip_versions = { "HASH" = "hash1_v4_0_Cube" }
+
+[[probe]]
+name = "h5f5-hash-sha3"
+base = "STM32H573IIKx"
+part = "STM32H5F5LJHxQ"
+ip_versions = { "HASH" = "hash1_v4_0_Cube" }
