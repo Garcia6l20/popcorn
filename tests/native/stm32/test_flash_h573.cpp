@@ -1164,8 +1164,12 @@ TEST_CASE(
     stm32::option_bytes wanted{.tzen = true};
     wanted.hdp2 = stm32::page_range{.first = 10, .last = 39};
     popcorn::testing::h573_secure_rig const r{firmware, wanted};
-    constexpr address                       hidden = 0x0c10'0000 + 10 * sector_bytes + 0x20;
-    constexpr address                       code   = 0x3000'0200;
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+    });
+    constexpr address hidden = 0x0c10'0000 + 10 * sector_bytes + 0x20;
+    constexpr address code   = 0x3000'0200;
     REQUIRE(r.f.target->mem().write(bank2 + 10 * sector_bytes + 0x20, 4, 0x1234'5678));
     for(auto const& [at, half] : std::initializer_list<std::pair<std::uint32_t, std::uint16_t>>{
             {0x00, 0x3b01},
@@ -1217,6 +1221,10 @@ TEST_CASE(
     wanted.hdp2 = stm32::page_range{.first = 10, .last = 39};
     popcorn::testing::h573_secure_rig const r{
         firmware, wanted, popcorn::arch::fault_policy::enter_handler};
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+    });
     auto mem = r.f.target->mem(true);
     for(auto const& [at, half] : std::initializer_list<std::pair<std::uint32_t, std::uint16_t>>{
             {0x00, 0x3b01},
@@ -1476,11 +1484,15 @@ TEST_CASE(
     "security, SECWM1 sectors 0 to 3")
 {
   secure_flash const s;
-  auto const         pg_s     = s.bit("FLASH_SECCR", "PG");
-  auto const         pg_ns    = s.bit("FLASH_NSCR", "PG");
-  auto const         bsy_s    = s.bit("FLASH_SECSR", "BSY");
-  auto const         wrperr_s = s.bit("FLASH_SECSR", "WRPERR");
-  auto const         wrperr   = s.bit("FLASH_NSSR", "WRPERR");
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"}
+  });
+  auto const pg_s     = s.bit("FLASH_SECCR", "PG");
+  auto const pg_ns    = s.bit("FLASH_NSCR", "PG");
+  auto const bsy_s    = s.bit("FLASH_SECSR", "BSY");
+  auto const wrperr_s = s.bit("FLASH_SECSR", "WRPERR");
+  auto const wrperr   = s.bit("FLASH_NSSR", "WRPERR");
   s.unlock(true);
   s.unlock(false);
   s.write("FLASH_SECCR", pg_s | s.bit("FLASH_SECCR", "EOPIE"), secure_priv);
@@ -1528,6 +1540,10 @@ TEST_CASE(
     "through FLASH_NSCR, erases both, and each set refuses the other's sector")
 {
   secure_flash const s;
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"}
+  });
   for(address const at : {flash_ns + 3 * sector_bytes, flash_ns + 4 * sector_bytes})
   {
     REQUIRE(s.r.f.target->mem().write(at, 4, 0));
@@ -1573,6 +1589,10 @@ TEST_CASE(
 {
   {
     secure_flash const s;
+    popcorn::testing::enable_clocks(
+        *s.r.f.target, {
+                           {"AHB1ENR", "TZSC1EN"}
+    });
     REQUIRE(s.r.f.target->mem().write(flash_ns + 5 * sector_bytes, 4, 0));
     s.unlock(true);
     s.unlock(false);
@@ -1624,8 +1644,12 @@ TEST_CASE(
     "and NSPRIV make their set RAZ/WI to unprivileged accesses")
 {
   secure_flash const s;
-  auto const         lock_s = s.bit("FLASH_SECCR", "LOCK");
-  auto const         lock   = s.bit("FLASH_NSCR", "LOCK");
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"}
+  });
+  auto const lock_s = s.bit("FLASH_SECCR", "LOCK");
+  auto const lock   = s.bit("FLASH_NSCR", "LOCK");
   CHECK(s.read("FLASH_SECCR", nonsecure_priv) == 0);
   CHECK(s.tzic("FLASH_REGF"));
   s.clear_events();
@@ -1662,6 +1686,10 @@ TEST_CASE(
     "Non-secure only Non-secure sectors")
 {
   secure_flash const s;
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"}
+  });
   s.write("FLASH_SECBB1R1", 0xf0, nonsecure_priv);
   CHECK(s.peek("FLASH_SECBB1R1") == 0);
   CHECK(s.tzic("FLASH_REGF"));
@@ -1739,9 +1767,14 @@ TEST_CASE(
     "privileged writes only")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
-  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
-  auto const         fpusec = sbs.bit("SBS_SECCFGR", "FPUSEC");
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  sbs_bus const sbs{s};
+  auto const    sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
+  auto const    fpusec = sbs.bit("SBS_SECCFGR", "FPUSEC");
   s.clear_events();
   sbs.write("SBS_SECCFGR", sbssec, nonsecure_priv);
   CHECK(sbs.peek("SBS_SECCFGR") == 0);
@@ -1765,7 +1798,12 @@ TEST_CASE(
     "open while ADC12 is Non-secure, a Non-secure access to a Secure one raises SBSF")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  sbs_bus const sbs{s};
   struct row
   {
     std::string_view reg;
@@ -1805,7 +1843,12 @@ TEST_CASE(
     "group and CLASSBSEC SBS_CFGR2, SBS_FPUIMR is privileged, SBSF follows the SEC bits")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  sbs_bus const sbs{s};
   s.clear_events();
   CHECK(sbs.flips("SBS_FPUIMR", "FPU_IE", nonsecure_priv));
   CHECK_FALSE(sbs.flips("SBS_FPUIMR", "FPU_IE", nonsecure_unpriv));
@@ -1851,7 +1894,12 @@ TEST_CASE(
     "above it")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  sbs_bus const sbs{s};
   sbs.write("SBS_DBGCR", 0xb4, secure_priv);
   CHECK(sbs.peek("SBS_DBGCR") == 0xb4);
   CHECK(sbs.read("SBS_DBGCR", nonsecure_unpriv) == 0xb4);
@@ -1872,9 +1920,13 @@ TEST_CASE(
     "keeps its value, RM0481 11.8.25 marks it reserved")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
-  auto const&        rcc  = s.r.f.target->peripheral("RCC").description();
-  auto const*        rstr = popcorn::find_register(rcc, std::string_view{"RCC_APB3RSTR"});
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
+  sbs_bus const sbs{s};
+  auto const&   rcc  = s.r.f.target->peripheral("RCC").description();
+  auto const*   rstr = popcorn::find_register(rcc, std::string_view{"RCC_APB3RSTR"});
   REQUIRE(rstr != nullptr);
   CHECK(
       std::ranges::none_of(rstr->fields, [](popcorn::field_desc const& f) { return f.lsb == 1; }));
@@ -1925,8 +1977,12 @@ TEST_CASE(
     std::uint32_t    reset;
   };
   secure_flash const s;
-  sbs_bus const      sbs{s};
-  std::array const   registers{
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
+  sbs_bus const    sbs{s};
+  std::array const registers{
       written{"SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC"), 0},
       written{"SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), 0},
       written{"SBS_CNSLCKR", sbs.bit("SBS_CNSLCKR", "LOCKNSMPU"), 0},
@@ -1969,11 +2025,16 @@ TEST_CASE(
     "reset keeps it, a written 1 clears MCLR and IPMEE")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
-  auto const         mclr  = sbs.bit("SBS_MESR", "MCLR");
-  auto const         ipmee = sbs.bit("SBS_MESR", "IPMEE");
-  auto&              unit  = s.r.f.target->peripheral("SBS");
-  auto const*        mesr  = popcorn::find_register(unit.description(), "SBS_MESR");
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  sbs_bus const sbs{s};
+  auto const    mclr  = sbs.bit("SBS_MESR", "MCLR");
+  auto const    ipmee = sbs.bit("SBS_MESR", "IPMEE");
+  auto&         unit  = s.r.f.target->peripheral("SBS");
+  auto const*   mesr  = popcorn::find_register(unit.description(), "SBS_MESR");
   REQUIRE(mesr != nullptr);
   CHECK(sbs.peek("SBS_MESR") == mclr);
   sbs.write("SBS_MESR", ipmee, secure_priv);
@@ -1981,10 +2042,18 @@ TEST_CASE(
   sbs.write("SBS_MESR", 0, secure_priv);
   CHECK(sbs.peek("SBS_MESR") == mclr);
   s.r.f.target->reset(popcorn::reset_kind::software);
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
   CHECK(sbs.peek("SBS_MESR") == mclr);
   sbs.write("SBS_MESR", mclr, secure_priv);
   CHECK(sbs.peek("SBS_MESR") == 0);
   s.r.f.target->reset(popcorn::reset_kind::software);
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
   CHECK(sbs.peek("SBS_MESR") == 0);
   unit.poke(mesr->offset, ipmee | mclr);
   sbs.write("SBS_MESR", ipmee, secure_priv);
@@ -1993,8 +2062,17 @@ TEST_CASE(
   CHECK(sbs.peek("SBS_MESR") == mclr);
 
   stm32_fixture const f{h573(), firmware};
-  auto const&         plain = f.target->peripheral("SBS");
-  auto&               bus   = core::machine_internals::services(*f.target);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"AHB1ENR", "TZSC1EN"},
+                     {"APB3ENR", "SBSEN"  }
+  });
+  auto const& plain = f.target->peripheral("SBS");
+  auto&       bus   = core::machine_internals::services(*f.target);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "SBSEN"}
+  });
   CHECK(plain.peek(mesr->offset) == mclr);
   REQUIRE(bus.write(plain.description().base + mesr->offset, 4, mclr, nonsecure_priv).has_value());
   CHECK(plain.peek(mesr->offset) == 0);
@@ -2028,19 +2106,24 @@ TEST_CASE("an H573 description with an SBS reset bit throws config_error at the 
 TEST_CASE("RM0481 11.5.1: SBSSEC makes RCC_APB3ENR.SBSEN Secure")
 {
   secure_flash const s;
-  sbs_bus const      sbs{s};
-  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
-  auto const         enable = s.r.bit("RCC", "RCC_APB3ENR", "SBSEN");
-  auto const         clock  = [&] { return s.r.peek("RCC", "RCC_APB3ENR") & enable; };
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
+  sbs_bus const sbs{s};
+  auto const    sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
+  auto const    enable = s.r.bit("RCC", "RCC_APB3ENR", "SBSEN");
+  auto const    clock  = [&] { return s.r.peek("RCC", "RCC_APB3ENR") & enable; };
   sbs.write("SBS_SECCFGR", sbssec, secure_priv);
   auto const before = clock();
   sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
   CHECK(clock() == before);
   sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, secure_priv);
   CHECK(clock() != before);
+  sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, secure_priv);
   sbs.write("SBS_SECCFGR", 0, secure_priv);
   sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
-  CHECK(clock() == before);
+  CHECK(clock() != before);
 }
 
 TEST_CASE(
@@ -2048,6 +2131,10 @@ TEST_CASE(
     "under TrustZone")
 {
   secure_flash const s;
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
   s.r.f.target->enable_coverage({}, true);
   s.put(code_s, {0x6001, 0x601a, bkpt});
   s.r.f.set("r0", s.r.alias("SBS", "SBS_PMCR", true));
@@ -2072,6 +2159,10 @@ TEST_CASE(
 {
   stm32_fixture const f{h573(), firmware};
   REQUIRE(f.target->model("SBS") != nullptr);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "SBSEN"}
+  });
   auto&       bus  = core::machine_internals::services(*f.target);
   auto const& unit = f.target->peripheral("SBS");
   auto const  at   = [&](std::string_view reg) {
@@ -2144,7 +2235,11 @@ TEST_CASE(
       .secwm1 = stm32::page_range{.first = 12, .last = 13},
       .hdp1   = stm32::page_range{.first = 10, .last = 11}
   };
-  auto       f   = option_fixture(options);
+  auto f = option_fixture(options);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "SBSEN"}
+  });
   auto&      bus = core::machine_internals::services(*f.target);
   auto const at  = [&](std::string_view unit, std::string_view reg) {
     auto const& desc  = f.target->peripheral(unit).description();
@@ -2226,7 +2321,11 @@ TEST_CASE(
   CHECK(load(closed) == 0x1234'5678);
   f.set("pc", (closed + 0x100) | 1u);
   CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
-  auto        other     = option_fixture(options);
+  auto other = option_fixture(options);
+  popcorn::testing::enable_clocks(
+      *other.target, {
+                         {"APB3ENR", "SBSEN"}
+  });
   auto&       other_bus = core::machine_internals::services(*other.target);
   auto const& sbs       = other.target->peripheral("SBS").description();
   auto const* hdplcr    = popcorn::find_register(sbs, "SBS_HDPLCR");
@@ -2405,7 +2504,12 @@ TEST_CASE(
     "SAU and HDPL")
 {
   secure_flash const s;
-  auto const         secwm = s.peek("FLASH_SECWM1R_CUR");
+  popcorn::testing::enable_clocks(
+      *s.r.f.target, {
+                         {"AHB1ENR", "TZSC1EN"},
+                         {"APB3ENR", "SBSEN"  }
+  });
+  auto const secwm = s.peek("FLASH_SECWM1R_CUR");
   s.write("FLASH_SECBB1R1", 0xf0, secure_priv);
   s.write("FLASH_SECBB2R4", 0x1, secure_priv);
   s.write("GTZC1_MPCBB1", "SECCFGR0", 0xffff'fffe);

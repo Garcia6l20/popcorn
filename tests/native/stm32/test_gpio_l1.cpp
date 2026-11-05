@@ -109,6 +109,10 @@ TEST_CASE("RM0038 7.4.11: a Cat.5 BRR store clears ODR, on Cat.3 BRR is absent a
     CAPTURE(desc->part);
     auto const f       = parked(*desc);
     auto const has_brr = desc == &l152re();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"AHBENR", "GPIOAEN"}
+    });
     CHECK(
         (popcorn::find_register(f.target->peripheral("GPIOA").description(), "BRR") != nullptr)
         == has_brr);

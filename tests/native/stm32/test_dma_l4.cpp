@@ -487,7 +487,11 @@ TEST_CASE(
     "strict before the store, a debugger write passes, popcorn policy")
 {
   {
-    auto const                    f = parked();
+    auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"AHB1ENR", "DMA1EN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -503,6 +507,10 @@ TEST_CASE(
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
   auto const f               = parked(std::move(options));
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"AHB1ENR", "DMA2EN"}
+  });
   CHECK(f.target->mem().write(dma2 + cselr, 1, 0x1).has_value());
   CHECK(read(f, dma2 + cselr) == 0x1u);
   CHECK_THROWS_AS((void)cpu_store(f, strb, dma2 + cselr, 0x2), popcorn::model_error);

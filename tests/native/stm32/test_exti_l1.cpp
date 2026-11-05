@@ -377,7 +377,11 @@ TEST_CASE("an EXTI and SYSCFG snapshot restores the selection, the masks and the
 
 TEST_CASE("RM0038 8.5.2: USB_PU reaches the USB pull-up source, SYSCFGRST keeps only MEMRMP")
 {
-  auto const  f      = parked();
+  auto const f = parked();
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   auto const* source = f.model_of<stm32::usb_pull_up_source>("SYSCFG");
   REQUIRE(source != nullptr);
   CHECK_FALSE(source->usb_pull_up());
@@ -395,7 +399,11 @@ TEST_CASE("RM0038 8.5.2: USB_PU reaches the USB pull-up source, SYSCFGRST keeps 
 TEST_CASE("RM0038 8.5.1: MEMRMP is storage, one warning per machine, model_error under strict")
 {
   {
-    auto const                    f = parked();
+    auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"APB2ENR", "SYSCFGEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -423,7 +431,11 @@ TEST_CASE(
 {
   constexpr std::uint32_t lcd_capa = 1u << 1;
   {
-    auto const                    f = parked();
+    auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"APB2ENR", "SYSCFGEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -246,6 +247,41 @@ private:
     return static_cast<std::uint32_t>(*value);
   }
 };
+
+/** @brief An RCC register and enable field, such as `{"APB2ENR", "SPI1EN"}`. */
+using clock_bit = std::pair<std::string_view, std::string_view>;
+
+/**
+ * @brief Sets RCC bus clock enable bits, as firmware does before it touches a peripheral, with a
+ *        debugger write of each RCC register, so the RCC model sees the write.
+ * @param target Machine to write.
+ * @param bits Register and field names, such as `{"APB2ENR", "SPI1EN"}`.
+ */
+inline void enable_clocks(
+    core::machine&                                                 target,
+    std::span<std::pair<std::string_view, std::string_view> const> bits)
+{
+  auto const& rcc = target.peripheral("RCC").description();
+  for(auto const& [reg, field] : bits)
+  {
+    auto const* const found = popcorn::find_register(rcc, reg);
+    REQUIRE_MESSAGE(found != nullptr, reg);
+    auto const at = std::ranges::find(found->fields, field, &field_desc::name);
+    REQUIRE_MESSAGE(at != found->fields.end(), field);
+    auto const address = rcc.base + found->offset;
+    auto const old     = target.mem().read(address, 4);
+    REQUIRE(old.has_value());
+    REQUIRE(target.mem().write(address, 4, *old | (std::uint32_t{1} << at->lsb)).has_value());
+  }
+}
+
+/** @brief enable_clocks() over a braced list of register and field names. */
+inline void enable_clocks(
+    core::machine&                                                       target,
+    std::initializer_list<std::pair<std::string_view, std::string_view>> bits)
+{
+  enable_clocks(target, std::span{bits.begin(), bits.size()});
+}
 
 /**
  * @brief Sets or clears a DBGMCU freeze field, found by its SVD name in any DBGMCU register.

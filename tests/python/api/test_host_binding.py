@@ -430,6 +430,9 @@ def test_past_4096_queued_log_records_the_rest_are_counted_in_one_warning(
     description = mcu("STM32U575QGIx")
     m = popcorn.Machine(description, image=popcorn.Image.elf(BOARD_ELF))
     m.reset()
+    enables = m.periph.RCC.AHB2ENR1
+    for port in "ABCDEFGHI":
+        setattr(enables, f"GPIO{port}EN", 1)
     holes = gpio_holes(description, 5000)
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         load_each_unforwarded(m, holes)

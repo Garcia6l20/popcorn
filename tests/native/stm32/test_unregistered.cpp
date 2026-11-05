@@ -44,10 +44,11 @@ public:
 struct part
 {
   part_description const& (*desc)();
-  std::string_view firmware;
-  std::string_view probe_host;
-  std::string_view peripheral;
-  std::string_view short_window;
+  std::string_view                                           firmware;
+  std::string_view                                           probe_host;
+  std::string_view                                           peripheral;
+  std::string_view                                           short_window;
+  std::vector<std::pair<std::string_view, std::string_view>> clocks;
 };
 
 struct rig
@@ -101,17 +102,32 @@ struct rig
 
 auto l152re_part() -> part
 {
-  return {&popcorn::testing::l152re, "l152xe_l1_iwdg_ll", "DAC", "TIM2", "DBGMCU"};
+  return {&popcorn::testing::l152re, "l152xe_l1_iwdg_ll", "DAC", "TIM2", "DBGMCU",
+          {{"APB1ENR", "TIM2EN"}}};
 }
 
 auto u575_part() -> part
 {
-  return {&popcorn::testing::u575, "rcc_ll", "DAC1", "CRC", "ADC1"};
+  return {
+      &popcorn::testing::u575,
+      "rcc_ll",
+      "DAC1",
+      "CRC",
+      "ADC1",
+      {{"AHB1ENR", "CRCEN"}, {"AHB2ENR1", "ADC12EN"}}
+  };
 }
 
 auto h573_part() -> part
 {
-  return {&popcorn::testing::h573, "h573_rcc_ll", "DAC", "CRC", "ADC1"};
+  return {
+      &popcorn::testing::h573,
+      "h573_rcc_ll",
+      "DAC",
+      "CRC",
+      "ADC1",
+      {{"AHB1ENR", "CRCEN"}, {"AHB2ENR", "ADC12EN"}}
+  };
 }
 
 struct holes
@@ -170,6 +186,7 @@ TEST_CASE(
     {
       CAPTURE(where);
       rig const r{on, true};
+      popcorn::testing::enable_clocks(*r.f->target, on.clocks);
       CHECK_THROWS_AS(static_cast<void>(r.read(where, initiator::cpu)), popcorn::model_error);
       CHECK_THROWS_AS(
           static_cast<void>(r.write(where, 0x5A, initiator::cpu)), popcorn::model_error);
@@ -193,6 +210,7 @@ TEST_CASE(
     {
       CAPTURE(where);
       rig const r{on, true};
+      popcorn::testing::enable_clocks(*r.f->target, on.clocks);
       REQUIRE(r.write(where, 0x5A, initiator::debugger).has_value());
       auto const read = r.read(where, initiator::debugger);
       REQUIRE(read.has_value());
@@ -214,6 +232,7 @@ TEST_CASE(
     {
       CAPTURE(static_cast<int>(by));
       rig const r{on, false};
+      popcorn::testing::enable_clocks(*r.f->target, on.clocks);
       for(auto const where : {at.inside, at.beyond})
       {
         auto const read = r.read(where, by);
@@ -231,6 +250,7 @@ TEST_CASE("a firmware load from an L1 hole of the register map fails a strict ru
   auto const on = l152re_part();
   auto const at = holes_of(on);
   rig const  r{on, true};
+  popcorn::testing::enable_clocks(*r.f->target, on.clocks);
   auto const code = address{0x2000'1000};
   REQUIRE(r.f->target->mem().write(code, 2, 0x6808).has_value());
   REQUIRE(r.f->target->mem().write(code + 2, 2, 0xBE00).has_value());
@@ -247,6 +267,7 @@ TEST_CASE(
   auto const on = l152re_part();
   auto const at = holes_of(on);
   rig const  r{on, true};
+  popcorn::testing::enable_clocks(*r.f->target, on.clocks);
   popcorn::testing::rcc_reset_write(*r.f, "APB1RSTR", "TIM2RST", 1);
   REQUIRE(r.f->target->held_in_reset("TIM2"));
   CHECK_THROWS_AS(

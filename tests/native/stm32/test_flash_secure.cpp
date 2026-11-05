@@ -351,6 +351,10 @@ TEST_CASE(
     "security, SECWM1 pages 0 to 3")
 {
   rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   r.unlock(true);
   r.unlock(false);
   r.write("SECCR", pg | eopie, secure_priv);
@@ -396,6 +400,10 @@ TEST_CASE(
     "NSCR, erases both, and each set refuses the other's page")
 {
   rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   for(address const at : {flash_ns + 3 * page_bytes, flash_ns + 4 * page_bytes})
   {
     REQUIRE(r.target->mem().write(at, 4, 0));
@@ -431,6 +439,10 @@ TEST_CASE(
 {
   {
     rig const r{true, four_secure_pages};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"AHB1ENR", "GTZC1EN"}
+    });
     REQUIRE(r.target->mem().write(flash_ns + 5 * page_bytes, 4, 0));
     r.unlock(true);
     r.unlock(false);
@@ -483,6 +495,10 @@ TEST_CASE(
     "make their set RAZ/WI to unprivileged accesses")
 {
   rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   CHECK(r.read("SECCR", nonsecure_priv) == 0);
   CHECK(r.tzic("FLASH_REGF"));
   r.clear_events();
@@ -516,6 +532,10 @@ TEST_CASE(
     "unprivileged pages, PRIVBB a privileged one, from Non-secure only Non-secure pages")
 {
   rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   r.write("SEC1BBR1", 0xf0, nonsecure_priv);
   CHECK(r.peek("SEC1BBR1") == 0);
   CHECK(r.tzic("FLASH_REGF"));
@@ -545,7 +565,11 @@ TEST_CASE(
     "RM0456 7.5.4 and Table 68: a SECBB bit makes page 9 Secure: a Non-secure program is refused "
     "and a Non-secure load that read data before reads 0")
 {
-  rig const         r{true, four_secure_pages};
+  rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   constexpr address page9 = flash_ns + 9 * page_bytes;
   REQUIRE(r.target->mem().write(page9 + 0x100, 4, 0x1234'5678));
   nonsecure_code(r);
@@ -764,6 +788,10 @@ TEST_CASE(
         .secwm2 = stm32::no_area{},
         .hdp1   = stm32::page_range{.first = 0, .last = 1}}
   };
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   auto const secwm = r.peek("SECWM1R1");
   r.write("SEC1BBR1", 0xf0, secure_priv);
   r.write("SECHDPCR", 1, secure_priv);
@@ -825,6 +853,10 @@ TEST_CASE(
     "with no event and to a Non-secure one with FLASHF, a Secure fetch is a bus fault")
 {
   rig const r{true, hidden_pages, popcorn::arch::fault_policy::enter_handler};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   REQUIRE(r.target->mem().write(flash_ns + page_bytes + 0x40, 4, 0x4444'4444));
   REQUIRE(r.target->mem().write(flash_ns + 2 * page_bytes, 4, 0x2222'2222));
   r.put(flash_ns + page_bytes, {bkpt});
@@ -857,7 +889,11 @@ TEST_CASE(
     "data to a privileged one, an unprivileged fetch is a bus fault, popcorn's deviation from the "
     "zeros of Table 73")
 {
-  rig const         r{true, four_secure_pages, popcorn::arch::fault_policy::enter_handler};
+  rig const r{true, four_secure_pages, popcorn::arch::fault_policy::enter_handler};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   constexpr address page6 = flash_ns + 6 * page_bytes;
   REQUIRE(r.target->mem().write(page6 + 0x20, 4, 0x6666'6666));
   CHECK(load_from(r, page6 + 0x20, true, true) == 0x6666'6666);
@@ -973,7 +1009,11 @@ TEST_CASE("a TrustZone machine whose FLASH has no option bytes is refused at con
 
 TEST_CASE("a PRIVBB write drops the cached data verdict of its page, RM0456 7.5.6 and Table 76")
 {
-  rig const         r{true, four_secure_pages};
+  rig const r{true, four_secure_pages};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   constexpr address page6 = flash_ns + 6 * page_bytes;
   REQUIRE(r.target->mem().write(page6 + 0x20, 4, 0x6666'6666));
   nonsecure_code(r);

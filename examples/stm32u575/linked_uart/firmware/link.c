@@ -46,6 +46,7 @@ __attribute__((noipa)) void links_ready(void)
 
 static void clock_init(void)
 {
+  __HAL_RCC_PWR_CLK_ENABLE();
   if(HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
   {
     Error_Handler();

@@ -42,12 +42,14 @@ public:
  * @param firmware A firmware of the part with an `idle` loop.
  * @param host A peripheral whose model the port replaces.
  * @param units Timers with no SMCR in @p desc.
+ * @param clocks RCC enable register and field of each timer of @p units, set before the accesses.
  */
 inline void serves_reserved_slave_word(
-    part_description const&                 desc,
-    std::string_view                        firmware,
-    std::string_view                        host,
-    std::initializer_list<std::string_view> units)
+    part_description const&                                              desc,
+    std::string_view                                                     firmware,
+    std::string_view                                                     host,
+    std::initializer_list<std::string_view>                              units,
+    std::initializer_list<std::pair<std::string_view, std::string_view>> clocks)
 {
   for(auto const strict : {true, false})
   {
@@ -64,6 +66,7 @@ inline void serves_reserved_slave_word(
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
     f.set("pc", sym(firmware, "idle"));
+    enable_clocks(*f.target, clocks);
     auto* const port = f.model_of<reserved_word_port>(host);
     REQUIRE(port != nullptr);
     auto const warnings = [&] {

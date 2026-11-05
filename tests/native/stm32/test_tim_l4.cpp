@@ -1376,5 +1376,12 @@ TEST_CASE(
     "an L476RC timer with no SMCR reads offset 0x08 as 0 and drops a write there with one warning")
 {
   popcorn::testing::serves_reserved_slave_word(
-      l476rc(), firmware, "TSC", {"TIM6", "TIM7", "TIM16", "TIM17"});
+      l476rc(), firmware, "TSC",
+      {
+          "TIM6", "TIM7", "TIM16", "TIM17"
+  },
+      {{"APB1ENR1", "TIM6EN"},
+       {"APB1ENR1", "TIM7EN"},
+       {"APB2ENR", "TIM16EN"},
+       {"APB2ENR", "TIM17EN"}});
 }

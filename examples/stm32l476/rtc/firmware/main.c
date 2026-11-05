@@ -107,7 +107,7 @@ static void MX_RTC_Init(void)
   hrtc.Init.OutPutRemap    = RTC_OUTPUT_REMAP_NONE;
   hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
   hrtc.Init.OutPutType     = RTC_OUTPUT_TYPE_OPENDRAIN;
-  if(READ_BIT(RTC->ISR, RTC_ISR_INITS) != 0u)
+  if(READ_BIT(RCC->BDCR, RCC_BDCR_RTCEN) != 0u && READ_BIT(RTC->ISR, RTC_ISR_INITS) != 0u)
   {
     HAL_RTC_MspInit(&hrtc);
     hrtc.State = HAL_RTC_STATE_READY;

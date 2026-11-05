@@ -484,6 +484,10 @@ TEST_CASE(
 TEST_CASE("RM0351 38.3.7: RTC_TAMPCR, RTC_OR and the backup registers take writes, key locked")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"BDCR", "RTCEN"}
+  });
   r.cpu_write("TAMPCR", 3u << 11);
   r.cpu_write("OR", 0x3);
   r.cpu_write("BKP31R", 0xA5A5'0031);
@@ -551,6 +555,10 @@ TEST_CASE("RM0351 38.6.3: CR bit 7 has no DCE, a CPU write in init mode under st
 TEST_CASE("coverage reports CPU reads of TAMPCR and OR as storage_only, TSTR and TR as served")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"BDCR", "RTCEN"}
+  });
   r.f->target->enable_coverage({}, true);
   for(auto const* name : {"TSTR", "TAMPCR", "OR", "TR"})
   {

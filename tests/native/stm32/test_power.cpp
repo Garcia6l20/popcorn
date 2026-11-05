@@ -401,6 +401,10 @@ TEST_CASE(
     "RM0456 10.5.2 on a package with SMPS: the HAL_PWREx_ConfigSupply poll sees REGS follow REGSEL")
 {
   supply_rig r{u575_with_smps()};
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB3ENR", "PWREN"}
+  });
   REQUIRE(r.regs() == 0);
   auto const start = r.now();
   CHECK(r.hal_config_supply(hal_set_regsel) != 0);
@@ -509,7 +513,11 @@ TEST_CASE("a snapshot taken while REGS is pending restores the switch at its due
 
 TEST_CASE("RM0456 10.10.3 on a package without SMPS: REGSEL is reserved, REGS stays 0, one warning")
 {
-  supply_rig                    r{u575()};
+  supply_rig r{u575()};
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB3ENR", "PWREN"}
+  });
   std::vector<core::log_record> logged;
   auto const                    sink =
       r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });

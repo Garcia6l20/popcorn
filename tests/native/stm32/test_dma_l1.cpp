@@ -1011,6 +1011,10 @@ TEST_CASE(
           {
               {"USART1", {"DR"}}
   }));
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "USART1EN"}
+  });
   auto& p       = peer(f, "USART1");
   p.drop_on_ack = false;
   write(f, to, 0);
@@ -1071,6 +1075,12 @@ TEST_CASE(
               {"RTC",  {}}
   },
           {{"TIM5", {"ARR"}}, {"RTC", {"BKP0R"}}}));
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB1ENR", "TIM5EN" },
+                     {"AHBENR",  "GPIOAEN"},
+                     {"CSR",     "RTCEN"  }
+  });
   auto&      tim5 = peer(f, "TIM5");
   auto&      rtc  = peer(f, "RTC");
   auto const copy = [&](std::uint32_t sizes, address at, std::uint32_t item) {

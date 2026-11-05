@@ -107,8 +107,12 @@ struct on_u575
     return u575();
   }
 
-  static constexpr std::string_view host       = "LPGPIO1";
-  static constexpr std::uint32_t    gpioi_pins = 0x00ff;
+  static constexpr std::string_view            host       = "LPGPIO1";
+  static constexpr std::uint32_t               gpioi_pins = 0x00ff;
+  static constexpr popcorn::testing::clock_bit gpdma1{"AHB1ENR", "GPDMA1EN"};
+  static constexpr popcorn::testing::clock_bit gpioa{"AHB2ENR1", "GPIOAEN"};
+  static constexpr popcorn::testing::clock_bit gtzc1_mpcbb1{"AHB1ENR", "GTZC1EN"};
+  static constexpr popcorn::testing::clock_bit gtzc1_tzic{"AHB1ENR", "GTZC1EN"};
 };
 
 struct on_h573
@@ -118,8 +122,12 @@ struct on_h573
     return h573();
   }
 
-  static constexpr std::string_view host       = "OTFDEC1";
-  static constexpr std::uint32_t    gpioi_pins = 0x0fff;
+  static constexpr std::string_view            host       = "OTFDEC1";
+  static constexpr std::uint32_t               gpioi_pins = 0x0fff;
+  static constexpr popcorn::testing::clock_bit gpdma1{"AHB1ENR", "GPDMA1EN"};
+  static constexpr popcorn::testing::clock_bit gpioa{"AHB2ENR", "GPIOAEN"};
+  static constexpr popcorn::testing::clock_bit gtzc1_mpcbb1{"AHB1ENR", "TZSC1EN"};
+  static constexpr popcorn::testing::clock_bit gtzc1_tzic{"AHB1ENR", "TZSC1EN"};
 };
 
 struct rig
@@ -227,6 +235,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpioa});
   CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
   CHECK(r.read("GPIOA", "SECCFGR", nonsecure_unpriv) == 0xffff);
   auto const moder = r.peek("GPIOA", "MODER");
@@ -273,6 +282,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, false};
+  popcorn::testing::enable_clocks(*r.target, {P::gpioa});
   CHECK(r.read("GPIOA", "SECCFGR", nonsecure_priv) == 0);
   r.write("GPIOA", "SECCFGR", 0, nonsecure_priv);
   CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
@@ -284,6 +294,10 @@ TEST_CASE_TEMPLATE(
 TEST_CASE("RM0456 23.5.1: a Secure EXTI line is hidden from Non-secure accesses")
 {
   rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB2ENR1", "GPIOAEN"}
+  });
   r.write("GPIOA", "MODER", 0, secure_priv);
   r.write("EXTI", "SECCFGR1", 1u << 3, nonsecure_priv);
   CHECK(r.peek("EXTI", "SECCFGR1") == 0);
@@ -385,6 +399,10 @@ TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own securit
   rig const r{
       true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
   };
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   auto const tim2 = bit("RCC", "APB1ENR1", "TIM2EN");
   auto const tim3 = bit("RCC", "APB1ENR1", "TIM3EN");
   r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
@@ -396,10 +414,13 @@ TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own securit
   CHECK(r.read("RCC", "APB1ENR1", nonsecure_priv) == tim3);
 
   auto const gpioa = bit("RCC", "AHB2ENR1", "GPIOAEN");
+  r.write("RCC", "AHB2ENR1", r.peek("RCC", "AHB2ENR1") & ~gpioa, secure_priv);
   auto const reset = r.peek("RCC", "AHB2ENR1");
   r.write("RCC", "AHB2ENR1", reset | gpioa, nonsecure_priv);
   CHECK((r.peek("RCC", "AHB2ENR1") & gpioa) == 0);
+  r.write("RCC", "AHB2ENR1", reset | gpioa, secure_priv);
   r.write("GPIOA", "SECCFGR", 0, secure_priv);
+  r.write("RCC", "AHB2ENR1", reset, secure_priv);
   r.write("RCC", "AHB2ENR1", reset | gpioa, nonsecure_priv);
   CHECK((r.peek("RCC", "AHB2ENR1") & gpioa) == gpioa);
 
@@ -451,6 +472,11 @@ TEST_CASE(
       rig const r{
           true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
       };
+      popcorn::testing::enable_clocks(
+          *r.target, {
+                         {"AHB1ENR", "GTZC1EN"},
+                         {"AHB3ENR", "GTZC2EN"}
+      });
       auto const bits = bit("RCC", one.reg, one.field);
       r.write(
           one.tzsc, one.sec_reg, secured ? bit(one.tzsc, one.sec_reg, one.sec) : 0, secure_priv);
@@ -461,6 +487,10 @@ TEST_CASE(
   rig const r{
       true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
   };
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"}
+  });
   auto const sdmmc = bit("RCC", "CCIPR2", "SDMMCSEL");
   auto const octo  = bit("RCC", "CCIPR2", "OCTOSPISEL");
   r.write("GTZC1_TZSC", "SECCFGR3", bit("GTZC1_TZSC", "SECCFGR3", "SDMMC2SEC"), secure_priv);
@@ -476,6 +506,11 @@ TEST_CASE("RM0456 11.5.1: RNGRST of a Secure RNG ignores a Non-secure write, ADC
   rig const r{
       true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
   };
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR",  "GTZC1EN"},
+                     {"AHB2ENR1", "RNGEN"  }
+  });
   auto const rngrst = bit("RCC", "AHB2RSTR1", "RNGRST");
   auto const adcrst = bit("RCC", "AHB2RSTR1", "ADC12RST");
   auto const htcr   = r.peek("RNG", "HTCR");
@@ -521,6 +556,11 @@ TEST_CASE("RM0456 11.5.1: every RSTR register ignores a Non-secure write of a Se
     rig const r{
         true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
     };
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"AHB1ENR", "GTZC1EN"},
+                       {"AHB3ENR", "GTZC2EN"}
+    });
     auto const sec = target.instance == "OCTOSPI1" ? std::string{"OCTOSPI1_REGSEC"}
                                                    : std::string{target.instance} + "SEC";
     auto const rst = bit("RCC", target.reg, std::string{target.instance} + "RST");
@@ -534,7 +574,12 @@ TEST_CASE("RM0456 11.5.1: every RSTR register ignores a Non-secure write of a Se
 
 TEST_CASE("RM0456 5.4: a Non-secure write to a Secure LPTIM1 held in reset still raises its event")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "GTZC2EN" },
+                     {"APB3ENR", "LPTIM1EN"}
+  });
   auto const sec   = bit("GTZC2_TZSC", "SECCFGR1", "LPTIM1SEC");
   auto const event = bit("GTZC2_TZIC", "SR1", "LPTIM1F");
   r.write("GTZC2_TZSC", "SECCFGR1", sec, secure_priv);
@@ -598,6 +643,11 @@ TEST_CASE("RM0456 11.8.51, P1: RCC_SECCFGR reads 0 and ignores writes under TZEN
 TEST_CASE("RM0456 10.8 Table 109: PWR_SECCFGR, RCC and GPIO secure the PWR bits")
 {
   rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB2ENR1", "GPIOAEN"},
+                     {"AHB3ENR",  "PWREN"  }
+  });
   r.write("PWR", "SECCFGR", bit("PWR", "SECCFGR", "LPMSEC"), nonsecure_priv);
   CHECK(r.peek("PWR", "SECCFGR") == 0);
   CHECK(r.peek("GTZC2_TZIC", "SR2") == bit("GTZC2_TZIC", "SR2", "PWRF"));
@@ -633,6 +683,10 @@ TEST_CASE("RM0456 10.8 Table 109: PWR_SECCFGR, RCC and GPIO secure the PWR bits"
 TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
 {
   rig const r{false};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "PWREN"}
+  });
   r.write("PWR", "SECCFGR", 0xf0ff, nonsecure_priv);
   CHECK(r.read("PWR", "SECCFGR", nonsecure_priv) == 0);
   CHECK(r.peek("PWR", "SECCFGR") == 0);
@@ -643,6 +697,10 @@ TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
 TEST_CASE("RM0456 10.8.2: PWR_PRIVCFGR needs a privileged access and its SPRIV bit a Secure one")
 {
   rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "PWREN"}
+  });
   r.write("PWR", "PRIVCFGR", 0x3, nonsecure_unpriv);
   CHECK(r.peek("PWR", "PRIVCFGR") == 0);
   r.write("PWR", "PRIVCFGR", 0x3, nonsecure_priv);
@@ -653,7 +711,11 @@ TEST_CASE("RM0456 10.8.2: PWR_PRIVCFGR needs a privileged access and its SPRIV b
 
 TEST_CASE("RM0456 10.8.1: PWR_SECCFGR is privileged with SPRIV, a Non-secure read raises no event")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "PWREN"}
+  });
   auto const lpm   = bit("PWR", "SECCFGR", "LPMSEC");
   auto const event = bit("GTZC2_TZIC", "SR2", "PWRF");
   CHECK(r.read("PWR", "SECCFGR", nonsecure_priv) == 0);
@@ -684,7 +746,11 @@ TEST_CASE("RM0456 11.5.1: RCC_SECCFGR raises the RCC event on a Non-secure write
 TEST_CASE(
     "RM0456 10.8 and 11.5, P1: an unprivileged write reaches word 0 of PWR and RCC under TZEN=0")
 {
-  rig const  r{false};
+  rig const r{false};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "PWREN"}
+  });
   auto const hsion = r.bit("RCC", "CR", "HSION");
   r.write("PWR", "CR1", 0x1, nonsecure_unpriv);
   CHECK(r.peek("PWR", "CR1") == 0x1);
@@ -695,7 +761,12 @@ TEST_CASE(
 TEST_CASE(
     "RM0456 11.5.1: a Secure SYSCFG or GPDMA1 reset clears SECCFGR, a Non-secure one is ignored")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GPDMA1EN"},
+                     {"APB3ENR", "SYSCFGEN"}
+  });
   auto const sys_rst = bit("RCC", "APB3RSTR", "SYSCFGRST");
   auto const sys_sec =
       bit("SYSCFG", "SECCFGR", "SYSCFGSEC") | bit("SYSCFG", "SECCFGR", "CLASSBSEC");
@@ -719,7 +790,12 @@ TEST_CASE(
 
 TEST_CASE("RM0456 15.2.2: SYSCFG held by SYSCFGRST still raises the event of a Non-secure write")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "GTZC2EN" },
+                     {"APB3ENR", "SYSCFGEN"}
+  });
   auto const rst   = bit("RCC", "APB3RSTR", "SYSCFGRST");
   auto const event = bit("GTZC2_TZIC", "SR2", "SYSCFGF");
   auto const lock  = bit("SYSCFG", "SECCFGR", "CLASSBSEC");
@@ -740,6 +816,12 @@ TEST_CASE("RM0456 15.2.2: SYSCFG held by SYSCFGRST still raises the event of a N
 TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bits")
 {
   rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB2ENR1", "GPIOBEN" },
+                     {"AHB3ENR",  "GTZC2EN" },
+                     {"APB3ENR",  "SYSCFGEN"}
+  });
   r.write("SYSCFG", "SECCFGR", bit("SYSCFG", "SECCFGR", "CLASSBSEC"), nonsecure_priv);
   CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
   auto const event = bit("GTZC2_TZIC", "SR2", "SYSCFGF");
@@ -774,6 +856,10 @@ TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bi
 TEST_CASE("RM0456 15.3.1, P1: SYSCFG_SECCFGR is RAZ/WI under TZEN=0")
 {
   rig const r{false};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"APB3ENR", "SYSCFGEN"}
+  });
   r.write("SYSCFG", "SECCFGR", 0xb, nonsecure_priv);
   CHECK(r.read("SYSCFG", "SECCFGR", nonsecure_priv) == 0);
   CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
@@ -800,7 +886,11 @@ TEST_CASE("SYSCFG storage registers log one warning per register on the first la
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    rig const                     r{trustzone};
+    rig const r{trustzone};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "SYSCFGEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -818,7 +908,11 @@ TEST_CASE("SYSCFG storage registers log one warning per register on the first la
 
 TEST_CASE("RM0456 15.2.2 Table 131: a SYSCFG write the TrustZone rules refuse logs no warning")
 {
-  rig const                     r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"APB3ENR", "SYSCFGEN"}
+  });
   std::vector<core::log_record> logged;
   auto const                    sink =
       r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -835,7 +929,11 @@ TEST_CASE("under strict_peripherals a SYSCFG storage register write raises model
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    rig const  r{trustzone, {.tzen = true}, true};
+    rig const r{trustzone, {.tzen = true}, true};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "SYSCFGEN"}
+    });
     auto const at = r.at("SYSCFG", "CFGR2");
     CHECK_THROWS_AS(
         std::ignore = r.bus->services().write(at, 4, 0x1, secure_priv), popcorn::model_error);
@@ -854,7 +952,11 @@ TEST_CASE(
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    rig const                     r{trustzone, {.tzen = true}, true};
+    rig const r{trustzone, {.tzen = true}, true};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "SYSCFGEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -878,7 +980,11 @@ TEST_CASE(
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    rig const  r{on_h573{}, trustzone, {.tzen = true}, true};
+    rig const r{on_h573{}, trustzone, {.tzen = true}, true};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "SBSEN"}
+    });
     auto const at     = r.at("SBS", "SBS_PMCR");
     auto const before = r.peek("SBS", "SBS_PMCR");
     CHECK_THROWS_AS(
@@ -903,7 +1009,11 @@ TEST_CASE(
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    rig const                     r{on_h573{}, trustzone};
+    rig const r{on_h573{}, trustzone};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "SBSEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -948,6 +1058,10 @@ TEST_CASE("a host view access to a SYSCFG storage register raises model_error, S
 TEST_CASE("a SYSCFG snapshot holds no model bytes and restores from the SYSCFG storage")
 {
   rig const r{false};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"APB3ENR", "SYSCFGEN"}
+  });
   r.write("SYSCFG", "CFGR2", 0x1, nonsecure_priv);
   auto const taken = r.target->snapshot();
   CHECK(std::ranges::none_of(taken.data().models, [](core::snapshot_part const& part) {
@@ -1041,6 +1155,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   open_destination_block(r);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
   fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
@@ -1061,6 +1176,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   open_destination_block(r);
   fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
@@ -1081,6 +1197,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   open_destination_block(r);
   r.write("GPDMA1", "SECCFGR", 1, secure_priv);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
@@ -1105,6 +1222,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   open_destination_block(r);
   r.write("GPDMA1", "SECCFGR", 1, secure_priv);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
@@ -1129,7 +1247,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1});
   auto const event = r.bit("GTZC1_TZIC", "SR4", "GPDMA1F");
   r.write("RCC", "AHB1RSTR", r.bit("RCC", "AHB1RSTR", "GPDMA1RST"), secure_priv);
   REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
@@ -1146,6 +1265,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_tzic});
   r.write("GPDMA1", "SECCFGR", 1, nonsecure_priv);
   CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
   auto const event = r.bit("GTZC1_TZIC", "SR4", "GPDMA1F");
@@ -1197,6 +1317,11 @@ TEST_CASE(
     "popcorn's rule")
 {
   rig const r{false};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GPDMA1EN"},
+                     {"AHB3ENR", "LPDMA1EN"}
+  });
   r.write("GPDMA1", "RCFGLOCKR", 0xffff, nonsecure_priv);
   CHECK(r.read("GPDMA1", "RCFGLOCKR", nonsecure_priv) == 0);
   r.write("LPDMA1", "RCFGLOCKR", 0xf, nonsecure_priv);
@@ -1213,6 +1338,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1});
   r.write("GPDMA1", "SECCFGR", 1, secure_priv);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
   fill(r, sram1_secure_block + 0x100, 0x5555'0000, 4);
@@ -1239,6 +1365,10 @@ TEST_CASE_TEMPLATE(
 TEST_CASE("RM0456 18.8.1: an LPDMA Secure channel's registers are RAZ/WI to Non-secure accesses")
 {
   rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB3ENR", "LPDMA1EN"}
+  });
   r.write("LPDMA1", "SECCFGR", 0x2, secure_priv);
   r.write("LPDMA1", "C1SAR", 0x2800'0000, secure_priv);
   CHECK(r.read("LPDMA1", "C1SAR", nonsecure_priv) == 0);
@@ -1252,7 +1382,11 @@ TEST_CASE("Q9: RTC_SECCFGR and TAMP_SECCFGR stay storage, one warning each under
   for(auto const trustzone : {true, false})
   {
     CAPTURE(trustzone);
-    rig const                     r{trustzone};
+    rig const r{trustzone};
+    popcorn::testing::enable_clocks(
+        *r.target, {
+                       {"APB3ENR", "RTCAPBEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -1275,7 +1409,11 @@ TEST_CASE("Q9: RTC_SECCFGR and TAMP_SECCFGR stay storage, one warning each under
 TEST_CASE(
     "RM0456 11.5.1: BDRST and the RTC clock bits are Secure with a Secure RTC or TAMP function")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"APB3ENR", "RTCAPBEN"}
+  });
   auto const reset = bit("RCC", "BDCR", "BDRST");
   auto const pulse = [&](bus_attrs attrs) {
     r.write("RCC", "BDCR", r.peek("RCC", "BDCR") | reset, attrs);
@@ -1309,7 +1447,9 @@ TEST_CASE(
   auto const clock = bit("RCC", "APB3ENR", "RTCAPBEN");
   r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") & ~clock, nonsecure_priv);
   REQUIRE((r.peek("RCC", "APB3ENR") & clock) == 0);
+  r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") | clock, secure_priv);
   r.write("RTC", "SECCFGR", bit("RTC", "SECCFGR", "SEC"), secure_priv);
+  r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") & ~clock, secure_priv);
   r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") | clock, nonsecure_priv);
   CHECK((r.peek("RCC", "APB3ENR") & clock) == 0);
   r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") | clock, secure_priv);
@@ -1323,7 +1463,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1});
   auto const item   = sram1_secure_block + 0x300;
   auto const target = sram1_secure_block + 0x400;
   r.write("GPDMA1", "SECCFGR", 1, secure_priv);
@@ -1352,7 +1493,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const item   = sram1_secure_block + 0x300;
   auto const target = sram1_nonsecure_block + 0x180;
   open_destination_block(r);
@@ -1376,7 +1518,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const item    = sram1_nonsecure_block + 0x1c0;
   auto const secured = r.bit("GPDMA1", "C0TR1", "SSEC") | r.bit("GPDMA1", "C0TR1", "DSEC");
   auto const reused  = sram1_nonsecure_block + 0x180;
@@ -1441,6 +1584,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpioa});
   r.write("GPIOA", "SECCFGR", 0xffff & ~(1u << 5), secure_priv);
   r.write("GPIOA", "MODER", r.peek("GPIOA", "MODER") & ~(0xfu << 8), secure_priv);
   r.port("GPIOA").drive(4, true);
@@ -1469,6 +1613,7 @@ TEST_CASE_TEMPLATE(
     on_h573)
 {
   rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   open_destination_block(r);
   fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
   copy(r, sram1_nonsecure_block, sram1_nonsecure_block + 0x100);
@@ -1482,7 +1627,12 @@ TEST_CASE_TEMPLATE(
 
 TEST_CASE("RM0456 10.8 Table 109: PWR_UCPDR is RAZ/WI to Non-secure while the TZSC secures UCPD1")
 {
-  rig const  r{true};
+  rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.target, {
+                     {"AHB1ENR", "GTZC1EN"},
+                     {"AHB3ENR", "PWREN"  }
+  });
   auto const ucpd = bit("PWR", "UCPDR", "UCPD_DBDIS");
   r.write("PWR", "UCPDR", ucpd, nonsecure_priv);
   REQUIRE(r.peek("PWR", "UCPDR") == ucpd);
@@ -1502,7 +1652,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const to = sram1_nonsecure_block + 0x100;
   open_destination_block(r);
   fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
@@ -1532,7 +1683,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1});
   auto const to = sram1_secure_block + 0x100;
   r.write("GPDMA1", "SECCFGR", 1, secure_priv);
   fill(r, sram1_secure_block, 0xc0de'0000, 4);
@@ -1564,7 +1716,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const secured = r.bit("GPDMA1", "C0TR1", "SSEC") | r.bit("GPDMA1", "C0TR1", "DSEC");
   auto const to      = sram1_nonsecure_block + 0x100;
   open_destination_block(r);
@@ -1594,7 +1747,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const to = sram1_nonsecure_block + 0x100;
   fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
   fill(r, to, 0xaaaa'0000, 4);
@@ -1621,7 +1775,8 @@ TEST_CASE_TEMPLATE(
     on_u575,
     on_h573)
 {
-  rig const  r{P{}, true};
+  rig const r{P{}, true};
+  popcorn::testing::enable_clocks(*r.target, {P::gpdma1, P::gtzc1_mpcbb1});
   auto const from = sram1_nonsecure_block + 0x1f8;
   auto const to   = sram1_nonsecure_block + 0x100;
   open_destination_block(r);

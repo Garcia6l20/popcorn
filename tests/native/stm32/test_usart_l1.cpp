@@ -435,6 +435,10 @@ TEST_CASE(
   {
     CAPTURE(ready);
     rig r{"idle"};
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "USART1EN"}
+    });
     r.write(::usart1 + 0x08, 18);
     r.write(::usart1 + cr3, 1u << 9);
     r.write(::usart1 + cr1, ue | te);
@@ -569,6 +573,10 @@ TEST_CASE("RM0038 27.3.13: DMA1 channel 5 takes each received word from RXNE")
 TEST_CASE("RM0038 27.6.1: IDLE rises one frame after the last frame, SR then DR clears it")
 {
   rig r{"main"};
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "USART1EN"}
+  });
   r.parked_receiver();
   std::array<periph::host_frame, 1> frames{{{.data = 'q'}}};
   auto const                        t0 = r.now_ps();
@@ -639,6 +647,10 @@ TEST_CASE("RM0038 27.6.6: EIE raises USART1_IRQn on ORE only with DMAR")
 TEST_CASE("a snapshot between the SR read and the DR read keeps the clear sequence")
 {
   rig r{"main"};
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "USART1EN"}
+  });
   r.parked_receiver();
   std::array<periph::host_frame, 1> frames{{{.data = 'q'}}};
   auto const                        t0 = r.now_ps();
@@ -689,6 +701,10 @@ TEST_CASE(
   {
     CAPTURE(read_first);
     rig r{"main"};
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "USART1EN"}
+    });
     r.f->set("pc", sym(firmware, "idle"));
     r.write(usart1 + 0x08, 18);
     r.write(usart1 + cr1, ue | re | pce);
@@ -722,6 +738,10 @@ TEST_CASE("RM0038 27.6.1: an SR read then a DR read clears PE, FE and NF and kee
   {
     CAPTURE(flag);
     rig r{"main"};
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "USART1EN"}
+    });
     r.f->set("pc", sym(firmware, "idle"));
     r.write(usart1 + 0x08, 18);
     r.write(usart1 + cr1, ue | re | pce);
@@ -742,6 +762,10 @@ TEST_CASE("RM0038 27.6.1: a DR write with no SR read since TC rose sends and lea
   {
     CAPTURE(read_first);
     rig r{"main"};
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "USART1EN"}
+    });
     r.f->set("pc", sym(firmware, "idle"));
     r.write(usart1 + 0x08, 18);
     r.write(usart1 + cr1, ue | te);

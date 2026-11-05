@@ -3,6 +3,7 @@
 #include "stm32l4xx_ll_bus.h"
 #include "stm32l4xx_ll_cortex.h"
 #include "stm32l4xx_ll_pwr.h"
+#include "stm32l4xx_ll_rcc.h"
 
 #define POLL(condition) \
   do                    \
@@ -46,6 +47,7 @@ int main(void)
   LOG(LL_PWR_GetRegulVoltageScaling());
   LL_PWR_EnableBkUpAccess();
   LOG(READ_BIT(PWR->CR1, PWR_CR1_DBP));
+  LL_RCC_EnableRTC();
   RTC->BKP0R = 0xA5C3u;
   LOG(RTC->BKP0R);
   DONE();

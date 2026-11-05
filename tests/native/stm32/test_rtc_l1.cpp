@@ -639,6 +639,10 @@ TEST_CASE("RM0038 6.1.2: a power-on and a brown-out reset the calendar and the b
 TEST_CASE("RM0038 20.3.5: the backup registers take CPU and debugger writes with DBP 0, key locked")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"CSR", "RTCEN"}
+  });
   REQUIRE(r.f->field("PWR", "CR", "DBP") == 0);
   r.cpu_write("BKP1R", 0xA5A5'0001);
   r.write("BKP2R", 0xA5A5'0002);
@@ -808,18 +812,26 @@ TEST_CASE(
 TEST_CASE("RM0038 20.3.7 and 6.1.3: BKP0R keeps its value through a system reset, RTCRST clears it")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"CSR", "RTCEN"}
+  });
   r.cpu_write("BKP0R", 0xCAFE'0000);
   r.f->target->reset(reset_kind::software);
   r.f->set("pc", sym(r.elf, "idle"));
   CHECK(r.cpu_read("BKP0R") == 0xCAFE'0000);
   r.write("CSR", r.read("CSR", "RCC") | (1u << 23), "RCC");
   r.write("CSR", r.read("CSR", "RCC") & ~(1u << 23), "RCC");
-  CHECK(r.cpu_read("BKP0R") == 0);
+  CHECK(r.read("BKP0R") == 0);
 }
 
 TEST_CASE("coverage reports CPU reads of TSTR, CALIBR and TAFCR as storage_only and TR as served")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"CSR", "RTCEN"}
+  });
   r.f->target->enable_coverage({}, true);
   for(auto const* name : {"TSTR", "CALIBR", "TAFCR", "TR"})
   {

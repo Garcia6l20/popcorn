@@ -331,7 +331,11 @@ TEST_CASE(
     "FB_MODE raises under strict, SYSCFGRST keeps MEMRMP, SCSR, CFGR2 and SWPR inferred")
 {
   {
-    auto const                    f = parked();
+    auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"APB2ENR", "SYSCFGEN"}
+    });
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -362,6 +366,10 @@ TEST_CASE(
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
   auto const f               = parked(l476rc(), std::move(options));
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   CHECK_THROWS_AS((void)cpu_store(f, memrmp, 0x100), popcorn::model_error);
   CHECK(f.target->peripheral("SYSCFG").peek(0) == 0);
 }
@@ -443,6 +451,10 @@ TEST_CASE(
   {
     CAPTURE(hpre);
     auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"APB2ENR", "SYSCFGEN"}
+    });
     write(f, rcc_cfgr, hpre << 4);
     mark(f);
     unlock(f);
@@ -478,6 +490,10 @@ TEST_CASE(
   {
     CAPTURE(keys.size());
     auto const f = parked();
+    popcorn::testing::enable_clocks(
+        *f.target, {
+                       {"APB2ENR", "SYSCFGEN"}
+    });
     mark(f);
     unlock(f, keys);
     CHECK(read(f, skr) == 0);
@@ -488,6 +504,10 @@ TEST_CASE(
     CHECK_FALSE(erased(f));
   }
   auto const f = parked();
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   mark(f);
   unlock(f);
   REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
@@ -508,6 +528,10 @@ TEST_CASE(
     "keeps the running erase and locks the key, inferred")
 {
   auto const f = parked();
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   mark(f);
   unlock(f);
   REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
@@ -537,6 +561,10 @@ TEST_CASE(
   CHECK(read(f, scsr) == 0);
   unlock(f);
   f.target->reset(popcorn::reset_kind::software);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   REQUIRE(cpu_store(f, scsr, 1).reason == stop_reason::user);
   CHECK(read(f, scsr) == 0);
 }
@@ -544,6 +572,10 @@ TEST_CASE(
 TEST_CASE("an L4 SYSCFG snapshot saves the key stage and a running erase, the restore completes it")
 {
   auto const f = parked();
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB2ENR", "SYSCFGEN"}
+  });
   CHECK_FALSE(f.target->model("SYSCFG")->stateless());
   mark(f);
   unlock(f);

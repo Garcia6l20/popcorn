@@ -114,6 +114,7 @@ void USART1_IRQHandler(void)
 
 int main(void)
 {
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
   LOG(USART1->SR);
   start_usart1();
   send_poll(USART1);

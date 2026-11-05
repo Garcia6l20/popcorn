@@ -643,7 +643,11 @@ TEST_CASE("an LPDMA1 address outside its reach is a model_error under strict per
 TEST_CASE(
     "LPDMA1 reaches SRAM4 and the SRD peripherals, secure aliases included, without a warning")
 {
-  auto                          f = machine(true);
+  auto f = machine(true);
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "LPUART1EN"}
+  });
   std::vector<core::log_record> logged;
   auto const sink = f.target->add_log_sink([&](core::log_record const& r) { logged.push_back(r); });
   constexpr std::array<popcorn::address, 4> sources{

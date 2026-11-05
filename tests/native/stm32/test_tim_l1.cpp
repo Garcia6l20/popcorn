@@ -1843,5 +1843,10 @@ TEST_CASE(
 
 TEST_CASE("an L152RE TIM6 and TIM7 read offset 0x08 as 0 and drop a write there with one warning")
 {
-  popcorn::testing::serves_reserved_slave_word(l152re(), firmware, "DAC", {"TIM6", "TIM7"});
+  popcorn::testing::serves_reserved_slave_word(
+      l152re(), firmware, "DAC",
+      {
+          "TIM6", "TIM7"
+  },
+      {{"APB1ENR", "TIM6EN"}, {"APB1ENR", "TIM7EN"}});
 }

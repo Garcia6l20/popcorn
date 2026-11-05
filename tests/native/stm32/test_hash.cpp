@@ -1746,8 +1746,12 @@ TEST_CASE("a DMA suspend per RM0456 51.4.8 completes the current block before DM
       CAPTURE(s.beats);
       CAPTURE(s.at);
       hash_rig const r;
-      dma_feed       d{r, s.beats};
-      auto const     control = (algo << 17) | (2u << 4);
+      popcorn::testing::enable_clocks(
+          *r.f.target, {
+                           {"AHB2ENR1", "HASHEN"}
+      });
+      dma_feed   d{r, s.beats};
+      auto const control = (algo << 17) | (2u << 4);
       d.stage(message);
       r.write(str, 0);
       r.write(cr, cr_init | cr_dmae | control);
@@ -1800,8 +1804,12 @@ TEST_CASE("a snapshot taken while a DMA suspend holds or launched its block resu
         CAPTURE(s.beats);
         CAPTURE(launched);
         hash_rig const r;
-        dma_feed       d{r, s.beats};
-        auto const     control = (algo << 17) | (2u << 4);
+        popcorn::testing::enable_clocks(
+            *r.f.target, {
+                             {"AHB2ENR1", "HASHEN"}
+        });
+        dma_feed   d{r, s.beats};
+        auto const control = (algo << 17) | (2u << 4);
         d.stage(message);
         r.write(str, 0);
         r.write(cr, cr_init | cr_dmae | control);
@@ -1851,8 +1859,12 @@ TEST_CASE("an HMAC message phase fed by DMA suspends and resumes per RM0456 51.4
     auto const     c     = rfc_vector(algo, 7);
     auto const     words = static_cast<std::uint32_t>((c.data.size() + 3) / 4);
     hash_rig const r;
-    dma_feed       d{r};
-    auto const     control = cr_mode | cr_lkey | (algo << 17) | (2u << 4);
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"AHB2ENR1", "HASHEN"}
+    });
+    dma_feed   d{r};
+    auto const control = cr_mode | cr_lkey | (algo << 17) | (2u << 4);
     REQUIRE(words > 17);
     d.stage(c.data);
     r.hmac_begin(algo, true);
@@ -1895,8 +1907,12 @@ TEST_CASE("a channel completing while a suspend holds the request drops it and e
       CAPTURE(algo);
       CAPTURE(multiple);
       hash_rig const r;
-      dma_feed       d{r};
-      auto const     control = (multiple ? cr_mdmat : 0u) | (algo << 17) | (2u << 4);
+      popcorn::testing::enable_clocks(
+          *r.f.target, {
+                           {"AHB2ENR1", "HASHEN"}
+      });
+      dma_feed   d{r};
+      auto const control = (multiple ? cr_mdmat : 0u) | (algo << 17) | (2u << 4);
       d.stage(message);
       r.write(str, 0);
       r.write(cr, cr_init | cr_dmae | control);

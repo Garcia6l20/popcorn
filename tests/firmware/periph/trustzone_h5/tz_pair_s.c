@@ -45,6 +45,8 @@ __attribute__((noipa)) int main(void)
       SAU_RLAR_ENABLE_Msk | SAU_RLAR_NSC_Msk);
   sau_region(3, PERIPH_BASE_NS, NS_PERIPH_END, SAU_RLAR_ENABLE_Msk);
   SAU->CTRL = SAU_CTRL_ENABLE_Msk;
+  RCC_S->AHB1ENR |= RCC_AHB1ENR_TZSC1EN;
+  (void)RCC_S->AHB1ENR;
   for(uint32_t word = 0; word < SRAM1_WORDS; ++word)
   {
     GTZC_MPCBB1_S->SECCFGR[word] = 0;

@@ -188,7 +188,11 @@ TEST_CASE(
     "warns once per register")
 {
   otg_rig const r;
-  auto const    reset = r.peek(gpwrdn);
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  auto const reset = r.peek(gpwrdn);
   REQUIRE((reset & adpmen) == 0);
   REQUIRE(r.cpu_store(gpwrdn, adpmen).reason == popcorn::stop_reason::user);
   REQUIRE(r.cpu_store(gpwrdn, adpmen).reason == popcorn::stop_reason::user);
@@ -203,7 +207,11 @@ TEST_CASE(
     "and keeps the reset value")
 {
   otg_rig const r{true};
-  auto const    reset = r.peek(gpwrdn);
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  auto const reset = r.peek(gpwrdn);
   CHECK_THROWS_AS(static_cast<void>(r.cpu_store(gpwrdn, adpmen)), popcorn::model_error);
   CHECK(r.peek(gpwrdn) == reset);
 }

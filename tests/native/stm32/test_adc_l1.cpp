@@ -2340,6 +2340,10 @@ TEST_CASE(
   {
     CAPTURE(desc.part);
     adc_rig const r{desc};
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB2ENR", "ADC1EN"}
+    });
     r.port().drive(1, 750'000);
     r.port().drive(2, 1'500'000);
     r.port().drive(3, 2'250'000);
@@ -2366,6 +2370,10 @@ TEST_CASE(
     "SWSTART waits for OVR to clear, inferred, the valid result still transfers")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(0, 1'500'000);
   r.power();
   auto const start = r.now();
@@ -2397,6 +2405,10 @@ TEST_CASE(
   {
     CAPTURE(selection);
     adc_rig const r;
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB2ENR", "ADC1EN"}
+    });
     r.port().drive(1, 750'000);
     r.power();
     r.write(smpr3, 7u << 3);
@@ -2426,6 +2438,10 @@ TEST_CASE(
 TEST_CASE("a DMA bit set while a result waits unread raises the request at once")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(5, 1'500'000);
   r.power();
   r.write(sqr5, 5);
@@ -2444,6 +2460,10 @@ TEST_CASE("a DMA bit set while a result waits unread raises the request at once"
 TEST_CASE("ADC1RST ends the DDS 0 stop: DMA requests start again after the reset")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.power();
   r.dma_channel1(1, dma_half | dma_en);
   r.write(cr2, adon | dma | swstart);
@@ -2583,6 +2603,10 @@ TEST_CASE(
     "takes all three, no OVR")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(1, 750'000);
   r.port().drive(2, 1'500'000);
   r.port().drive(3, 2'250'000);
@@ -2613,6 +2637,10 @@ TEST_CASE(
   {
     CAPTURE(selection);
     adc_rig const r;
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB2ENR", "ADC1EN"}
+    });
     r.port().drive(1, 750'000);
     r.power();
     r.write(smpr3, 7u << 3);
@@ -2644,6 +2672,10 @@ TEST_CASE(
   {
     CAPTURE(interrupt);
     adc_rig const r;
+    popcorn::testing::enable_clocks(
+        *r.f.target, {
+                         {"APB2ENR", "ADC1EN"}
+    });
     r.port().drive(1, 2'900'000);
     r.port().drive(2, 1'500'000);
     r.port().drive(3, 750'000);
@@ -2680,6 +2712,10 @@ TEST_CASE(
     "trigger converts from rank 1, inferred")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(1, 2'900'000);
   r.port().drive(2, 1'500'000);
   r.port().drive(3, 750'000);
@@ -2726,6 +2762,10 @@ TEST_CASE(
 TEST_CASE("with DDS 0 after the last transfer an overrun leaves SWSTART working, as with DMA 0")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(5, 1'500'000);
   r.power();
   r.write(sqr5, 5);
@@ -2748,6 +2788,10 @@ TEST_CASE(
     "ADC's later DMA scan requesting")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(5, 1'500'000);
   r.power();
   r.write(sqr5, 5);
@@ -2768,6 +2812,10 @@ TEST_CASE(
     "channel 1 going")
 {
   adc_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB2ENR", "ADC1EN"}
+  });
   r.port().drive(5, 1'500'000);
   r.power();
   r.write(sqr5, 5);

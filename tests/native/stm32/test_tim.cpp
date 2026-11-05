@@ -1599,6 +1599,8 @@ void refused_under_strict(std::span<strict_leg const> legs)
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   b.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
   b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 1);
+  b.set("RCC", "RCC_APB2ENR", "TIM16EN", 1);
+  b.set("RCC", "RCC_APB2ENR", "TIM17EN", 1);
   auto* const port = f.model_of<cpu_port>("CRC");
   REQUIRE(port != nullptr);
   auto const field_value = [&](strict_leg const& leg) {
@@ -4242,7 +4244,14 @@ TEST_CASE(
     "a U575 timer with no SMCR reads offset 0x08 as 0 and drops a write there with one warning")
 {
   popcorn::testing::serves_reserved_slave_word(
-      u575(), "rcc_ll", "CRC", {"TIM6", "TIM7", "TIM16", "TIM17"});
+      u575(), "rcc_ll", "CRC",
+      {
+          "TIM6", "TIM7", "TIM16", "TIM17"
+  },
+      {{"APB1ENR1", "TIM6EN"},
+       {"APB1ENR1", "TIM7EN"},
+       {"APB2ENR", "TIM16EN"},
+       {"APB2ENR", "TIM17EN"}});
 }
 
 TEST_CASE(
@@ -4250,5 +4259,13 @@ TEST_CASE(
 {
   popcorn::testing::serves_reserved_slave_word(
       popcorn::testing::h573(), "h573_rcc_ll", "CRC",
-      {"TIM6", "TIM7", "TIM13", "TIM14", "TIM16", "TIM17"});
+      {
+          "TIM6", "TIM7", "TIM13", "TIM14", "TIM16", "TIM17"
+  },
+      {{"APB1LENR", "TIM6EN"},
+       {"APB1LENR", "TIM7EN"},
+       {"APB1LENR", "TIM13EN"},
+       {"APB1LENR", "TIM14EN"},
+       {"APB2ENR", "TIM16EN"},
+       {"APB2ENR", "TIM17EN"}});
 }

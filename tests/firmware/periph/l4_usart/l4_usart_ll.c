@@ -92,8 +92,8 @@ void UART4_IRQHandler(void)
 
 int main(void)
 {
-  LOG(USART2->ISR);
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
+  LOG(USART2->ISR);
   SystemCoreClockUpdate();
   init(USART2, SystemCoreClock);
   send_poll(USART2);

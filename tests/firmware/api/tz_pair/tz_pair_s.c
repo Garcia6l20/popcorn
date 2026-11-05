@@ -12,6 +12,8 @@
 #define SAU_RLAR        0xE000EDE0u
 #define SCB_NS_VTOR     0xE002ED08u
 #define MPCBB1_SECCFGR0 0x50032D00u
+#define RCC_AHB1ENR_S   0x56020C88u
+#define RCC_GTZC1EN     (1u << 24)
 #define SRAM1_WORDS     12u
 #define NS_VECTORS      0x08010000u
 #define NS_FLASH_END    0x080FFFE0u
@@ -54,6 +56,8 @@ __attribute__((noipa)) int main(void)
   sau_region(
       2, (uint32_t)&__sgstubs_start, (uint32_t)&__sgstubs_end - 1u, REGION_ENABLE | REGION_NSC);
   REG32(SAU_CTRL) = 1u;
+  REG32(RCC_AHB1ENR_S) |= RCC_GTZC1EN;
+  (void)REG32(RCC_AHB1ENR_S);
   for(uint32_t word = 0; word < SRAM1_WORDS; ++word)
   {
     REG32(MPCBB1_SECCFGR0 + 4u * word) = 0;

@@ -1195,6 +1195,10 @@ TEST_CASE("SPI4RST moves the frame generation past the event queued before it, t
 TEST_CASE("coverage classifies SPI_CFG2 as served and SPI_I2SCFGR as unimplemented")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.f->target->enable_coverage({}, true);
   constexpr popcorn::address stub = 0x2000'0200;
   REQUIRE(r.f->target->mem().write(stub, 4, 0xE7FE'6802).has_value());

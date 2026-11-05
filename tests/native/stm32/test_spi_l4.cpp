@@ -398,6 +398,10 @@ TEST_CASE("RM0351 42.6.2: a DS write of 0000 to 0010 stores 0111, 0011 and above
 TEST_CASE("RM0351 42.4.14: two DS 8 frames queued with CRCNEXT 1 send the CRC after both")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | crcen);
   r.write(spi1 + cr1, master | crcen | spe);
   auto const t0 = r.now_ps();
@@ -414,6 +418,10 @@ TEST_CASE("RM0351 42.4.14: two DS 8 frames queued with CRCNEXT 1 send the CRC af
 TEST_CASE("RM0351 42.4.10: with FRXTH 1 each frame sets RXNE, an 8-bit read pops one byte")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth);
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
@@ -432,6 +440,10 @@ TEST_CASE("RM0351 42.4.10: with FRXTH 1 each frame sets RXNE, an 8-bit read pops
 TEST_CASE("RM0351 Figure 466: a 16-bit write sends two DS 8 frames, FRXTH 0 reads both at once")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   r.cpu_write(spi1 + dr, 0x2211, 2);
@@ -447,6 +459,10 @@ TEST_CASE("RM0351 Figure 466: a 16-bit write sends two DS 8 frames, FRXTH 0 read
 TEST_CASE("inferred: a 32-bit DR write and read pack two DS 8 frames as the 16-bit access does")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   r.cpu_write(spi1 + dr, 0x4433'2211);
   r.idle_to(r.now_ps() + 3 * frame_ps(8));
@@ -458,6 +474,10 @@ TEST_CASE("inferred: a 32-bit DR write and read pack two DS 8 frames as the 16-b
 TEST_CASE("RM0351 42.4.9: the RXFIFO keeps its bytes across SPE 0, the TXFIFO too, inferred")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth);
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
@@ -483,6 +503,10 @@ TEST_CASE(
     "bytes inferred")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   r.cpu_write(spi1 + dr, 0x2211, 2);
@@ -500,6 +524,10 @@ TEST_CASE(
 TEST_CASE("RM0351 42.4.10: TXE is 1 up to 2 bytes queued, FTLVL reads 11 at 3 and 4 bytes")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master);
   for(std::uint32_t index = 0; index < 4; ++index)
   {
@@ -513,6 +541,10 @@ TEST_CASE("RM0351 42.4.10: TXE is 1 up to 2 bytes queued, FTLVL reads 11 at 3 an
 TEST_CASE("inferred: a byte write to a full TXFIFO is dropped, logged once")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master);
   for(std::uint32_t index = 0; index < 6; ++index)
   {
@@ -530,6 +562,10 @@ TEST_CASE(
     "stored frames are sent")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master);
   for(auto const byte : {0x01u, 0x02u, 0x03u})
   {
@@ -548,6 +584,10 @@ TEST_CASE(
     "frames stay aligned")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(16) | ssoe);
   r.write(spi1 + cr1, master);
   r.cpu_write(spi1 + dr, 0xBEEF, 2);
@@ -566,6 +606,10 @@ TEST_CASE(
 TEST_CASE("checklist 53 policy: under strict_peripherals a DR write that does not fit raises")
 {
   rig strict{true};
+  popcorn::testing::enable_clocks(
+      *strict.f->target, {
+                             {"APB2ENR", "SPI1EN"}
+  });
   strict.write(spi1 + cr1, master);
   for(auto const byte : {0x01u, 0x02u, 0x03u})
   {
@@ -580,6 +624,10 @@ TEST_CASE("checklist 53 policy: under strict_peripherals a DR write that does no
 TEST_CASE("RM0351 42.4.10: a DS 16 frame takes two bytes of each FIFO")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(16) | ssoe);
   r.write(spi1 + cr1, master);
   r.cpu_write(spi1 + dr, 0xBEEF, 2);
@@ -603,6 +651,10 @@ TEST_CASE(
     "stays 0 until the frame is whole")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(16) | ssoe);
   r.write(spi1 + cr1, master | spe);
   r.cpu_write(spi1 + dr, 0xAD, 1);
@@ -618,6 +670,10 @@ TEST_CASE(
 TEST_CASE("RM0351 42.4.10: OVR at the fifth DS 8 frame, the RXFIFO keeps the first four")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   for(std::uint32_t index = 0; index < 5; ++index)
@@ -635,6 +691,10 @@ TEST_CASE("RM0351 42.4.10: OVR at the fifth DS 8 frame, the RXFIFO keeps the fir
 TEST_CASE("RM0351 42.4.11: a DR read, then an SR read clears OVR")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   for(std::uint32_t index = 0; index < 5; ++index)
@@ -652,6 +712,10 @@ TEST_CASE("RM0351 42.4.11: a DR read, then an SR read clears OVR")
 TEST_CASE("RM0351 42.4.10: a DS 16 frame with one byte of room sets OVR")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(16) | ssoe);
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
@@ -680,6 +744,10 @@ TEST_CASE("RM0351 42.6.2 DS: DS 4 and DS 12 frames are masked and due after DS +
   {
     CAPTURE(bits);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.device->replies = {0xFFFF};
     r.write(spi1 + cr2, ds(bits) | ssoe | (bits <= 8 ? frxth : 0));
     r.write(spi1 + cr1, (master & ~(7u << 3)) | br << 3 | spe);
@@ -697,6 +765,10 @@ TEST_CASE("RM0351 42.6.2 DS: DS 4 and DS 12 frames are masked and due after DS +
 TEST_CASE("RM0351 42.4.10 note: controller receive-only keeps BSY 1 in RXONLY and BIDIMODE")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | rxonly | spe);
   CHECK((r.read(spi1 + sr) & bsy) == bsy);
   r.write(spi1 + cr1, master);
@@ -716,6 +788,10 @@ TEST_CASE("RM0351 42.4.10 note: controller receive-only keeps BSY 1 in RXONLY an
 TEST_CASE("inferred: a read of an empty RXFIFO slot returns 0, DR + 1 moves no FIFO byte")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth);
   r.write(spi1 + cr1, master | spe);
   r.cpu_write(spi1 + dr + 1, 0x77, 1);
@@ -733,6 +809,10 @@ TEST_CASE("inferred: a read of an empty RXFIFO slot returns 0, DR + 1 moves no F
 TEST_CASE("RM0351 42.4.10: TXEIE, RXNEIE and the DMA requests follow TXE and RXNE of the FIFOs")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master);
   for(auto const byte : {0x01, 0x02, 0x03})
   {
@@ -760,6 +840,10 @@ TEST_CASE("RM0351 42.4.10: TXEIE, RXNEIE and the DMA requests follow TXE and RXN
 TEST_CASE("a snapshot mid-frame restores the frame in flight and both FIFOs")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   r.cpu_write(spi1 + dr, 0x0201, 2);
@@ -784,6 +868,10 @@ TEST_CASE("a snapshot mid-frame restores the frame in flight and both FIFOs")
 TEST_CASE("checklist 31: an SPI1RST pulse empties both FIFOs, a new frame keeps its own time")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
   r.cpu_write(spi1 + dr, 0x0201, 2);
@@ -809,6 +897,10 @@ TEST_CASE("checklist 31: an SPI1RST pulse empties both FIFOs, a new frame keeps 
 TEST_CASE("checklist 27: a DR write at the frame end time queues behind the frame that ends")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth);
   r.write(spi1 + cr1, master | spe);
   auto const t0 = r.now_ps();
@@ -840,12 +932,20 @@ TEST_CASE("RM0351 42.6.2 FRF: the TI format logs once, raises model_error under 
 {
   {
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.write(spi1 + cr1, master | spe);
     r.write(spi1 + cr2, ds(8) | frf);
     r.write(spi1 + cr2, ds(8) | frf | ssoe);
     CHECK(r.warnings("TI frame format") == 1);
   }
   rig strict{true};
+  popcorn::testing::enable_clocks(
+      *strict.f->target, {
+                             {"APB2ENR", "SPI1EN"}
+  });
   strict.write(spi1 + cr1, master | spe);
   CHECK_THROWS_AS(
       static_cast<void>(
@@ -885,6 +985,10 @@ TEST_CASE("RM0351 42.4.14: CRC-8 over DS 8 frames of 123456789 is 0xF4, a bad fr
   {
     CAPTURE(corrupt);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     crc_setup(r, ds(8), master | crcen, 7);
     if(corrupt)
     {
@@ -902,6 +1006,10 @@ TEST_CASE("RM0351 42.4.14: CRC-8 over DS 8 frames of 123456789 is 0xF4, a bad fr
 TEST_CASE("RM0351 42.4.14: CRC-16 over DS 8 frames takes two CRC frames, high byte first inferred")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   crc_setup(r, ds(8), master | crcen | crcl, 0x1021);
   auto const got = crc_block(r, digits(9), master | crcen | crcl, 8, 2);
   CHECK(r.read(spi1 + txcrcr) == 0x31C3);
@@ -925,6 +1033,10 @@ TEST_CASE(
   {
     CAPTURE(expected);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     crc_setup(r, ds(16), master | crcen | length, poly);
     if(length == 0)
     {
@@ -941,6 +1053,10 @@ TEST_CASE(
 TEST_CASE("RM0351 42.4.14: with LSBFIRST 1 the CRC-16 phase of DS 8 frames sends [7:0] first")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   crc_setup(r, ds(8), master | crcen | crcl | lsbfirst, 0x1021);
   static_cast<void>(crc_block(r, digits(9), master | crcen | crcl | lsbfirst, 8, 2));
   auto const crc      = r.read(spi1 + txcrcr);
@@ -961,7 +1077,11 @@ TEST_CASE("RM0351 42.4.14: with LSBFIRST 1 the CRC-16 phase of DS 8 frames sends
 
 TEST_CASE("RM0351 42.4.14: SPE 0 in a CRC-16 phase, then CRCEN 0 and 1 give the next block two")
 {
-  rig        r;
+  rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   auto const control = master | crcen | crcl;
   crc_setup(r, ds(8), control, 0x1021);
   for(auto const word : digits(9))
@@ -995,7 +1115,11 @@ TEST_CASE("RM0351 42.4.14: SPE 0 in a CRC-16 phase, then CRCEN 0 and 1 give the 
 
 TEST_CASE("RM0351 42.4.14: a mode fault in the second CRC-16 frame leaves the next block two")
 {
-  rig        r;
+  rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   auto const control = master | crcen | crcl;
   crc_setup(r, ds(8), control, 0x1021);
   static_cast<void>(crc_block(r, digits(9), control, 8, 0));
@@ -1018,6 +1142,10 @@ TEST_CASE("RM0351 42.4.14: a mode fault in the second CRC-16 frame leaves the ne
 TEST_CASE("RM0351 42.4.14: the data frame after a CRC phase clears TXCRCR and RXCRCR first")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   crc_setup(r, ds(8), master | crcen, 7);
   static_cast<void>(crc_block(r, digits(9), master | crcen, 8, 1));
   CHECK(r.read(spi1 + rxcrcr) == 0xF4);
@@ -1031,6 +1159,10 @@ TEST_CASE("checklist 53: CRCEN with DS 12 logs once, model_error under strict at
 {
   {
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     crc_setup(r, ds(12), master | crcen, 7);
     r.cpu_write(spi1 + dr, 0x0ABC, 2);
     r.cpu_write(spi1 + dr, 0x0123, 2);
@@ -1039,6 +1171,10 @@ TEST_CASE("checklist 53: CRCEN with DS 12 logs once, model_error under strict at
     CHECK(r.warnings("CRCEN 1 with a CR2.DS other than 8 or 16") == 1);
   }
   rig strict{true};
+  popcorn::testing::enable_clocks(
+      *strict.f->target, {
+                             {"APB2ENR", "SPI1EN"}
+  });
   strict.write(spi1 + cr2, ds(12) | ssoe);
   strict.write(spi1 + cr1, master | crcen | spe);
   CHECK_THROWS_AS(
@@ -1049,6 +1185,10 @@ TEST_CASE("checklist 53: CRCEN with DS 12 logs once, model_error under strict at
 TEST_CASE("checklist 53: the frame-start raise after a DS change keeps the landed frame's RXNE")
 {
   rig r{true};
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth);
   r.write(spi1 + cr1, master | crcen | spe);
   r.cpu_write(spi1 + dr, 0x0201, 2);
@@ -1084,6 +1224,10 @@ TEST_CASE("checklist 53: a target's frame-start raise after a DS change keeps RX
 TEST_CASE("RM0351 42.4.9: receive-only with CRCEN holds one frame, FRLVL reads 00")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr1, master | rxonly | crcen);
   r.write(spi1 + cr1, master | rxonly | crcen | spe);
   auto const t0 = r.now_ps();
@@ -1103,6 +1247,10 @@ TEST_CASE("RM0351 42.4.9 Packing with DMA: LDMA_TX sends 7 frames from 4 half-wo
   {
     CAPTURE(last);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.write(spi1 + cr2, ds(8) | ssoe | frxth | txdmaen | last);
     r.write(spi1 + cr1, master | spe);
     for(std::uint32_t half : {0x0201u, 0x0403u, 0x0605u, 0x0807u})
@@ -1128,6 +1276,10 @@ TEST_CASE(
   {
     CAPTURE(last);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.write(spi1 + cr2, ds(8) | ssoe | rxdmaen | last);
     r.write(spi1 + cr1, master | spe);
     for(std::uint32_t half : {0x0201u, 0x0403u, 0x0605u})
@@ -1155,6 +1307,10 @@ TEST_CASE("inferred: an LDMA_TX flag lasts one DR write, needs DS 8 or less, SPE
   {
     CAPTURE(leg);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.write(spi1 + cr2, (leg == 0 ? ds(16) : ds(8)) | ssoe | frxth | txdmaen | ldma_tx);
     r.write(spi1 + cr1, master | spe);
     r.last_but_one(tx_signal);
@@ -1186,6 +1342,10 @@ TEST_CASE("inferred: an LDMA_RX flag lasts one DR read, needs DS 8 or less, SPE 
   {
     CAPTURE(leg);
     rig r;
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"APB2ENR", "SPI1EN"}
+    });
     r.write(spi1 + cr2, (leg == 0 ? ds(16) : ds(8)) | ssoe | rxdmaen | ldma_rx);
     r.write(spi1 + cr1, master | spe);
     r.last_but_one(rx_signal);
@@ -1213,6 +1373,10 @@ TEST_CASE("inferred: an LDMA_RX flag lasts one DR read, needs DS 8 or less, SPE 
 TEST_CASE("RM0351 42.4.12: NSSP pulses NSS high one SCK period between frames, inferred")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth | nssp);
   r.write(spi1 + cr1, master | spe);
   auto const t0  = r.now_ps();
@@ -1238,6 +1402,10 @@ TEST_CASE("RM0351 42.4.12: NSSP pulses NSS high one SCK period between frames, i
 TEST_CASE("RM0351 42.6.2 NSSP: with CPHA 1 frames run back to back and NSS stays low")
 {
   rig r;
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | ssoe | frxth | nssp);
   r.write(spi1 + cr1, master | cpha | spe);
   auto const t0 = r.now_ps();
@@ -1253,6 +1421,10 @@ TEST_CASE(
     "fifth DS 8 frame")
 {
   rig r{false, l476rc(), true};
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"APB2ENR", "SPI1EN"}
+  });
   r.write(spi1 + cr2, ds(8) | frxth);
   r.write(spi1 + cr1, ssm | spe);
   r.cpu_write(spi1 + dr, 0xA5, 1);

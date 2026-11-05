@@ -1144,8 +1144,12 @@ TEST_CASE("the missing reset bit message names every reset bit name an instance 
 
 TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its writes")
 {
-  auto const  f        = idle_fixture();
-  auto const& desc     = f.target->peripheral("LPTIM1").description();
+  auto const  f    = idle_fixture();
+  auto const& desc = f.target->peripheral("LPTIM1").description();
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "LPTIM1EN"}
+  });
   auto const* cfgr     = popcorn::find_register(desc, "CFGR");
   auto&       services = probe(f).context.services;
   REQUIRE(cfgr != nullptr);
@@ -1179,6 +1183,10 @@ TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its wri
   auto const saved = f.target->snapshot();
   f.target->reset(reset_kind::software);
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  popcorn::testing::enable_clocks(
+      *f.target, {
+                     {"APB3ENR", "LPTIM1EN"}
+  });
   store(0x20);
   CHECK(load() == 0x20);
   f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});

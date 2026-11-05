@@ -152,6 +152,10 @@ TEST_CASE("RM0351 8.5.12: ASCR closes the switch of each pin it sets, the debugg
 {
   rig        r{l476rc()};
   auto const ascr = 0x4800'0800u + 0x2c;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "GPIOCEN"}
+  });
   write(r.f, ascr, 0x8001u);
   CHECK(analog(r.f, "GPIOC").switch_closed(0));
   CHECK(analog(r.f, "GPIOC").switch_closed(15));
@@ -200,6 +204,10 @@ TEST_CASE(
 {
   rig r{with_port_g_bonded()};
   REQUIRE((read(r.f, pwr_cr2) & iosv) == 0);
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "GPIOGEN"}
+  });
   REQUIRE(cpu_store(r.f, gpiog + 0x14, 0x3u).reason == stop_reason::user);
   CHECK(r.warnings("ODR") == 0);
   write(r.f, gpiog + 0x14, 0xffffu);
@@ -214,10 +222,18 @@ TEST_CASE(
   REQUIRE(r.logged.size() == 1);
   CHECK(r.logged.front().message.contains("PG2"));
   rig valid{with_port_g_bonded()};
+  popcorn::testing::enable_clocks(
+      *valid.f.target, {
+                           {"AHB2ENR", "GPIOGEN"}
+  });
   write(valid.f, pwr_cr2, read(valid.f, pwr_cr2) | iosv);
   REQUIRE(cpu_store(valid.f, gpiog, 0xffff'ffdfu).reason == stop_reason::user);
   CHECK(valid.logged.empty());
   rig unbonded{l476rc()};
+  popcorn::testing::enable_clocks(
+      *unbonded.f.target, {
+                              {"AHB2ENR", "GPIOGEN"}
+  });
   REQUIRE(cpu_store(unbonded.f, gpiog, 0xffff'ffdfu).reason == stop_reason::user);
   CHECK(unbonded.logged.empty());
 }
@@ -249,6 +265,10 @@ TEST_CASE("RM0351 5.4.2: a DMA write configuring PG2 with IOSV 0 warns once, inf
       };
   rig r{with_port_g_bonded(), std::move(options)};
   REQUIRE(probe != nullptr);
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "GPIOGEN"}
+  });
   REQUIRE((read(r.f, pwr_cr2) & iosv) == 0);
   REQUIRE(probe->services().write(gpiog + 0x14, 4, 0x4u, popcorn::initiator::dma).has_value());
   CHECK(read(r.f, gpiog + 0x14) == 0x4u);

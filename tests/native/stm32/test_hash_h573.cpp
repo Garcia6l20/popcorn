@@ -1638,8 +1638,12 @@ TEST_CASE("a DMA suspend mid SHA-512 block keeps the words of the started burst 
   constexpr std::uint32_t sr_dmas = 1u << 2;
   auto const              message = pattern(300);
   rig const               r;
-  dma_feed                d{r, 4};
-  auto const              control = (sha512 << 17) | (2u << 4);
+  popcorn::testing::enable_clocks(
+      *r.f->target, {
+                        {"AHB2ENR", "HASHEN"}
+  });
+  dma_feed   d{r, 4};
+  auto const control = (sha512 << 17) | (2u << 4);
   d.stage(message);
   r.write(str, 0);
   r.write(cr, cr_init | cr_dmae | control);
@@ -1676,7 +1680,11 @@ TEST_CASE("a DMAE clear from a block's launch to its DINIS drops DMAS and holds 
   {
     CAPTURE(offset);
     rig const r;
-    dma_feed  d{r};
+    popcorn::testing::enable_clocks(
+        *r.f->target, {
+                          {"AHB2ENR", "HASHEN"}
+    });
+    dma_feed d{r};
     d.stage(pattern(128));
     r.write(str, 0);
     r.write(cr, cr_init | cr_dmae | control);
