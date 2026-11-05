@@ -1,10 +1,9 @@
 #include "../support/inert_model.hpp"
-#include "factories.hpp"
 #include "reserved_slave_word.hpp"
 #include "stm32_fixture.hpp"
+#include "tim_rows.hpp"
 #include "trigger_probe.hpp"
 #include "trigger_signal.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>

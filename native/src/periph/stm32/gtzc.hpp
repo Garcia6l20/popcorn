@@ -1,6 +1,6 @@
 #pragma once
 
-#include "variants.hpp"
+#include "gtzc_rows.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>

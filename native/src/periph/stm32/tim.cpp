@@ -1,6 +1,6 @@
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
+#include "tim_rows.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -3556,5 +3556,53 @@ auto tim_factory(tim_variant variant) -> model_factory
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<tim>(ctx, desc, variant);
   };
+}
+
+namespace
+{
+constexpr auto l1_tim_instances =
+    std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM9", "TIM10", "TIM11"});
+constexpr auto l1_cat3_tim_instances =
+    std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5", "TIM9", "TIM10", "TIM11"});
+constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
+constexpr auto tim_table              = std::to_array<builtin>({
+    row_of<^^tim_factory, ^^u5_tim>(
+        {.ip = "TIM1_8U5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = u5_parts}),
+    row_of<^^tim_factory, ^^u5_tim>(
+        {.ip = "TIM6_7U5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = u5_parts}),
+    row_of<^^tim_factory, ^^h5_tim>(
+        {.ip = "TIM1_8H5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = h5_parts}),
+    row_of<^^tim_factory, ^^h5_tim>(
+        {.ip = "TIM6_7H5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = h5_parts}),
+    row_of<^^tim_factory, ^^l1_tim>(
+        {.ip              = "TIM1_8L1",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .instance_globs  = l1_tim_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^tim_factory, ^^l1_cat3_tim>(
+        {.ip              = "TIM1_8L1Cat345",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .instance_globs  = l1_cat3_tim_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^tim_factory, ^^l1_tim>(
+        {.ip              = "TIM6_7L1",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .instance_globs  = l1_basic_tim_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^tim_factory, ^^l1_cat3_tim>(
+        {.ip              = "TIM6_7L1Cat345",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .instance_globs  = l1_basic_tim_instances,
+         .part_globs      = l1_parts}),
+    row_of<^^tim_factory, ^^l4_tim>(
+        {.ip = "TIM1_8L4", .ip_version_glob = "gptimer2_v3_x*", .part_globs = l4_parts}),
+    row_of<^^tim_factory, ^^l4_tim>(
+        {.ip = "TIM6_7L4", .ip_version_glob = "gptimer2_v3_x*", .part_globs = l4_parts}),
+});
+}
+
+auto tim_rows() -> std::span<builtin const>
+{
+  return tim_table;
 }
 }

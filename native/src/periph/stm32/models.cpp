@@ -5,12 +5,14 @@
 #include "factories.hpp"
 #include "flash_rows.hpp"
 #include "gpio_rows.hpp"
+#include "gtzc_rows.hpp"
 #include "lptim_rows.hpp"
 #include "pwr_rows.hpp"
 #include "rcc_rows.hpp"
 #include "row_of.hpp"
 #include "rows.hpp"
 #include "syscfg_rows.hpp"
+#include "tim_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
@@ -37,11 +39,6 @@ namespace
 constexpr auto hash_sha2_parts =
     std::to_array<std::string_view>({"STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"});
 constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
-constexpr auto l1_tim_instances =
-    std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM9", "TIM10", "TIM11"});
-constexpr auto l1_cat3_tim_instances =
-    std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5", "TIM9", "TIM10", "TIM11"});
-constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
 
 constexpr auto rest_rows = std::to_array<builtin>({
     {.ip              = "USART",
@@ -79,50 +76,6 @@ constexpr auto rest_rows = std::to_array<builtin>({
     {.ip              = "LPUART",
      .ip_version_glob = "sci3_v1*",
      .make            = [](board const& b) { return usart_factory(b, l4_lpuart); },
-     .part_globs      = l4_parts},
-    {.ip              = "TIM1_8U5",
-     .ip_version_glob = "gptimer2_v4_x*",
-     .make            = [](board const&) { return tim_factory(u5_tim); },
-     .part_globs      = u5_parts},
-    {.ip              = "TIM6_7U5",
-     .ip_version_glob = "gptimer2_v4_x*",
-     .make            = [](board const&) { return tim_factory(u5_tim); },
-     .part_globs      = u5_parts},
-    {.ip              = "TIM1_8H5",
-     .ip_version_glob = "gptimer2_v4_x*",
-     .make            = [](board const&) { return tim_factory(h5_tim); },
-     .part_globs      = h5_parts},
-    {.ip              = "TIM6_7H5",
-     .ip_version_glob = "gptimer2_v4_x*",
-     .make            = [](board const&) { return tim_factory(h5_tim); },
-     .part_globs      = h5_parts},
-    {.ip              = "TIM1_8L1",
-     .ip_version_glob = "gptimer2_v2_x*",
-     .make            = [](board const&) { return tim_factory(l1_tim); },
-     .instance_globs  = l1_tim_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "TIM1_8L1Cat345",
-     .ip_version_glob = "gptimer2_v2_x*",
-     .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
-     .instance_globs  = l1_cat3_tim_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "TIM6_7L1",
-     .ip_version_glob = "gptimer2_v2_x*",
-     .make            = [](board const&) { return tim_factory(l1_tim); },
-     .instance_globs  = l1_basic_tim_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "TIM6_7L1Cat345",
-     .ip_version_glob = "gptimer2_v2_x*",
-     .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
-     .instance_globs  = l1_basic_tim_instances,
-     .part_globs      = l1_parts},
-    {.ip              = "TIM1_8L4",
-     .ip_version_glob = "gptimer2_v3_x*",
-     .make            = [](board const&) { return tim_factory(l4_tim); },
-     .part_globs      = l4_parts},
-    {.ip              = "TIM6_7L4",
-     .ip_version_glob = "gptimer2_v3_x*",
-     .make            = [](board const&) { return tim_factory(l4_tim); },
      .part_globs      = l4_parts},
     {.ip              = "DAC",
      .ip_version_glob = "dacif_v2_0_Cube",
@@ -323,7 +276,7 @@ auto builtins() -> std::span<builtin const>
     std::vector<builtin> all;
     for(auto const rows :
         {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(), gpio_rows(), exti_rows(),
-         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(),
+         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(), tim_rows(),
          std::span<builtin const>{rest_rows}})
     {
       all.insert(all.end(), rows.begin(), rows.end());

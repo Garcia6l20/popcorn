@@ -24,12 +24,6 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto usart_factory(board const& b, usart_variant variant) -> model_factory;
 
 /**
- * @brief Factory of the TIM model, RM0456 sections 54 to 57 and RM0481 sections 43 to 48.
- * @param variant What differs between the timers of the family the row serves.
- */
-[[nodiscard]] auto tim_factory(tim_variant variant) -> model_factory;
-
-/**
  * @brief Factory of the IWDG model, RM0456 section 61, RM0038 section 21.
  * @param variant What differs between the IWDG of the family the row serves.
  */
@@ -190,14 +184,6 @@ namespace popcorn::periph::stm32
  *        @p variant has them.
  */
 [[nodiscard]] auto hash_h5_factory(hash_variant variant) -> model_factory;
-
-/**
- * @brief Factory of the GTZC TZSC, TZIC and MPCBB models, RM0456 and RM0481 section 5. Returns
- *        no model without TrustZone: the GTZC registers then stay storage at their description
- *        reset values.
- * @param variant Field stems of the family the row serves.
- */
-[[nodiscard]] auto gtzc_factory(gtzc_variant variant) -> model_factory;
 
 /** @brief Factory of the STM32H5 SBS temporal isolation model, RM0481 section 14. Returns no
  * model without TrustZone: the SBS registers then stay storage at their description reset
