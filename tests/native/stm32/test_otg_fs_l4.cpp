@@ -290,3 +290,114 @@ TEST_CASE(
   CHECK_FALSE(r.port().pulled_up());
   CHECK(usv_warnings() == 1);
 }
+
+namespace
+{
+void set_rcc(otg_rig const& r, std::string_view reg, std::string_view field, std::uint32_t value)
+{
+  auto const& desc  = r.f.target->peripheral("RCC").description();
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  auto const mask = ((std::uint32_t{1} << bits->width) - 1u) << bits->lsb;
+  auto const old  = r.f.target->mem().read(desc.base + found->offset, 4);
+  REQUIRE(old.has_value());
+  auto const word = (static_cast<std::uint32_t>(*old) & ~mask) | ((value << bits->lsb) & mask);
+  REQUIRE(r.f.target->mem().write(desc.base + found->offset, 4, word).has_value());
+}
+
+void clk48_from_pll(otg_rig const& r, std::uint32_t n)
+{
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  set_rcc(r, "PLLCFGR", "PLLSRC", 1);
+  set_rcc(r, "PLLCFGR", "PLLM", 0);
+  set_rcc(r, "PLLCFGR", "PLLN", n);
+  set_rcc(r, "PLLCFGR", "PLLQ", 1);
+  set_rcc(r, "PLLCFGR", "PLLQEN", 1);
+  set_rcc(r, "CR", "PLLON", 1);
+  r.f.run_for(100'000'000);
+  set_rcc(r, "CCIPR", "CLK48SEL", 2);
+}
+
+auto clock_warnings(otg_rig const& r) -> std::ptrdiff_t
+{
+  return std::ranges::count_if(r.logged, [](core::log_record const& record) {
+    return record.kind == core::log_kind::model_warning
+       and record.message.find("48 MHz kernel clock") != std::string::npos;
+  });
+}
+}
+
+TEST_CASE(
+    "CLK48SEL: powering the transceiver with CLK48SEL on no clock checks at each rising PWRDWN "
+    "write and warns once")
+{
+  otg_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  REQUIRE(r.cpu_store(gccfg, pwrdwn).reason == popcorn::stop_reason::user);
+  REQUIRE(r.cpu_store(gccfg, 0).reason == popcorn::stop_reason::user);
+  REQUIRE(r.cpu_store(gccfg, pwrdwn).reason == popcorn::stop_reason::user);
+  CHECK(clock_warnings(r) == 1);
+}
+
+TEST_CASE("CLK48SEL: a transceiver left powered down checks no clock")
+{
+  otg_rig const r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  REQUIRE(r.cpu_store(gccfg, 0).reason == popcorn::stop_reason::user);
+  CHECK(clock_warnings(r) == 0);
+}
+
+TEST_CASE("under strict_peripherals a GCCFG PWRDWN write with no 48 MHz clock raises model_error")
+{
+  otg_rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  CHECK_THROWS_AS(static_cast<void>(r.cpu_store(gccfg, pwrdwn)), popcorn::model_error);
+}
+
+TEST_CASE("a debugger GCCFG PWRDWN write with no 48 MHz clock is served on a strict machine")
+{
+  otg_rig const r{true};
+  CHECK_NOTHROW(r.write(gccfg, pwrdwn));
+  CHECK(clock_warnings(r) == 0);
+}
+
+TEST_CASE("USB 2.0 7.1.11: PLL Q at 48 MHz powers the transceiver silently")
+{
+  otg_rig const r{true};
+  clk48_from_pll(r, 48);
+  REQUIRE_NOTHROW(static_cast<void>(r.cpu_store(gccfg, pwrdwn)));
+  CHECK(clock_warnings(r) == 0);
+}
+
+TEST_CASE("only the PWRDWN write that powers the transceiver checks the clock")
+{
+  otg_rig const r{true};
+  clk48_from_pll(r, 48);
+  REQUIRE_NOTHROW(static_cast<void>(r.cpu_store(gccfg, pwrdwn)));
+  set_rcc(r, "CCIPR", "CLK48SEL", 0);
+  CHECK_NOTHROW(static_cast<void>(r.cpu_store(gotgctl, 0)));
+  CHECK_NOTHROW(static_cast<void>(r.cpu_store(gccfg, pwrdwn | (1u << 21))));
+  CHECK(clock_warnings(r) == 0);
+}
+
+TEST_CASE("USB 2.0 7.1.11: PLL Q at 47 MHz warns, 0.25 % is the full-speed tolerance")
+{
+  otg_rig const r;
+  clk48_from_pll(r, 47);
+  REQUIRE(r.cpu_store(gccfg, pwrdwn).reason == popcorn::stop_reason::user);
+  CHECK(clock_warnings(r) == 1);
+}

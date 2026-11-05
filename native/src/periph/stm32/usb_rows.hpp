@@ -213,19 +213,24 @@ struct otg_fs_variant
   std::string_view partial_reset;
   /** @brief GPWRDN and GADPCTL present, claimed as storage registers. */
   bool adp;
+  /** @brief RCC kernel clock domain of the 48 MHz clock, `iclk` on the STM32U5, `otg_fs` on the
+   * STM32L4. */
+  std::string_view kernel_clock;
 };
 
 /** @brief STM32U5 OTG_FS, GRSTCTL in RM0456 72.15.5. */
 inline constexpr otg_fs_variant u5_otg_fs{
     .frame_counter_reset = "FSRST",
     .partial_reset       = "PSRST",
-    .adp                 = false};
+    .adp                 = false,
+    .kernel_clock        = "iclk"};
 
 /** @brief STM32L47x/L48x OTG_FS, GRSTCTL in RM0351 47.15.5, no PSRST per Table 322. */
 inline constexpr otg_fs_variant l4_otg_fs{
     .frame_counter_reset = "FCRST",
     .partial_reset       = "",
-    .adp                 = true};
+    .adp                 = true,
+    .kernel_clock        = "otg_fs"};
 
 /**
  * @brief Factory of the USB OTG_FS device core model, RM0456 section 72 on the STM32U5, RM0351

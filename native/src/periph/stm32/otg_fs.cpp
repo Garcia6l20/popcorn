@@ -70,6 +70,7 @@ enum warning : std::uint32_t
   iso_dropped      = 1u << 11,
   iso_packets      = 1u << 12,
   usb_supply       = 1u << 13,
+  usb_clock        = 1u << 14,
 };
 
 struct rx_packet
@@ -268,7 +269,11 @@ struct out_fields
  * masked by DIEPEMPMSK, and DOEPINTn masked by DOEPMSK. The IRQ is GAHBCFG.GINTMSK and GINTSTS
  * masked by GINTMSK. The line is OTG_FS_IRQn, 73 on the STM32U5 and 67 on the STM32L4.
  *
- * Timing is full speed whatever the 48 MHz kernel clock source and its frequency.
+ * Timing is full speed. A firmware GCCFG write that sets PWRDWN from 0 while the 48 MHz kernel
+ * clock, `ICLKSEL` on the STM32U5 and `CLK48SEL` on the STM32L4, is stopped or off 48 MHz by more
+ * than the 0.25 % full-speed data rate tolerance of USB 2.0 7.1.11 logs one model_warning per
+ * machine life and raises model_error under strict_peripherals. The reference manuals give no
+ * tolerance, 0.25 % is inferred. Debugger writes and later writes while powered check nothing.
  *
  * Not modelled, logged once and a model_error under strict_peripherals: host mode, HNP and SRP,
  * battery charging detection, test modes, a TX FIFO numbered other than its endpoint. DMA and LPM
@@ -328,6 +333,7 @@ public:
   void refresh_written(std::uint32_t old, std::uint32_t now);
   void fifo_size_written(std::uint32_t old, std::uint32_t now);
   void link_written(std::uint32_t old, std::uint32_t now);
+  void gccfg_written(std::uint32_t old, std::uint32_t now);
   void usb_config_written(std::uint32_t old, std::uint32_t now);
   void reset_control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
@@ -346,6 +352,7 @@ private:
   [[nodiscard]] auto b_valid() const -> bool;
   [[nodiscard]] auto supplied() const -> bool;
   [[nodiscard]] auto connectable() const -> bool;
+  void               check_kernel_clock();
   [[nodiscard]] auto on_bus(std::uint8_t address) const -> bool;
   [[nodiscard]] auto rx_used() const -> std::size_t;
   [[nodiscard]] auto tx_depth(std::size_t n) const -> std::size_t;
@@ -445,8 +452,10 @@ private:
   std::vector<std::uint32_t>        storage_;
   storage_notes                     notes_;
   std::uint32_t                     access_offset_{};
+  initiator                         by_{initiator::cpu};
   std::uint32_t                     written_{};
   std::uint32_t                     warned_{};
+  core::clock_domain                kernel_;
 };
 
 constexpr std::array<write_entry<otg_fs>, 73> otg_fs_writes{
@@ -462,7 +471,7 @@ constexpr std::array<write_entry<otg_fs>, 73> otg_fs_writes{
      {"GRXSTSP_DEVICE", &otg_fs::plain_written},
      {"GRXFSIZ", &otg_fs::fifo_size_written},
      {"HNPTXFSIZ", &otg_fs::fifo_size_written},
-     {"GCCFG", &otg_fs::link_written},
+     {"GCCFG", &otg_fs::gccfg_written},
      {"DIEPTXF1", &otg_fs::fifo_size_written},
      {"DIEPTXF2", &otg_fs::fifo_size_written},
      {"DIEPTXF3", &otg_fs::fifo_size_written},
@@ -577,7 +586,7 @@ otg_fs::otg_fs(
       set_out_nak_{field("DCTL", "SGONAK")}, clear_out_nak_{field("DCTL", "CGONAK")},
       test_control_{field("DCTL", "TCTL")}, suspended_status_{field("DSTS", "SUSPSTS")},
       speed_{field("DSTS", "ENUMSPD")}, frame_number_{field("DSTS", "FNSOF")},
-      empty_mask_{field("DIEPEMPMSK", "INEPTXFEM")}
+      empty_mask_{field("DIEPEMPMSK", "INEPTXFEM")}, kernel_{ctx.clock.domain(variant.kernel_clock)}
 {
   if(variant.adp)
   {
@@ -1027,6 +1036,7 @@ auto otg_fs::on_write(
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
   access_offset_ = offset & ~3u;
+  by_            = ctx.by;
   written_       = merge_write(0, offset, size, value);
   if(storage_only(access_offset_))
   {
@@ -1069,6 +1079,37 @@ void otg_fs::link_written(std::uint32_t, std::uint32_t)
   }
   link(true);
   refresh();
+}
+
+void otg_fs::gccfg_written(std::uint32_t old, std::uint32_t now)
+{
+  link_written(old, now);
+  if(by_ != initiator::debugger and (old & power_up_.mask()) == 0 and (now & power_up_.mask()) != 0)
+  {
+    check_kernel_clock();
+  }
+}
+
+void otg_fs::check_kernel_clock()
+{
+  if(ctx_.peers.find("RCC") == nullptr)
+  {
+    return;
+  }
+  constexpr std::uint64_t usb_hz        = 48'000'000;
+  constexpr std::uint64_t tolerance_ppm = 2'500;
+  auto const              hz            = ctx_.clock.hz(kernel_);
+  auto const              error         = hz > usb_hz ? hz - usb_hz : usb_hz - hz;
+  if(error * 1'000'000 > usb_hz * tolerance_ppm)
+  {
+    unmodelled(
+        "GCCFG",
+        std::format(
+            "the transceiver is powered while the 48 MHz kernel clock runs at {} Hz, USB full "
+            "speed needs 48 MHz within 0.25 %",
+            hz),
+        usb_clock);
+  }
 }
 
 void otg_fs::usb_config_written(std::uint32_t, std::uint32_t now)

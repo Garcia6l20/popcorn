@@ -1376,8 +1376,13 @@ Not modelled, logged:
 - A TX FIFO numbered other than its IN endpoint. DFIFOn feeds IN endpoint n.
 - An isochronous endpoint armed with PKTCNT above 1. One packet goes per frame.
 
-On every family the timing is full speed whatever the 48 MHz kernel clock source and its
-frequency, `CCIPR1.ICLKSEL` on the STM32U5 and `CCIPR.CLK48SEL` on the STM32L4.
+The timing is full speed. A firmware `GCCFG.PWRDWN` write that powers the transceiver, PWRDWN
+going from 0 to 1, while the 48 MHz kernel clock, `RCC_CCIPR1.ICLKSEL` on the STM32U5 and
+`RCC_CCIPR.CLK48SEL` on the STM32L4, is stopped or off 48 MHz by more than 0.25 % logs one
+`model_warning` per machine life and raises `model_error` under `strict_peripherals`. A debugger
+write, a later write while powered and a clock change after the power-up check nothing. 0.25 % is
+the full-speed data rate tolerance of USB 2.0 7.1.11, the reference manuals give no figure,
+inferred. A machine without an RCC model checks nothing.
 
 The device connects only once firmware declares VDDUSB valid, `PWR_SVMCR.USV` on the STM32U5,
 RM0456 10.4.6, and `PWR_CR2.USV` on the STM32L4, RM0351 5.1.3. `HAL_PWREx_EnableVddUSB` sets
