@@ -186,6 +186,34 @@ def test_the_l4_group_a_is_the_lqfp64_part_of_each_die_of_the_shipped_l4_names()
     assert [part_class(p) for p in L4_GROUP_A] == [PartClass("DIE415", 256, "LQFP64", False)]
 
 
+L4_PACKAGES = {
+    ("J", "Y"): "WLCSP72",
+    ("M", "Y"): "WLCSP81",
+    ("Q", "I"): "UFBGA132",
+    ("R", "T"): "LQFP64",
+    ("V", "T"): "LQFP100",
+    ("V", "Y"): "WLCSP99",
+    ("Z", "J"): "UFBGA144",
+    ("Z", "T"): "LQFP144",
+}
+"""Package of each STM32L4 DIE415 pin-count and package letter pair, the `Package` attribute of
+its CubeMX part file."""
+L4_FLASH_KIB = {"C": 256, "E": 512, "G": 1024}
+
+
+@pytest.mark.parametrize("part", [p for p in shipped_parts() if p.startswith("STM32L4")])
+def test_an_l4_part_class_is_the_package_flash_and_smps_of_its_order_code(part: str) -> None:
+    assert part_class(part) == PartClass(
+        "DIE415", L4_FLASH_KIB[part[10]], L4_PACKAGES[part[9], part[11]], part.endswith("P")
+    )
+
+
+def test_the_smps_suffix_p_is_an_stm32l4_suffix_only() -> None:
+    assert part_class("STM32L476ZGTxP").smps is True
+    with pytest.raises(ValueError, match="STM32L152RETxP"):
+        part_class("STM32L152RETxP")
+
+
 def test_the_l1_part_classes_split_the_cat3_parts_by_die() -> None:
     assert part_class("STM32L152RCTx").die == "DIE427"
     assert part_class("STM32L152RCTxA").die == "DIE436"

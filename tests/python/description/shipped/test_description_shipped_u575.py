@@ -59,7 +59,11 @@ REFERENCES = {
     "STM32L151xx": "STM32L151ZDTx",
     "STM32L152xx": "STM32L152ZDTx",
     "STM32L162xx": "STM32L162ZDTx",
-    "STM32L476xx": "STM32L476RCTx",
+    "STM32L471xx": "STM32L471ZGJx",
+    "STM32L475xx": "STM32L475VGTx",
+    "STM32L476xx": "STM32L476ZGJx",
+    "STM32L485xx": "STM32L485JEYx",
+    "STM32L486xx": "STM32L486ZGTx",
 }
 """Reference of each shipped line, the choice of `_layers.choose_reference` over its shipped
 parts: the most instances, which on the STM32L1 differ between the parts of a line, then the most

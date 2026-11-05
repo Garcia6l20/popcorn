@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 357,
+    "cross_rules": 37,
+    "fields": 9716,
+    "irqs": 82,
+    "patched_fields": 88,
+    "peripherals": 67,
+    "regions": 10,
+    "registers": 1274
+  },
+  "part": "STM32L486JGYx",
+  "svd_sha256": "df2c648a23e7e845a76e754035cfa414a47c9047891c6ca349dfb90db03b9957",
+  "tables": {
+    "alternates": "cfbb6f2284e0b178a0d8f8641d99bcbbda9ec0ee09e0f081336db206c3a06c88",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "083a754212b959f2952b8a59bbcbfcbcaa71943579f4949f8a6aec5e871e6f57",
+    "irqs": "a6694c78cb70bb559b3c0236572e28372b1c01604f272e47289e6c72446807de",
+    "peripherals": "a5d6099f513bf9d77288ab678a68f19e9a4be2f504e0d26aa724bd6e11af1eb4",
+    "regions": "c36449b4b8d83a55405a764835e644f01c2d6f2a9accdb2116512022bcff4d7f",
+    "registers": "81d828ef0c76abc930e802b84b50bb2fb29ea8f96048e3837c701a0b332a8fcf"
+  }
+}

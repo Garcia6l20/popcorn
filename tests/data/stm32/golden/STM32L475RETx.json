@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 290,
+    "cross_rules": 37,
+    "fields": 9647,
+    "irqs": 80,
+    "patched_fields": 88,
+    "peripherals": 65,
+    "regions": 10,
+    "registers": 1242
+  },
+  "part": "STM32L475RETx",
+  "svd_sha256": "946a952bc233911021f5a4e77620818cfd066430ae9e82a6892acc6f36156cdf",
+  "tables": {
+    "alternates": "abff6bdf6278a829c3d507253ed2902fa9ba702588400931b89d76d20d163280",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "de2487eb746e6ee075711bb5b193f0889467afb2fd0e2679bb76a4112a9b4a58",
+    "irqs": "50ce6f7d019a8ef433acda1f30a41d247bfd05be4be8cafc6a19149613a50bdf",
+    "peripherals": "dc2e567f5db09354c94b3cd9915d7272224a7d30a15d56b793b80ba157bd1af3",
+    "regions": "f5d9be8e1e7d8380aeadeef0e706b452b2b62be182686278ede252ee80829352",
+    "registers": "75711fe8758a323e38d9c0196a4e6641f1818ef13c814b14beb1eb4d7f8ff1ac"
+  }
+}

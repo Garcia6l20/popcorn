@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 312,
+    "cross_rules": 37,
+    "fields": 9673,
+    "irqs": 81,
+    "patched_fields": 88,
+    "peripherals": 66,
+    "regions": 10,
+    "registers": 1254
+  },
+  "part": "STM32L485JCYx",
+  "svd_sha256": "df2c648a23e7e845a76e754035cfa414a47c9047891c6ca349dfb90db03b9957",
+  "tables": {
+    "alternates": "db4373e3859172b8028c567945c59de299ca89ba398c063c197562439fade7bb",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "62f0ea95c144f674630b58e61cd077d25ff74c9acdc5ae12b6b9c0dfdc5f2f96",
+    "irqs": "b4b96f2f1cb7ad6b854e2c9a2952768865de5541931079dffc17b79447b37f21",
+    "peripherals": "15e854eefec366cca5aee57f2424f881636ee12c8e8d1c5ebd435484dbf2531c",
+    "regions": "c9169816baa458d98dd0d4a4b96f42225ec704ae33d46c8c675e4d66a2982ffb",
+    "registers": "b036f18e22a751389230ecf43ff78d89b89327af2f96459a8d3bbe34ce38ac29"
+  }
+}

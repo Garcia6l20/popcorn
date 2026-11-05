@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 496,
+    "cross_rules": 37,
+    "fields": 9690,
+    "irqs": 81,
+    "patched_fields": 88,
+    "peripherals": 66,
+    "regions": 10,
+    "registers": 1262
+  },
+  "part": "STM32L476VGTx",
+  "svd_sha256": "9e35544908b7a561035398d1f60150bb82994f15b5edf9990cb44e7cfc1c9ff5",
+  "tables": {
+    "alternates": "8ee272f8d75d59d911c4bc17a6d3349455c29655fc01071d0422b66f10debcf6",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "cd620dba11df2bec5ec58a5bbcb132a4e4266a80b94124a2c6bd70dffa481381",
+    "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
+    "peripherals": "9e2459a8774ae17d7cf3e05ef524b82aa90ef5728fc121e77fc879720d976e62",
+    "regions": "30f1a905d9fc67722deb4f17e9f77a5cde9a11c4fcbaf64aa78f527034175580",
+    "registers": "e303a21195a1070b54639892bd239ba1c3b8ace044eaceb0d7d4f12c1638388b"
+  }
+}

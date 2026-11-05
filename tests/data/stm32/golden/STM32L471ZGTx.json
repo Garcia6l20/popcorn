@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 516,
+    "cross_rules": 37,
+    "fields": 8733,
+    "irqs": 79,
+    "patched_fields": 46,
+    "peripherals": 64,
+    "regions": 10,
+    "registers": 1098
+  },
+  "part": "STM32L471ZGTx",
+  "svd_sha256": "d645e82a08e03fb86617f3b6f9bc27e84d1d1bc45e83b9804e87af8d4a1b16ba",
+  "tables": {
+    "alternates": "6e13f62de8cf56da4ceb1730eebf5b58669cdb21da143d46d7c0dc746f8b510e",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "da65d64ae5005ebc18d55e9b3a3023482252b4c9f63288c4a91083d4502ef720",
+    "irqs": "06c58ed3beb4d3fd5852f1c79763fe2f353baff620cd75612e3904bcf5e05722",
+    "peripherals": "8102a8b68ec476c37194045767f67839c06bbae76d0457dc73bf03f7e5dbca9e",
+    "regions": "c36449b4b8d83a55405a764835e644f01c2d6f2a9accdb2116512022bcff4d7f",
+    "registers": "9cc900f2028d1cd226651687a6c11743af60b2d54448f686e6176803996892f8"
+  }
+}

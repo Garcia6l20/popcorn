@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 335,
+    "cross_rules": 37,
+    "fields": 9716,
+    "irqs": 82,
+    "patched_fields": 88,
+    "peripherals": 67,
+    "regions": 10,
+    "registers": 1274
+  },
+  "part": "STM32L486RGTx",
+  "svd_sha256": "df2c648a23e7e845a76e754035cfa414a47c9047891c6ca349dfb90db03b9957",
+  "tables": {
+    "alternates": "1f0f6503080dd841bc440b6ba801e9a22573ac634a7190ca763879c54146ad03",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "083a754212b959f2952b8a59bbcbfcbcaa71943579f4949f8a6aec5e871e6f57",
+    "irqs": "a6694c78cb70bb559b3c0236572e28372b1c01604f272e47289e6c72446807de",
+    "peripherals": "efa04a9726f4a4a4308158bfd541ca6ad25710f4d1ee00c1b902e7b0b2c15b04",
+    "regions": "07742330d50c2706128a421b1b10d13c70588688b862927fa72dbaed1964307e",
+    "registers": "81d828ef0c76abc930e802b84b50bb2fb29ea8f96048e3837c701a0b332a8fcf"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 335,
+    "cross_rules": 37,
+    "fields": 9690,
+    "irqs": 81,
+    "patched_fields": 88,
+    "peripherals": 66,
+    "regions": 10,
+    "registers": 1262
+  },
+  "part": "STM32L476RGTx",
+  "svd_sha256": "9e35544908b7a561035398d1f60150bb82994f15b5edf9990cb44e7cfc1c9ff5",
+  "tables": {
+    "alternates": "1f0f6503080dd841bc440b6ba801e9a22573ac634a7190ca763879c54146ad03",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "cd620dba11df2bec5ec58a5bbcb132a4e4266a80b94124a2c6bd70dffa481381",
+    "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
+    "peripherals": "5a0ca8f34ca9f1e1303641c4f28bc88a97a6e33c40d1e46cc1bae619a9409f25",
+    "regions": "07742330d50c2706128a421b1b10d13c70588688b862927fa72dbaed1964307e",
+    "registers": "e303a21195a1070b54639892bd239ba1c3b8ace044eaceb0d7d4f12c1638388b"
+  }
+}

@@ -54,7 +54,8 @@ class PartClass(NamedTuple):
             `DIE437`.
         flash_kib: The flash size, such as 1024 or 2048.
         package: The package name, such as `LQFP64`.
-        smps: Whether the part has the SMPS supply, a trailing `Q` in its ordering code.
+        smps: Whether the part has the SMPS supply, a trailing `Q` in a U5 or H5 ordering code
+            and a trailing `P` in an STM32L4 one.
     """
 
     die: str
@@ -71,8 +72,12 @@ _DIES: Final = {
     "H573": "H56x/H573",
 }
 _FLASH_KIB: Final = {"G": 1024, "I": 2048}
-_DESCRIBED_FAMILIES: Final = ("L1", "L4")
-_DESCRIBED_SUFFIXES: Final = ("x", "xA", "xX")
+_DESCRIBED_SUFFIXES: Final[Mapping[str, Mapping[str, bool]]] = {
+    "L1": {"x": False, "xA": False, "xX": False},
+    "L4": {"x": False, "xP": True},
+}
+"""The order-code suffixes of each described family, each with whether it marks the SMPS supply,
+`P` on the STM32L4 by DS10198 Table 134."""
 FLASH_REGIONS: Final = ("Flash", "Flash_Bank2")
 DEV_ID_MASK: Final = 0xFFF
 _PACKAGES: Final = {
@@ -96,38 +101,49 @@ _PACKAGES: Final = {
     ("V", "Y"): "WLCSP104",
     ("Z", "T"): "LQFP144",
 }
+_FAMILY_PACKAGES: Final[Mapping[str, Mapping[tuple[str, str], str]]] = {
+    "L4": {
+        ("J", "Y"): "WLCSP72",
+        ("M", "Y"): "WLCSP81",
+        ("V", "Y"): "WLCSP99",
+        ("Z", "J"): "UFBGA144",
+    },
+}
+"""Packages whose pin-count and package letters a family reads differently from `_PACKAGES`,
+from the `Package` attribute of the CubeMX part files."""
 
 
 @cache
-def _described_class(part: str, package: str) -> PartClass:
+def _described_class(part: str, package: str, smps: bool) -> PartClass:
     from popcorn.stm32 import mcu
 
     description = mcu(part)
     flash = sum(region.size for region in description.regions if region.name in FLASH_REGIONS)
     dbgmcu = next(unit for unit in description.peripherals if unit.name == "DBGMCU")
     idcode = next(register for register in dbgmcu.registers if register.name.endswith("IDCODE"))
-    return PartClass(f"DIE{idcode.reset & DEV_ID_MASK:03X}", flash // 1024, package, False)
+    return PartClass(f"DIE{idcode.reset & DEV_ID_MASK:03X}", flash // 1024, package, smps)
 
 
 def part_class(part: str) -> PartClass:
-    """The class of a shipped part by its ordering code, `STM32<line><pins><flash><package>x[Q]`.
+    """The class of a shipped part by its ordering code, `STM32<line><pins><flash><package>x[Q|P]`.
 
     The pin-count letter and the package letter are read together: `R` with `T` is LQFP64 and
-    `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. On the U5 and
-    H5 the die and flash size come from the name letters. On the STM32L1 and the STM32L4 the die
-    is the DEV_ID of the shipped description's DBGMCU_IDCODE reset value and the flash size its
-    `Flash` and `Flash_Bank2` regions, since one STM32L1 die carries several flash letters and
-    categories. The decoding only groups parts, no model reads it.
+    `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. A family of
+    `_FAMILY_PACKAGES` reads some pairs its own way, `M` with `Y` is WLCSP81 on the STM32L4. On
+    the U5 and H5 the die and flash size come from the name letters. On the STM32L1 and the
+    STM32L4 the die is the DEV_ID of the shipped description's DBGMCU_IDCODE reset value and the
+    flash size its `Flash` and `Flash_Bank2` regions, since one STM32L1 die carries several flash
+    letters and categories. The decoding only groups parts, no model reads it.
 
     Raises:
         ValueError: `part` is not an ordering code of the shipped lines. An STM32L1 or STM32L4
             name raises what `popcorn.stm32.mcu` raises for it.
     """
     line, pins, flash, package = part[5:9], part[9:10], part[10:11], part[11:12]
-    name = _PACKAGES.get((pins, package))
-    described = line.startswith(_DESCRIBED_FAMILIES) and part[12:] in _DESCRIBED_SUFFIXES
-    if described and part.startswith("STM32") and name is not None:
-        return _described_class(part, name)
+    name = _FAMILY_PACKAGES.get(line[:2], {}).get((pins, package)) or _PACKAGES.get((pins, package))
+    smps = _DESCRIBED_SUFFIXES.get(line[:2], {}).get(part[12:])
+    if smps is not None and part.startswith("STM32") and name is not None:
+        return _described_class(part, name, smps)
     die = _DIES.get(line)
     size = _FLASH_KIB.get(flash)
     if (

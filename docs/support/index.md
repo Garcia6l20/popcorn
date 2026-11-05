@@ -13,8 +13,9 @@ from the shipped descriptions and the model registry at each docs build, so they
 ## What the states mean
 
 A part is supported when firmware examples run on its class: its die, flash size, package and
-SMPS supply. The dies are U575/U585 and H56x/H573, and on the STM32L1 the DBGMCU DEV_ID such as
-DIE437. The state column of the [Parts](generated/parts.md) page names the evidence:
+SMPS supply. The dies are U575/U585 and H56x/H573, and on the STM32L1 and the STM32L4 the DBGMCU
+DEV_ID such as DIE437 or DIE415. The STM32L4 codes with the `P` suffix have the SMPS supply. The
+state column of the [Parts](generated/parts.md) page names the evidence:
 
 - **tested**: the tests of the firmware examples name the part and run on it. The STM32U575QGIx,
   the STM32H573AIIx and the STM32L152RETx run every example of their family, the STM32L152RBTx the

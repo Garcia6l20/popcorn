@@ -139,6 +139,7 @@ L1_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("S
 L4_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("STM32L4")]
 L1_CLASS = 11
 L1_ATTACHES = 116
+L4_CLASS = {"STM32L475RCTx"}
 STATES = ("tested", "examples", "class", "attaches")
 NEGATION = re.compile(r"\b(not|no|never|without|none|cannot|n't)\b", re.IGNORECASE)
 EXTRA_PARTS = {part for row in EXAMPLE_PARTS.values() for part in row.extra}
@@ -192,7 +193,8 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert len(by_state["class"] & set(L1_NAMES)) == L1_CLASS
     assert len(by_state["attaches"] & set(L1_NAMES)) == L1_ATTACHES
     assert by_state["tested"] & set(L4_NAMES) == {"STM32L476RCTx"}
-    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES) - {"STM32L476RCTx"}
+    assert by_state["class"] & set(L4_NAMES) == L4_CLASS
+    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES) - {"STM32L476RCTx"} - L4_CLASS
 
 
 @pytest.mark.timeout(60)
@@ -224,7 +226,9 @@ def test_the_parts_page_prints_the_line_of_the_name_and_the_die_of_the_class(
     for name, cell in state_rows(page).items():
         if kind(cell) == "class":
             named = cell.split(" of ")[1].split(",")[0]
-            other_line += cells[named][2] != cells[name][2] and not name.startswith("STM32L1")
+            other_line += cells[named][2] != cells[name][2] and not name.startswith(
+                ("STM32L1", "STM32L4")
+            )
             assert cells[named][3] == cells[name][3], name
     assert other_line == 43
 
@@ -363,7 +367,12 @@ def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated:
     families = {cells[name][1] for name in cells if name not in L1_NAMES}
     assert families == {"STM32U5", "STM32H5", "STM32L4"}
     assert [cells[name][8] for name in L4_NAMES] == [
-        "tested" if name == "STM32L476RCTx" else "attaches" for name in L4_NAMES
+        (
+            "tested"
+            if name == "STM32L476RCTx"
+            else "class of STM32L476RCTx" if name in L4_CLASS else "attaches"
+        )
+        for name in L4_NAMES
     ]
     assert cells["STM32L152RETx"][8] == "tested"
     assert cells["STM32L152RCTxA"][8].startswith("examples: ")

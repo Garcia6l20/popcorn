@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 372,
+    "cross_rules": 37,
+    "fields": 9690,
+    "irqs": 81,
+    "patched_fields": 88,
+    "peripherals": 66,
+    "regions": 10,
+    "registers": 1262
+  },
+  "part": "STM32L476VGYxP",
+  "svd_sha256": "9e35544908b7a561035398d1f60150bb82994f15b5edf9990cb44e7cfc1c9ff5",
+  "tables": {
+    "alternates": "c55f93297913d8c1ea0d28d22bcf2d61c42e81bcf95d0ee710105237e3c0681c",
+    "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
+    "fields": "cd620dba11df2bec5ec58a5bbcb132a4e4266a80b94124a2c6bd70dffa481381",
+    "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
+    "peripherals": "40e1bf51065ea33e32a236c163095d34d1e266869e094df3e9de4f2cd954d875",
+    "regions": "c36449b4b8d83a55405a764835e644f01c2d6f2a9accdb2116512022bcff4d7f",
+    "registers": "e303a21195a1070b54639892bd239ba1c3b8ace044eaceb0d7d4f12c1638388b"
+  }
+}
