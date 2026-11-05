@@ -31,6 +31,9 @@ using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
 using popcorn::testing::l476rc;
+using popcorn::testing::no_reset;
+using popcorn::testing::no_reset_t;
+using popcorn::testing::rcc_reset_pulse;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
@@ -116,6 +119,19 @@ struct rig
 
   rig(rig const&)                    = delete;
   auto operator=(rig const&) -> rig& = delete;
+
+  explicit rig(no_reset_t)
+  {
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(stm32::board{}, l476rc());
+    f    = std::make_unique<stm32_fixture>(no_reset, l476rc(), firmware, std::move(options));
+    sink = f->target->add_log_sink([this](core::log_record const& record) {
+      if(record.kind == core::log_kind::model_warning)
+      {
+        logged.push_back(record);
+      }
+    });
+  }
 
   explicit rig(bool strict = false)
   {
@@ -268,6 +284,19 @@ struct rig
       return;
     }
     exti9_pin().drive(9, true);
+  }
+
+  [[nodiscard]] auto pad() const -> stm32::gpio_port&
+  {
+    auto* const port = f->model_of<stm32::gpio_port>("GPIOA");
+    REQUIRE(port != nullptr);
+    return *port;
+  }
+
+  [[nodiscard]] auto pad_warnings() const -> std::size_t
+  {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        logged, [](core::log_record const& r) { return r.peripheral == "GPIOA"; }));
   }
 
   [[nodiscard]] auto encoded() const -> std::vector<std::byte>
@@ -1792,4 +1821,188 @@ TEST_CASE(
   write(rcc_csr, read(rcc_csr) & ~1u);
   REQUIRE(logged.size() == 1);
   CHECK(logged[0].message.contains("the LSI stopped with MODE1 1xx"));
+}
+
+TEST_CASE(
+    "RM0351 19.3 and Table 130: with EN1 1 in MODE 000 PA4 reads DAC_DOR1 x VDDA / 4096 from each "
+    "load on, over a board drive with one warning, and EN1 0 gives the pad back to the board")
+{
+  rig const              r;
+  constexpr std::uint8_t pa4 = 4;
+  r.pad().drive_analog(pa4, 500'000);
+  r.write(dac1 + dhr12r1, 0x800);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.pad().analog_level(pa4) == 500'000);
+  r.write(dac1 + cr, en1);
+  CHECK(r.pad().analog_level(pa4) == 1'500'000);
+  CHECK(r.pad_warnings() == 1);
+  auto const at = r.now_ps();
+  r.write(dac1 + dhr12r1, 0xFFF);
+  CHECK(r.pending(0) == std::vector<std::uint64_t>{at + cycle});
+  CHECK(r.pad().analog_level(pa4) == 1'500'000);
+  r.idle_to(at + cycle);
+  CHECK(r.pad().analog_level(pa4) == 2'999'267);
+  r.write(dac1 + cr, 0);
+  CHECK(r.pad().analog_level(pa4) == 500'000);
+  CHECK(r.pad().analog_drive(pa4) == std::optional<std::uint32_t>{500'000});
+  CHECK(r.pad_warnings() == 1);
+}
+
+TEST_CASE("channel 2 drives PA5 the same way, at a 3.3 V VDDA, and leaves PA4 to channel 1")
+{
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(stm32::board{.supply = {.vdda_mv = 3300}}, l476rc());
+  stm32_fixture const f{l476rc(), firmware, std::move(options)};
+  f.set("pc", sym(firmware, "idle"));
+  REQUIRE(f.target->mem().write(apb1enr1, 4, dac1en).has_value());
+  REQUIRE(f.target->mem().write(dac1 + dhr12r2, 4, 0x800).has_value());
+  REQUIRE(f.target->mem().write(dac1 + cr, 4, en2).has_value());
+  REQUIRE(
+      f.run_to_stop(
+           {.max_instructions = icount{1'000'000}, .until_time = vtime{f.now().ps + cycle}})
+          .reason
+      == stop_reason::time);
+  auto* const port = f.model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(port != nullptr);
+  CHECK(port->analog_level(5) == 1'650'000);
+  CHECK(port->analog_level(4) == 0);
+}
+
+TEST_CASE(
+    "RM0351 Table 130: MODE 000, 001 and 010 drive PA4 at EN1, 011 leaves it, and the sample and "
+    "hold MODE 100, 101 and 110 drive it from the first sample end, 111 never")
+{
+  for(std::uint32_t mode = 0; mode < 8; ++mode)
+  {
+    CAPTURE(mode);
+    rig const r;
+    if(mode >= 4)
+    {
+      sample_and_hold(r, 20, 5);
+    }
+    r.write(dac1 + mcr, mode);
+    r.write(dac1 + dhr12r1, 0x800);
+    r.idle_to(r.now_ps() + cycle);
+    auto const at = r.now_ps();
+    r.write(dac1 + cr, en1);
+    auto const drives = mode != 3 and mode != 7;
+    CHECK(r.pad().analog_level(4) == (drives and mode < 4 ? 1'500'000u : 0u));
+    r.idle_to(at + 11 * lsi);
+    CHECK(r.pad().analog_level(4) == (drives ? 1'500'000u : 0u));
+    r.write(dac1 + cr, 0);
+    CHECK(r.pad().analog_level(4) == 0);
+  }
+}
+
+TEST_CASE(
+    "a sample and hold channel drives the DAC_DOR1 value held at the sample end through the hold "
+    "and refresh phases, and a load shows on PA4 only at the next sample end, inferred")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  r.pad().drive_analog(4, 250'000);
+  r.write(dac1 + dhr12r1, 0x800);
+  r.idle_to(r.now_ps() + cycle);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1);
+  r.idle_to(at + 11 * lsi - 4 * cycle);
+  CHECK(r.pad().analog_level(4) == 250'000);
+  r.idle_to(at + 11 * lsi);
+  CHECK(r.pad().analog_level(4) == 1'500'000);
+  r.idle_to(at + 31 * lsi);
+  CHECK(r.pad().analog_level(4) == 1'500'000);
+  r.idle_to(at + 36 * lsi);
+  CHECK(r.pad().analog_level(4) == 1'500'000);
+  auto const write = r.now_ps();
+  r.write(dac1 + dhr12r1, 0x400);
+  r.idle_to(write + cycle);
+  CHECK(r.read(dac1 + dor1) == 0x400);
+  CHECK(r.pad().analog_level(4) == 1'500'000);
+  r.idle_to(write + cycle + 11 * lsi - 4 * cycle);
+  CHECK(r.pad().analog_level(4) == 1'500'000);
+  r.idle_to(write + cycle + 11 * lsi);
+  CHECK(r.pad().analog_level(4) == 750'000);
+  r.write(dac1 + cr, 0);
+  CHECK(r.pad().analog_level(4) == 250'000);
+  auto const again = r.now_ps();
+  r.write(dac1 + cr, en1);
+  CHECK(r.pad().analog_level(4) == 250'000);
+  r.idle_to(again + 11 * lsi);
+  CHECK(r.pad().analog_level(4) == 750'000);
+}
+
+TEST_CASE("DAC1RST and a machine reset release PA4, and the board drive shows again")
+{
+  rig const r;
+  r.pad().drive_analog(4, 500'000);
+  r.write(dac1 + dhr12r1, 0x800);
+  r.write(dac1 + cr, en1);
+  r.idle_to(r.now_ps() + cycle);
+  REQUIRE(r.pad().analog_level(4) == 1'500'000);
+  rcc_reset_pulse(*r.f, "APB1RSTR1", "DAC1RST");
+  CHECK(r.pad().analog_level(4) == 500'000);
+  r.write(dac1 + dhr12r1, 0x800);
+  r.write(dac1 + cr, en1);
+  r.idle_to(r.now_ps() + cycle);
+  REQUIRE(r.pad().analog_level(4) == 1'500'000);
+  r.f->target->reset();
+  CHECK(r.pad().analog_level(4) == 500'000);
+}
+
+TEST_CASE(
+    "checklist 26: a DAC_DOR1 load tells the PA4 listeners before the level changes, and a load of "
+    "the same value tells nothing")
+{
+  rig const r;
+  r.write(dac1 + cr, en1);
+  std::vector<std::uint32_t> seen;
+  auto const                 subscription = r.pad().on_analog_changing([&](std::uint8_t pin) {
+    if(pin == 4)
+    {
+      seen.push_back(r.pad().analog_level(4));
+    }
+  });
+  r.write(dac1 + dhr12r1, 0x800);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(seen == std::vector<std::uint32_t>{0});
+  r.write(dac1 + dhr12r1, 0x800);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(seen == std::vector<std::uint32_t>{0});
+  r.write(dac1 + dhr12r1, 0x400);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(seen == std::vector<std::uint32_t>{0, 1'500'000});
+  CHECK(r.pad().analog_level(4) == 750'000);
+}
+
+TEST_CASE(
+    "checklist 72: a snapshot restored into a machine never reset keeps the PA4 level and the held "
+    "sample, and the next loads drive PA4 at their own times")
+{
+  rig const r;
+  sample_and_hold(r, 20, 5);
+  r.write(dac1 + dhr12r1, 0x800);
+  r.write(dac1 + dhr12r2, 0x200);
+  r.idle_to(r.now_ps() + cycle);
+  auto const at = r.now_ps();
+  r.write(dac1 + cr, en1 | en2);
+  r.idle_to(at + 15 * lsi);
+  REQUIRE(r.pad().analog_level(4) == 1'500'000);
+  REQUIRE(r.pad().analog_level(5) == 375'000);
+  auto const bytes = r.encoded();
+
+  rig const fresh{no_reset};
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.pad().analog_level(4) == 1'500'000);
+  CHECK(fresh.pad().analog_level(5) == 375'000);
+  auto const write = fresh.now_ps();
+  fresh.write(dac1 + dhr12r1, 0x400);
+  fresh.write(dac1 + dhr12r2, 0x100);
+  fresh.idle_to(write + cycle);
+  CHECK(fresh.pad().analog_level(4) == 1'500'000);
+  CHECK(fresh.pad().analog_level(5) == 187'500);
+  fresh.idle_to(write + cycle + 11 * lsi);
+  CHECK(fresh.pad().analog_level(4) == 750'000);
+  fresh.write(dac1 + cr, 0);
+  CHECK(fresh.pad().analog_level(4) == 0);
+  CHECK(fresh.pad().analog_level(5) == 0);
 }

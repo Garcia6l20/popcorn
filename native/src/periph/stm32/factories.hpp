@@ -175,8 +175,9 @@ namespace popcorn::periph::stm32
 /**
  * @brief Factory of the DAC model, RM0351 section 19.
  * @param variant What differs between the DAC of the family the row serves.
+ * @param supply VDDA, the VREF+ the channel outputs scale to.
  */
-[[nodiscard]] auto dac_factory(dac_variant variant) -> model_factory;
+[[nodiscard]] auto dac_factory(dac_variant variant, supply_options supply) -> model_factory;
 
 /**
  * @brief Factory of the LPTIM model, RM0351 section 34.

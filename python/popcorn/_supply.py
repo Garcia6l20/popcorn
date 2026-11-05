@@ -9,7 +9,8 @@ class SupplyOptions:
 
     Attributes:
         vdda_mv: VDDA in millivolts, 1620 to 3600, also VREF+: the reference of every ADC
-            conversion. 3000 is the voltage the factory calibration words were taken at.
+            conversion and DAC output. 3000 is the voltage the factory calibration words were
+            taken at.
     """
 
     vdda_mv: int = 3000

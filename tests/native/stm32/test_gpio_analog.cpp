@@ -127,17 +127,18 @@ TEST_CASE(
   for(auto const& which : families())
   {
     CAPTURE(which.name);
-    rig const r{which};
-    r.port().drive_chip_analog(pa4, 900'000);
+    rig const              r{which};
+    constexpr std::uint8_t pa0 = 0;
+    r.port().drive_chip_analog(pa0, 900'000);
     r.gpio_reset();
-    CHECK(r.port().analog_level(pa4) == 900'000);
+    CHECK(r.port().analog_level(pa0) == 900'000);
     for(auto const kind : {popcorn::reset_kind::software, popcorn::reset_kind::power_on})
     {
       r.f->target->reset(kind);
-      CHECK(r.port().analog_level(pa4) == 900'000);
+      CHECK(r.port().analog_level(pa0) == 900'000);
     }
-    r.port().drive_chip_analog(pa4, std::nullopt);
-    CHECK(r.port().analog_level(pa4) == 0);
+    r.port().drive_chip_analog(pa0, std::nullopt);
+    CHECK(r.port().analog_level(pa0) == 0);
   }
 }
 

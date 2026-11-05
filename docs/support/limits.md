@@ -534,7 +534,19 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
 - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
   for a peripheral to see.
-- The output is `DAC_DORx` only. No pin or ADC channel sees it.
+- With ENx 1 a channel drives its pad, PA4 or PA5, RM0351 19.3, when MODEx connects the pad,
+  000, 001, 010, 100, 101 or 110, RM0351 Table 130, at `DAC_DORx` x VDDA / 4096, floored, VDDA
+  from `SupplyOptions` taken as VREF+. The level follows each `DAC_DORx` load at once, with no
+  tSETTLING or tWAKEUP, and the buffer state changes no level, inferred.
+- A sample and hold channel drives the `DAC_DORx` value held at the end of each sample and refresh
+  phase, through the hold phase, in which RM0351 19.4.10 tri-states the output and the hold
+  capacitor keeps the voltage, inferred. From ENx set to the end of its first sample phase it
+  leaves the pad, inferred. The RM0351 Table 129 settling formulas do not enter the level.
+- MODEx 011 and 111, ENx 0, DAC1RST and a machine reset release the pad. The ADC channels on the
+  pad convert the DAC level, and it wins over a board drive of the pin with one warning per pin.
+  The output reaches the pad only.
+- In Stop 0 and Stop 1 a channel keeps its level and a sample and hold channel runs its phases, as
+  RM0351 Table 131 states for the sample and hold mode, since popcorn models no Stop entry.
 
 ## DBGMCU
 

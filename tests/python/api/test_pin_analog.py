@@ -2,11 +2,15 @@
 a GPIO pin, which the ADC channels on its pad convert."""
 
 import asyncio
+import logging
+import struct
 from fractions import Fraction
 from typing import cast
 
 import popcorn
 import pytest
+from popcorn.board import SupplyOptions
+from popcorn.units import us
 
 PADS = (
     ("STM32U575QGIx", "ADC1", 5, "GPIOA", 0),
@@ -138,3 +142,54 @@ def test_every_analog_access_of_an_unbonded_pin_is_refused_naming_the_part() -> 
     ):
         with pytest.raises(popcorn.ConfigError, match=refused):
             access()
+
+
+def _pad_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "GPIOA"]
+
+
+def test_the_dac_output_wins_over_a_board_drive_of_pa4_and_release_volts_clears_the_board_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    released = _machine("STM32L476RCTx")
+    pa4 = released.periph.GPIOA.pin(4)
+    pa4.volts = 1.0
+    pa4.release_volts()
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        released.periph.DAC1.CR.EN1 = 1
+        assert pa4.volts == 0.0
+        released.periph.DAC1.CR.EN1 = 0
+        assert pa4.volts == 0.0
+    assert _pad_warnings(caplog) == []
+
+    zero = _machine("STM32L476RCTx")
+    pa4 = zero.periph.GPIOA.pin(4)
+    pa4.volts = 0.0
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        zero.periph.DAC1.CR.EN1 = 1
+        pa4.volts = 1.0
+        assert pa4.volts == 0.0
+        zero.periph.DAC1.CR.EN1 = 0
+        assert pa4.volts == pytest.approx(1.0)
+    assert len(_pad_warnings(caplog)) == 1
+
+
+SRAM_WFI = 0x2000_0000
+WFI_THEN_BRANCH_BACK = struct.pack("<2H", 0xBF30, 0xE7FD)
+THUMB = 0x0100_0000
+
+
+@pytest.mark.parametrize("vdda_mv", [3000, 3300])
+def test_the_dac_drives_pa4_at_the_supply_vdda(vdda_mv: int) -> None:
+    m = popcorn.MachineDescription(
+        part="STM32L476RCTx", images=[], supply=SupplyOptions(vdda_mv=vdda_mv)
+    ).machine()
+    m.reset()
+    m.mem.write(SRAM_WFI, WFI_THEN_BRANCH_BACK)
+    m.reg.pc = SRAM_WFI
+    m.reg.xpsr = THUMB
+    m.periph.RCC.APB1ENR1.DAC1EN = 1
+    m.periph.DAC1.DHR12R1.DACC1DHR = 0x800
+    m.periph.DAC1.CR.EN1 = 1
+    asyncio.run(m.run(for_=us(10)))
+    assert m.periph.GPIOA.pin(4).volts == pytest.approx(vdda_mv / 2000)

@@ -1022,6 +1022,10 @@ struct dac_variant
   /** @brief Factory OTRIMx of each channel, the DAC_CCR reset value. RM0351 19.7.15 gives
    *         0x00XX 00XX, so the value is a mid-range code, inferred. */
   std::array<std::uint32_t, 2> factory_trim{16, 16};
+  /** @brief GPIO port of the channel output pads, RM0351 19.3. */
+  std::string_view pad_port = "GPIOA";
+  /** @brief Pin of each channel's DAC_OUTx pad on @ref pad_port, PA4 and PA5, RM0351 19.3. */
+  std::array<std::uint8_t, 2> pads{4, 5};
 };
 
 /** @brief STM32L4 DAC1, RM0351 section 19, the triggers and SWTRIG at TSELx 111 of RM0351

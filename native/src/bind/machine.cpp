@@ -83,7 +83,7 @@ auto supply_factories(part_description const& description, std::uint32_t vdda_mv
   std::map<std::string, periph::model_factory, std::less<>> out;
   for(auto const& unit : description.peripherals)
   {
-    if(unit.ip != "ADC" or unit.alias_of)
+    if((unit.ip != "ADC" and unit.ip != "DAC") or unit.alias_of)
     {
       continue;
     }
