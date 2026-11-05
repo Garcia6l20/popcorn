@@ -100,6 +100,21 @@ def test_an_entry_built_before_a_helper_edit_is_not_reused_after_it(
     assert len(entries(cache, "echo")) == 2
 
 
+def test_the_key_covers_the_sdk_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = copied("echo", tmp_path)
+    before = _build_cache.key_of(source)
+    same = tmp_path / "same"
+    edited = tmp_path / "edited"
+    shutil.copytree(sdk().include, same)
+    shutil.copytree(sdk().include, edited)
+    header = edited / "popcorn" / "core" / "services.hpp"
+    header.write_text(header.read_text() + "\n")
+    monkeypatch.setattr(_build_cache, "sdk_include", lambda: same)
+    assert _build_cache.key_of(source) == before
+    monkeypatch.setattr(_build_cache, "sdk_include", lambda: edited)
+    assert _build_cache.key_of(source) != before
+
+
 def test_an_edit_in_the_same_process_asks_for_a_restart(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     plugin = Plugin.dev(source)

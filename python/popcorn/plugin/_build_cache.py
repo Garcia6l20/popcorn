@@ -2,9 +2,9 @@
 
 An entry is `<root>/<name>-<key>/`: `src/` a copy of the plugin directory without the files
 IGNORED names, `build/` the pcons build of that copy, `lib/` its outputs and their manifest. The
-key covers the ABI tag, the native code popcorn runs, `sdk.json` and the build helper modules, and
-every file of the copy, so an edit gives a new entry at a new path. A library is never unloaded, a
-changed file at an old path would `dlopen` to the old handle.
+key covers the ABI tag, the native code popcorn runs, the SDK headers, `sdk.json` and the build
+helper modules, and every file of the copy, so an edit gives a new entry at a new path. A library
+is never unloaded, a changed file at an old path would `dlopen` to the old handle.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import fnmatch
+import functools
 import hashlib
 import importlib.util
 import json
@@ -97,9 +98,19 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def sdk_include() -> Path:
+    """The include directory of the SDK a plugin build compiles against."""
+    return package_directory() / "sdk" / "include"
+
+
+@functools.cache
+def _include_digest(include: Path) -> str:
+    return tree_digest(include)
+
+
 def helper_files() -> tuple[Path, ...]:
-    """The files of popcorn a plugin build reads besides the SDK headers, which the ABI tag
-    covers: `sdk.json` and the modules `PluginProject` builds from."""
+    """The files of popcorn a plugin build reads besides the SDK headers: `sdk.json` and the
+    modules `PluginProject` builds from."""
     plugin = Path(__file__).resolve().parent
     return (package_directory() / "sdk" / "sdk.json", plugin / "build.py", plugin / "_sdk.py")
 
@@ -117,7 +128,14 @@ def key_of(copy: Path) -> str:
     """The cache key of the plugin copy at @p copy."""
     digest = hashlib.sha256()
     abi_tag = _core._host_abi_tag()  # pyright: ignore[reportPrivateUsage]
-    for part in (abi_tag, native_digest(), _helpers_digest(), tree_digest(copy)):
+    parts = (
+        abi_tag,
+        native_digest(),
+        _include_digest(sdk_include()),
+        _helpers_digest(),
+        tree_digest(copy),
+    )
+    for part in parts:
         digest.update(part.encode())
         digest.update(b"\0")
     return digest.hexdigest()
