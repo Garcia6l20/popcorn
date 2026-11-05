@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
+          fetch-depth: 0
       - name: Point ccache and Python at the container workspace
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
