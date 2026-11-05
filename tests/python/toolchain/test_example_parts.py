@@ -81,9 +81,9 @@ def flash_kib(part: str) -> int:
     return sum(r.size for r in description(part).regions if r.name in FLASH_REGIONS) // 1024
 
 
-def test_the_classes_of_the_shipped_parts_number_57_on_eight_dies() -> None:
+def test_the_classes_of_the_shipped_parts_number_58_on_eight_dies() -> None:
     found = classes()
-    assert len(found) == 57
+    assert len(found) == 58
     assert collections.Counter(c.die for c in found) == {
         "U575/U585": 30,
         "H56x/H573": 21,
@@ -92,7 +92,7 @@ def test_the_classes_of_the_shipped_parts_number_57_on_eight_dies() -> None:
         "DIE427": 1,
         "DIE436": 1,
         "DIE437": 1,
-        "DIE415": 1,
+        "DIE415": 2,
     }
 
 
@@ -183,7 +183,35 @@ def test_the_l4_group_a_is_the_lqfp64_part_of_each_die_of_the_shipped_l4_names()
     assert set(L4_GROUP_A) <= set(shipped)
     assert {part_class(p).package for p in L4_GROUP_A} == {"LQFP64"}
     assert {part_class(p).die for p in L4_GROUP_A} == {part_class(p).die for p in shipped}
-    assert [part_class(p) for p in L4_GROUP_A] == [PartClass("DIE415", 256, "LQFP64", False)]
+    assert [part_class(p) for p in L4_GROUP_A] == [
+        PartClass("DIE415", 256, "LQFP64", False),
+        PartClass("DIE415", 1024, "LQFP64", False),
+    ]
+
+
+L4_EXTRA = ("STM32L471RGTx", "STM32L475RGTx", "STM32L486RGTx")
+L4_OTG = ("STM32L475RGTx", "STM32L486RGTx")
+L4_EXTRA_ROWS = {
+    "stm32l476/gpio": L4_EXTRA,
+    "stm32l476/pwr_flash": L4_EXTRA,
+    "stm32l476/rcc": L4_EXTRA,
+    "stm32l476/usart": L4_EXTRA,
+    "stm32l476/usb_cdc": L4_OTG,
+}
+
+
+def test_the_l4_extras_are_the_1_mb_lqfp64_part_of_the_other_lines() -> None:
+    rows = {name: row for name, row in EXAMPLE_PARTS.items() if name.startswith("stm32l476/")}
+    assert {name: row.extra for name, row in rows.items() if row.extra} == L4_EXTRA_ROWS
+    assert {row.conftest for row in rows.values()} == {"STM32L476RCTx"}
+    assert {part_class(p) for p in L4_EXTRA} == {part_class("STM32L476RGTx")}
+    assert sorted(p[5:9] for p in L4_EXTRA) == ["L471", "L475", "L486"]
+    assert [p for p in L4_OTG if "OTG_FS" not in names_of(p)] == []
+    assert "OTG_FS" not in names_of("STM32L471RGTx")
+
+
+def names_of(part: str) -> set[str]:
+    return {p.name for p in description(part).peripherals}
 
 
 L4_PACKAGES = {

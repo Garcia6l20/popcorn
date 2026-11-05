@@ -4,7 +4,8 @@ The gate runs every example on its `conftest.py` part, then once more on each ex
 `EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped U5 and
 H5 parts, and of the STM32L1 parts of `L1_GROUP_A` and the STM32L4 parts of `L4_GROUP_A`, under
 at least one example. The other shipped STM32L1 names, every order code of the line, carry
-attach and reach evidence only, as do the shipped STM32L4 names outside `L4_GROUP_A`. An extra
+attach and reach evidence only, as do the shipped STM32L4 names that are neither in `L4_GROUP_A`
+nor an extra. The three L4 extras run the example rows that list them. An extra
 run moves every machine of the example onto its part, so each of the example's ELFs fits each
 extra part.
 `python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>` line per
@@ -29,7 +30,10 @@ class ExampleParts:
         extra: The parts its ELFs fit that it also runs on, on any die of the family. A U5 or
             H5 example runs on one part per class no other run covers. An STM32L1 example runs
             on one part per other category its builds fit, since the models differ by category:
-            the xe build on Cat.3 of both dies, the xb build also on Cat.2.
+            the xe build on Cat.3 of both dies, the xb build also on Cat.2. An STM32L4 example
+            runs on the 1 MB LQFP64 part of each other line its firmware fits, but only the
+            rows that list L4 extras have them: rcc, gpio, usart and pwr_flash take all three,
+            usb_cdc the two with an OTG_FS.
         pins: The GPIO pins its tests and firmware use, such as `PA5`, bonded on every part.
         adc_channels: The external channels of ADC1, the single `ADC` on the STM32L1, that it
             uses, in `bonded_channels` of every part.
@@ -166,11 +170,13 @@ L1_GROUP_A: Final = (
 )
 """The STM32L1 parts the examples cover, one LQFP64 part per die."""
 
-L4_GROUP_A: Final = ("STM32L476RCTx",)
-"""The STM32L4 parts the examples cover, the LQFP64 STM32L476RCTx of the DIE415."""
+L4_GROUP_A: Final = ("STM32L476RCTx", "STM32L476RGTx")
+"""The STM32L4 parts the examples cover, the 256 KB and the 1 MB LQFP64 STM32L476 of the DIE415."""
 
 _L1_XE_EXTRA: Final = ("STM32L152RCTxA", "STM32L152RCTx")
 _L1_XB_EXTRA: Final = (*_L1_XE_EXTRA, "STM32L152RBTxA")
+_L4_EXTRA: Final = ("STM32L471RGTx", "STM32L475RGTx", "STM32L486RGTx")
+_L4_OTG_EXTRA: Final = ("STM32L475RGTx", "STM32L486RGTx")
 
 EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
     "stm32u575/adc": ExampleParts(
@@ -434,7 +440,7 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         "STM32L476RCTx", (), pins=("PA4",), adc_channels=(), flash_kib=None
     ),
     "stm32l476/gpio": ExampleParts(
-        "STM32L476RCTx", (), pins=("PA5", "PC13"), adc_channels=(), flash_kib=None
+        "STM32L476RCTx", _L4_EXTRA, pins=("PA5", "PC13"), adc_channels=(), flash_kib=None
     ),
     "stm32l476/i2c": ExampleParts(
         "STM32L476RCTx", (), pins=("PA5", "PB8", "PB9"), adc_channels=(), flash_kib=None
@@ -444,10 +450,10 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         "STM32L476RCTx", (), pins=("PA5", "PC14", "PC15"), adc_channels=(), flash_kib=None
     ),
     "stm32l476/pwr_flash": ExampleParts(
-        "STM32L476RCTx", (), pins=(), adc_channels=(), flash_kib=None
+        "STM32L476RCTx", _L4_EXTRA, pins=(), adc_channels=(), flash_kib=None
     ),
     "stm32l476/rcc": ExampleParts(
-        "STM32L476RCTx", (), pins=("PA8",), adc_channels=(), flash_kib=None
+        "STM32L476RCTx", _L4_EXTRA, pins=("PA8",), adc_channels=(), flash_kib=None
     ),
     "stm32l476/rng": ExampleParts("STM32L476RCTx", (), pins=(), adc_channels=(), flash_kib=None),
     "stm32l476/rtc": ExampleParts(
@@ -460,11 +466,11 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         "STM32L476RCTx", (), pins=("PA5", "PA6"), adc_channels=(), flash_kib=None
     ),
     "stm32l476/usart": ExampleParts(
-        "STM32L476RCTx", (), pins=("PA2", "PA3"), adc_channels=(), flash_kib=None
+        "STM32L476RCTx", _L4_EXTRA, pins=("PA2", "PA3"), adc_channels=(), flash_kib=None
     ),
     "stm32l476/usb_cdc": ExampleParts(
         "STM32L476RCTx",
-        (),
+        _L4_OTG_EXTRA,
         pins=("PA11", "PA12"),
         adc_channels=(),
         flash_kib=None,

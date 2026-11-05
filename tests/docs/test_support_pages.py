@@ -139,7 +139,14 @@ L1_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("S
 L4_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("STM32L4")]
 L1_CLASS = 11
 L1_ATTACHES = 116
-L4_CLASS = {"STM32L475RCTx"}
+L4_CLASS = {"STM32L475RCTx": "STM32L476RCTx", "STM32L476RGTx": "STM32L471RGTx"}
+L4_EXAMPLES = {
+    "STM32L471RGTx": "stm32l476/gpio, stm32l476/pwr_flash, stm32l476/rcc, stm32l476/usart",
+    "STM32L475RGTx": "stm32l476/gpio, stm32l476/pwr_flash, stm32l476/rcc, stm32l476/usart, "
+    "stm32l476/usb_cdc",
+    "STM32L486RGTx": "stm32l476/gpio, stm32l476/pwr_flash, stm32l476/rcc, stm32l476/usart, "
+    "stm32l476/usb_cdc",
+}
 STATES = ("tested", "examples", "class", "attaches")
 NEGATION = re.compile(r"\b(not|no|never|without|none|cannot|n't)\b", re.IGNORECASE)
 EXTRA_PARTS = {part for row in EXAMPLE_PARTS.values() for part in row.extra}
@@ -193,8 +200,11 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert len(by_state["class"] & set(L1_NAMES)) == L1_CLASS
     assert len(by_state["attaches"] & set(L1_NAMES)) == L1_ATTACHES
     assert by_state["tested"] & set(L4_NAMES) == {"STM32L476RCTx"}
-    assert by_state["class"] & set(L4_NAMES) == L4_CLASS
-    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES) - {"STM32L476RCTx"} - L4_CLASS
+    assert by_state["examples"] & set(L4_NAMES) == set(L4_EXAMPLES)
+    assert by_state["class"] & set(L4_NAMES) == set(L4_CLASS)
+    assert by_state["attaches"] & set(L4_NAMES) == (
+        set(L4_NAMES) - {"STM32L476RCTx"} - set(L4_CLASS) - set(L4_EXAMPLES)
+    )
 
 
 @pytest.mark.timeout(60)
@@ -370,7 +380,11 @@ def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated:
         (
             "tested"
             if name == "STM32L476RCTx"
-            else "class of STM32L476RCTx" if name in L4_CLASS else "attaches"
+            else (
+                f"class of {L4_CLASS[name]}"
+                if name in L4_CLASS
+                else f"examples: {L4_EXAMPLES[name]}" if name in L4_EXAMPLES else "attaches"
+            )
         )
         for name in L4_NAMES
     ]
