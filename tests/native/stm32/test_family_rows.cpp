@@ -1,3 +1,4 @@
+#include "rows.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -12,11 +13,13 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -297,4 +300,53 @@ TEST_CASE("option_bytes.tzen on an STM32L4 part is refused")
   auto const refused = stm32::configure_option_bytes(toy_l4(l4_dbgmcu), {.tzen = true}, options);
   REQUIRE_FALSE(refused.has_value());
   CHECK(refused.error().key == "option_bytes.tzen");
+}
+
+TEST_CASE("board_inputs_of lists the board members of each row, split at the commas")
+{
+  for(auto const* const desc : {&popcorn::testing::h573(), &popcorn::testing::l476rc()})
+  {
+    CAPTURE(desc->part);
+    auto const inputs  = stm32::board_inputs_of(*desc);
+    auto const rows    = stm32::resolve(*desc);
+    auto const served  = stm32::factories(stm32::board{}, *desc);
+    auto       counted = std::size_t{};
+    for(auto const& found : rows)
+    {
+      CAPTURE(found.instance);
+      auto const listed = inputs.find(found.instance);
+      CHECK((listed != inputs.end()) == (found.source == stm32::row_source::row));
+      CHECK((served.find(found.instance) != served.end()) == (listed != inputs.end()));
+      if(listed == inputs.end())
+      {
+        continue;
+      }
+      ++counted;
+      std::string joined;
+      for(auto const name : listed->second)
+      {
+        joined += joined.empty() ? "" : ",";
+        joined += name;
+      }
+      CHECK(joined == found.reads);
+    }
+    CHECK(counted == inputs.size());
+    CHECK(counted > 0);
+  }
+}
+
+TEST_CASE("the rows of the bus, supply, rng, rcc and usb models read the member bind fills")
+{
+  using members = std::vector<std::string_view>;
+  auto const h5 = stm32::board_inputs_of(popcorn::testing::h573());
+  CHECK(h5.at("SPI1") == members{"spi", "spi_controllers"});
+  CHECK(h5.at("I2C1") == members{"i2c", "i2c_controllers"});
+  CHECK(h5.at("RCC") == members{"rcc"});
+  CHECK(h5.at("RNG") == members{"rng"});
+  CHECK(h5.at("ADC1") == members{"supply"});
+  CHECK(h5.at("USB") == members{"usb_hosts"});
+  CHECK(h5.at("GPIOA").empty());
+  auto const l4 = stm32::board_inputs_of(popcorn::testing::l476rc());
+  CHECK(l4.at("OTG_FS") == members{"usb_hosts"});
+  CHECK(l4.at("SPI1") == members{"spi", "spi_controllers"});
 }

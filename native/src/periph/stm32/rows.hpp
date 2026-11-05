@@ -5,8 +5,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -57,6 +59,15 @@ struct row_info
   /** @brief Part globs of the row. */
   std::vector<std::string> part_globs;
 };
+
+/**
+ * @brief The `board` members read by the row that serves each non-alias peripheral of @p part,
+ *        as a machine selects it.
+ * @return Member names such as `spi` and `spi_controllers` by instance name. An instance with no
+ *         row, or a row reading no member, is absent or maps to an empty list.
+ */
+[[nodiscard]] POPCORN_API auto board_inputs_of(part_description const& part)
+    -> std::map<std::string, std::vector<std::string_view>, std::less<>>;
 
 /** @brief Every row of the built-in model table, in table order. */
 [[nodiscard]] POPCORN_API auto rows() -> std::vector<row_info>;

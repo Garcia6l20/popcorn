@@ -430,6 +430,7 @@ family_rows = add_doctest(
     },
     register=u575_2m is not None and h573 is not None and l476rc is not None,
 )
+family_rows.private.include_dirs.append(private_dir)
 
 class_a_h573 = add_doctest(
     "stm32-class-a-h573",

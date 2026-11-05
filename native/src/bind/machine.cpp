@@ -1,5 +1,6 @@
 #include "machine.hpp"
 #include "../periph/stm32/flash_unit.hpp"
+#include "../periph/stm32/rows.hpp"
 #include "devices.hpp"
 #include "errors.hpp"
 #include "held_python_end.hpp"
@@ -30,10 +31,9 @@ namespace popcorn::bind
 {
 namespace
 {
-constexpr std::uint64_t                   hse_min_hz = 4'000'000;
-constexpr std::uint64_t                   hse_max_hz = 50'000'000;
-constexpr std::uint64_t                   lse_max_hz = 1'000'000;
-constexpr std::array<std::string_view, 2> usb_device_ips{"USB_OTG_FS", "USB"};
+constexpr std::uint64_t hse_min_hz = 4'000'000;
+constexpr std::uint64_t hse_max_hz = 50'000'000;
+constexpr std::uint64_t lse_max_hz = 1'000'000;
 
 auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32::rcc_options>
 {
@@ -66,8 +66,29 @@ auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32
   return options;
 }
 
-auto supply_factories(part_description const& description, std::uint32_t vdda_mv)
-    -> std::map<std::string, periph::model_factory, std::less<>>
+using board_inputs = std::map<std::string, std::vector<std::string_view>, std::less<>>;
+
+auto serving(
+    part_description const& description,
+    board_inputs const&     inputs,
+    std::string_view        input) -> std::vector<std::string>
+{
+  return description.peripherals
+       | std::views::filter([&](peripheral_desc const& unit) {
+           auto const found = inputs.find(unit.name);
+           return not unit.alias_of
+              and found != inputs.end()
+              and std::ranges::contains(found->second, input);
+         })
+       | std::views::transform(&peripheral_desc::name)
+       | std::ranges::to<std::vector>();
+}
+
+auto supply_names(
+    part_description const& description,
+    board_inputs const&     inputs,
+    std::uint32_t           vdda_mv,
+    periph::stm32::board&   board) -> std::vector<std::string>
 {
   using periph::stm32::vdda_max_mv;
   using periph::stm32::vdda_min_mv;
@@ -77,51 +98,30 @@ auto supply_factories(part_description const& description, std::uint32_t vdda_mv
         "supply", 0, "supply.vdda_mv",
         std::format("a VDDA from {} to {} mV, not {} mV", vdda_min_mv, vdda_max_mv, vdda_mv));
   }
-  periph::stm32::board board;
   board.supply.vdda_mv = vdda_mv;
-  auto all             = periph::stm32::factories(board, description);
-  std::map<std::string, periph::model_factory, std::less<>> out;
-  for(auto const& unit : description.peripherals)
-  {
-    if((unit.ip != "ADC" and unit.ip != "DAC") or unit.alias_of)
-    {
-      continue;
-    }
-    if(auto found = all.find(unit.name); found != all.end())
-    {
-      out.emplace(unit.name, std::move(found->second));
-    }
-  }
-  return out;
+  return serving(description, inputs, "supply");
 }
 
-auto rng_factories(part_description const& description, machine_config const& config)
-    -> std::map<std::string, periph::model_factory, std::less<>>
+auto rng_names(
+    part_description const& description,
+    board_inputs const&     inputs,
+    machine_config const&   config,
+    periph::stm32::board&   board) -> std::vector<std::string>
 {
-  periph::stm32::board board;
   board.rng.seed = *config.rng_seed;
-  auto all       = periph::stm32::factories(board, description);
-  std::map<std::string, periph::model_factory, std::less<>> out;
-  for(auto const& unit : description.peripherals)
+  auto names     = serving(description, inputs, "rng");
+  for(auto const& name : names)
   {
-    if(unit.ip != "RNG" or unit.alias_of)
-    {
-      continue;
-    }
-    if(config.python_models.contains(unit.name) or config.plugin_models.contains(unit.name))
+    if(config.python_models.contains(name) or config.plugin_models.contains(name))
     {
       throw config_error(
           "rng", 0, "rng",
           std::format(
-              "the built-in model of {}, not a {} model", unit.name,
-              config.plugin_models.contains(unit.name) ? "plugin" : "Python"));
-    }
-    if(auto found = all.find(unit.name); found != all.end())
-    {
-      out.emplace(unit.name, std::move(found->second));
+              "the built-in model of {}, not a {} model", name,
+              config.plugin_models.contains(name) ? "plugin" : "Python"));
     }
   }
-  return out;
+  return names;
 }
 
 auto option_bytes_of(option_bytes_config const& config) -> periph::stm32::option_bytes
@@ -185,12 +185,12 @@ auto key_of(std::string const& usb) -> std::string
 
 using usb_hub_map = std::map<std::string, detail::usb_hubs>;
 
-auto usb_factories(
-    part_description const& description,
-    machine_config const&   config,
-    usb_hub_map const&      hubs) -> std::map<std::string, periph::model_factory, std::less<>>
+auto usb_names(
+    machine_config const&                    config,
+    usb_hub_map const&                       hubs,
+    std::function_ref<board_inputs const&()> inputs,
+    periph::stm32::board&                    board) -> std::vector<std::string>
 {
-  periph::stm32::board board;
   for(auto const& [name, host] : config.usb_hosts)
   {
     if(host.reset_ns == 0 or host.timeout_ns == 0)
@@ -209,23 +209,18 @@ auto usb_factories(
     options.host.drivers.push_back(periph::usb::uac2_factory(channels.uac2));
     board.usb_hosts.emplace(name, std::move(options));
   }
-  auto all = periph::stm32::factories(board, description);
-  std::map<std::string, periph::model_factory, std::less<>> out;
-  for(auto const& name : config.usb_hosts | std::views::keys)
+  auto        names = config.usb_hosts | std::views::keys | std::ranges::to<std::vector>();
+  auto const& known = inputs();
+  for(auto const& name : names)
   {
-    auto const unit  = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
-      return p.name == name and not p.alias_of;
-    });
-    auto       found = all.find(name);
-    if(unit == description.peripherals.end()
-       or not std::ranges::contains(usb_device_ips, unit->ip)
-       or found == all.end())
+    auto const found = known.find(name);
+    if(found == known.end()
+       or not std::ranges::contains(found->second, std::string_view{"usb_hosts"}))
     {
       throw config_error("usb", 0, key_of(name), "a USB device controller a built-in model serves");
     }
-    out.emplace(name, std::move(found->second));
   }
-  return out;
+  return names;
 }
 
 auto options_of(
@@ -307,46 +302,71 @@ auto options_of(
   auto const kind = [&config](std::string const& name) {
     return config.plugin_models.contains(name) ? "plugin" : "Python";
   };
-  auto const rcc = rcc_options_of(config);
-  if(not config.python_devices.empty() or rcc)
-  {
-    for(auto& [name, factory] :
-        detail::device_factories(description, config.python_devices, rcc, python_owned))
+  auto const                  rcc = rcc_options_of(config);
+  std::optional<board_inputs> known;
+  auto const                  inputs = [&]() -> board_inputs const& {
+    if(not known)
     {
-      if(not options.models.emplace(name, std::move(factory)).second)
-      {
-        if(not config.python_devices.contains(name))
-        {
-          throw config_error("rcc", 0, "rcc", std::format("an RCC without a {} model", kind(name)));
-        }
-        throw config_error(
-            "devices", 0, std::format("devices.{}", name),
-            std::format("a peripheral without a {} model", kind(name)));
-      }
+      known = periph::stm32::board_inputs_of(description);
     }
-  }
-  for(auto& [name, factory] : usb_factories(description, config, hubs))
-  {
-    if(not options.models.emplace(name, std::move(factory)).second)
+    return *known;
+  };
+  periph::stm32::board board;
+  auto const           refuse_device_taken = [&](std::string const& name) {
+    if(options.models.contains(name))
+    {
+      if(not config.python_devices.contains(name))
+      {
+        throw config_error("rcc", 0, "rcc", std::format("an RCC without a {} model", kind(name)));
+      }
+      throw config_error(
+          "devices", 0, std::format("devices.{}", name),
+          std::format("a peripheral without a {} model", kind(name)));
+    }
+  };
+  auto const refuse_usb_taken = [&](std::string const& name) {
+    if(options.models.contains(name))
     {
       throw config_error(
           "usb", 0, key_of(name),
           std::format("a USB device controller without a {} model", kind(name)));
     }
+  };
+  detail::device_plan devices;
+  if(not config.python_devices.empty() or rcc)
+  {
+    devices = detail::prepare_devices(
+        description, config.python_devices, rcc, inputs, board, python_owned);
+    std::ranges::for_each(devices.names, refuse_device_taken);
   }
+  auto const usb = usb_names(config, hubs, inputs, board);
+  std::ranges::for_each(usb, refuse_usb_taken);
+  std::vector<std::string> rng;
   if(config.rng_seed)
   {
-    for(auto& [name, factory] : rng_factories(description, config))
-    {
-      options.models.emplace(name, std::move(factory));
-    }
+    rng = rng_names(description, inputs(), config, board);
   }
+  std::vector<std::string> supply;
   if(config.vdda_mv)
   {
-    for(auto& [name, factory] : supply_factories(description, *config.vdda_mv))
-    {
-      options.models.try_emplace(name, std::move(factory));
-    }
+    supply = supply_names(description, inputs(), *config.vdda_mv, board);
+  }
+  auto all = periph::stm32::factories(board, description);
+  for(auto& [name, factory] : detail::device_factories(devices, all))
+  {
+    options.models.emplace(name, std::move(factory));
+  }
+  for(auto const& name : usb)
+  {
+    options.models.emplace(name, std::move(all.at(name)));
+  }
+  for(auto const& name : rng)
+  {
+    options.models.emplace(name, std::move(all.at(name)));
+  }
+  for(auto const& name : supply)
+  {
+    options.models.try_emplace(name, std::move(all.at(name)));
   }
   if(config.arena_start)
   {

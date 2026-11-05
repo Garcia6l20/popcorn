@@ -253,6 +253,30 @@ auto rows() -> std::vector<row_info>
        | std::ranges::to<std::vector>();
 }
 
+auto board_inputs_of(part_description const& part)
+    -> std::map<std::string, std::vector<std::string_view>, std::less<>>
+{
+  std::map<std::string, std::vector<std::string_view>, std::less<>> out;
+  for(auto const& unit : part.peripherals)
+  {
+    if(unit.alias_of)
+    {
+      continue;
+    }
+    if(auto const* const row = select_row(unit.ip, unit.ip_version, part.part, unit.name))
+    {
+      out.emplace(
+          unit.name,
+          row->reads | std::views::split(',') | std::views::transform([](auto part_name) {
+            return std::string_view{part_name};
+          }) | std::views::filter([](std::string_view name) {
+            return not name.empty();
+          }) | std::ranges::to<std::vector>());
+    }
+  }
+  return out;
+}
+
 auto resolve(part_description const& part) -> std::vector<resolution>
 {
   std::vector<resolution> out;

@@ -1546,3 +1546,61 @@ def test_a_mode_mismatch_on_a_linked_system_member_raises_from_the_system_run(
         with pytest.raises(ConfigError, match=MODE_REFUSED) as raised:
             asyncio.run(system.run(for_=ms(5)))
         assert raised.value.key == "devices.SPI1"
+
+
+def no_row_i2c() -> popcorn.PartDescription:
+    from popcorn.stm32 import mcu
+
+    other = mcu("STM32U575QGIx")
+    for peripheral in other.peripherals:
+        if peripheral.name == "I2C1" and peripheral.alias_of is None:
+            peripheral.ip_version = "i2c_unknown_version"
+    return other
+
+
+def test_an_i2c_instance_no_row_serves_is_refused_when_it_has_devices() -> None:
+    with pytest.raises(ConfigError, match="a peripheral a built-in I2C or SPI model serves") as e:
+        popcorn.Machine(no_row_i2c(), devices={"I2C1": [Eeprom24(0x50, 256)]})
+    assert e.value.key == "devices.I2C1"
+
+
+def test_an_i2c_instance_no_row_serves_is_skipped_with_no_devices() -> None:
+    popcorn.Machine(no_row_i2c(), devices={"I2C1": list[I2CTarget]()})
+
+
+def no_row_part() -> popcorn.PartDescription:
+    from popcorn.stm32 import mcu
+
+    other = mcu("STM32U575QGIx")
+    other.part = "STM32X575ZITxQ"
+    return other
+
+
+def test_a_wrong_kind_device_is_refused_before_the_part_with_no_row() -> None:
+    with pytest.raises(ConfigError) as refused:
+        popcorn.Machine(no_row_part(), devices={"I2C1": [JedecDevice(None, (1, 2, 3))]})
+    assert refused.value.key == "devices.I2C1"
+
+
+def test_a_part_with_no_row_is_refused_by_its_first_instance_once_the_devices_pass() -> None:
+    with pytest.raises(ConfigError) as refused:
+        popcorn.Machine(no_row_part(), devices={"I2C1": [Eeprom24(0x50, 256)]})
+    assert refused.value.key.startswith("peripherals.")
+
+
+def test_a_python_rcc_with_clock_sources_names_the_rcc_not_a_usb_host_of_that_name(
+    u575: popcorn.PartDescription,
+) -> None:
+    from popcorn.board import RccOptions, UsbHostOptions
+
+    class Rcc(Model):
+        pass
+
+    with pytest.raises(ConfigError) as refused:
+        popcorn.Machine(
+            u575,
+            models={"RCC": Rcc},
+            rcc=RccOptions(hse_hz=8_000_000),
+            usb={"RCC": UsbHostOptions()},
+        )
+    assert refused.value.key == "rcc"

@@ -540,19 +540,20 @@ void bind_device_bases(nb::module_ scope)
       .def(nb::init<>());
 }
 
-auto device_factories(
+auto prepare_devices(
     part_description const&                               description,
     std::map<std::string, std::vector<nb::object>> const& devices,
     std::optional<stm32::rcc_options> const&              rcc,
-    std::vector<nb::handle>&                              python_owned)
-    -> std::map<std::string, periph::model_factory, std::less<>>
+    device_inputs                                         inputs,
+    stm32::board&                                         board,
+    std::vector<nb::handle>&                              python_owned) -> device_plan
 {
-  stm32::board board;
   device_cells cells;
   if(rcc)
   {
     board.rcc = *rcc;
   }
+  std::vector<std::pair<std::string, std::string_view>> served;
   for(auto const& [peripheral, objects] : devices)
   {
     auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
@@ -562,13 +563,19 @@ auto device_factories(
     {
       throw refused(peripheral, "an I2C or SPI peripheral of the MCU");
     }
+    bool const i2c_bus = unit->ip == "I2C";
+    bool const spi_bus = unit->ip == "SPI";
+    if(not objects.empty())
+    {
+      served.emplace_back(peripheral, i2c_bus ? "i2c" : "spi");
+    }
     for(auto const& object : objects)
     {
       if(std::shared_ptr<periph::i2c_target> target; nb::try_cast(object, target) and target)
       {
         adopt<python_i2c_target, attached_i2c_target>(
             target, object, peripheral, cells, python_owned);
-        if(unit->ip != "I2C")
+        if(not i2c_bus)
         {
           throw refused(peripheral, "an SPI peripheral for an SpiTarget, not an I2CTarget");
         }
@@ -582,7 +589,7 @@ auto device_factories(
           std::shared_ptr<periph::i2c_controller_sink> controller;
           nb::try_cast(object, controller) and controller)
       {
-        if(unit->ip != "I2C")
+        if(not i2c_bus)
         {
           throw refused(peripheral, "an I2C peripheral for an I2CController");
         }
@@ -598,7 +605,7 @@ auto device_factories(
           std::shared_ptr<periph::spi_controller_sink> controller;
           nb::try_cast(object, controller) and controller)
       {
-        if(unit->ip != "SPI")
+        if(not spi_bus)
         {
           throw refused(peripheral, "an SPI peripheral for an SpiController");
         }
@@ -616,7 +623,7 @@ auto device_factories(
         {
           throw refused(peripheral, "one SpiController alone on the SPI instance");
         }
-        if(unit->ip != "SPI")
+        if(not spi_bus)
         {
           throw refused(peripheral, "an I2C peripheral for an I2CTarget");
         }
@@ -625,32 +632,49 @@ auto device_factories(
       }
     }
   }
-  auto all = stm32::factories(board, description);
-  std::map<std::string, periph::model_factory, std::less<>> out;
-  for(auto const& [peripheral, objects] : devices)
+  auto const& known = inputs();
+  auto const  reads = [&](std::string const& peripheral, std::string_view input) {
+    auto const found = known.find(peripheral);
+    return found != known.end() and std::ranges::contains(found->second, input);
+  };
+  device_plan plan;
+  for(auto const& [peripheral, member] : served)
   {
-    if(objects.empty())
-    {
-      continue;
-    }
-    auto found = all.find(peripheral);
-    if(found == all.end())
+    if(not reads(peripheral, member))
     {
       throw refused(peripheral, "a peripheral a built-in I2C or SPI model serves");
     }
-    out.emplace(peripheral, stopping(std::move(found->second), std::move(cells[peripheral])));
+    plan.names.push_back(peripheral);
   }
   if(rcc)
   {
-    auto const unit  = std::ranges::find_if(description.peripherals, [](peripheral_desc const& p) {
-      return p.ip == "RCC" and not p.alias_of;
+    auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
+      return not p.alias_of and reads(p.name, "rcc");
     });
-    auto       found = unit == description.peripherals.end() ? all.end() : all.find(unit->name);
-    if(found == all.end())
+    if(unit == description.peripherals.end())
     {
       throw config_error("rcc", 0, "rcc", "an MCU whose RCC a built-in model serves");
     }
-    out.emplace(found->first, std::move(found->second));
+    plan.names.push_back(unit->name);
+  }
+  std::ranges::sort(plan.names);
+  plan.cells = std::move(cells);
+  return plan;
+}
+
+auto device_factories(
+    device_plan&                                               plan,
+    std::map<std::string, periph::model_factory, std::less<>>& all)
+    -> std::map<std::string, periph::model_factory, std::less<>>
+{
+  std::map<std::string, periph::model_factory, std::less<>> out;
+  for(auto const& name : plan.names)
+  {
+    auto& made  = all.at(name);
+    auto  cells = plan.cells.find(name);
+    out.emplace(
+        name, cells == plan.cells.end() ? std::move(made)
+                                        : stopping(std::move(made), std::move(cells->second)));
   }
   return out;
 }
