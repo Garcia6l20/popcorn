@@ -57,9 +57,11 @@ inline constexpr std::size_t rng_max_queued = std::size_t{1} << 16;
  * @brief The word source of the RNG model as a test sees it, implemented by the built-in RNG
  *        model. Reach it with `dynamic_cast<entropy_source*>(machine.model("RNG"))`. Every value
  *        but the seed is board state: kept across every reset kind and restored by a snapshot.
- *        The seed is configuration, checked through the config digest. A conditioning
- *        round or init takes its four words, in order, from the stuck word while one is set,
- *        else from the queue, else from the generator.
+ *        The seed is configuration, checked through the config digest. On the STM32U5 and STM32H5,
+ *        RM0456 section 48, a conditioning round or init takes its four words, in order, from
+ *        the stuck word while one is set, else from the queue, else from the generator. On the
+ *        STM32L4, RM0351 section 27, each phase produces one word and takes it from the same
+ *        sources.
  */
 class POPCORN_API entropy_source
 {
@@ -80,9 +82,11 @@ public:
 
   /**
    * @brief Generator position: the generator words produced since the machine was built, zeros
-   *        skipped included. Queued and stuck words do not move it. A word counts when init or a
-   *        round produces it into the FIFO or the conditioning register, so up to 8 counted
-   *        words may not be read yet: the generator words after the ones the RNG holds start
+   *        skipped included. Queued and stuck words do not move it. A word counts when it is
+   *        produced. On the STM32U5 and STM32H5, RM0456 48, init or a round produces four words
+   *        into the FIFO or the conditioning register, so up to 8 counted words may not be read
+   *        yet. On the STM32L4, RM0351 27, each phase produces one word into DR, so at most 1
+   *        counted word is not read yet. The generator words after the ones the RNG holds start
    *        at this position.
    */
   [[nodiscard]] virtual auto drawn() const -> std::uint64_t = 0;
@@ -112,12 +116,15 @@ public:
   [[nodiscard]] virtual auto seed_fault() const -> bool = 0;
 
   /**
-   * @brief Sets or releases the noise source failure. While set and the noise source runs, CR.RNGEN
-   *        1, CONDRST 0 and the kernel clock running, SECS and SEIS set, the FIFO and the
-   *        conditioning register empty and generation stops, RM0456 48.3.7. SECS stays across
-   *        every recovery while set. Released with ARDIS 0, SECS clears 2 AHB plus 2 RNG cycles
-   *        later, an assumption: RM0456 gives no auto-reset time. With ARDIS 1 it clears at the
-   *        end of a CONDRST cycle.
+   * @brief Sets or releases the noise source failure. On the STM32U5 and STM32H5, while set and
+   *        the noise source runs, CR.RNGEN 1, CONDRST 0 and the kernel clock running, SECS and
+   *        SEIS set, the FIFO and the conditioning register empty and generation stops, RM0456
+   *        48.3.7. SECS stays across every recovery while set. Released with ARDIS 0, SECS
+   *        clears 2 AHB plus 2 RNG cycles later, an assumption: RM0456 gives no auto-reset
+   *        time. With ARDIS 1 it clears at the end of a CONDRST cycle. On the STM32L4, RM0351
+   *        27.3.7, SECS and SEIS set, DR empties and generation stops. SECS clears only when
+   *        firmware writes RNGEN 0, with no auto-reset and no CONDRST, inferred: RM0351 27.3.7
+   *        gives the recovery sequence, not when SECS clears.
    * @param fault Whether the noise source fails.
    */
   virtual void set_seed_fault(bool fault) = 0;
@@ -128,7 +135,8 @@ public:
   /**
    * @brief Sets or releases a slow RNG clock as the clock checker sees it. While set, CED 0,
    *        RNGEN 1 and the bus enable set, CECS is 1 and its rise sets CEIS. Generation goes on,
-   *        RM0456 48.3.7.
+   *        RM0456 48.3.7 on the STM32U5 and STM32H5, RM0351 27.3.7 as corrected by ES0250 2.15.1
+   *        on the STM32L4, where CECS is 1 below fHCLK / 16.
    * @param fault Whether the clock checker sees a slow clock.
    */
   virtual void set_clock_fault(bool fault) = 0;

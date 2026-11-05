@@ -174,8 +174,11 @@ class Memory:
         the TZIC flags and GTZC_IRQn stay as they are. Unmodelled data raises ModelError as
         through `m.mem`. On a machine without TrustZone enabled each access is a DAP access of
         the Secure state, decided by the bus firewall: the STM32H5 FLASH HDP areas and the
-        STM32L1 PCROP sectors read 0 through it. With no firewall it reads and writes as
-        `m.mem`.
+        STM32L1 PCROP sectors read 0 through it. The STM32L4 FLASH adds two rules, RM0351 3.5.
+        At RDP level 1 an access to the flash raises BusAccessError, and so does one to the OTP
+        area or SRAM2, inferred. At level 2 every access does. A PCROP area reads 0, inferred,
+        and sets FLASH_SR.RDERR, and a write to it is dropped. With no firewall it reads and
+        writes as `m.mem`.
         """
         return self._views()[0]
 
@@ -795,10 +798,11 @@ class RngEntropy:
     """The word source of the built-in RNG model, `m.periph.RNG.entropy`.
 
     Every value but `seed` is board state: kept across every reset kind and restored by
-    snapshots. `seed` is configuration, checked through the config digest. A conditioning round
-    takes its four words from `stuck` while it is set, else from the queue, else from the
-    generator. While the machine is busy, every access raises MachineRunning outside its
-    callbacks.
+    snapshots. `seed` is configuration, checked through the config digest. On the STM32U5 and
+    STM32H5, RM0456 section 48, a conditioning round takes its four words from `stuck` while it
+    is set, else from the queue, else from the generator. On the STM32L4, RM0351 section 27,
+    each phase produces one word from the same sources. While the machine is busy, every
+    access raises MachineRunning outside its callbacks.
 
     Raises:
         ModelError: On any access, when the peripheral's model is not the built-in RNG.
@@ -820,8 +824,10 @@ class RngEntropy:
     def drawn(self) -> int:
         """Generator position: generator words produced since the machine was built, skipped
         zeros included. Queued and stuck words do not move it. A word counts when the RNG
-        produces it into its FIFO or conditioning register, up to 8 of them not yet read, so
-        the generator words after the ones the RNG holds start at this position."""
+        produces it. On the STM32U5 and STM32H5, RM0456 48, up to 8 counted words are not yet
+        read, held in the FIFO or the conditioning register. On the STM32L4, RM0351 27, at most
+        1 is not yet read, the word in DR. The generator words after the ones the RNG holds
+        start at this position."""
         return self._access.handle.rng_drawn(self.rng)
 
     @property
@@ -868,7 +874,10 @@ class RngEntropy:
         empty and generation stops, RM0456 48.3.7. Setting it acts at once. SECS stays across
         every recovery while True. Set back to False, SECS clears after a CONDRST cycle with
         ARDIS 1, or 2 AHB plus 2 RNG cycles later with ARDIS 0, an assumption: RM0456 gives no
-        auto-reset time. SEIS stays until firmware writes 0 or writes CONDRST 1.
+        auto-reset time. SEIS stays until firmware writes 0 or writes CONDRST 1. On the
+        STM32L4, RM0351 27.3.7, SECS and SEIS set and DR empties. SECS clears only when
+        firmware writes RNGEN 0, with no auto-reset and no CONDRST, inferred: RM0351 27.3.7
+        gives the recovery sequence, not when SECS clears.
 
         Raises:
             TypeError: Set to anything but a bool.
@@ -883,8 +892,9 @@ class RngEntropy:
     def clock_fault(self) -> bool:
         """Whether the clock checker sees a slow RNG clock. While True, CED 0, RNGEN 1 and the
         RNG bus clock enabled, CECS is 1, and each rise of CECS sets CEIS. Generation goes on,
-        RM0456 48.3.7. CECS clears by itself when it is set back to False, CEIS stays until
-        firmware writes 0.
+        RM0456 48.3.7 on the STM32U5 and STM32H5, RM0351 27.3.7 as corrected by ES0250 2.15.1 on
+        the STM32L4, where CECS is 1 below fHCLK / 16. CECS clears by itself when it is set back
+        to False, CEIS stays until firmware writes 0.
 
         Raises:
             TypeError: Set to anything but a bool.

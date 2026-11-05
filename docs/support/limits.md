@@ -99,6 +99,48 @@ ES0250:
 - ES0250 2.1.3: an exception return that overlaps a buffered store vectors to the interrupt the
   NVIC acknowledged.
 
+## STM32L4 instances without a model
+
+QUADSPI, DFSDM1, LCD, CAN1, COMP, OPAMP, TSC, SWPMI1, SDMMC1, FMC, FIREWALL, VREFBUF and WWDG
+keep plain register storage, as does the AES of the STM32L485 and STM32L486. The generic rules
+of "Peripherals without a model" apply to them. The ES0250 items of these blocks, 2.3, 2.5, 2.6,
+2.7, 2.10 to 2.14, 2.16, 2.25 and 2.26, describe silicon behaviour a storage block does not
+produce.
+
+- ES0250 2.2.26, the OPAMP output consuming extra current from VDDA, is electrical. The OPAMP
+  registers store and the supply current is not modelled. ES0250 2.11.1, the OPAMP
+  characteristics degrading with the current sunk on its output, is electrical too.
+
+## STM32L4 errata
+
+The errata of ES0250 Rev 13 sit in the section of the IP they concern. This table lists them
+by IP. Each section states per item whether the model reproduces it, corrects the reference
+manual as the erratum does, or has no counterpart.
+
+| IP | ES0250 items | Section |
+|---|---|---|
+| Cortex-M4 core | 2.1.1 to 2.1.3 | STM32L4 core |
+| RCC clocks | 2.2.1, 2.2.3, 2.2.8, 2.2.10, 2.2.11, 2.2.22, 2.2.24, 2.2.25 | RCC |
+| PWR | 2.2.5, 2.2.21 | PWR |
+| FLASH | 2.2.2, 2.2.9, 2.2.14, 2.2.15, 2.2.23 | FLASH |
+| GPIO | 2.2.6, 2.2.16, 2.2.17, 2.2.20 | GPIO |
+| SYSCFG | 2.2.7, 2.2.12, 2.2.19 | SYSCFG |
+| System memory | 2.2.18 | [STM32L4](stm32l4.md) |
+| RTC and TAMP | 2.2.13, 2.19.1 to 2.19.7 | RTC and TAMP |
+| DMA | 2.4.1, 2.4.2 | DMA |
+| ADC | 2.2.4, 2.8.1 to 2.8.18 | ADC |
+| DAC | 2.9.1 | DAC |
+| OPAMP | 2.2.26, 2.11.1 | STM32L4 instances without a model |
+| RNG | 2.15.1 | RNG |
+| TIM | 2.17.1 to 2.17.3 | TIM |
+| LPTIM | 2.18.1 to 2.18.4 | LPTIM |
+| I2C | 2.20.1 to 2.20.13 | I2C |
+| USART, UART | 2.21.1 to 2.21.7 | USART, UART and LPUART |
+| LPUART | 2.22.1 to 2.22.4 | USART, UART and LPUART |
+| SPI | 2.23.1 to 2.23.3 | SPI |
+| SAI | 2.24.1 to 2.24.4 | SAI |
+| OTG_FS | 2.27.1, 2.27.2 | OTG_FS |
+
 ## STM32L1 description
 
 Source: [patches](https://github.com/Garcia6l20/popcorn/blob/main/python/popcorn/stm32/description/patches)
@@ -333,8 +375,10 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   2.8.13 requires the line enabled as an interrupt and its pending bit cleared.
 - LDM, STM, LDRD and STRD accesses to the ADC registers complete as single accesses, ES0250 2.8.3
   and 2.8.15 list them as not supported.
-- ES0250 2.8.10, the slave data shift in dual regular simultaneous mode, has no counterpart: the
-  dual modes are not modelled.
+- ES0250 2.8.7 and 2.8.10, an unexpected regular conversion after two injected conversions and a
+  shifted slave datum, have no counterpart: the dual modes are not modelled.
+- ES0250 2.8.9, injected data stored in ADC_JDR1 when JADSTP lands at the end of an injected
+  conversion, has no counterpart: every injected result goes to its own ADC_JDRy.
 - `EXTSEL` 8 and 10, TIM8_TRGO2 and TIM1_TRGO2, have no source and are logged once, a model_error
   under strict_peripherals. `EXTSEL` 6 takes EXTI line 11 from the line input, a pin edge
   counting at its own time.
@@ -822,10 +866,11 @@ On the STM32L47x/L48x, RM0351 section 3:
 - Option bytes, RM0351 3.4: `FLASH_OPTR`, `FLASH_PCROPxSR`, `FLASH_PCROPxER`, `FLASH_WRPxAR`
   and `FLASH_WRPxBR` read their ST production values, `FLASH_OPTR` 0xFFEFF8AA. Writes are stored
   while `OPTLOCK` is clear and ignored while it is set, inferred, and reserved bits keep their
-  production value. `OPTSTRT` programs the nine registers at once, with no BSY. A power-on,
-  brown-out or option byte loader reset loads them, `OBL_LAUNCH` requests the last, and every
-  other reset puts the loaded words back. The construction and every `OPTSTRT` write the programmed
-  words into the option byte area of RM0351 3.4.1 Table 13, bank 1 from 0x1FFF7800, bank 2 from
+  production value. `OPTSTRT` programs the nine registers at once, with no BSY, inferred. A
+  power-on, brown-out or option byte loader reset loads them, `OBL_LAUNCH` requests the last, and
+  every other reset puts the loaded words back. The construction and every `OPTSTRT` write the
+  programmed words into the option byte area of RM0351 3.4.1 Table 13, bank 1 from 0x1FFF7800,
+  bank 2 from
   0x1FFFF808, each double word the word in its low half and its complement in its high half. The
   Unused fields hold the register's reserved bits and their complement, and the double word at
   0x1FFFF800 stays erased, inferred. The loaded `WRPxy_STRT` to `WRPxy_END` pages of bank x refuse a store,
@@ -1336,8 +1381,11 @@ The STM32L47x/L48x core, RM0351 section 47, is the STM32U5 core with these diffe
   STM32U5.
 - No PSRST, ERRATIM, STSPHST or CURMOD, RM0351 Table 322. The PSRST note of 47.15.5 and the
   ERRATIM note of 47.15.35 agree: "This bit is available in STM32L49x/L4Ax products, reserved
-  otherwise". The 47.15.1 GOTGCTL drawing shows CURMOD at bit 21. The model follows the table:
-  GRSTCTL bit 1 and GOTGCTL bit 21 read 0.
+  otherwise". The 47.15.1 GOTGCTL drawing shows CURMOD at bit 21. The model follows the table,
+  inferred: GRSTCTL bit 1 and GOTGCTL bit 21 read 0.
+- GSNPSID at offset 0x40 reads 0x4F54310A, with GHWCFG1 to GHWCFG4 and GDFIFOCFG at their L476
+  reset values, inferred: RM0351 47.15 documents no register at 0x040 to 0x05C. The values come
+  from the HAL core ID and a TinyUSB register dump of an STM32L476.
 - The ADP registers `GPWRDN` and `GADPCTL`, RM0351 47.15.18 and 47.15.19, are storage. A
   firmware write logs one `model_warning` per register and raises `model_error` under
   `strict_peripherals` before it is stored.
@@ -1651,8 +1699,8 @@ On the STM32L4, RM0351 section 27:
   RNGEN 1, the next 42 cycles after the read that empties DR, 27.5. RNGEN 0 keeps the DR word
   and ends the word in progress, 27.3.8.
 - With CED 0 and RNGEN 1, CECS is 1 while fRNG is below fHCLK / 16 and its rise sets CEIS,
-  which stays 1 until written 0, 27.7.2. Words keep coming, RM0351 27.3.7 as corrected by
-  ES0250 2.15.1.
+  which stays 1 until written 0, 27.7.2. Words keep coming at the unchanged rate, inferred,
+  RM0351 27.3.7 as corrected by ES0250 2.15.1.
 - A CED write while RNGEN is 1 before and in the write keeps CED, inferred. RM0351 27.7.1 asks
   for the RNG disabled and gives no rule for such a write.
 - A seed error sets SECS and SEIS and stops generation, 27.3.7, and DR reads 0, the 27.3.5 note

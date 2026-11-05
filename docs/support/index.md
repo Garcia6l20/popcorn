@@ -8,6 +8,8 @@ from the shipped descriptions and the model registry at each docs build, so they
 - [Cores](generated/cores.md): the arch modules and the core of each part.
 - [STM32L1](stm32l1.md): the categories, memory, bit-banding, data EEPROM and option bytes of
   the STM32L1 family.
+- [STM32L4](stm32l4.md): the lines, order codes, memory map, boot memory, option bytes and read
+  protection of the STM32L4 family.
 - [Limits](limits.md): what each model leaves out, and where it differs from the reference manual.
 
 ## What the states mean
@@ -20,8 +22,12 @@ state column of the [Parts](generated/parts.md) page names the evidence:
 - **tested**: the tests of the firmware examples name the part and run on it. The STM32U575QGIx,
   the STM32H573AIIx and the STM32L152RETx run every example of their family, the STM32L152RBTx the
   `gpio`, `pwr_flash`, `rcc` and `usart` examples.
-- **examples**: the part runs the listed examples itself, as the representative of its class.
-- **class**: the part shares its class with the named part, which runs examples.
+- **examples**: the part runs the listed examples itself, as a part of its class that runs them.
+  A class can hold several such parts, since the examples fit different lines.
+- **class**: the part shares its class with the named part, which runs examples. The named part
+  is the first of the class's running parts in name order. It can lack a peripheral the part has,
+  such as the OTG_FS of the STM32L476RGTx against the STM32L471RGTx, so the examples that need
+  that peripheral run on the other parts of the class.
 - **attaches**: the part ships and attaches, and its host checks are its evidence.
 
 A note on a row, FLASH geometry cases, marks the two parts the FLASH model's geometry cases run

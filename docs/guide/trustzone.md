@@ -66,7 +66,11 @@ are a privileged debug access of that state, DDI0553B.z B13.3.4:
   bytes before it are written and the rest are not.
 - Without TrustZone both views are DAP accesses of the requested security state, decided by
   the bus firewall: the STM32H5 FLASH HDP areas and the STM32L1 PCROP sectors read 0 through
-  them. With no firewall they read and write as `m.mem`.
+  them. The STM32L4 FLASH adds two rules, RM0351 3.5. At RDP level 1 an access to the flash
+  raises BusAccessError, and so does one to the OTP area or SRAM2, inferred. At level 2 every
+  access does. A PCROP area reads 0, inferred, and sets `FLASH_SR.RDERR`, and a write to it is
+  dropped. With no firewall they read
+  and write as `m.mem`.
 - `BusAccessError` is an EmulationError with `address` and `denied`. `denied` is False when
   nothing is mapped there.
 

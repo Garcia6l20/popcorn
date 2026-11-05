@@ -148,6 +148,20 @@ Rules that follow:
    to each part, and the generated part pages of the support section show which instances got a
    model.
 
+Two families show the steps with a core and a peripheral set of their own:
+
+- The STM32L1 patches in `stm32l1*.toml` split the family into seven categories by die and flash
+  size, each file scoped by `[match]` to the parts that need it, and `stm32l1_part_facts.toml`
+  holds per-part facts. The L1 rows, `l1_rcc` traits and `adc_l1_factory` serve the Cortex-M3
+  parts.
+- The STM32L4 patches for the die DIE415 split by line, `stm32l471.toml`, `stm32l475.toml` and
+  `stm32l485.toml`, with `stm32l4.toml` for the SVD corrections of all five lines and
+  `stm32l4_otg.toml` for the OTG_FS core ID registers the SVDs omit. The model differences
+  between the STM32L4 and the families before it are variants and traits, `l4_rng`, `l4_crc`
+  and `l4_adc`, and each row lists the L4 part globs. The example class decoding reads the
+  package suffixes of the family from a per-family table, `_FAMILY_PACKAGES`, as the family
+  difference rule asks.
+
 ## When a row or variant is missing
 
 | Mistake | Result |
