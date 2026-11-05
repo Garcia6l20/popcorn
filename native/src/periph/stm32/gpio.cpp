@@ -1162,14 +1162,13 @@ auto gpio_factory(gpio_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto u575_gpio_parts = std::to_array<std::string_view>({"STM32U575*", "STM32U585*"});
-constexpr auto gpio_instances  = std::to_array<std::string_view>({"GPIO?"});
-constexpr auto gpio_table      = std::to_array<builtin>({
+constexpr auto gpio_instances = std::to_array<std::string_view>({"GPIO?"});
+constexpr auto gpio_table     = std::to_array<builtin>({
     row_of<^^gpio_factory, ^^u575_gpio>(
         {.ip              = "GPIO",
-         .ip_version_glob = "STM32U5x_gpio_*",
+         .ip_version_glob = "STM32U57x_gpio",
          .instance_globs  = gpio_instances,
-         .part_globs      = u575_gpio_parts}),
+         .part_globs      = u5_parts}),
     row_of<^^gpio_factory, ^^u5_gpio>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32U5x_gpio_*",

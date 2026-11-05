@@ -17,8 +17,6 @@ from popcorn_build.resolution_diff import FAMILIES, GOLDEN_DIR, family_of
 FAMILY_KEYS = list(FAMILIES.values())
 
 OVERLAPS = {
-    ("GPIO", "GPIO/STM32U5x_gpio_*/STM32U575*,STM32U585*/GPIO?"),
-    ("PWR", "PWR/STM32U5_pwr_*/STM32U5*Q/*"),
     ("flash", "flash/v1.0.0_U5_Cube/STM32U535*,STM32U545*/*"),
     ("flash", "flash/v1.0.0_U5_Cube/STM32U59*,STM32U5A*,STM32U5F*,STM32U5G*/*"),
 }
@@ -63,9 +61,7 @@ def walked_resolutions() -> list[Any]:
 
     found = [r for part in shipped_parts() for r in _core.resolve_rows(mcu(part))]
     for probe in golden_tool.probes():
-        description = mcu(probe["base"])
-        description.part = probe["part"]
-        found.extend(_core.resolve_rows(description))
+        found.extend(_core.resolve_rows(golden_tool.probe_description(probe)))
     return found
 
 
@@ -157,3 +153,40 @@ def test_a_listed_glob_exception_is_served_by_its_row_for_the_part(
 def test_every_row_is_built_by_name() -> None:
     unnamed = {r.row_label for r in walked_resolutions() if r.row_label and r.factory in ("", "?")}
     assert unnamed == set()
+
+
+def versioned_patches() -> list[tuple[Path, dict[str, str]]]:
+    from popcorn.stm32.description import _sources
+    from popcorn.stm32.description._patches import read_patch
+
+    found: list[tuple[Path, dict[str, str]]] = []
+    for path in sorted((Path(_sources.__file__).parent / "patches").glob("*.toml")):
+        patch = read_patch(path)
+        if patch.ip is not None and patch.ip.versions:
+            found.append((path, patch.ip.versions))
+    return found
+
+
+@pytest.mark.parametrize("probe", golden_tool.probes(), ids=lambda p: p["name"])
+def test_a_probe_carries_the_versions_of_the_patches_that_reach_its_part(
+    probe: dict[str, Any],
+) -> None:
+    from popcorn.stm32.description._patches import load_patches
+
+    svd = f"{probe['part'][:7]}xx.svd"
+    description = golden_tool.probe_description(probe)
+    checked = 0
+    for path, versions in versioned_patches():
+        for glob, version in versions.items():
+            matched = [
+                p
+                for p in description.peripherals
+                if p.alias_of is None and fnmatchcase(p.name, glob)
+            ]
+            if not matched:
+                continue
+            reached = bool(load_patches([path], part=probe["part"], svd_name=svd))
+            carried = all(p.ip_version == version for p in matched)
+            assert reached == carried, f"{probe['name']}: {path.name} {glob}"
+            checked += 1
+    assert checked > 0

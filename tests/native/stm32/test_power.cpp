@@ -295,6 +295,8 @@ auto u575_with_smps() -> popcorn::part_description
 {
   auto desc = u575();
   desc.part = "STM32U575ZITxQ";
+  std::ranges::find(desc.peripherals, std::string_view{"PWR"}, &popcorn::peripheral_desc::name)
+      ->ip_version = "STM32U5_smps_pwr";
   return desc;
 }
 

@@ -1168,10 +1168,9 @@ auto pwr_h5_factory(pwr_options options) -> model_factory
 
 namespace
 {
-constexpr auto u5_smps_parts = std::to_array<std::string_view>({"STM32U5*Q"});
-constexpr auto pwr_table     = std::to_array<builtin>({
+constexpr auto pwr_table = std::to_array<builtin>({
     row_of<^^pwr_smps_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_smps_parts}),
+        {.ip = "PWR", .ip_version_glob = "STM32U5_smps_pwr", .part_globs = u5_parts}),
     row_of<^^pwr_factory, ^^void, ^^board::pwr>(
         {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_parts}),
     row_of<^^pwr_h5_factory, ^^void, ^^board::pwr>(

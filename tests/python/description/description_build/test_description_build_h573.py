@@ -340,6 +340,8 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     assert report == _patches.PatchReport(
         peripherals_renamed=1,
         ip_renamed=19,
+        ip_versions_set=1,
+        ip_version_changes=[("HASH", "hash1_v4_0_Cube", "STM32H5_hash_sha2")],
         aliased=104,
         fields_touched=412,
         fields_dropped=49,

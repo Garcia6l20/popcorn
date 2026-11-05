@@ -2,13 +2,16 @@
 name = "u535-flash-5bit-generic-gpio"
 base = "STM32U575ZITxQ"
 part = "STM32U535CBTx"
+ip_versions = { "GPIO?" = "STM32U5x_gpio_v1_0", "PWR" = "STM32U5_pwr_v1_0" }
 
 [[probe]]
 name = "u599-flash-8bit"
 base = "STM32U575ZITxQ"
 part = "STM32U599NJHxQ"
+ip_versions = { "GPIO?" = "STM32U5x_gpio_v1_0" }
 
 [[probe]]
 name = "h543-hash-sha3"
 base = "STM32H573IIKx"
 part = "STM32H543RETx"
+ip_versions = { "HASH" = "hash1_v4_0_Cube" }

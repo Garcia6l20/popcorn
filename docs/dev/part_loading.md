@@ -123,11 +123,15 @@ Rules that follow:
 - Keep a register or field required in every family that has it. A family that lacks it says so
   in its own variant, traits or name table, so a description that lost the item by a bad patch
   still fails at construction.
-- Sub-family splits that follow the die go through a patch version. Splits that follow the part
-  number go through a part glob on the row.
+- A sub-family split of a shipped line goes through a patch version: `STM32U5_smps_pwr` for the
+  U5 packages with the SMPS, `STM32U57x_gpio` for the 8-pin port I of the U575 and U585,
+  `STM32H5_hash_sha2` for the H5 HASH without SHA-3. A row selects it by version and the family
+  scope only.
+- The U5 FLASH 5-bit and 8-bit rows of lines not shipped yet split by part glob and sit above the
+  generic FLASH row of the same version. The H5 SHA-3 HASH row, also of an unshipped line, is the
+  only row of its version and takes a part glob.
 - A new family needs its own part globs on its rows. A row with `every` part globs adopts any
   family that reuses the ip version.
-- Put a specific row above its generic row, since the first match wins.
 
 ## Adding a family
 

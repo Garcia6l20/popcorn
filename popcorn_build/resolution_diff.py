@@ -28,23 +28,40 @@ def family_of(part: str) -> str:
     return FAMILIES[part[:7]]
 
 
-def probes() -> list[dict[str, str]]:
-    """The synthetic probes: a shipped base description renamed to an unshipped part."""
+def probes() -> list[dict[str, Any]]:
+    """The synthetic probes: a shipped base description renamed to an unshipped part, with the
+    `ip_versions` table that restores the CubeMX versions of the unshipped line."""
     with PROBES.open("rb") as handle:
         return list(tomllib.load(handle)["probe"])
 
 
-def resolve_part(part: str, rename: str | None = None) -> dict[str, list[Any]]:
+def probe_description(probe: Mapping[str, Any]) -> Any:
+    """The description of @p probe: its base renamed to the probe's part, with the IP versions
+    its `ip_versions` table sets, a glob of instance names to the version of the unshipped line."""
+    from fnmatch import fnmatchcase
+
+    from popcorn.stm32 import mcu
+
+    description = mcu(probe["base"])
+    description.part = probe["part"]
+    for glob, version in probe.get("ip_versions", {}).items():
+        matched = [p for p in description.peripherals if fnmatchcase(p.name, glob)]
+        if not matched:
+            raise KeyError(f"{probe['name']}: no instance matches {glob}")
+        for peripheral in matched:
+            peripheral.ip_version = version
+    return description
+
+
+def resolve_part(part: str, probe: Mapping[str, Any] | None = None) -> dict[str, list[Any]]:
     """Map each non-alias instance of @p part to `[label, source, factory, variant, reads]`.
 
-    @p rename resolves the description under another part name.
+    @p probe resolves the probe's description instead, and @p part is then ignored.
     """
     from popcorn import _core
     from popcorn.stm32 import mcu
 
-    description = mcu(part)
-    if rename is not None:
-        description.part = rename
+    description = mcu(part) if probe is None else probe_description(probe)
     return {
         r.instance: [r.row_label, r.source, r.factory, r.variant, r.reads]
         for r in _core.resolve_rows(description)
@@ -64,7 +81,7 @@ def compute(family: str) -> dict[str, Any]:
         key = json.dumps(resolved, sort_keys=True)
         groups.setdefault(key, {"parts": [], "instances": resolved})["parts"].append(part)
     probed = {
-        p["name"]: {"part": p["part"], "instances": resolve_part(p["base"], p["part"])}
+        p["name"]: {"part": p["part"], "instances": resolve_part(p["base"], p)}
         for p in probes()
         if family_of(p["part"]) == family
     }

@@ -4,6 +4,10 @@ source = "Port I of the STM32U575 and STM32U585 has 8 pins and no GPIOx_AFRH pin
 [match]
 parts = ["STM32U575*", "STM32U585*"]
 
+[ip]
+versions = { "GPIO?" = "STM32U57x_gpio" }
+source = "RM0456 Rev 7, 13.4.1 and 13.4.13, port I of the STM32U575 and STM32U585 has 8 pins. The STM32U59x, 5Ax, 5Fx and 5Gx have 16 and keep the CubeMX version STM32U5x_gpio_*, so a row selects the 8-pin port I by version"
+
 [[fields]]
 instances = ["GPIOI"]
 registers = ["GPIO_MODER"]

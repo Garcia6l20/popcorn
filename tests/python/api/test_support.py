@@ -259,7 +259,7 @@ def test_a_row_names_the_instance_it_serves() -> None:
     found = {s.name: s for s in support(U575)}
     assert found["RCC"].row == "RCC/STM32U5_rcc_*/STM32U5*/*"
     assert found["RCC"].source == "row"
-    assert found["GPIOA"].row == "GPIO/STM32U5x_gpio_*/STM32U575*,STM32U585*/GPIO?"
+    assert found["GPIOA"].row == "GPIO/STM32U57x_gpio/STM32U5*/GPIO?"
 
 
 def test_an_instance_no_row_lists_has_no_row() -> None:
@@ -287,17 +287,16 @@ def test_a_part_no_row_of_the_version_serves_is_reported() -> None:
     assert found["RCC"].matches == []
 
 
-def test_the_u575_gpio_matches_its_row_and_the_generic_u5_row() -> None:
+def test_the_u575_gpio_matches_its_version_row_only() -> None:
     found = {r.instance: r for r in _core.resolve_rows(U575)}
-    assert len(found["GPIOA"].matches) == 2
-    assert found["GPIOA"].row == found["GPIOA"].matches[0]
+    assert len(found["GPIOA"].matches) == 1
     assert len(found["RCC"].matches) == 1
 
 
-def test_the_smps_pwr_row_precedes_the_generic_u5_row() -> None:
+def test_the_smps_pwr_matches_its_version_row_only() -> None:
     smps = {r.instance: r for r in _core.resolve_rows(mcu("STM32U575ZITxQ"))}
-    assert smps["PWR"].row_label == "PWR/STM32U5_pwr_*/STM32U5*Q/*"
-    assert len(smps["PWR"].matches) == 2
+    assert smps["PWR"].row_label == "PWR/STM32U5_smps_pwr/STM32U5*/*"
+    assert len(smps["PWR"].matches) == 1
     assert len({r.instance: r for r in _core.resolve_rows(U575)}["PWR"].matches) == 1
 
 

@@ -1747,14 +1747,12 @@ auto hash_h5_factory(hash_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto hash_sha2_parts =
-    std::to_array<std::string_view>({"STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"});
 constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
 constexpr auto hash_row_table  = std::to_array<builtin>({
     row_of<^^hash_factory>(
         {.ip = "HASH", .ip_version_glob = "hash1_v2_2*", .part_globs = u5_parts}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha2>(
-        {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_sha2_parts}),
+        {.ip = "HASH", .ip_version_glob = "STM32H5_hash_sha2", .part_globs = h5_parts}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha3>(
         {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_sha3_parts}),
 });

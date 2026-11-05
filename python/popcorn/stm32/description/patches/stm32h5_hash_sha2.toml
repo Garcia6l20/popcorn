@@ -1,0 +1,10 @@
+format = 1
+source = "HASH of the STM32H52x, H53x, H56x and H57x: SHA-1 and SHA-2 only. RM0481 Rev 5, Table 397 and 40.6.1 HASH_CR.ALGO keep 0000, 0010, 0011 and 1100 to 1111"
+
+[match]
+parts = ["STM32H52*", "STM32H53*", "STM32H56*", "STM32H57*"]
+svd = ["STM32H5*.svd"]
+
+[ip]
+versions = { "HASH" = "STM32H5_hash_sha2" }
+source = "RM0481 Rev 5, Table 397 and 40.6.1, the SHA-1 and SHA-2 only HASH. The STM32H54x and H55x add SHA-3 and SHAKE and keep the CubeMX version, so a row selects the SHA-2 HASH by version"

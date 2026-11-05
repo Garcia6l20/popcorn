@@ -490,6 +490,11 @@ auto renamed(std::string_view part) -> popcorn::part_description
 {
   auto desc = h573();
   desc.part = part;
+  if(part.starts_with("STM32H54") or part.starts_with("STM32H55"))
+  {
+    std::ranges::find(desc.peripherals, std::string_view{"HASH"}, &popcorn::peripheral_desc::name)
+        ->ip_version = "hash1_v4_0_Cube";
+  }
   return desc;
 }
 

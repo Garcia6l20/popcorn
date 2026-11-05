@@ -1,0 +1,9 @@
+format = 1
+source = "PWR of the STM32U5 packages that use the SMPS regulator, the part names ending in Q. RM0456 Rev 7, 10.5 and 10.10.3: PWR_SVMSR.REGS follows PWR_CR3.REGSEL on these packages"
+
+[match]
+parts = ["STM32U5*Q"]
+
+[ip]
+versions = { "PWR" = "STM32U5_smps_pwr" }
+source = "RM0456 Rev 7, 10.5 and 10.10.3, the SMPS packages. The version is outside the STM32U5_pwr_* family of the CubeMX version, so a row selects the SMPS PWR by version"
