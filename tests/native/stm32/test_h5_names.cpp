@@ -1,6 +1,6 @@
 #include "../support/inert_model.hpp"
-#include "factories.hpp"
 #include "stm32_fixture.hpp"
+#include "usart_rows.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
@@ -408,7 +408,7 @@ TEST_CASE("RM0481 56.8: the USART variant takes the FIFO presence apart from the
   CHECK_THROWS_AS(h5(without), popcorn::config_error);
   auto options = popcorn::testing::stm32_options();
   options.models.insert_or_assign(
-      "USART1", stm32::usart_factory(stm32::board{}, {.mode_views = true, .fifo = false}));
+      "USART1", stm32::usart_factory(stm32::board{}.uarts, {.mode_views = true, .fifo = false}));
   auto const f = h5(without, options);
   REQUIRE(f.target->model("USART1") != nullptr);
   CHECK_THROWS_AS(
@@ -416,7 +416,8 @@ TEST_CASE("RM0481 56.8: the USART variant takes the FIFO presence apart from the
          [] {
            auto o = popcorn::testing::stm32_options();
            o.models.insert_or_assign(
-               "USART1", stm32::usart_factory(stm32::board{}, {.mode_views = true, .fifo = false}));
+               "USART1",
+               stm32::usart_factory(stm32::board{}.uarts, {.mode_views = true, .fifo = false}));
            return o;
          }()),
       popcorn::config_error);

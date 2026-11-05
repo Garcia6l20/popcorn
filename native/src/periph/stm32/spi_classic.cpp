@@ -1,9 +1,8 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
 #include "spi_bus.hpp"
-#include "variants.hpp"
+#include "spi_rows.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -1483,9 +1482,12 @@ void spi_classic::load(std::span<std::byte const> in)
 }
 }
 
-auto spi_classic_factory(board const& b, spi_classic_variant variant) -> model_factory
+auto spi_classic_factory(
+    decltype(board::spi) const&             devices_,
+    decltype(board::spi_controllers) const& controllers_,
+    spi_classic_variant                     variant) -> model_factory
 {
-  return [devices = b.spi, controllers = b.spi_controllers,
+  return [devices = devices_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = devices.find(desc.name);
     auto const controller = controllers.find(desc.name);

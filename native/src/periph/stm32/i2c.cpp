@@ -1,7 +1,7 @@
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "i2c_link_port.hpp"
 #include "i2c_port_queue.hpp"
+#include "i2c_rows.hpp"
 #include "model_base.hpp"
 #include "target_port.hpp"
 
@@ -3075,9 +3075,12 @@ i2c_link_target::~i2c_link_target()         = default;
 i2c_link_controller::~i2c_link_controller() = default;
 i2c_link_port::~i2c_link_port()             = default;
 
-auto i2c_factory(board const& b, i2c_variant variant) -> model_factory
+auto i2c_factory(
+    decltype(board::i2c) const&             targets_,
+    decltype(board::i2c_controllers) const& controllers_,
+    i2c_variant                             variant) -> model_factory
 {
-  return [targets = b.i2c, controllers = b.i2c_controllers,
+  return [targets = targets_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = targets.find(desc.name);
     auto const controller = controllers.find(desc.name);
@@ -3086,5 +3089,24 @@ auto i2c_factory(board const& b, i2c_variant variant) -> model_factory
         found != targets.end() ? found->second : std::vector<std::shared_ptr<i2c_target>>{},
         controller != controllers.end() ? controller->second : nullptr, variant);
   };
+}
+
+namespace
+{
+constexpr auto i2c_row_table = std::to_array<builtin>({
+    row_of<^^i2c_factory, ^^u5_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+        {.ip = "I2C", .ip_version_glob = "i2c2_v1_1U5*", .part_globs = u5_parts}),
+    row_of<^^i2c_factory, ^^h5_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+        {.ip = "I2C", .ip_version_glob = "i2c2_v1_1U5*", .part_globs = h5_parts}),
+    row_of<^^i2c_factory, ^^l4_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+        {.ip = "I2C", .ip_version_glob = "i2c2_v1_1_Cube", .part_globs = l4_parts}),
+    row_of<^^i2c_v1_factory, ^^l1_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+        {.ip = "I2C", .ip_version_glob = "i2c1_v1_*", .part_globs = l1_parts}),
+});
+}
+
+auto i2c_rows() -> std::span<builtin const>
+{
+  return i2c_row_table;
 }
 }

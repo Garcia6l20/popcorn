@@ -1,4 +1,3 @@
-#include "factories.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>

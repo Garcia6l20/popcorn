@@ -1,10 +1,9 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "i2c_port_queue.hpp"
+#include "i2c_rows.hpp"
 #include "model_base.hpp"
 #include "target_port.hpp"
-#include "variants.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -2034,9 +2033,12 @@ void i2c_v1::load(std::span<std::byte const> in)
 }
 }
 
-auto i2c_v1_factory(board const& b, i2c_v1_variant variant) -> model_factory
+auto i2c_v1_factory(
+    decltype(board::i2c) const&             targets_,
+    decltype(board::i2c_controllers) const& controllers_,
+    i2c_v1_variant                          variant) -> model_factory
 {
-  return [targets = b.i2c, controllers = b.i2c_controllers,
+  return [targets = targets_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = targets.find(desc.name);
     auto const controller = controllers.find(desc.name);

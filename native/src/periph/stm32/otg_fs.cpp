@@ -1,9 +1,9 @@
-#include "factories.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
 #include "pwr_peers.hpp"
 #include "secure_config.hpp"
 #include "usb_device_link.hpp"
+#include "usb_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
@@ -1718,8 +1718,9 @@ void otg_fs::resume(vtime)
 }
 }
 
-auto otg_fs_factory(board const& b, otg_fs_variant const& variant) -> model_factory
+auto otg_fs_factory(decltype(board::usb_hosts) const& hosts, otg_fs_variant const& variant)
+    -> model_factory
 {
-  return usb_device_factory<otg_fs>(b, variant);
+  return usb_device_factory<otg_fs>(hosts, variant);
 }
 }

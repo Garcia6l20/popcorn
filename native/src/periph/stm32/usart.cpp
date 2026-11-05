@@ -1,6 +1,6 @@
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
+#include "usart_rows.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
@@ -2004,13 +2004,42 @@ void usart::attach(std::shared_ptr<uart_endpoint> far_end)
 }
 }
 
-auto usart_factory(board const& b, usart_variant variant) -> model_factory
+auto usart_factory(decltype(board::uarts) const& uarts_, usart_variant variant) -> model_factory
 {
-  return [uarts = b.uarts,
+  return [uarts = uarts_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found = uarts.find(desc.name);
     return std::make_shared<usart>(
         ctx, desc, found != uarts.end() ? found->second : nullptr, variant);
   };
+}
+
+namespace
+{
+constexpr auto usart_row_table = std::to_array<builtin>({
+    row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
+        {.ip = "USART", .ip_version_glob = "sci3_v2*", .part_globs = u5_h5_parts}),
+    row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
+        {.ip = "UART", .ip_version_glob = "sci2_*", .part_globs = u5_h5_parts}),
+    row_of<^^usart_factory, ^^l1_usart, ^^board::uarts>(
+        {.ip = "USART", .ip_version_glob = "sci2_*", .part_globs = l1_parts}),
+    row_of<^^usart_factory, ^^l1_uart, ^^board::uarts>(
+        {.ip = "UART", .ip_version_glob = "sci2_*", .part_globs = l1_parts}),
+    row_of<^^usart_factory, ^^l4_usart, ^^board::uarts>(
+        {.ip = "USART", .ip_version_glob = "sci3_v1*", .part_globs = l4_parts}),
+    row_of<^^usart_factory, ^^l4_usart, ^^board::uarts>(
+        {.ip = "UART", .ip_version_glob = "sci2_v2*", .part_globs = l4_parts}),
+    row_of<^^usart_factory, ^^u5_lpuart, ^^board::uarts>(
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = u5_parts}),
+    row_of<^^usart_factory, ^^h5_lpuart, ^^board::uarts>(
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = h5_parts}),
+    row_of<^^usart_factory, ^^l4_lpuart, ^^board::uarts>(
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = l4_parts}),
+});
+}
+
+auto usart_rows() -> std::span<builtin const>
+{
+  return usart_row_table;
 }
 }

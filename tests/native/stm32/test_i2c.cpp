@@ -1,7 +1,7 @@
 #include "../support/inert_model.hpp"
 #include "dma.hpp"
-#include "factories.hpp"
 #include "i2c_link_port.hpp"
+#include "i2c_rows.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -367,7 +367,8 @@ struct rig
     options.models    = stm32::factories(board, desc);
     if(variant)
     {
-      options.models.insert_or_assign("I2C1", stm32::i2c_factory(board, *variant));
+      options.models.insert_or_assign(
+          "I2C1", stm32::i2c_factory(board.i2c, board.i2c_controllers, *variant));
     }
     if(probe)
     {

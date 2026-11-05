@@ -6,13 +6,17 @@
 #include "flash_rows.hpp"
 #include "gpio_rows.hpp"
 #include "gtzc_rows.hpp"
+#include "i2c_rows.hpp"
 #include "lptim_rows.hpp"
 #include "pwr_rows.hpp"
 #include "rcc_rows.hpp"
 #include "row_of.hpp"
 #include "rows.hpp"
+#include "spi_rows.hpp"
 #include "syscfg_rows.hpp"
 #include "tim_rows.hpp"
+#include "usart_rows.hpp"
+#include "usb_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
@@ -41,42 +45,6 @@ constexpr auto hash_sha2_parts =
 constexpr auto hash_sha3_parts = std::to_array<std::string_view>({"STM32H54*", "STM32H55*"});
 
 constexpr auto rest_rows = std::to_array<builtin>({
-    {.ip              = "USART",
-     .ip_version_glob = "sci3_v2*",
-     .make            = [](board const& b) { return usart_factory(b, with_views_usart); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "UART",
-     .ip_version_glob = "sci2_*",
-     .make            = [](board const& b) { return usart_factory(b, with_views_usart); },
-     .part_globs      = u5_h5_parts},
-    {.ip              = "USART",
-     .ip_version_glob = "sci2_*",
-     .make            = [](board const& b) { return usart_factory(b, l1_usart); },
-     .part_globs      = l1_parts},
-    {.ip              = "UART",
-     .ip_version_glob = "sci2_*",
-     .make            = [](board const& b) { return usart_factory(b, l1_uart); },
-     .part_globs      = l1_parts},
-    {.ip              = "USART",
-     .ip_version_glob = "sci3_v1*",
-     .make            = [](board const& b) { return usart_factory(b, l4_usart); },
-     .part_globs      = l4_parts},
-    {.ip              = "UART",
-     .ip_version_glob = "sci2_v2*",
-     .make            = [](board const& b) { return usart_factory(b, l4_usart); },
-     .part_globs      = l4_parts},
-    {.ip              = "LPUART",
-     .ip_version_glob = "sci3_v1*",
-     .make            = [](board const& b) { return usart_factory(b, u5_lpuart); },
-     .part_globs      = u5_parts},
-    {.ip              = "LPUART",
-     .ip_version_glob = "sci3_v1*",
-     .make            = [](board const& b) { return usart_factory(b, h5_lpuart); },
-     .part_globs      = h5_parts},
-    {.ip              = "LPUART",
-     .ip_version_glob = "sci3_v1*",
-     .make            = [](board const& b) { return usart_factory(b, l4_lpuart); },
-     .part_globs      = l4_parts},
     {.ip              = "DAC",
      .ip_version_glob = "dacif_v2_0_Cube",
      .make            = [](board const& b) { return dac_factory(b.supply, l4_dac); },
@@ -121,46 +89,6 @@ constexpr auto rest_rows = std::to_array<builtin>({
      .ip_version_glob = "STM32L5_rtc2_v2_8*",
      .make            = [](board const&) { return tamp_factory(h5_rtc); },
      .part_globs      = h5_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "spi2s3_v1*",
-     .make            = [](board const& b) { return spi_factory(b, u5_spi); },
-     .part_globs      = u5_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "spi2s3_v2*",
-     .make            = [](board const& b) { return spi_factory(b, h5_spi); },
-     .part_globs      = h5_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "spi2s1_v2_*",
-     .make            = [](board const& b) { return spi_classic_factory(b, l1_spi_ti); },
-     .part_globs      = l1_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "spi2s1_v1_*",
-     .make            = [](board const& b) { return spi_classic_factory(b, l1_spi); },
-     .part_globs      = l1_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "STM32L1_spi_cat2*",
-     .make            = [](board const& b) { return spi_classic_factory(b, l1_spi); },
-     .part_globs      = l1_parts},
-    {.ip              = "SPI",
-     .ip_version_glob = "spi2s1_v3_*",
-     .make            = [](board const& b) { return spi_classic_factory(b, l4_spi); },
-     .part_globs      = l4_parts},
-    {.ip              = "I2C",
-     .ip_version_glob = "i2c2_v1_1U5*",
-     .make            = [](board const& b) { return i2c_factory(b, u5_i2c); },
-     .part_globs      = u5_parts},
-    {.ip              = "I2C",
-     .ip_version_glob = "i2c2_v1_1U5*",
-     .make            = [](board const& b) { return i2c_factory(b, h5_i2c); },
-     .part_globs      = h5_parts},
-    {.ip              = "I2C",
-     .ip_version_glob = "i2c2_v1_1_Cube",
-     .make            = [](board const& b) { return i2c_factory(b, l4_i2c); },
-     .part_globs      = l4_parts},
-    {.ip              = "I2C",
-     .ip_version_glob = "i2c1_v1_*",
-     .make            = [](board const& b) { return i2c_v1_factory(b, l1_i2c); },
-     .part_globs      = l1_parts},
     {.ip              = "SAI",
      .ip_version_glob = "sai1_L5*",
      .make            = [](board const& b) { return sai_factory(b, u5_sai); },
@@ -174,24 +102,6 @@ constexpr auto rest_rows = std::to_array<builtin>({
      .make            = [](board const& b) { return sai_factory(b, l4_sai); },
      .part_globs      = l4_parts},
     {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }, every, u5_parts},
-    {.ip              = "USB_OTG_FS",
-     .ip_version_glob = "otgfs1_v3_0_Cube",
-     .make            = [](board const& b) { return otg_fs_factory(b, u5_otg_fs); },
-     .part_globs      = u5_parts},
-    {.ip              = "USB_OTG_FS",
-     .ip_version_glob = "otgfs1_v2_0_Cube",
-     .make            = [](board const& b) { return otg_fs_factory(b, l4_otg_fs); },
-     .part_globs      = l4_parts},
-    {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b, h5_usb); }, every,
-     h5_parts},
-    {.ip              = "USB",
-     .ip_version_glob = "usb1_v1_2*",
-     .make            = [](board const& b) { return usb_drd_factory(b, l1_usb); },
-     .part_globs      = l1_parts},
-    {.ip              = "USB_SRAM",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return usb_packet_memory_factory("USB"); },
-     .part_globs      = l1_parts},
     {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }, every,
      u5_parts},
     {.ip              = "ADC12",
@@ -276,8 +186,8 @@ auto builtins() -> std::span<builtin const>
     std::vector<builtin> all;
     for(auto const rows :
         {rcc_rows(), pwr_rows(), flash_rows(), caches_rows(), crs_rows(), gpio_rows(), exti_rows(),
-         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(), tim_rows(),
-         std::span<builtin const>{rest_rows}})
+         syscfg_rows(), dma_classic_rows(), gpdma_rows(), lptim_rows(), tim_rows(), usart_rows(),
+         i2c_rows(), spi_rows(), usb_rows(), std::span<builtin const>{rest_rows}})
     {
       all.insert(all.end(), rows.begin(), rows.end());
     }

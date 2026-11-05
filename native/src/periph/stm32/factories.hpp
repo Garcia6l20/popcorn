@@ -16,14 +16,6 @@
 namespace popcorn::periph::stm32
 {
 /**
- * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
- * @param b Board whose `uarts` give each instance its far end, copied: the endpoints stay
- *        shared.
- * @param variant What differs between the peripherals of the family the row serves.
- */
-[[nodiscard]] auto usart_factory(board const& b, usart_variant variant) -> model_factory;
-
-/**
  * @brief Factory of the IWDG model, RM0456 section 61, RM0038 section 21.
  * @param variant What differs between the IWDG of the family the row serves.
  */
@@ -60,37 +52,6 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto tamp_factory(rtc_variant variant) -> model_factory;
 
 /**
- * @brief Factory of the SPI model, RM0456 section 68 and RM0481 section 58.
- * @param b Board whose `spi` lists each instance's devices, copied when a model is made.
- * @param variant What differs between the peripherals of the family the row serves.
- */
-[[nodiscard]] auto spi_factory(board const& b, spi_variant variant) -> model_factory;
-
-/**
- * @brief Factory of the classic SPI model, RM0038 section 28.
- * @param b Board whose `spi` lists each instance's devices and `spi_controllers` its controller,
- *        copied when a model is made.
- * @param variant What differs between the peripherals of the family the row serves.
- */
-[[nodiscard]] auto spi_classic_factory(board const& b, spi_classic_variant variant)
-    -> model_factory;
-
-/**
- * @brief Factory of the I2C model, RM0456 section 65.
- * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
- * @param variant What differs between the peripherals of the family the row serves.
- */
-[[nodiscard]] auto i2c_factory(board const& b, i2c_variant variant) -> model_factory;
-
-/**
- * @brief Factory of the STM32L1 I2C model, RM0038 section 26.
- * @param b Board whose `i2c` lists each instance's targets, copied when a model is made. An
- *        instance with a `i2c_controllers` entry is refused with config_error.
- * @param variant What differs between the peripherals of the family the row serves.
- */
-[[nodiscard]] auto i2c_v1_factory(board const& b, i2c_v1_variant variant) -> model_factory;
-
-/**
  * @brief Factory of the SAI model, RM0456 section 69.
  * @param b Board whose `audio` wires each audio block, copied: the endpoints stay shared.
  * @param variant What differs between the peripherals of the family the row serves.
@@ -102,29 +63,6 @@ namespace popcorn::periph::stm32
  *        description of each instance.
  */
 [[nodiscard]] auto mdf_factory() -> model_factory;
-
-/**
- * @brief Factory of the USB OTG_FS device core model, RM0456 section 72 on the STM32U5, RM0351
- *        section 47 on the STM32L4.
- * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
- * @param variant GRSTCTL reset field names of the core, copied.
- */
-[[nodiscard]] auto otg_fs_factory(board const& b, otg_fs_variant const& variant) -> model_factory;
-
-/**
- * @brief Factory of the USB full-speed device controller model, RM0481 section 61 on the STM32H5,
- *        RM0038 section 24 on the STM32L1.
- * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
- * @param variant Register names, packet memory and pull-up of the controller, copied.
- */
-[[nodiscard]] auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory;
-
-/**
- * @brief Factory of the packet memory window of a USB device controller held in a peripheral of
- *        its own, `USB_SRAM` on the STM32L1, served by the controller's model.
- * @param controller Peripheral name of the controller.
- */
-[[nodiscard]] auto usb_packet_memory_factory(std::string_view controller) -> model_factory;
 
 /**
  * @brief Factory of the ADC1 model, RM0456 section 33.

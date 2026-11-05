@@ -1,8 +1,8 @@
 #include "dma_signal.hpp"
-#include "factories.hpp"
 #include "model_base.hpp"
 #include "spi_bus.hpp"
 #include "spi_link_port.hpp"
+#include "spi_rows.hpp"
 #include "target_port.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -2025,9 +2025,12 @@ void spi_link_controller::unit_frame(
 
 spi_link_port::~spi_link_port() = default;
 
-auto spi_factory(board const& b, spi_variant variant) -> model_factory
+auto spi_factory(
+    decltype(board::spi) const&             devices_,
+    decltype(board::spi_controllers) const& controllers_,
+    spi_variant                             variant) -> model_factory
 {
-  return [devices = b.spi, controllers = b.spi_controllers,
+  return [devices = devices_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = devices.find(desc.name);
     auto const controller = controllers.find(desc.name);
@@ -2035,5 +2038,28 @@ auto spi_factory(board const& b, spi_variant variant) -> model_factory
         ctx, desc, found != devices.end() ? found->second : std::vector<spi_attachment>{},
         controller != controllers.end() ? controller->second : nullptr, variant);
   };
+}
+
+namespace
+{
+constexpr auto spi_row_table = std::to_array<builtin>({
+    row_of<^^spi_factory, ^^u5_spi, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "spi2s3_v1*", .part_globs = u5_parts}),
+    row_of<^^spi_factory, ^^h5_spi, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "spi2s3_v2*", .part_globs = h5_parts}),
+    row_of<^^spi_classic_factory, ^^l1_spi_ti, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "spi2s1_v2_*", .part_globs = l1_parts}),
+    row_of<^^spi_classic_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "spi2s1_v1_*", .part_globs = l1_parts}),
+    row_of<^^spi_classic_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "STM32L1_spi_cat2*", .part_globs = l1_parts}),
+    row_of<^^spi_classic_factory, ^^l4_spi, ^^board::spi, ^^board::spi_controllers>(
+        {.ip = "SPI", .ip_version_glob = "spi2s1_v3_*", .part_globs = l4_parts}),
+});
+}
+
+auto spi_rows() -> std::span<builtin const>
+{
+  return spi_row_table;
 }
 }

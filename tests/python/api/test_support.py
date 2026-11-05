@@ -400,3 +400,10 @@ def test_option_bytes_on_a_part_no_flash_row_serves_name_the_flash_row() -> None
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(other, option_bytes=OptionBytes())
     assert caught.value.key == "peripherals.FLASH"
+
+
+def test_a_row_reading_two_board_members_names_both() -> None:
+    found = {r.instance: r for r in _core.resolve_rows(U575)}
+    assert found["SPI1"].reads == "spi,spi_controllers"
+    assert found["I2C1"].reads == "i2c,i2c_controllers"
+    assert found["USART1"].reads == "uarts"

@@ -1,9 +1,8 @@
 #include "exti_classic.hpp"
-#include "factories.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
 #include "usb_device_link.hpp"
-#include "variants.hpp"
+#include "usb_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
@@ -1483,9 +1482,10 @@ private:
 };
 }
 
-auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory
+auto usb_drd_factory(decltype(board::usb_hosts) const& hosts, usb_drd_variant const& variant)
+    -> model_factory
 {
-  return usb_device_factory<usb_drd>(b, variant);
+  return usb_device_factory<usb_drd>(hosts, variant);
 }
 
 auto usb_packet_memory_factory(std::string_view controller) -> model_factory
@@ -1493,5 +1493,26 @@ auto usb_packet_memory_factory(std::string_view controller) -> model_factory
   return [controller](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<usb_packet_memory>(ctx, desc, controller);
   };
+}
+
+namespace
+{
+constexpr auto usb_row_table = std::to_array<builtin>({
+    row_of<^^otg_fs_factory, ^^u5_otg_fs, ^^board::usb_hosts>(
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v3_0_Cube", .part_globs = u5_parts}),
+    row_of<^^otg_fs_factory, ^^l4_otg_fs, ^^board::usb_hosts>(
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v2_0_Cube", .part_globs = l4_parts}),
+    row_of<^^usb_drd_factory, ^^h5_usb, ^^board::usb_hosts>(
+        {.ip = "USB", .ip_version_glob = "usbfs_v1*", .part_globs = h5_parts}),
+    row_of<^^usb_drd_factory, ^^l1_usb, ^^board::usb_hosts>(
+        {.ip = "USB", .ip_version_glob = "usb1_v1_2*", .part_globs = l1_parts}),
+    row_of<^^usb_packet_memory_factory, ^^usb_packet_memory_controller>(
+        {.ip = "USB_SRAM", .ip_version_glob = "", .part_globs = l1_parts}),
+});
+}
+
+auto usb_rows() -> std::span<builtin const>
+{
+  return usb_row_table;
 }
 }
