@@ -1,3 +1,4 @@
+#include "analog_peers.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -21,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -28,10 +30,12 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::size_t   channels  = 2;
-constexpr std::size_t   depth     = 3;
-constexpr std::uint32_t data_mask = 0xFFF;
-constexpr std::uint16_t lfsr_seed = 0xAAA;
+constexpr std::size_t   channels   = 2;
+constexpr std::size_t   depth      = 3;
+constexpr std::uint32_t data_mask  = 0xFFF;
+constexpr std::uint16_t lfsr_seed  = 0xAAA;
+constexpr std::uint8_t  pad_modes  = 0b0111'0111;
+constexpr std::uint8_t  chip_modes = 0b1110'1010;
 
 enum class sample_phase : std::uint8_t
 {
@@ -77,6 +81,9 @@ struct dac_state
   std::array<std::uint64_t, channels>         phase_event{};
   std::array<std::uint16_t, channels>         held{};
   std::array<std::uint8_t, channels>          held_set{};
+  std::array<std::uint32_t, channels>         internal{};
+  std::array<std::uint8_t, channels>          internal_set{};
+  std::array<std::uint8_t, channels>          pad_driven{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -180,18 +187,23 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        phase of length 0 is skipped, and with THOLDx and TREFRESHx both 0 the channel stays in
  *        refresh with no further phase. While the LSI is off the phase in progress holds, and it
  *        restarts at its full length when the LSI starts, inferred. ENx 0 stops the phases.
- *        With ENx 1 a channel drives the chip analog slot of its DAC_OUTx pad, PA4 or PA5,
- *        RM0351 19.3, when MODEx connects the pad, 000, 001, 010, 100, 101 or 110, RM0351 Table
- *        130. The level is DORx x VDDA / 4096 in microvolts, floored, VDDA from the board's
- *        supply_options taken as VREF+. It follows each DAC_DORx load at once, with no
- *        tSETTLING or tWAKEUP, and the buffer state changes no level, inferred. A sample and
- *        hold channel drives the DAC_DORx value held at the end of each sample and refresh
- *        phase, through the hold phase, in which RM0351 19.4.10 tri-states the output and the
- *        hold capacitor keeps the voltage, inferred. From ENx set to the end of its first sample
- *        phase it leaves the pad, inferred. The Table 129 settling formulas do not enter the
- *        level. MODEx 011 and 111, ENx 0, DAC1RST and a machine reset release the pad. The ADC
- *        channels on the pad convert the level, and a board drive on the pad yields to it as
- *        gpio_port states. The output reaches the pad only.
+ *        With ENx 1 a channel drives the chip analog slot of its DAC_OUTx pad, PA4 or PA5, RM0351
+ *        19.3, when MODEx connects the pad, 000, 001, 010, 100, 101 or 110, RM0351 Table 130. The
+ *        level is DORx x VDDA / 4096 in microvolts, rounded up, so an ADC at the same VDDA converts
+ *        DORx back, VDDA from the board's supply_options taken as VREF+. It follows each DAC_DORx
+ *        load at once, with no tSETTLING or tWAKEUP, and the buffer state changes no level,
+ *        inferred. A sample and hold channel drives the DAC_DORx value held at the end of each
+ *        sample and refresh phase, through the hold phase, in which RM0351 19.4.10 tri-states the
+ *        output and the hold capacitor keeps the voltage, inferred. From ENx set to the end of its
+ *        first sample phase it leaves the pad, inferred. The Table 129 settling formulas do not
+ *        enter the level. MODEx 011 and 111, ENx 0, DAC1RST and a machine reset release the pad.
+ *        The ADC channels on the pad convert the level, and a board drive on the pad yields to it
+ *        as gpio_port states. MODEx 001, 011, 101, 110 and 111 connect the channel on chip, RM0351
+ *        Table 130, and the model publishes the same level, the held one in sample and hold mode,
+ *        MODEx 111 holding it on the internal CLint, through internal_analog_source for ADC2
+ *        channels 17 and 18 and ADC3 channels 14 and 15, RM0351 18.4.11. MODEx 000, 010, 100, ENx
+ *        0, DAC1RST and a machine reset disconnect it. Each change of the published level tells the
+ *        ADCs that read it before it applies.
  *        A Stop 2 entry with ENx 1, which RM0351 19.5 Table 131 forbids, reaches the model as
  *        nothing: the PWR model has no Stop entry for a peripheral to see. In Stop 0 and Stop 1
  *        a channel keeps its level and a sample and hold channel runs its phases, as RM0351
@@ -203,7 +215,8 @@ class dac final : public dispatch_model<dac, dac_state>,
                   public bus_reset_listener,
                   public trigger_sink,
                   public dma_requester,
-                  public clock_listener
+                  public clock_listener,
+                  public internal_analog_source
 {
 public:
   dac(model_context&         ctx,
@@ -229,6 +242,8 @@ public:
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
   void on_clock_change() override;
+  [[nodiscard]] auto internal_level(std::size_t output) const
+      -> std::optional<std::uint32_t> override;
 
   void                                control_written(std::uint32_t old, std::uint32_t now);
   void                                mode_written(std::uint32_t old, std::uint32_t now);
@@ -277,9 +292,11 @@ private:
   void               transfer(std::size_t channel, load_kind kind);
   [[nodiscard]] auto wave_term(std::size_t channel) -> std::uint32_t;
   void               release(std::size_t channel);
-  [[nodiscard]] auto pad_level(std::size_t channel) const -> std::optional<std::uint32_t>;
-  void               drive_pad(std::size_t channel);
-  void               drive_pads();
+  [[nodiscard]] auto output_level(std::size_t channel, std::uint8_t modes) const
+      -> std::optional<std::uint32_t>;
+  void               publish(std::size_t channel);
+  void               drive_output(std::size_t channel);
+  void               drive_outputs();
   void               refresh_line();
   void               start_busy(std::size_t channel);
   void               settle_busy(std::size_t channel, std::uint64_t ps);
@@ -303,20 +320,22 @@ private:
   void
       refuse(rule which, std::string_view name, reg_ref at, std::uint32_t old, std::string message);
 
-  dac_variant                                       variant_;
-  supply_options                                    supply_;
-  register_file&                                    regs_;
-  reg_ref                                           control_;
-  reg_ref                                           mode_;
-  reg_ref                                           status_;
-  std::array<reg_ref, 9>                            holding_;
-  std::array<channel_fields, 2>                     channel_;
-  core::clock_domain                                bus_;
-  core::clock_domain                                lsi_;
-  irq_line*                                         line_;
-  std::array<dma_signal, channels>                  requests_;
-  std::array<bool, std::to_underlying(rule::count)> rule_logged_{};
-  gpio_port*                                        pad_port_{};
+  dac_variant                                                  variant_;
+  supply_options                                               supply_;
+  register_file&                                               regs_;
+  reg_ref                                                      control_;
+  reg_ref                                                      mode_;
+  reg_ref                                                      status_;
+  std::array<reg_ref, 9>                                       holding_;
+  std::array<channel_fields, 2>                                channel_;
+  core::clock_domain                                           bus_;
+  core::clock_domain                                           lsi_;
+  irq_line*                                                    line_;
+  std::array<dma_signal, channels>                             requests_;
+  std::array<bool, std::to_underlying(rule::count)>            rule_logged_{};
+  gpio_port*                                                   pad_port_{};
+  std::array<std::vector<internal_analog_listener*>, channels> readers_;
+  bool                                                         readers_known_{};
 };
 
 constexpr std::array<write_entry<dac>, 20> dac_writes{
@@ -593,7 +612,7 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
       release(channel);
     }
   }
-  drive_pads();
+  drive_outputs();
   refresh_flags();
   refresh_line();
 }
@@ -634,7 +653,7 @@ void dac::mode_written(std::uint32_t old, std::uint32_t now)
       start_busy(index);
     }
   }
-  drive_pads();
+  drive_outputs();
   refresh_flags();
 }
 
@@ -998,7 +1017,7 @@ void dac::transfer(std::size_t channel, load_kind kind)
   {
     start_sample(channel);
   }
-  drive_pad(channel);
+  drive_output(channel);
   if(kind != load_kind::hardware or get(regs_, unit.dma) == 0)
   {
     return;
@@ -1023,11 +1042,12 @@ void dac::release(std::size_t channel)
   requests_[channel].set(false);
 }
 
-auto dac::pad_level(std::size_t channel) const -> std::optional<std::uint32_t>
+auto dac::output_level(std::size_t channel, std::uint8_t modes) const
+    -> std::optional<std::uint32_t>
 {
   auto const& unit = channel_[channel];
   auto const  mode = get(regs_, unit.mode);
-  if(get(regs_, unit.enable) == 0 or mode == 0b011 or mode == 0b111)
+  if(get(regs_, unit.enable) == 0 or (modes >> mode & 1u) == 0)
   {
     return std::nullopt;
   }
@@ -1037,26 +1057,70 @@ auto dac::pad_level(std::size_t channel) const -> std::optional<std::uint32_t>
   }
   auto const code = mode >= 4 ? std::uint64_t{state_.held[channel]}
                               : std::uint64_t{regs_.peek(unit.output.offset) & data_mask};
-  return static_cast<std::uint32_t>(code * supply_.vdda_mv * 1000u / (data_mask + 1u));
+  return static_cast<std::uint32_t>(
+      (code * supply_.vdda_mv * 1000u + data_mask) / (data_mask + 1u));
 }
 
-void dac::drive_pad(std::size_t channel)
+auto dac::internal_level(std::size_t output) const -> std::optional<std::uint32_t>
+{
+  if(output >= channels or state_.internal_set[output] == 0)
+  {
+    return std::nullopt;
+  }
+  return state_.internal[output];
+}
+
+void dac::publish(std::size_t channel)
+{
+  auto const target = output_level(channel, chip_modes);
+  if(target == internal_level(channel))
+  {
+    return;
+  }
+  if(not std::exchange(readers_known_, true))
+  {
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const reader = dynamic_cast<internal_analog_listener*>(peer))
+      {
+        for(std::size_t output = 0; output < channels; ++output)
+        {
+          if(reader->reads_internal(*this, output))
+          {
+            readers_[output].push_back(reader);
+          }
+        }
+      }
+    }
+  }
+  for(auto* const reader : readers_[channel])
+  {
+    reader->internal_changing(*this, channel);
+  }
+  state_.internal[channel]     = target.value_or(0);
+  state_.internal_set[channel] = target ? 1 : 0;
+}
+
+void dac::drive_output(std::size_t channel)
 {
   if(pad_port_ == nullptr)
   {
     pad_port_ = dynamic_cast<gpio_port*>(ctx_.peers.find(variant_.pad_port));
   }
-  if(pad_port_ != nullptr)
+  auto const level = output_level(channel, pad_modes);
+  if(pad_port_ != nullptr and (level or state_.pad_driven[channel] != 0))
   {
-    pad_port_->drive_chip_analog(variant_.pads[channel], pad_level(channel));
+    pad_port_->drive_chip_analog(variant_.pads[channel], level);
   }
+  state_.pad_driven[channel] = level ? 1 : 0;
+  publish(channel);
 }
 
-void dac::drive_pads()
+void dac::drive_outputs()
 {
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    drive_pad(channel);
+    drive_output(channel);
   }
 }
 
@@ -1155,7 +1219,7 @@ void dac::advance_phase(std::size_t channel, std::uint64_t ps)
       state_.held[channel] =
           static_cast<std::uint16_t>(regs_.peek(channel_[channel].output.offset) & data_mask);
       state_.held_set[channel] = 1;
-      drive_pad(channel);
+      drive_output(channel);
     }
     auto next    = current == sample_phase::hold ? sample_phase::refresh : sample_phase::hold;
     auto periods = phase_periods(channel, next);
@@ -1264,11 +1328,17 @@ void dac::restore_reset_values()
     release(channel);
     cancel_phase(channel);
   }
-  auto const generation = state_.generation + 1;
-  state_                = {};
-  state_.generation     = generation;
+  auto const generation   = state_.generation + 1;
+  auto const internal     = state_.internal;
+  auto const internal_set = state_.internal_set;
+  auto const pad_driven   = state_.pad_driven;
+  state_                  = {};
+  state_.generation       = generation;
+  state_.internal         = internal;
+  state_.internal_set     = internal_set;
+  state_.pad_driven       = pad_driven;
   restore_trim();
-  drive_pads();
+  drive_outputs();
   refresh_line();
 }
 }

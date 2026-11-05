@@ -7,6 +7,6 @@ here = Path(__file__).resolve().parent
 add_ll_firmware(
     "l4_dac_ll",
     [here / "l4_dac_ll.c"],
-    entries=["idle"],
+    entries=["idle", "loopback"],
     chipset=STM32L476XX,
 )

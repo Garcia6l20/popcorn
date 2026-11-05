@@ -1,4 +1,5 @@
 #include "adc_pads.hpp"
+#include "analog_peers.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -214,12 +215,13 @@ struct adc_pad
 
 struct adc_inputs
 {
-  std::string_view             instance;
-  std::optional<std::uint32_t> vrefint;
-  std::optional<std::uint32_t> sensor;
-  std::string_view             irq{};
-  std::uint32_t                externals{};
-  std::string_view             external_names{};
+  std::string_view                            instance;
+  std::optional<std::uint32_t>                vrefint;
+  std::optional<std::uint32_t>                sensor;
+  std::string_view                            irq{};
+  std::uint32_t                               externals{};
+  std::string_view                            external_names{};
+  std::array<std::optional<std::uint32_t>, 2> dac{};
 };
 
 struct threshold_names
@@ -610,13 +612,18 @@ struct l4_adc
   static constexpr std::array<std::uint32_t, 3>    synchronous_dividers{1, 2, 4};
   static constexpr std::array<adc_inputs, 3>       inputs{
       {{.instance = "ADC1", .vrefint = 0, .sensor = 17, .irq = "ADC1_2_IRQn"},
-       {.instance = "ADC2", .vrefint = std::nullopt, .sensor = std::nullopt, .irq = "ADC1_2_IRQn"},
+       {.instance = "ADC2",
+        .vrefint  = std::nullopt,
+        .sensor   = std::nullopt,
+        .irq      = "ADC1_2_IRQn",
+        .dac      = {17, 18}},
        {.instance       = "ADC3",
         .vrefint        = std::nullopt,
         .sensor         = 17,
         .irq            = "ADC3_IRQn",
         .externals      = 0x3FDE,
-        .external_names = "1 to 4 or 6 to 13"}}
+        .external_names = "1 to 4 or 6 to 13",
+        .dac            = {14, 15}}}
   };
   static constexpr std::array<threshold_names, watchdogs> thresholds{
       {{"ADC_TR1", "LT1", "ADC_TR1", "HT1"},
@@ -1203,8 +1210,13 @@ struct adc_clock
  *        inferred. The external channels are 1 to 16 on ADC1 and ADC2, 1 to 4 and 6 to 13 on ADC3,
  *        RM0351 Figures 68 to 70. ADC1 reads VREFINT on channel 0 with VREFEN, ADC1 and ADC3 the
  *        temperature sensor on 17 with CH17SEL, the factory VREFINT_CAL and TS_CAL1 scaled by 3000
- *        / VDDA, RM0351 18.4.11. VBAT / 3 on 18, the DAC1 channels 17 and 18 of ADC2 and 14 and 15
- *        of ADC3, and the reserved ADC3 channels 5 and 16 read 0. Channel 19 does not exist: SQ 19
+ *        / VDDA, RM0351 18.4.11. ADC2 channels 17 and 18 and ADC3 channels 14 and 15
+ *        convert the on-chip outputs of DAC1 channels 1 and 2, RM0351 18.4.11, the level the
+ *        DAC publishes through internal_analog_source, 0 while that output reaches no on-chip
+ *        peripheral, with no CCR enable, RM0351 18.4.11 naming VREFEN, CH17SEL and CH18SEL only.
+ *        A DAC output change during a conversion reaches the ADC through
+ *        internal_analog_listener before it applies. VBAT / 3 on 18 and the reserved ADC3
+ *        channels 5 and 16 read 0. Channel 19 does not exist: SQ 19
  *        converts 0 with the SMP 000 time. The EXTSEL map is RM0351 Table 111, 4 bits, the H5 codes
  *        0 to 15: EXTSEL 6 takes the `exti11` line input of the EXTI, a pin edge on the line
  *        SYSCFG_EXTICR3 selects, and the TRGO2 selections 8 and 10, which no L4 timer model
@@ -1309,7 +1321,8 @@ class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits
                         public clock_listener,
                         public dma_requester,
                         public trigger_sink,
-                        public bus_reset_listener
+                        public bus_reset_listener,
+                        public internal_analog_listener
 {
   using base = dispatch_model<adc_model<Traits>, typename Traits::state>;
   static_assert(not Traits::filter_gates_dma or not Traits::filter_field.empty());
@@ -1333,7 +1346,10 @@ public:
   void               on_bus_reset() override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_clock_change() override;
-  void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
+  [[nodiscard]] auto reads_internal(internal_analog_source const& source, std::size_t output) const
+      -> bool override;
+  void internal_changing(internal_analog_source const& source, std::size_t output) override;
+  void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
@@ -1468,6 +1484,7 @@ private:
   [[nodiscard]] auto pad_port(char letter) const -> gpio_port*;
   [[nodiscard]] auto driven_pad(std::size_t channel) const -> std::pair<gpio_port&, std::uint8_t>;
   [[nodiscard]] auto level_uv(std::uint32_t channel) const -> std::uint32_t;
+  [[nodiscard]] auto internal_source() const -> internal_analog_source const*;
   void               listen_pads();
   [[nodiscard]] auto calibration_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t;
   void               start_calibration();
@@ -1483,6 +1500,7 @@ private:
   adc_inputs                                       inputs_;
   std::vector<adc_pad>                             pads_;
   std::vector<subscription>                        pad_listeners_;
+  mutable internal_analog_source const*            internal_source_{};
   core::clock_domain                               kernel_;
   core::clock_domain                               hclk_;
   core::clock_domain                               sysclk_;
@@ -2117,6 +2135,34 @@ auto adc_model<Traits>::driven_pad(std::size_t channel) const -> std::pair<gpio_
         std::format("a positive pad of channel {} on a GPIO port of the machine", channel));
   }
   return {*port, pad->pin};
+}
+
+template <typename Traits>
+auto adc_model<Traits>::internal_source() const -> internal_analog_source const*
+{
+  if(internal_source_ == nullptr)
+  {
+    internal_source_ = dynamic_cast<internal_analog_source const*>(ctx_.peers.find("DAC1"));
+  }
+  return internal_source_;
+}
+
+template <typename Traits>
+auto adc_model<Traits>::reads_internal(internal_analog_source const& source, std::size_t output)
+    const -> bool
+{
+  return output < inputs_.dac.size()
+     and inputs_.dac[output].has_value()
+     and &source == internal_source();
+}
+
+template <typename Traits>
+void adc_model<Traits>::internal_changing(internal_analog_source const&, std::size_t)
+{
+  if(state_.converting)
+  {
+    hold_until(ctx_.clock.time().ps);
+  }
 }
 
 template <typename Traits>
@@ -3920,6 +3966,15 @@ auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
     return shared != nullptr and shared->sensor_connected()
              ? at_vdda<Traits>(calibration(Traits::ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
              : 0u;
+  }
+  for(std::size_t output = 0; output < inputs_.dac.size(); ++output)
+  {
+    if(inputs_.dac[output] == channel)
+    {
+      auto const* const source = internal_source();
+      auto const        level  = source == nullptr ? std::nullopt : source->internal_level(output);
+      return code_of<Traits>(level.value_or(0), supply_.vdda_mv);
+    }
   }
   if(is_external(channel) and not option_open(channel) and not switch_open(channel))
   {

@@ -325,8 +325,10 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   corruption at Stop entry, has none: Stop is not modelled.
 - With ROVSE, AWD1 compares `ADC_DR[15:4]`, RM0351 18.4.30. AWD2 and AWD3 compare `ADC_DR[15:8]`,
   the STM32H5 rule, inferred: RM0351 18.4.29 and 18.4.30 give no oversampled rule for them.
-- VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`. The ADC2 channels 17 and 18
-  and the ADC3 channels 14 and 15, the DAC1 outputs, read 0.
+- VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`.
+- The ADC2 channels 17 and 18 and the ADC3 channels 14 and 15 convert the on-chip outputs of DAC1
+  channels 1 and 2, RM0351 18.4.11, and read 0 while that output reaches no on-chip peripheral.
+  They need no `ADC_CCR` enable, RM0351 18.4.11 naming VREFEN, CH17SEL and CH18SEL only.
 - The trigger from EXTI line 11 reaches the ADC whatever the EXTI interrupt configuration, ES0250
   2.8.13 requires the line enabled as an interrupt and its pending bit cleared.
 - LDM, STM, LDRD and STRD accesses to the ADC registers complete as single accesses, ES0250 2.8.3
@@ -535,8 +537,9 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop entry
   for a peripheral to see.
 - With ENx 1 a channel drives its pad, PA4 or PA5, RM0351 19.3, when MODEx connects the pad,
-  000, 001, 010, 100, 101 or 110, RM0351 Table 130, at `DAC_DORx` x VDDA / 4096, floored, VDDA
-  from `SupplyOptions` taken as VREF+. The level follows each `DAC_DORx` load at once, with no
+  000, 001, 010, 100, 101 or 110, RM0351 Table 130, at `DAC_DORx` x VDDA / 4096, rounded up to
+  the next microvolt so that an ADC at the same VDDA converts `DAC_DORx` back, VDDA from
+  `SupplyOptions` taken as VREF+. The level follows each `DAC_DORx` load at once, with no
   tSETTLING or tWAKEUP, and the buffer state changes no level, inferred.
 - A sample and hold channel drives the `DAC_DORx` value held at the end of each sample and refresh
   phase, through the hold phase, in which RM0351 19.4.10 tri-states the output and the hold
@@ -544,7 +547,10 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
   leaves the pad, inferred. The RM0351 Table 129 settling formulas do not enter the level.
 - MODEx 011 and 111, ENx 0, DAC1RST and a machine reset release the pad. The ADC channels on the
   pad convert the DAC level, and it wins over a board drive of the pin with one warning per pin.
-  The output reaches the pad only.
+- MODEx 001, 011, 101, 110 and 111 connect the channel on chip, RM0351 Table 130: ADC2 channels 17
+  and 18 and ADC3 channels 14 and 15 convert the same level, the held one in sample and hold
+  mode, MODEx 111 holding it on the internal CLint. MODEx 000, 010, 100, ENx 0, DAC1RST and a
+  machine reset disconnect it, and those channels then read 0.
 - In Stop 0 and Stop 1 a channel keeps its level and a sample and hold channel runs its phases, as
   RM0351 Table 131 states for the sample and hold mode, since popcorn models no Stop entry.
 

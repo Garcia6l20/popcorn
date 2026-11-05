@@ -35,6 +35,8 @@ using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
 using popcorn::testing::l476rc;
+using popcorn::testing::no_reset;
+using popcorn::testing::no_reset_t;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
@@ -116,6 +118,17 @@ struct rig
   std::unique_ptr<stm32_fixture> f;
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
+
+  explicit rig(no_reset_t)
+  {
+    stm32::board board{};
+    board.supply.vdda_mv = vdda_mv;
+    auto options         = popcorn::testing::stm32_options();
+    options.models       = stm32::factories(board, l476rc());
+    f    = std::make_unique<stm32_fixture>(no_reset, l476rc(), firmware, std::move(options));
+    sink = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+  }
 
   explicit rig(bool strict = false, bool routed = true)
   {
@@ -3317,4 +3330,144 @@ TEST_CASE(
   CHECK(r.cpu_read("ADC1", "ADC_DR") == code(1'000'000));
   CHECK(r.convert(9, "ADC2") == code(2'000'000));
   CHECK(r.port("ADC1").input(9) == 2'000'000);
+}
+
+namespace
+{
+void dac_channel(rig const& r, std::uint32_t mode, std::uint32_t code, std::uint32_t channel = 1)
+{
+  r.set("RCC", "APB1ENR1", "DAC1EN", 1);
+  r.set("DAC1", "MCR", std::format("MODE{}", channel), mode);
+  r.write("DAC1", std::format("DHR12R{}", channel), code);
+  r.set("DAC1", "CR", std::format("EN{}", channel), 1);
+  r.run_until(r.now() + cycle_ps);
+}
+}
+
+TEST_CASE(
+    "RM0351 18.4.11 and Table 130: ADC2 IN17 and ADC3 IN14 convert DAC1 channel 1 at MODE 001 and "
+    "011, read 0 at 000 and 010, and at EN1 0, with no CCR enable")
+{
+  for(std::uint32_t mode = 0; mode < 4; ++mode)
+  {
+    CAPTURE(mode);
+    rig const r;
+    r.enable("ADC2");
+    r.enable("ADC3");
+    dac_channel(r, mode, 0x5A5);
+    auto const expected = mode == 1 or mode == 3 ? 0x5A5u : 0u;
+    CHECK(r.convert(17, "ADC2") == expected);
+    CHECK(r.convert(14, "ADC3") == expected);
+    CHECK(r.convert(18, "ADC2") == 0);
+    r.set("DAC1", "CR", "EN1", 0);
+    CHECK(r.convert(17, "ADC2") == 0);
+  }
+}
+
+TEST_CASE("ADC2 IN18 and ADC3 IN15 convert DAC1 channel 2, and ADC1 channel 18 stays VBAT at 0")
+{
+  rig const r;
+  r.enable();
+  r.enable("ADC2");
+  r.enable("ADC3");
+  dac_channel(r, 0b001, 0xFFF, 2);
+  CHECK(r.convert(18, "ADC2") == 0xFFF);
+  CHECK(r.convert(15, "ADC3") == 0xFFF);
+  CHECK(r.convert(17, "ADC2") == 0);
+  CHECK(r.convert(18) == 0);
+}
+
+TEST_CASE(
+    "MODE 111 holds the sample on CLint: ADC2 IN17 reads 0 until the first sample end, then the "
+    "held DAC_DOR1 until the next sample end, and DAC1RST disconnects it, inferred")
+{
+  rig const r;
+  r.write("RCC", "CSR", r.read("RCC", "CSR") | 1u);
+  r.run_until(r.now() + ms);
+  REQUIRE(r.get("RCC", "CSR", "LSIRDY") == 1);
+  r.enable("ADC2");
+  r.set("RCC", "APB1ENR1", "DAC1EN", 1);
+  r.write("DAC1", "MCR", 0b111);
+  r.write("DAC1", "SHSR1", 10);
+  r.write("DAC1", "SHHR", 20);
+  r.write("DAC1", "SHRR", 5);
+  r.write("DAC1", "DHR12R1", 0x800);
+  r.run_until(r.now() + cycle_ps);
+  auto const at = r.now();
+  r.set("DAC1", "CR", "EN1", 1);
+  CHECK(r.convert(17, "ADC2") == 0);
+  r.run_until(at + 11 * 31'250'000);
+  CHECK(r.convert(17, "ADC2") == 0x800);
+  auto const load = r.now();
+  r.write("DAC1", "DHR12R1", 0x400);
+  CHECK(r.convert(17, "ADC2") == 0x800);
+  r.run_until(load + cycle_ps + 11 * 31'250'000);
+  CHECK(r.convert(17, "ADC2") == 0x400);
+  r.set("DAC1", "CR", "EN1", 0);
+  r.set("DAC1", "CR", "EN1", 1);
+  CHECK(r.convert(17, "ADC2") == 0);
+  popcorn::testing::rcc_reset_pulse(*r.f, "APB1RSTR1", "DAC1RST");
+  CHECK(r.convert(17, "ADC2") == 0);
+}
+
+TEST_CASE(
+    "checklist 26: a DAC1 load or a DAC1RST after the ADC2 IN17 sampling phase leaves the held "
+    "code, a load before its end converts the new one, the EOC due unchanged")
+{
+  enum class change
+  {
+    load_before_end,
+    load_after_end,
+    reset_after_end,
+  };
+  for(auto const which : {change::load_before_end, change::load_after_end, change::reset_after_end})
+  {
+    CAPTURE(static_cast<int>(which));
+    rig const r;
+    r.enable("ADC2");
+    dac_channel(r, 0b011, 0x800);
+    r.write("ADC2", "ADC_SMPR2", 7u << 21);
+    r.start(17, "ADC2");
+    auto const end    = r.last_due("ADC2");
+    auto const before = which == change::load_before_end;
+    r.run_until(end - (before ? 20 : 8) * cycle_ps);
+    if(which == change::reset_after_end)
+    {
+      popcorn::testing::rcc_reset_pulse(*r.f, "APB1RSTR1", "DAC1RST");
+    }
+    else
+    {
+      r.write("DAC1", "DHR12R1", 0x400);
+    }
+    r.run_until(end - (before ? 18 : 6) * cycle_ps);
+    CHECK(r.last_due("ADC2") == end);
+    r.run_until(end);
+    REQUIRE(r.isr("EOC", "ADC2") == 1);
+    CHECK(r.cpu_read("ADC2", "ADC_DR") == (before ? 0x400u : 0x800u));
+  }
+}
+
+TEST_CASE(
+    "checklist 72: a snapshot restored into a machine never reset keeps the DAC1 level on ADC2 "
+    "IN17, and a later load tells the converting ADC2")
+{
+  rig const r;
+  r.enable("ADC2");
+  dac_channel(r, 0b011, 0x700);
+  auto const bytes = core::encode_snapshot(r.f->target->snapshot().data());
+
+  rig const fresh{no_reset};
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.convert(17, "ADC2") == 0x700);
+  fresh.write("ADC2", "ADC_SMPR2", 7u << 21);
+  fresh.start(17, "ADC2");
+  auto const end = fresh.last_due("ADC2");
+  fresh.run_until(end - 8 * cycle_ps);
+  fresh.write("DAC1", "DHR12R1", 0x100);
+  fresh.run_until(end);
+  REQUIRE(fresh.isr("EOC", "ADC2") == 1);
+  CHECK(fresh.cpu_read("ADC2", "ADC_DR") == 0x700);
+  fresh.start(17, "ADC2");
+  fresh.run_until(fresh.last_due("ADC2"));
+  CHECK(fresh.cpu_read("ADC2", "ADC_DR") == 0x100);
 }

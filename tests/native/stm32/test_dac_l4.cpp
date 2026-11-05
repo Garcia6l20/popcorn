@@ -1134,6 +1134,30 @@ TEST_CASE(
   CHECK(warnings.empty());
 }
 
+TEST_CASE(
+    "LL firmware, RM0351 18.4.11: a SWTRIG1 triangle at MODE 011 reads back on ADC2 IN17 code for "
+    "code, DHR plus 0 to 7 and back down")
+{
+  constexpr std::string_view    dac_ll = "l476_l4_dac_ll";
+  stm32_fixture                 f{l476rc(), dac_ll};
+  std::vector<core::log_record> warnings;
+  auto const sink = f.target->add_log_sink([&warnings](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      warnings.push_back(record);
+    }
+  });
+  f.set("pc", sym(dac_ll, "loopback"));
+  auto const stopped = f.run_to_stop({.max_instructions = icount{1'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(
+      f.log()
+      == std::vector<std::uint32_t>{
+          0x800, 0x801, 0x802, 0x803, 0x804, 0x805, 0x806, 0x807, 0x806, 0x805});
+  CHECK(warnings.empty());
+}
+
 namespace
 {
 constexpr std::uint32_t noise1    = 1u << 6;
@@ -1841,7 +1865,7 @@ TEST_CASE(
   CHECK(r.pending(0) == std::vector<std::uint64_t>{at + cycle});
   CHECK(r.pad().analog_level(pa4) == 1'500'000);
   r.idle_to(at + cycle);
-  CHECK(r.pad().analog_level(pa4) == 2'999'267);
+  CHECK(r.pad().analog_level(pa4) == 2'999'268);
   r.write(dac1 + cr, 0);
   CHECK(r.pad().analog_level(pa4) == 500'000);
   CHECK(r.pad().analog_drive(pa4) == std::optional<std::uint32_t>{500'000});
@@ -1929,6 +1953,24 @@ TEST_CASE(
   CHECK(r.pad().analog_level(4) == 250'000);
   r.idle_to(again + 11 * lsi);
   CHECK(r.pad().analog_level(4) == 750'000);
+}
+
+TEST_CASE(
+    "the DAC releases only a pad it drove: another chip driver's PA4 level survives an EN2-only "
+    "DAC_CR write, DAC1RST and a machine reset")
+{
+  rig const r;
+  r.pad().drive_chip_analog(4, 900'000);
+  r.write(dac1 + dhr12r2, 0x800);
+  r.write(dac1 + cr, en2);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.pad().analog_level(4) == 900'000);
+  CHECK(r.pad().analog_level(5) == 1'500'000);
+  rcc_reset_pulse(*r.f, "APB1RSTR1", "DAC1RST");
+  CHECK(r.pad().analog_level(4) == 900'000);
+  CHECK(r.pad().analog_level(5) == 0);
+  r.f->target->reset();
+  CHECK(r.pad().analog_level(4) == 900'000);
 }
 
 TEST_CASE("DAC1RST and a machine reset release PA4, and the board drive shows again")
