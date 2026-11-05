@@ -975,9 +975,9 @@ namespace
 {
 constexpr auto rng_row_table = std::to_array<builtin>({
     row_of<^^rng_factory, ^^u5_rng, ^^board::rng>(
-        {.ip = "RNG", .ip_version_glob = "rng1_v4_1", .part_globs = u5_h5_parts}),
+        {.ip = "RNG", .ip_version_glob = "rng1_v4_1", .families = family::u5 | family::h5}),
     row_of<^^rng_factory, ^^l4_rng, ^^board::rng>(
-        {.ip = "RNG", .ip_version_glob = "rng1_v1_1", .part_globs = l4_parts}),
+        {.ip = "RNG", .ip_version_glob = "rng1_v1_1", .families = family::l4}),
 });
 }
 

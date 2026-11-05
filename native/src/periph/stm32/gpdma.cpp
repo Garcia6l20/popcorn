@@ -1473,11 +1473,11 @@ namespace
 {
 constexpr auto gpdma_table = std::to_array<builtin>({
     row_of<^^gpdma_factory>(
-        {.ip = "GPDMA", .ip_version_glob = "STM32U5_dma3_*", .part_globs = u5_parts}),
+        {.ip = "GPDMA", .ip_version_glob = "STM32U5_dma3_*", .families = family::u5}),
     row_of<^^gpdma_h5_factory>(
-        {.ip = "GPDMA", .ip_version_glob = "*STM32H5_dma3_*", .part_globs = h5_parts}),
+        {.ip = "GPDMA", .ip_version_glob = "*STM32H5_dma3_*", .families = family::h5}),
     row_of<^^lpdma_factory>(
-        {.ip = "LPDMA", .ip_version_glob = "STM32U5_dma3_*", .part_globs = u5_parts}),
+        {.ip = "LPDMA", .ip_version_glob = "STM32U5_dma3_*", .families = family::u5}),
 });
 }
 

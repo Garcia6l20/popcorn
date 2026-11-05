@@ -1720,13 +1720,13 @@ namespace
 {
 constexpr auto rcc_table = std::to_array<builtin>({
     row_of<^^rcc_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32U5_rcc_*", .part_globs = u5_parts}),
+        {.ip = "RCC", .ip_version_glob = "STM32U5_rcc_*", .families = family::u5}),
     row_of<^^rcc_h5_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32H5_rcc_*", .part_globs = h5_parts}),
+        {.ip = "RCC", .ip_version_glob = "STM32H5_rcc_*", .families = family::h5}),
     row_of<^^rcc_l1_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32L1_rcc_*", .part_globs = l1_parts}),
+        {.ip = "RCC", .ip_version_glob = "STM32L1_rcc_*", .families = family::l1}),
     row_of<^^rcc_l4_factory, ^^void, ^^board::rcc>(
-        {.ip = "RCC", .ip_version_glob = "STM32L4_rcc_*", .part_globs = l4_parts}),
+        {.ip = "RCC", .ip_version_glob = "STM32L4_rcc_*", .families = family::l4}),
 });
 }
 

@@ -2083,7 +2083,7 @@ void mdf::reschedule()
 namespace
 {
 constexpr auto mdf_row_table = std::to_array<builtin>({
-    row_of<^^mdf_factory>({.ip = "MDF", .ip_version_glob = "v1_0_Cube", .part_globs = u5_parts}),
+    row_of<^^mdf_factory>({.ip = "MDF", .ip_version_glob = "v1_0_Cube", .families = family::u5}),
 });
 }
 

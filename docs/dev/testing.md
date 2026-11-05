@@ -101,8 +101,8 @@ runs inside `bypassed()`.
 
 Set `POPCORN_STM32_PIN_DATA` to a STM32_open_pin_data checkout, or the freshness and
 `ship --check` cases of `fresh_u5`, `fresh_h5`, `fresh_l1` and `fresh_l4` skip. The `golden` cases
-need CubeMX and ST's SVDs. The three H503 HASH cases in `tests/python/api/test_support.py` skip without
-the pin data and the CMSIS SVD of the H503.
+need CubeMX and ST's SVDs. The three H503 HASH cases in `tests/python/api/test_support.py` skip
+without the pin data and the CMSIS SVD of the H503.
 
 The CMSIS device headers come from the checkout. `tests/python/description/conftest.py` puts the
 `build/deps/src/cmsis-device-*/Include` directories the configure fetched first in

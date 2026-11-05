@@ -6,13 +6,109 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <meta>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace popcorn::periph::stm32
 {
+/** @brief The STM32 families a built-in model row can serve. A new family adds an enumerator, a
+ *         prefix in `family_of` and the rows that name it. */
+enum class family : std::uint8_t
+{
+  u5,
+  h5,
+  l1,
+  l4,
+};
+
+static_assert(
+    std::meta::enumerators_of(^^family).size() < 8,
+    "family_set holds one bit per family in 8 bits");
+
+/**
+ * @brief The family of a part, from the prefix of its name. A prefix that extends the prefix of
+ *        another family is tested before it.
+ * @return The family, or empty for a name with no family prefix.
+ */
+[[nodiscard]] constexpr auto family_of(std::string_view part) -> std::optional<family>
+{
+  if(part.starts_with("STM32U5"))
+  {
+    return family::u5;
+  }
+  if(part.starts_with("STM32H5"))
+  {
+    return family::h5;
+  }
+  if(part.starts_with("STM32L1"))
+  {
+    return family::l1;
+  }
+  if(part.starts_with("STM32L4"))
+  {
+    return family::l4;
+  }
+  return std::nullopt;
+}
+
+/** @brief The family of @p part. */
+[[nodiscard]] inline auto family_of(part_description const& part) -> std::optional<family>
+{
+  return family_of(std::string_view{part.part});
+}
+
+/** @brief The families a row serves, written out for every row. `shared_families` serves every
+ *         family and a part with no family. */
+struct family_set
+{
+  /** @brief One bit per `family` enumerator, all set for the shared set. */
+  std::uint8_t bits;
+
+  constexpr family_set(family one) : bits{static_cast<std::uint8_t>(1u << std::to_underlying(one))}
+  {}
+
+  /** @brief Whether the set serves every family and a part with no family. */
+  [[nodiscard]] constexpr auto shared() const -> bool
+  {
+    return bits == 0xFF;
+  }
+
+  /** @brief Whether a part of family @p of, empty for none, is served. */
+  [[nodiscard]] constexpr auto serves(std::optional<family> of) const -> bool
+  {
+    return shared() or (of and ((bits >> std::to_underlying(*of)) & 1u) != 0);
+  }
+
+  [[nodiscard]] constexpr auto has(family one) const -> bool
+  {
+    return not shared() and ((bits >> std::to_underlying(one)) & 1u) != 0;
+  }
+
+  [[nodiscard]] static constexpr auto from_bits(std::uint8_t bits) -> family_set
+  {
+    family_set out{family::u5};
+    out.bits = bits;
+    return out;
+  }
+};
+
+[[nodiscard]] constexpr auto operator|(family_set a, family_set b) -> family_set
+{
+  return family_set::from_bits(static_cast<std::uint8_t>(a.bits | b.bits));
+}
+
+/** @brief The set of a row that serves every family and a part with no family. */
+inline constexpr auto shared_families = family_set::from_bits(0xFF);
+
+[[nodiscard]] constexpr auto operator|(family a, family b) -> family_set
+{
+  return family_set{a} | family_set{b};
+}
+
 /** @brief Why a peripheral instance has the row it has, or none. */
 enum class row_source : std::uint8_t
 {
@@ -56,8 +152,10 @@ struct row_info
 {
   /** @brief Label, as `resolution::row_label` spells it. */
   std::string label;
-  /** @brief Part globs of the row. */
-  std::vector<std::string> part_globs;
+  /** @brief Names of the families the row serves, `*` for a shared row. */
+  std::vector<std::string> families;
+  /** @brief Part globs that narrow the row inside its families, `*` for none. */
+  std::vector<std::string> lines;
 };
 
 /**

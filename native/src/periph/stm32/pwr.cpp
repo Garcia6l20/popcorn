@@ -1170,15 +1170,15 @@ namespace
 {
 constexpr auto pwr_table = std::to_array<builtin>({
     row_of<^^pwr_smps_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32U5_smps_pwr", .part_globs = u5_parts}),
+        {.ip = "PWR", .ip_version_glob = "STM32U5_smps_pwr", .families = family::u5}),
     row_of<^^pwr_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .part_globs = u5_parts}),
+        {.ip = "PWR", .ip_version_glob = "STM32U5_pwr_*", .families = family::u5}),
     row_of<^^pwr_h5_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "STM32H5_pwr_*", .part_globs = h5_parts}),
+        {.ip = "PWR", .ip_version_glob = "STM32H5_pwr_*", .families = family::h5}),
     row_of<^^pwr_l1_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "", .part_globs = l1_parts}),
+        {.ip = "PWR", .ip_version_glob = "", .families = family::l1}),
     row_of<^^pwr_l4_factory, ^^void, ^^board::pwr>(
-        {.ip = "PWR", .ip_version_glob = "", .part_globs = l4_parts}),
+        {.ip = "PWR", .ip_version_glob = "", .families = family::l4}),
 });
 }
 

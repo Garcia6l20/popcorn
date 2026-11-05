@@ -616,11 +616,11 @@ namespace
 {
 constexpr auto iwdg_row_table = std::to_array<builtin>({
     row_of<^^iwdg_factory, ^^u5_iwdg>(
-        {.ip = "IWDG", .ip_version_glob = "iwdg1_v3*", .part_globs = u5_h5_parts}),
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v3*", .families = family::u5 | family::h5}),
     row_of<^^iwdg_factory, ^^l1_iwdg>(
-        {.ip = "IWDG", .ip_version_glob = "iwdg1_v1*", .part_globs = l1_parts}),
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v1*", .families = family::l1}),
     row_of<^^iwdg_factory, ^^l4_iwdg>(
-        {.ip = "IWDG", .ip_version_glob = "iwdg1_v2*", .part_globs = l4_parts}),
+        {.ip = "IWDG", .ip_version_glob = "iwdg1_v2*", .families = family::l4}),
 });
 }
 

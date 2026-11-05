@@ -387,13 +387,14 @@ auto exti_classic_factory(exti_classic_variant variant) -> model_factory
 namespace
 {
 constexpr auto exti_table = std::to_array<builtin>({
-    row_of<^^exti_factory>({.ip = "EXTI", .ip_version_glob = "", .part_globs = u5_h5_parts}),
+    row_of<^^exti_factory>(
+        {.ip = "EXTI", .ip_version_glob = "", .families = family::u5 | family::h5}),
     row_of<^^exti_classic_factory, ^^l1_exti_24>(
-        {.ip = "EXTI", .ip_version_glob = "", .part_globs = l1_parts}),
+        {.ip = "EXTI", .ip_version_glob = "", .families = family::l1}),
     row_of<^^exti_classic_factory, ^^l1_exti_23>(
-        {.ip = "EXTI", .ip_version_glob = "STM32L1_exti_23", .part_globs = l1_parts}),
+        {.ip = "EXTI", .ip_version_glob = "STM32L1_exti_23", .families = family::l1}),
     row_of<^^exti_classic_factory, ^^l4_exti>(
-        {.ip = "EXTI", .ip_version_glob = "", .part_globs = l4_parts}),
+        {.ip = "EXTI", .ip_version_glob = "", .families = family::l4}),
 });
 }
 

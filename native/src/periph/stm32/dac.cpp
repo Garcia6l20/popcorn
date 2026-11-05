@@ -1355,7 +1355,7 @@ namespace
 {
 constexpr auto dac_row_table = std::to_array<builtin>({
     row_of<^^dac_factory, ^^l4_dac, ^^board::supply>(
-        {.ip = "DAC", .ip_version_glob = "dacif_v2_0_Cube", .part_globs = l4_parts}),
+        {.ip = "DAC", .ip_version_glob = "dacif_v2_0_Cube", .families = family::l4}),
 });
 }
 

@@ -2018,23 +2018,23 @@ namespace
 {
 constexpr auto usart_row_table = std::to_array<builtin>({
     row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
-        {.ip = "USART", .ip_version_glob = "sci3_v2*", .part_globs = u5_h5_parts}),
+        {.ip = "USART", .ip_version_glob = "sci3_v2*", .families = family::u5 | family::h5}),
     row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
-        {.ip = "UART", .ip_version_glob = "sci2_*", .part_globs = u5_h5_parts}),
+        {.ip = "UART", .ip_version_glob = "sci2_*", .families = family::u5 | family::h5}),
     row_of<^^usart_factory, ^^l1_usart, ^^board::uarts>(
-        {.ip = "USART", .ip_version_glob = "sci2_*", .part_globs = l1_parts}),
+        {.ip = "USART", .ip_version_glob = "sci2_*", .families = family::l1}),
     row_of<^^usart_factory, ^^l1_uart, ^^board::uarts>(
-        {.ip = "UART", .ip_version_glob = "sci2_*", .part_globs = l1_parts}),
+        {.ip = "UART", .ip_version_glob = "sci2_*", .families = family::l1}),
     row_of<^^usart_factory, ^^l4_usart, ^^board::uarts>(
-        {.ip = "USART", .ip_version_glob = "sci3_v1*", .part_globs = l4_parts}),
+        {.ip = "USART", .ip_version_glob = "sci3_v1*", .families = family::l4}),
     row_of<^^usart_factory, ^^l4_usart, ^^board::uarts>(
-        {.ip = "UART", .ip_version_glob = "sci2_v2*", .part_globs = l4_parts}),
+        {.ip = "UART", .ip_version_glob = "sci2_v2*", .families = family::l4}),
     row_of<^^usart_factory, ^^u5_lpuart, ^^board::uarts>(
-        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = u5_parts}),
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .families = family::u5}),
     row_of<^^usart_factory, ^^h5_lpuart, ^^board::uarts>(
-        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = h5_parts}),
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .families = family::h5}),
     row_of<^^usart_factory, ^^l4_lpuart, ^^board::uarts>(
-        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .part_globs = l4_parts}),
+        {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .families = family::l4}),
 });
 }
 

@@ -17,8 +17,8 @@ from popcorn_build.resolution_diff import FAMILIES, GOLDEN_DIR, family_of
 FAMILY_KEYS = list(FAMILIES.values())
 
 OVERLAPS = {
-    ("flash", "flash/v1.0.0_U5_Cube/STM32U535*,STM32U545*/*"),
-    ("flash", "flash/v1.0.0_U5_Cube/STM32U59*,STM32U5A*,STM32U5F*,STM32U5G*/*"),
+    ("flash", "flash/v1.0.0_U5_Cube/u5:STM32U535*,STM32U545*/*"),
+    ("flash", "flash/v1.0.0_U5_Cube/u5:STM32U59*,STM32U5A*,STM32U5F*,STM32U5G*/*"),
 }
 
 
@@ -89,17 +89,17 @@ def all_part_names() -> list[str]:
     return [*shipped_parts(), *(p["part"] for p in golden_tool.probes())]
 
 
-GLOB_EXCEPTIONS = [
+FAMILY_EXCEPTIONS = [
     {
-        "row": "DBGMCU/-/STM32U5*,STM32H5*,STM32L1*,STM32L4*/*",
-        "glob": "STM32H5*",
+        "row": "DBGMCU/-/u5,h5,l1,l4/*",
+        "family": "h5",
         "part": "STM32H523CCTx",
         "reason": "the shipped H5 lines call the IP DBG, H523 and H533 call it DBGMCU",
     }
 ]
 
 
-def test_every_part_glob_names_one_family_its_row_serves() -> None:
+def test_every_row_serves_each_family_it_names() -> None:
     served: dict[str, set[str]] = defaultdict(set)
     for family in FAMILY_KEYS:
         for label, families in stored(family)["rows"].items():
@@ -107,17 +107,26 @@ def test_every_part_glob_names_one_family_its_row_serves() -> None:
     names = all_part_names()
     offenders: list[str] = []
     for row in _core.model_rows():
-        for glob in row.part_globs:
-            family = FAMILIES.get(glob[:7])
-            if family is None:
-                offenders.append(f"{row.label}: {glob} starts with no family prefix")
+        for family in row.families:
+            listed = any(e["row"] == row.label and e["family"] == family for e in FAMILY_EXCEPTIONS)
+            if family != "*" and family not in served[row.label] and not listed:
+                offenders.append(
+                    f"{row.label}: {family}, the row serves {sorted(served[row.label])}"
+                )
+        for glob in row.lines:
+            if glob == "*":
                 continue
-            wider = sorted(n for n in names if fnmatchcase(n, glob) and family_of(n) != family)
-            if wider:
-                offenders.append(f"{row.label}: {glob} also matches {wider}")
-            listed = any(e["row"] == row.label and e["glob"] == glob for e in GLOB_EXCEPTIONS)
-            if family not in served[row.label] and not listed:
-                offenders.append(f"{row.label}: {glob}, the row serves {sorted(served[row.label])}")
+            outside = sorted(
+                n for n in names if fnmatchcase(n, glob) and family_of(n) not in row.families
+            )
+            if outside:
+                offenders.append(f"{row.label}: {glob} also matches {outside}")
+    narrowed = [(r.label, r.lines) for r in _core.model_rows() if r.lines != ["*"]]
+    offenders += [
+        f"{label}: no part matches {lines}"
+        for label, lines in narrowed
+        if not any(fnmatchcase(n, g) for n in names for g in lines)
+    ]
     assert offenders == []
 
 
@@ -140,8 +149,8 @@ def test_row_labels_are_unique() -> None:
 @pytest.mark.skipif(
     not os.environ.get("POPCORN_STM32_PIN_DATA"), reason="POPCORN_STM32_PIN_DATA is not set"
 )
-@pytest.mark.parametrize("exception", GLOB_EXCEPTIONS, ids=lambda e: e["part"])
-def test_a_listed_glob_exception_is_served_by_its_row_for_the_part(
+@pytest.mark.parametrize("exception", FAMILY_EXCEPTIONS, ids=lambda e: e["part"])
+def test_a_listed_family_exception_is_served_by_its_row_for_the_part(
     exception: dict[str, str],
 ) -> None:
     from popcorn.stm32 import mcu
@@ -190,3 +199,7 @@ def test_a_probe_carries_the_versions_of_the_patches_that_reach_its_part(
             assert reached == carried, f"{probe['name']}: {path.name} {glob}"
             checked += 1
     assert checked > 0
+
+
+def test_no_row_is_shared() -> None:
+    assert [r.label for r in _core.model_rows() if r.families == ["*"]] == []

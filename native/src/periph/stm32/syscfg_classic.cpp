@@ -442,13 +442,13 @@ namespace
 {
 constexpr auto syscfg_table = std::to_array<builtin>({
     row_of<^^syscfg_classic_factory, ^^l1_syscfg>(
-        {.ip = "SYSCFG", .ip_version_glob = "", .part_globs = l1_parts}),
+        {.ip = "SYSCFG", .ip_version_glob = "", .families = family::l1}),
     row_of<^^syscfg_classic_factory, ^^l1_syscfg_cat12>(
-        {.ip = "SYSCFG", .ip_version_glob = "STM32L1_exti_23", .part_globs = l1_parts}),
+        {.ip = "SYSCFG", .ip_version_glob = "STM32L1_exti_23", .families = family::l1}),
     row_of<^^syscfg_classic_factory, ^^l4_syscfg>(
-        {.ip = "SYS", .ip_version_glob = "STM32L47x_sys_*", .part_globs = l4_parts}),
+        {.ip = "SYS", .ip_version_glob = "STM32L47x_sys_*", .families = family::l4}),
     row_of<^^syscfg_factory>(
-        {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .part_globs = u5_parts}),
+        {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .families = family::u5}),
 });
 }
 

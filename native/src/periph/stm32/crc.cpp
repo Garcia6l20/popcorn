@@ -380,11 +380,11 @@ namespace
 {
 constexpr auto crc_row_table = std::to_array<builtin>({
     row_of<^^crc_factory, ^^l4_crc>(
-        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .part_globs = l4_parts}),
+        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .families = family::l4}),
     row_of<^^crc_factory, ^^u5_crc>(
-        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .part_globs = u5_h5_parts}),
+        {.ip = "CRC", .ip_version_glob = "integtest1_v2_0", .families = family::u5 | family::h5}),
     row_of<^^crc_factory, ^^l1_crc>(
-        {.ip = "CRC", .ip_version_glob = "integtest1_v1*", .part_globs = l1_parts}),
+        {.ip = "CRC", .ip_version_glob = "integtest1_v1*", .families = family::l1}),
 });
 }
 

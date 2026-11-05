@@ -301,7 +301,7 @@ auto sbs_factory() -> model_factory
 namespace
 {
 constexpr auto sbs_row_table = std::to_array<builtin>({
-    row_of<^^sbs_factory>({.ip = "SBS", .ip_version_glob = "sbs_v1_1*", .part_globs = h5_parts}),
+    row_of<^^sbs_factory>({.ip = "SBS", .ip_version_glob = "sbs_v1_1*", .families = family::h5}),
 });
 }
 

@@ -1168,32 +1168,32 @@ constexpr auto gpio_table     = std::to_array<builtin>({
         {.ip              = "GPIO",
          .ip_version_glob = "STM32U57x_gpio",
          .instance_globs  = gpio_instances,
-         .part_globs      = u5_parts}),
+         .families        = family::u5}),
     row_of<^^gpio_factory, ^^u5_gpio>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32U5x_gpio_*",
          .instance_globs  = gpio_instances,
-         .part_globs      = u5_parts}),
+         .families        = family::u5}),
     row_of<^^gpio_factory, ^^h56x_gpio>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32H56x_gpio_*",
          .instance_globs  = gpio_instances,
-         .part_globs      = h5_parts}),
+         .families        = family::h5}),
     row_of<^^gpio_factory, ^^l1_gpio_cat13>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32L1_gpio_cat13",
          .instance_globs  = gpio_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^gpio_factory, ^^l1_gpio_cat46>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32L1_gpio_cat46",
          .instance_globs  = gpio_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^gpio_factory, ^^l4_gpio>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32L47x_gpio_*",
          .instance_globs  = gpio_instances,
-         .part_globs      = l4_parts}),
+         .families        = family::l4}),
 });
 }
 

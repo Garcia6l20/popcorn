@@ -4082,19 +4082,19 @@ namespace
 {
 constexpr auto adc_row_table = std::to_array<builtin>({
     row_of<^^adc_factory, ^^void, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "aditf5_40v1_U5_Cube", .part_globs = u5_parts}),
-    row_of<^^adc_common_factory>({.ip = "ADC12", .ip_version_glob = "*", .part_globs = u5_parts}),
+        {.ip = "ADC", .ip_version_glob = "aditf5_40v1_U5_Cube", .families = family::u5}),
+    row_of<^^adc_common_factory>({.ip = "ADC12", .ip_version_glob = "*", .families = family::u5}),
     row_of<^^adc_h5_factory, ^^void, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "aditf5_v3_0_H5*", .part_globs = h5_parts}),
-    row_of<^^adc_common_h5_factory>({.ip = "ADCC", .ip_version_glob = "*", .part_globs = h5_parts}),
+        {.ip = "ADC", .ip_version_glob = "aditf5_v3_0_H5*", .families = family::h5}),
+    row_of<^^adc_common_h5_factory>({.ip = "ADCC", .ip_version_glob = "*", .families = family::h5}),
     row_of<^^adc_l4_factory, ^^void, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "aditf5_v2_0*", .part_globs = l4_parts}),
+        {.ip = "ADC", .ip_version_glob = "aditf5_v2_0*", .families = family::l4}),
     row_of<^^adc_common_l4_factory>(
-        {.ip = "ADC_Common", .ip_version_glob = "", .part_globs = l4_parts}),
+        {.ip = "ADC_Common", .ip_version_glob = "", .families = family::l4}),
     row_of<^^adc_l1_factory, ^^l1_adc, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "aditf3_v1*", .part_globs = l1_parts}),
+        {.ip = "ADC", .ip_version_glob = "aditf3_v1*", .families = family::l1}),
     row_of<^^adc_l1_factory, ^^l1_cat12_adc, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "STM32L1_adc_cat12", .part_globs = l1_parts}),
+        {.ip = "ADC", .ip_version_glob = "STM32L1_adc_cat12", .families = family::l1}),
 });
 }
 

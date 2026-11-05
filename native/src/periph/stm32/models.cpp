@@ -33,6 +33,7 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
+#include <reflex/enum.hpp>
 
 #include <array>
 #include <expected>
@@ -98,14 +99,14 @@ constexpr auto u5_idau = std::to_array<idau_region>({
 
 struct idau_family
 {
-  std::string_view             part_glob;
+  family                       of;
   std::span<idau_region const> ranges;
 };
 
 constexpr std::array<idau_family, 2> idau_maps{
     {
-     {"STM32U5*", u5_idau},
-     {"STM32H5*", u5_idau},
+     {family::u5, u5_idau},
+     {family::h5, u5_idau},
      }
 };
 
@@ -138,7 +139,7 @@ constexpr auto cm_debug_blocks = std::to_array<debug_block>({
 
 struct debug_family
 {
-  std::string_view             part_glob;
+  family                       of;
   std::span<debug_block const> blocks;
 };
 
@@ -146,10 +147,10 @@ struct debug_family
 // sits at 0xE00E4000 for the debugger and 0x44024000 for the CPU, outside these ranges.
 constexpr std::array<debug_family, 4> debug_maps{
     {
-     {"STM32U5*", u5_debug_blocks},
-     {"STM32H5*", u5_debug_blocks},
-     {"STM32L1*", cm_debug_blocks},
-     {"STM32L4*", cm_debug_blocks},
+     {family::u5, u5_debug_blocks},
+     {family::h5, u5_debug_blocks},
+     {family::l1, cm_debug_blocks},
+     {family::l4, cm_debug_blocks},
      }
 };
 
@@ -225,11 +226,39 @@ auto scope_of(std::span<std::string_view const> globs) -> std::string
   return globs | std::views::join_with(',') | std::ranges::to<std::string>();
 }
 
+auto family_names(family_set const& set) -> std::vector<std::string>
+{
+  if(set.shared())
+  {
+    return {"*"};
+  }
+  std::vector<std::string> names;
+  template for(constexpr auto one : std::define_static_array(std::meta::enumerators_of(^^family)))
+  {
+    if(set.has([:one:]))
+    {
+      names.emplace_back(reflex::enum_value_name([:one:]));
+    }
+  }
+  return names;
+}
+
+auto part_scope(builtin const& entry) -> std::string
+{
+  auto scope =
+      family_names(entry.families) | std::views::join_with(',') | std::ranges::to<std::string>();
+  if(entry.lines.size() != 1 or entry.lines.front() != "*")
+  {
+    scope += std::format(":{}", scope_of(entry.lines));
+  }
+  return scope;
+}
+
 auto row_label(builtin const& entry) -> std::string
 {
   return std::format(
       "{}/{}/{}/{}", entry.ip, entry.ip_version_glob.empty() ? "-" : entry.ip_version_glob,
-      scope_of(entry.part_globs), scope_of(entry.instance_globs));
+      part_scope(entry), scope_of(entry.instance_globs));
 }
 
 auto select_row(
@@ -247,8 +276,9 @@ auto rows() -> std::vector<row_info>
   return builtins()
        | std::views::transform([](builtin const& entry) {
            return row_info{
-               .label      = row_label(entry),
-               .part_globs = entry.part_globs | std::ranges::to<std::vector<std::string>>()};
+               .label    = row_label(entry),
+               .families = family_names(entry.families),
+               .lines    = entry.lines | std::ranges::to<std::vector<std::string>>()};
          })
        | std::ranges::to<std::vector>();
 }
@@ -373,11 +403,12 @@ auto factories(board const& b, part_description const& part)
 
 auto idau_map(part_description const& part) -> std::optional<std::span<idau_region const>>
 {
-  for(auto const& family : idau_maps)
+  auto const of = family_of(part);
+  for(auto const& map : idau_maps)
   {
-    if(glob_match(family.part_glob, part.part))
+    if(of == map.of)
     {
-      return family.ranges;
+      return map.ranges;
     }
   }
   return std::nullopt;
@@ -385,13 +416,14 @@ auto idau_map(part_description const& part) -> std::optional<std::span<idau_regi
 
 auto raz_wi_map(part_description const& part) -> std::vector<address_range>
 {
-  auto const family = std::ranges::find_if(
-      debug_maps, [&](debug_family const& f) { return glob_match(f.part_glob, part.part); });
-  if(family == debug_maps.end())
+  auto const of = family_of(part);
+  auto const map =
+      std::ranges::find_if(debug_maps, [&](debug_family const& f) { return of == f.of; });
+  if(map == debug_maps.end())
   {
     return {};
   }
-  return family->blocks
+  return map->blocks
        | std::views::transform([](debug_block const& block) {
            return address_range{
                .name = std::string{block.name}, .start = block.start, .size = block.size};

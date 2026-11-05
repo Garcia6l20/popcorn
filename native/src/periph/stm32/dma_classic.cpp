@@ -729,22 +729,22 @@ constexpr auto dma_classic_table = std::to_array<builtin>({
         {.ip              = "DMA",
          .ip_version_glob = "STM32L1*_dma_*",
          .instance_globs  = dma1_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^dma_classic_factory, ^^l1_dma2>(
         {.ip              = "DMA",
          .ip_version_glob = "STM32L1*_dma_*",
          .instance_globs  = dma2_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^dma_classic_factory, ^^l4_dma1>(
         {.ip              = "DMA",
          .ip_version_glob = "STM32L4*_dma_*",
          .instance_globs  = dma1_instances,
-         .part_globs      = l4_parts}),
+         .families        = family::l4}),
     row_of<^^dma_classic_factory, ^^l4_dma2>(
         {.ip              = "DMA",
          .ip_version_glob = "STM32L4*_dma_*",
          .instance_globs  = dma2_instances,
-         .part_globs      = l4_parts}),
+         .families        = family::l4}),
 });
 }
 

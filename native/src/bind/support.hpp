@@ -70,8 +70,10 @@ struct[[= reflex::py::rename{"ModelRow"}]] model_row
 {
   /** @brief Label, as `RowResolution.row_label` spells it. */
   [[= reflex::py::readonly]] std::string label{};
-  /** @brief Part globs of the row. */
-  [[= reflex::py::readonly]] std::vector<std::string> part_globs{};
+  /** @brief Names of the families the row serves, `*` for a shared row. */
+  [[= reflex::py::readonly]] std::vector<std::string> families{};
+  /** @brief Part globs that narrow the row inside its families, `*` for none. */
+  [[= reflex::py::readonly]] std::vector<std::string> lines{};
 };
 
 /** @brief Every row of the built-in STM32 model table, in table order. */

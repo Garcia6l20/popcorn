@@ -4,6 +4,8 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
+#include "rows.hpp"
+
 #include <algorithm>
 #include <array>
 #include <format>
@@ -14,14 +16,7 @@
 
 namespace popcorn::periph::stm32
 {
-inline constexpr auto every       = std::to_array<std::string_view>({"*"});
-inline constexpr auto u5_parts    = std::to_array<std::string_view>({"STM32U5*"});
-inline constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
-inline constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
-inline constexpr auto l4_parts    = std::to_array<std::string_view>({"STM32L4*"});
-inline constexpr auto u5_h5_parts = std::to_array<std::string_view>({"STM32U5*", "STM32H5*"});
-inline constexpr auto u5_h5_l1_l4_parts =
-    std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*", "STM32L4*"});
+inline constexpr auto every = std::to_array<std::string_view>({"*"});
 
 /** @brief One row of the built-in model table: the model made for the instances it matches. */
 struct builtin
@@ -30,7 +25,11 @@ struct builtin
   std::string_view ip_version_glob;
   auto (*make)(board const& b) -> model_factory;
   std::span<std::string_view const> instance_globs = every;
-  std::span<std::string_view const> part_globs     = every;
+  /** @brief Families the row serves. */
+  family_set families;
+  /** @brief Part globs that narrow the row inside its families, for a line of a family that no
+   *         other line shares the model of. */
+  std::span<std::string_view const> lines = every;
   /** @brief Name of the factory function, `?` for a row not built by `row_of`. */
   std::string_view factory = "?";
   /** @brief Name of the variant the factory is given, empty for none. */
@@ -45,7 +44,8 @@ struct row_key
   std::string_view                  ip;
   std::string_view                  ip_version_glob;
   std::span<std::string_view const> instance_globs = every;
-  std::span<std::string_view const> part_globs     = every;
+  family_set                        families;
+  std::span<std::string_view const> lines = every;
 };
 
 [[nodiscard]] inline auto any_glob(std::span<std::string_view const> globs, std::string_view text)
@@ -64,7 +64,8 @@ struct row_key
 {
   return entry.ip == ip
      and glob_match(entry.ip_version_glob, version)
-     and any_glob(entry.part_globs, part)
+     and entry.families.serves(family_of(part))
+     and any_glob(entry.lines, part)
      and any_glob(entry.instance_globs, instance);
 }
 
@@ -80,7 +81,9 @@ struct row_key
   };
   return std::ranges::any_of(rows, same_version)
      and not std::ranges::any_of(rows, [&](builtin const& entry) {
-           return same_version(entry) and any_glob(entry.part_globs, part);
+           return same_version(entry)
+              and entry.families.serves(family_of(part))
+              and any_glob(entry.lines, part);
          });
 }
 
@@ -142,7 +145,8 @@ consteval auto row_of(row_key key) -> builtin
       .ip_version_glob = key.ip_version_glob,
       .make            = nullptr,
       .instance_globs  = key.instance_globs,
-      .part_globs      = key.part_globs,
+      .families        = key.families,
+      .lines           = key.lines,
       .factory         = std::meta::identifier_of(Factory)};
   if constexpr(has_variant)
   {

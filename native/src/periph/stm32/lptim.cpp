@@ -1586,12 +1586,12 @@ constexpr auto lptim_table      = std::to_array<builtin>({
         {.ip              = "LPTIM",
          .ip_version_glob = "L4_lptimer1_v1*",
          .instance_globs  = lptim1_instances,
-         .part_globs      = l4_parts}),
+         .families        = family::l4}),
     row_of<^^lptim_factory, ^^l4_lptim2>(
         {.ip              = "LPTIM",
          .ip_version_glob = "L4_lptimer1_v1*",
          .instance_globs  = lptim2_instances,
-         .part_globs      = l4_parts}),
+         .families        = family::l4}),
 });
 }
 

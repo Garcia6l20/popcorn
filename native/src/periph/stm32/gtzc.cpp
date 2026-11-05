@@ -1689,9 +1689,9 @@ namespace
 {
 constexpr auto gtzc_row_table = std::to_array<builtin>({
     row_of<^^gtzc_factory, ^^u5_gtzc>(
-        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .part_globs = u5_parts}),
+        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .families = family::u5}),
     row_of<^^gtzc_factory, ^^h5_gtzc>(
-        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .part_globs = h5_parts}),
+        {.ip = "GTZC", .ip_version_glob = "tzsc1_v2_2*", .families = family::h5}),
 });
 }
 

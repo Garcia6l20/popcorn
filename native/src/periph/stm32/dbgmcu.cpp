@@ -113,8 +113,10 @@ namespace
 {
 constexpr auto dbgmcu_row_table = std::to_array<builtin>({
     row_of<^^dbgmcu_factory>(
-        {.ip = "DBGMCU", .ip_version_glob = "", .part_globs = u5_h5_l1_l4_parts}),
-    row_of<^^dbgmcu_factory>({.ip = "DBG", .ip_version_glob = "", .part_globs = h5_parts}),
+        {.ip              = "DBGMCU",
+         .ip_version_glob = "",
+         .families        = family::u5 | family::h5 | family::l1 | family::l4}),
+    row_of<^^dbgmcu_factory>({.ip = "DBG", .ip_version_glob = "", .families = family::h5}),
 });
 }
 

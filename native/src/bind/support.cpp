@@ -75,7 +75,7 @@ auto model_rows() -> std::vector<model_row>
 {
   return periph::stm32::rows()
        | std::views::transform([](periph::stm32::row_info const& row) {
-           return model_row{.label = row.label, .part_globs = row.part_globs};
+           return model_row{.label = row.label, .families = row.families, .lines = row.lines};
          })
        | std::ranges::to<std::vector>();
 }

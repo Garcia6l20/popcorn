@@ -35,7 +35,7 @@ flowchart TD
 | Machine | `Machine` in `python/popcorn/_machine.py`, `options_of` in `native/src/bind/machine.cpp` | Board options and per-name models become `machine_options::models`, a map from instance name to factory |
 | Registry | `register_builtin_models` in `native/src/periph/stm32/models.cpp`, `find_model` in `native/src/periph/registry.cpp` | Importing `popcorn._core` loads `libpopcorn_stm32`, whose entry point registers one closure per distinct `(ip, ip_version glob)` pair of the row table |
 | Attach | `machine::run_state::attach_peripherals` in `native/src/core/peripherals.cpp` | Per peripheral, in description order: the machine option for the name wins, else `find_model` |
-| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, part globs and instance globs all match. The table is the row set of each model, `rcc_rows()`, `pwr_rows()`, `flash_rows()` and so on, one `<ip>_rows()` per `<ip>_rows.hpp` |
+| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, families, lines and instance globs all match. The table is the row set of each model, `rcc_rows()`, `pwr_rows()`, `flash_rows()` and so on, one `<ip>_rows()` per `<ip>_rows.hpp` |
 | Factory | `<ip>_rows.hpp` next to the model | The row's `make` calls a factory, often with a `*_variant` from the same header |
 | Model | `stm32_model` in `native/src/periph/stm32/model_base.hpp` | `reg` and `field` bind registers by name, `expect_register` and `expect_field` check the description against the variant |
 
@@ -51,14 +51,19 @@ The row table is a `std::to_array<builtin>` per model, in selection order within
 {.ip              = "RCC",
  .ip_version_glob = "STM32L1_rcc_*",
  .make            = [](board const& b) { return rcc_l1_factory(b.rcc); },
- .part_globs      = l1_parts},
+ .families        = family::l1},
 ```
 
-`instance_globs` and `part_globs` are spans of globs, a row matches when any glob matches. Both
-default to `every`, which is `{"*"}`. Shared glob lists such as `u5_h5_parts` are named
-constants at the top of the file. The first matching row wins, so a specific row sits above its
-generic row. An empty version glob matches only a peripheral with an empty version, which is the
-case for EXTI, PWR, SYSCFG and DBGMCU on some families.
+`instance_globs` and `lines` are spans of globs, a row matches when any glob matches. Both
+default to `every`, which is `{"*"}`. `families` is a set of the `family` enumerators of
+`rows.hpp`, `family::u5 | family::h5` for two. `family_of` reads the family of a part from the
+prefix of its name once. A row names its families, a row without `families` does not compile.
+`shared_families` serves every family and a part with no family, and no row uses it. A part with
+no family prefix matches only shared rows. `lines` narrows a row inside its families to some
+lines, for the rows of lines that no other line shares the model of. The first matching row
+wins, so a specific row sits above its generic row. An empty version glob matches only a
+peripheral with an empty version, which is the case for EXTI, PWR, SYSCFG and DBGMCU on some
+families.
 
 `register_builtin_models` builds every row's factory once and registers one closure for each
 distinct `(ip, ip_version_glob)` pair. The closure calls `select_row` again with the real part
@@ -86,7 +91,10 @@ model. Every other variant goes through the row's `make` into its factory.
 - **category** and **die**: sub-groups of a line, such as STM32L1 Cat.1 to Cat.6 and `DIE416`.
   A die follows the silicon, which a part number glob cannot express. A patch `[match]` tests
   `dies`.
-- **part glob**: a pattern over the part number, such as `STM32U535*`. A row lists several.
+- **family**: an enumerator of `family` in `rows.hpp`, `u5`, `h5`, `l1` or `l4`, derived from the
+  part name prefix. A row names the families it serves.
+- **line glob**: a pattern over the part number, such as `STM32U535*`. Only the `lines` of a row
+  hold one.
 - **patch**: a TOML file in `python/popcorn/stm32/description/patches`. It corrects the
   description during a local build and its result ships in the layers.
 - **layer**: one of the three shipped file kinds, the family blocks, the line and the part
@@ -127,11 +135,11 @@ Rules that follow:
   U5 packages with the SMPS, `STM32U57x_gpio` for the 8-pin port I of the U575 and U585,
   `STM32H5_hash_sha2` for the H5 HASH without SHA-3. A row selects it by version and the family
   scope only.
-- The U5 FLASH 5-bit and 8-bit rows of lines not shipped yet split by part glob and sit above the
-  generic FLASH row of the same version. The H5 SHA-3 HASH row, also of an unshipped line, is the
-  only row of its version and takes a part glob.
-- A new family needs its own part globs on its rows. A row with `every` part globs adopts any
-  family that reuses the ip version.
+- The U5 FLASH 5-bit and 8-bit rows of lines not shipped yet split by line glob in `lines` and sit
+  above the generic FLASH row of the same version. The H5 SHA-3 HASH row and the H503 HASH row,
+  also of unshipped lines, are the two rows of `hash1_v4*`, with disjoint `lines`.
+- A new family needs its own enumerator and its rows name it. A shared row adopts any family
+  that reuses the ip version.
 
 ## Adding a family
 
@@ -142,12 +150,14 @@ Rules that follow:
    its own model variant. Check each rule against the SVD of every part of the family.
 3. Add golden files and regenerate the shipped layers with
    `uv run python -m popcorn.stm32.description golden <part>` and `... ship <part>`.
-4. Give the rows of the family part globs in the row table, so the rows of another family do not
-   adopt it, and place each specific row above its generic row. Run
+4. Add the enumerator to `family` and its prefix to `family_of` in `rows.hpp`, above any
+   prefix it extends, give the rows of
+   the family its `families` in the row table, so the rows of another family do not adopt it, and
+   place each specific row above its generic row. Run
    `uv run python -m popcorn_build.resolution_diff update` and read the diff of the goldens in
    `tests/data/stm32/resolution`: a row that serves a new family shows there, and
-   `tests/python/stm32/test_resolution.py` fails for a row with a part glob that reaches two
-   families, a row whose part glob is `*`, a row no part serves and an instance
+   `tests/python/stm32/test_resolution.py` fails for a line glob that reaches two
+   families, a row naming a family no part serves, a row no part serves and an instance
    with two matching rows outside the listed overlaps.
 5. Add an entry for the family to `debug_maps` and `idau_maps` in `models.cpp`. A family
    without one has no debug blocks and no IDAU map.
@@ -167,7 +177,7 @@ Two families show the steps with a core and a peripheral set of their own:
   `stm32l485.toml`, with `stm32l4.toml` for the SVD corrections of all five lines and
   `stm32l4_otg.toml` for the OTG_FS core ID registers the SVDs omit. The model differences
   between the STM32L4 and the families before it are variants and traits, `l4_rng`, `l4_crc`
-  and `l4_adc`, and each row lists the L4 part globs. The example class decoding reads the
+  and `l4_adc`, and each row names `family::l4`. The example class decoding reads the
   package suffixes of the family from a per-family table, `_FAMILY_PACKAGES`, as the family
   difference rule asks.
 

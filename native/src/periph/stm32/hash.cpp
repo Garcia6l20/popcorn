@@ -92,6 +92,7 @@ struct hash_ip_variant
   std::size_t                hr_count;
   std::size_t                csr_count;
   std::uint8_t               nbwe_bits = 0;
+  std::uint8_t               nbwe_max  = 0;
 };
 
 constexpr std::array<chain, 4> initial_values{
@@ -182,8 +183,8 @@ constexpr std::array<algorithm, 4> h503_codes{sha1_code, absent_code, sha224_cod
 
 constexpr hash_ip_variant u5_hash{u5_codes, 8, 54};
 constexpr hash_ip_variant h503_hash{h503_codes, 8, 54};
-constexpr hash_ip_variant h5_hash{h5_codes, 42, 103, 6};
-constexpr hash_ip_variant h5_sha3_hash{h5_sha3_codes, 42, 103, 6};
+constexpr hash_ip_variant h5_hash{h5_codes, 42, 103, 6, 33};
+constexpr hash_ip_variant h5_sha3_hash{h5_sha3_codes, 42, 103, 6, 37};
 
 /**
  * @brief Compresses one 512-bit block into a SHA-1 chaining value, FIPS 180-4 6.1.2.
@@ -725,7 +726,9 @@ hash::hash(
   {
     throw config_error(
         desc.name, 0, "SR.NBWE",
-        std::format("a field of at least {} bits, NBWE counts up to 37 words", variant_.nbwe_bits));
+        std::format(
+            "a field of at least {} bits, NBWE counts up to {} words", variant_.nbwe_bits,
+            variant_.nbwe_max));
   }
   for(std::size_t i = 0; i < variant_.hr_count; ++i)
   {
@@ -1769,13 +1772,19 @@ constexpr auto hash_sha3_parts =
     std::to_array<std::string_view>({"STM32H54*", "STM32H55*", "STM32H5E*", "STM32H5F*"});
 constexpr auto hash_row_table = std::to_array<builtin>({
     row_of<^^hash_factory, ^^hash_u5>(
-        {.ip = "HASH", .ip_version_glob = "hash1_v2_2*", .part_globs = u5_parts}),
+        {.ip = "HASH", .ip_version_glob = "hash1_v2_2*", .families = family::u5}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha2>(
-        {.ip = "HASH", .ip_version_glob = "STM32H5_hash_sha2", .part_globs = h5_parts}),
+        {.ip = "HASH", .ip_version_glob = "STM32H5_hash_sha2", .families = family::h5}),
     row_of<^^hash_h5_factory, ^^hash_h5_sha3>(
-        {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_sha3_parts}),
+        {.ip              = "HASH",
+         .ip_version_glob = "hash1_v4*",
+         .families        = family::h5,
+         .lines           = hash_sha3_parts}),
     row_of<^^hash_factory, ^^hash_h503>(
-        {.ip = "HASH", .ip_version_glob = "hash1_v4*", .part_globs = hash_h50_parts}),
+        {.ip              = "HASH",
+         .ip_version_glob = "hash1_v4*",
+         .families        = family::h5,
+         .lines           = hash_h50_parts}),
 });
 }
 

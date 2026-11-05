@@ -308,9 +308,11 @@ namespace
 {
 constexpr auto caches_table = std::to_array<builtin>({
     row_of<^^icache_factory, ^^void, ^^board::caches>(
-        {.ip = "ICACHE", .ip_version_glob = "Icache_v1_0_0*", .part_globs = u5_h5_parts}),
+        {.ip = "ICACHE", .ip_version_glob = "Icache_v1_0_0*", .families = family::u5 | family::h5}),
     row_of<^^dcache_factory, ^^void, ^^board::caches>(
-        {.ip = "DCACHE", .ip_version_glob = "STM32U5xx1_v0_0", .part_globs = u5_h5_parts}),
+        {.ip              = "DCACHE",
+         .ip_version_glob = "STM32U5xx1_v0_0",
+         .families        = family::u5 | family::h5}),
 });
 }
 

@@ -3567,37 +3567,37 @@ constexpr auto l1_cat3_tim_instances =
 constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
 constexpr auto tim_table              = std::to_array<builtin>({
     row_of<^^tim_factory, ^^u5_tim>(
-        {.ip = "TIM1_8U5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = u5_parts}),
+        {.ip = "TIM1_8U5", .ip_version_glob = "gptimer2_v4_x*", .families = family::u5}),
     row_of<^^tim_factory, ^^u5_tim>(
-        {.ip = "TIM6_7U5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = u5_parts}),
+        {.ip = "TIM6_7U5", .ip_version_glob = "gptimer2_v4_x*", .families = family::u5}),
     row_of<^^tim_factory, ^^h5_tim>(
-        {.ip = "TIM1_8H5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = h5_parts}),
+        {.ip = "TIM1_8H5", .ip_version_glob = "gptimer2_v4_x*", .families = family::h5}),
     row_of<^^tim_factory, ^^h5_tim>(
-        {.ip = "TIM6_7H5", .ip_version_glob = "gptimer2_v4_x*", .part_globs = h5_parts}),
+        {.ip = "TIM6_7H5", .ip_version_glob = "gptimer2_v4_x*", .families = family::h5}),
     row_of<^^tim_factory, ^^l1_tim>(
         {.ip              = "TIM1_8L1",
          .ip_version_glob = "gptimer2_v2_x*",
          .instance_globs  = l1_tim_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^tim_factory, ^^l1_cat3_tim>(
         {.ip              = "TIM1_8L1Cat345",
          .ip_version_glob = "gptimer2_v2_x*",
          .instance_globs  = l1_cat3_tim_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^tim_factory, ^^l1_tim>(
         {.ip              = "TIM6_7L1",
          .ip_version_glob = "gptimer2_v2_x*",
          .instance_globs  = l1_basic_tim_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^tim_factory, ^^l1_cat3_tim>(
         {.ip              = "TIM6_7L1Cat345",
          .ip_version_glob = "gptimer2_v2_x*",
          .instance_globs  = l1_basic_tim_instances,
-         .part_globs      = l1_parts}),
+         .families        = family::l1}),
     row_of<^^tim_factory, ^^l4_tim>(
-        {.ip = "TIM1_8L4", .ip_version_glob = "gptimer2_v3_x*", .part_globs = l4_parts}),
+        {.ip = "TIM1_8L4", .ip_version_glob = "gptimer2_v3_x*", .families = family::l4}),
     row_of<^^tim_factory, ^^l4_tim>(
-        {.ip = "TIM6_7L4", .ip_version_glob = "gptimer2_v3_x*", .part_globs = l4_parts}),
+        {.ip = "TIM6_7L4", .ip_version_glob = "gptimer2_v3_x*", .families = family::l4}),
 });
 }
 

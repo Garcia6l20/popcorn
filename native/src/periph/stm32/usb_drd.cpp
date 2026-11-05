@@ -1499,15 +1499,15 @@ namespace
 {
 constexpr auto usb_row_table = std::to_array<builtin>({
     row_of<^^otg_fs_factory, ^^u5_otg_fs, ^^board::usb_hosts>(
-        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v3_0_Cube", .part_globs = u5_parts}),
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v3_0_Cube", .families = family::u5}),
     row_of<^^otg_fs_factory, ^^l4_otg_fs, ^^board::usb_hosts>(
-        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v2_0_Cube", .part_globs = l4_parts}),
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v2_0_Cube", .families = family::l4}),
     row_of<^^usb_drd_factory, ^^h5_usb, ^^board::usb_hosts>(
-        {.ip = "USB", .ip_version_glob = "usbfs_v1*", .part_globs = h5_parts}),
+        {.ip = "USB", .ip_version_glob = "usbfs_v1*", .families = family::h5}),
     row_of<^^usb_drd_factory, ^^l1_usb, ^^board::usb_hosts>(
-        {.ip = "USB", .ip_version_glob = "usb1_v1_2*", .part_globs = l1_parts}),
+        {.ip = "USB", .ip_version_glob = "usb1_v1_2*", .families = family::l1}),
     row_of<^^usb_packet_memory_factory, ^^usb_packet_memory_controller>(
-        {.ip = "USB_SRAM", .ip_version_glob = "", .part_globs = l1_parts}),
+        {.ip = "USB_SRAM", .ip_version_glob = "", .families = family::l1}),
 });
 }
 

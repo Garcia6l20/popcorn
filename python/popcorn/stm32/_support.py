@@ -20,9 +20,9 @@ class PeripheralSupport:
         model: `"builtin"` for a built-in model, `"python"` for a class that
             `popcorn.model.register()` routes the IP to, None for no model.
         row: Label of the built-in model row that serves the instance, as
-            `<ip>/<ip version glob>/<part scope>/<instance scope>`, None when no row does. It
-            names the selected row even where the row's factory declines the instance, so
-            `model` is None with a `row` set for GTZC without TrustZone.
+            `<ip>/<ip version glob>/<families>[:<line globs>]/<instance scope>`, None when no
+            row does. It names the selected row even where the row's factory declines the
+            instance, so `model` is None with a `row` set for GTZC without TrustZone.
         variant: Name of the variant the row gives its factory. None when the row names no
             variant, or when no row serves the instance.
         source: `"row"` when a row serves the instance, `"none_no_row"` when no row matches and none

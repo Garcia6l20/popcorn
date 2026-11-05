@@ -258,9 +258,9 @@ def test_the_row_of_each_instance_is_the_golden(part: str) -> None:
 
 def test_a_row_names_the_instance_it_serves() -> None:
     found = {s.name: s for s in support(U575)}
-    assert found["RCC"].row == "RCC/STM32U5_rcc_*/STM32U5*/*"
+    assert found["RCC"].row == "RCC/STM32U5_rcc_*/u5/*"
     assert found["RCC"].source == "row"
-    assert found["GPIOA"].row == "GPIO/STM32U57x_gpio/STM32U5*/GPIO?"
+    assert found["GPIOA"].row == "GPIO/STM32U57x_gpio/u5/GPIO?"
 
 
 def test_an_instance_no_row_lists_has_no_row() -> None:
@@ -275,7 +275,7 @@ def test_a_factory_that_declines_an_instance_keeps_its_row() -> None:
     plain = {s.name: s for s in support(U575)}
     secured = {s.name: s for s in support(U575, trustzone=True)}
     assert plain["GTZC1_TZSC"].model is None
-    assert plain["GTZC1_TZSC"].row == secured["GTZC1_TZSC"].row == "GTZC/tzsc1_v2_2*/STM32U5*/*"
+    assert plain["GTZC1_TZSC"].row == secured["GTZC1_TZSC"].row == "GTZC/tzsc1_v2_2*/u5/*"
     assert secured["GTZC1_TZSC"].model == "builtin"
 
 
@@ -296,7 +296,7 @@ def test_the_u575_gpio_matches_its_version_row_only() -> None:
 
 def test_the_smps_pwr_matches_its_version_row_only() -> None:
     smps = {r.instance: r for r in _core.resolve_rows(mcu("STM32U575ZITxQ"))}
-    assert smps["PWR"].row_label == "PWR/STM32U5_smps_pwr/STM32U5*/*"
+    assert smps["PWR"].row_label == "PWR/STM32U5_smps_pwr/u5/*"
     assert len(smps["PWR"].matches) == 1
     assert len({r.instance: r for r in _core.resolve_rows(U575)}["PWR"].matches) == 1
 
@@ -323,7 +323,7 @@ def test_explain_prints_one_line_per_instance() -> None:
     assert [line.split()[0] for line in lines[1:]] == INSTANCES
     assert next(line for line in lines if line.startswith("RCC ")).split()[3:] == [
         "builtin",
-        "RCC/STM32U5_rcc_*/STM32U5*/*",
+        "RCC/STM32U5_rcc_*/u5/*",
         "row",
         "rcc_factory",
         "-",
@@ -420,7 +420,7 @@ def h503_hash_only() -> popcorn.PartDescription:
 
 def test_the_h503_hash_is_served_by_the_u5_model_row() -> None:
     found = {s.name: s for s in support(h503_hash_only())}
-    assert found["HASH"].row == "HASH/hash1_v4*/STM32H50*/*"
+    assert found["HASH"].row == "HASH/hash1_v4*/h5:STM32H50*/*"
     assert found["HASH"].model == "builtin"
 
 

@@ -1345,11 +1345,11 @@ namespace
 {
 constexpr auto sai_row_table = std::to_array<builtin>({
     row_of<^^sai_factory, ^^u5_sai, ^^board::audio>(
-        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .part_globs = u5_parts}),
+        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .families = family::u5}),
     row_of<^^sai_factory, ^^h5_sai, ^^board::audio>(
-        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .part_globs = h5_parts}),
+        {.ip = "SAI", .ip_version_glob = "sai1_L5*", .families = family::h5}),
     row_of<^^sai_factory, ^^l4_sai, ^^board::audio>(
-        {.ip = "SAI", .ip_version_glob = "sai1_v1_*", .part_globs = l4_parts}),
+        {.ip = "SAI", .ip_version_glob = "sai1_v1_*", .families = family::l4}),
 });
 }
 

@@ -397,7 +397,8 @@ auto crs_factory() -> model_factory
 namespace
 {
 constexpr auto crs_table = std::to_array<builtin>({
-    row_of<^^crs_factory, ^^void>({.ip = "CRS", .ip_version_glob = "", .part_globs = u5_h5_parts}),
+    row_of<^^crs_factory, ^^void>(
+        {.ip = "CRS", .ip_version_glob = "", .families = family::u5 | family::h5}),
 });
 }
 

@@ -900,19 +900,19 @@ namespace
 {
 constexpr auto rtc_row_table = std::to_array<builtin>({
     row_of<^^rtc_factory, ^^u5_rtc, ^^board::rtc_initial>(
-        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .part_globs = u5_parts}),
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .families = family::u5}),
     row_of<^^rtc_factory, ^^h5_rtc, ^^board::rtc_initial>(
-        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .part_globs = h5_parts}),
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .families = family::h5}),
     row_of<^^rtc_classic_factory, ^^l1_rtc, ^^board::rtc_initial>(
-        {.ip = "RTC", .ip_version_glob = "rtc2_v2_5*", .part_globs = l1_parts}),
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_5*", .families = family::l1}),
     row_of<^^rtc_classic_factory, ^^l1_cat1_rtc, ^^board::rtc_initial>(
-        {.ip = "RTC", .ip_version_glob = "STM32L1_rtc_cat1", .part_globs = l1_parts}),
+        {.ip = "RTC", .ip_version_glob = "STM32L1_rtc_cat1", .families = family::l1}),
     row_of<^^rtc_classic_factory, ^^l4_rtc, ^^board::rtc_initial>(
-        {.ip = "RTC", .ip_version_glob = "rtc2_v2_4*", .part_globs = l4_parts}),
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_4*", .families = family::l4}),
     row_of<^^tamp_factory, ^^u5_rtc>(
-        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .part_globs = u5_parts}),
+        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .families = family::u5}),
     row_of<^^tamp_factory, ^^h5_rtc>(
-        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .part_globs = h5_parts}),
+        {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .families = family::h5}),
 });
 }
 
