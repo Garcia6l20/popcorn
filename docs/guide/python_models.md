@@ -47,6 +47,9 @@ This model replaces the RNG of the STM32U575 with a counter. The pieces:
   writes are ignored. Events the model scheduled stay queued, so cancel them there when the
   reset must drop them.
   `machine.periph.RNG.held_in_reset` tells whether the bit holds the peripheral.
+  `machine.periph.RNG.clock_gated` tells whether its RCC enable bit is 0. While gated, the
+  machine serves no firmware or DMA access to the peripheral, so no handler of the model runs for
+  those accesses. Debugger accesses still run them.
 
 ## Put it on the board
 

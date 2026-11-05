@@ -1578,8 +1578,8 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   host's bit, inferred: the GTZC TZIC and MPCBB blocks on the GTZC or TZSC enable, the OCTOSPI
   delay blocks on the OCTOSPI enable, the STM32U5 SDMMC delay blocks on the SDMMC enable,
   STM32U5 FDCAN1_RAM on `FDCAN1EN`, STM32L1 OPAMP on `COMPEN` and STM32L1 USB_SRAM on `USBEN`.
-  The STM32H563 and STM32H573 ETH is gated on `ETHEN`, `ETHTXEN` and `ETHRXEN` are storage,
-  inferred.
+  The STM32H563 and STM32H573 ETH is gated on `ETHEN` alone, `ETHTXEN` and `ETHRXEN` are
+  storage, inferred.
 - RCC, EXTI, IWDG and DBGMCU, the STM32H5 PWR and the STM32U5 and STM32H5 ICACHE have no enable
   and are never gated. FLASH and the STM32U5 and STM32H5 DCACHE enables reset to 1.
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not

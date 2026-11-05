@@ -106,6 +106,35 @@ model. Firmware and DMA accesses follow other rules:
   model warning per block. Under `strict` it raises `ModelError` naming the block. The ROM tables
   read 0, not their entries, so a ROM table walk ends at its first entry.
 
+## Clock gating
+
+An STM32 peripheral whose RCC bus clock enable bit is 0 does not answer the bus. Firmware that
+forgets `__HAL_RCC_CRC_CLK_ENABLE()` fails as it would on a board. In popcorn it reads zeros and
+loses its writes:
+
+```python
+--8<-- "guide/test_faults.py:gated"
+```
+
+- Gated initiators are the core and the DMA controllers. Host accesses through `m.mem`, register
+  `read()`, `write()` and `value`, and `poke()` are served, so a test sets registers up without
+  enabling the clock.
+- A read of a gated peripheral gives 0 and a write is lost. No model handler runs.
+- Each gated peripheral logs one model warning per machine, at its first gated access. Enabling
+  the clock does not rearm it.
+- Under `strict` or `strict_peripherals` the access raises `ModelError`:
+
+```python
+--8<-- "guide/test_faults.py:gated_strict"
+```
+
+- `machine.periph.<NAME>.clock_gated` tells whether the clock is gated. Writing the enable bit
+  updates it at once.
+- The enable gates register access only. Timers keep counting, transfers keep running and
+  events stay queued while the clock is off.
+- Read 0 and write lost are inferred, the reference manuals say only that access is not
+  supported. [Limits](../support/limits.md#rcc) lists the instances gated on a host block's bit.
+
 ## Errors
 
 popcorn raises these exceptions, all exported from `popcorn`:

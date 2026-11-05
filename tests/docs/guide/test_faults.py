@@ -156,3 +156,37 @@ async def test_a_firewall_refusal_is_a_precise_busfault(secure: popcorn.Machine)
     assert stop.fault.cfsr & PRECISERR
     assert stop.fault.cfsr & BFARVALID
     assert stop.fault.address == 0x4603_2400
+
+
+CRC_DR = 0x4002_3000
+STRICT = STOPS.replace(strict=True)
+
+
+@popcorn.pytest.machine
+def strict_stops() -> popcorn.MachineDescription:
+    return STRICT
+
+
+async def test_a_gated_peripheral_reads_0_until_its_clock_runs(
+    stops: popcorn.Machine,
+) -> None:
+    # --8<-- [start:gated]
+    crc = stops.periph.CRC
+    assert crc.clock_gated
+    await run_code(stops, LOAD, CRC_DR)
+    assert stops.reg.r0 == 0
+    stops.periph.RCC.AHB1ENR.CRCEN = 1
+    assert not crc.clock_gated
+    await run_code(stops, LOAD, CRC_DR)
+    assert stops.reg.r0 == 0xFFFF_FFFF
+    # --8<-- [end:gated]
+
+
+async def test_a_gated_access_raises_under_strict(strict_stops: popcorn.Machine) -> None:
+    # --8<-- [start:gated_strict]
+    with pytest.raises(popcorn.ModelError):
+        await run_code(strict_stops, LOAD, CRC_DR)
+    # --8<-- [end:gated_strict]
+    strict_stops.periph.RCC.AHB1ENR.CRCEN = 1
+    await run_code(strict_stops, LOAD, CRC_DR)
+    assert strict_stops.reg.r0 == 0xFFFF_FFFF
