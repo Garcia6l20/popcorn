@@ -45,3 +45,19 @@ def test_the_gate_builds_with_tests_and_examples_on(asan: bool) -> None:
     build = dict(stages(asan))["build"]
     assert "POPCORN_BUILD_TESTS=ON" in build
     assert "POPCORN_BUILD_EXAMPLES=ON" in build
+
+
+@pytest.mark.parametrize("asan", [False, True])
+def test_fail_fast_stops_every_test_stage_at_its_first_failure(asan: bool) -> None:
+    gate = stages(asan, fail_fast=True)
+    assert "--stop-on-fail" in dict(gate)["test"]
+    pytest_stages = [command for _, command in gate if "pytest" in command]
+    assert all("-x" in command for command in pytest_stages)
+    assert len(pytest_stages) >= (0 if asan else 2)
+
+
+@pytest.mark.parametrize("asan", [False, True])
+def test_the_gate_of_record_runs_every_test(asan: bool) -> None:
+    for _, command in stages(asan):
+        assert "-x" not in command
+        assert "--stop-on-fail" not in command

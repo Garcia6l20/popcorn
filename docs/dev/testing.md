@@ -151,3 +151,6 @@ file and run only the test that should catch it. Python tests import the package
 `popcorn_build/example_parts.py`, the examples together, the docs stage, pyright,
 ruff, black, clang-format and the layering check. It stops at the first failing stage. `-j N` caps
 the parallelism, and `--asan` runs the native suite in the asan variant only.
+`--fail-fast` stops each test stage at its first failing test, through `--stop-on-fail` for the
+native suite and `-x` for pytest. Use it while iterating. The gate of record runs without it and
+reports every failure.

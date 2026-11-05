@@ -38,15 +38,15 @@ def _clang_format() -> list[str]:
     return [clang_format, "--dry-run", "-Werror", *_native_sources()]
 
 
-def _examples() -> list[Stage]:
+def _examples(stop: list[str]) -> list[Stage]:
     examples = sorted(ini.parent for ini in (project_dir / "examples").glob("*/*/pytest.ini"))
     stages: list[Stage] = []
     for example in examples:
         name = f"{example.parent.name}/{example.name}"
         path = str(example.relative_to(project_dir))
-        stages.append((name, _python_tool("pytest", "-q", path)))
+        stages.append((name, _python_tool("pytest", "-q", *stop, path)))
         stages.extend(
-            (f"{name}@{part}", _python_tool("pytest", "-q", f"--popcorn-part={part}", path))
+            (f"{name}@{part}", _python_tool("pytest", "-q", *stop, f"--popcorn-part={part}", path))
             for part in EXAMPLE_PARTS[name].extra
         )
     return stages
@@ -70,27 +70,33 @@ def _xdist(jobs: int | None, cap: int | None = None) -> list[str]:
     return ["-n", "auto" if jobs is None else str(jobs)]
 
 
-def stages(asan: bool, jobs: int | None = None) -> list[Stage]:
+def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only.
 
     The build stages set the test and example switches ON: a package build persists them OFF in
-    the same build directory. @p jobs caps every parallel stage, None leaves each at its default."""
+    the same build directory. @p jobs caps every parallel stage, None leaves each at its default.
+    With @p fail_fast, each test stage stops at its first failing test."""
+    native_stop = ["--stop-on-fail"] if fail_fast else []
+    pytest_stop = ["-x"] if fail_fast else []
     if asan:
         return [
             (
                 "build",
                 _pcons("-B", "build-asan", "--variant=asan", *_pcons_jobs(jobs), *GATE_VARIABLES),
             ),
-            ("test", _pcons("-B", "build-asan", "test", *_pcons_jobs(jobs))),
+            ("test", _pcons("-B", "build-asan", "test", *_pcons_jobs(jobs), *native_stop)),
         ]
     return [
         ("build", _pcons("-B", "build", *_pcons_jobs(jobs), *GATE_VARIABLES)),
-        ("test", _pcons("-B", "build", "test", *_pcons_jobs(jobs))),
-        ("pytest", _python_tool("pytest", "-q", *_xdist(jobs), "tests/python", "tests/docs")),
-        *_examples(),
+        ("test", _pcons("-B", "build", "test", *_pcons_jobs(jobs), *native_stop)),
+        (
+            "pytest",
+            _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs), "tests/python", "tests/docs"),
+        ),
+        *_examples(pytest_stop),
         (
             "examples",
-            _python_tool("pytest", "-q", *_xdist(jobs, EXAMPLE_WORKERS), "examples"),
+            _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs, EXAMPLE_WORKERS), "examples"),
         ),
         ("docs", _python_tool("popcorn_build.docs")),
         ("pyright", _python_tool("pyright")),
@@ -101,10 +107,10 @@ def stages(asan: bool, jobs: int | None = None) -> list[Stage]:
     ]
 
 
-def run(asan: bool, jobs: int | None = None) -> int:
+def run(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> int:
     summary: list[str] = []
     status = 0
-    for name, command in stages(asan, jobs):
+    for name, command in stages(asan, jobs, fail_fast):
         start = time.monotonic()
         code = subprocess.run(command, cwd=project_dir, check=False).returncode
         summary.append(
@@ -129,8 +135,14 @@ def register() -> None:
         help="Cap the build and every test stage at this many jobs, 1 runs the tests serially. "
         "Default: all cores, examples at 4 workers.",
     )
-    def check(asan: bool, jobs: int | None) -> None:
+    @click.option(
+        "--fail-fast",
+        is_flag=True,
+        help="Stop each test stage at its first failing test, for iterating. Leave it off for "
+        "the gate of record, which reports every failure.",
+    )
+    def check(asan: bool, jobs: int | None, fail_fast: bool) -> None:
         """Build, test, type check and lint. Stops at the first failing stage."""
-        status = run(asan, jobs)
+        status = run(asan, jobs, fail_fast)
         if status != 0:
             raise SystemExit(status)
