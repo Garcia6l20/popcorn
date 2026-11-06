@@ -817,3 +817,23 @@ def test_a_model_error_names_the_register_an_alias_reached(tmp_path: Path) -> No
         call(m, "read_timer_count")
     assert caught.value.register == "CNT"
     assert str(caught.value).startswith("TIMER.CNT: read handler _cnt")
+
+
+def test_a_raising_model_reset_still_resets_the_other_models(u575: popcorn.PartDescription) -> None:
+    class Raising(Model):
+        armed = False
+
+        def reset(self, kind: popcorn.ResetKind) -> None:
+            if type(self).armed:
+                raise LookupError("model reset")
+
+    m = popcorn.Machine(u575, models={"TIM2": Raising})
+    m.reset()
+    m.periph.TIM3.ARR.value = 5
+    m.periph.USART1.BRR.value = 35
+    Raising.armed = True
+    with pytest.raises(LookupError, match="model reset"):
+        m.reset(popcorn.ResetKind.SOFTWARE)
+    assert m.periph.TIM3.ARR.value != 5
+    assert m.periph.USART1.BRR.value == 0
+    assert m.time.ps == 0

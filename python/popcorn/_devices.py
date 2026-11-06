@@ -1,6 +1,6 @@
-"""Devices on the I2C and SPI buses of the MCU, written in Python: `popcorn.board.I2CTarget`,
-`popcorn.board.SpiTarget`, `popcorn.board.SpiController` and `popcorn.board.I2CController`,
-served by the native bus models."""
+"""Devices on the I2C and SPI buses and the UARTs of the MCU, written in Python:
+`popcorn.board.I2CTarget`, `popcorn.board.SpiTarget`, `popcorn.board.SpiController`,
+`popcorn.board.I2CController` and `popcorn.board.UartDevice`, served by the native models."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from popcorn import _core
-from popcorn._enums import I2CError, I2CPhase, ResetKind
+from popcorn._enums import I2CError, I2CPhase, ResetKind, UartError
 from popcorn._errors import ConfigError, ModelError
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
@@ -124,10 +124,14 @@ def _read_reply(
 
 
 type BusDevice = (
-    _core.I2CTargetBase | _core.SpiTargetBase | _core.SpiControllerBase | _core.I2CControllerBase
+    _core.I2CTargetBase
+    | _core.SpiTargetBase
+    | _core.SpiControllerBase
+    | _core.I2CControllerBase
+    | _core.UartDeviceBase
 )
-"""A device the native I2C or SPI models serve: a `popcorn.board` target or controller, or a
-`popcorn.devices` device."""
+"""A device the native I2C, SPI or UART models serve: a `popcorn.board` target, controller or UART
+device, or a `popcorn.devices` device."""
 
 type AudioClock = Callable[[BusDevice, str, Block, int], None]
 """What a machine does when a device sets an audio clock: the device, the SAI, the block, the
@@ -904,6 +908,165 @@ class I2CController(_core.I2CControllerBase):
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._scl_hz} Hz>"
+
+
+class UartDevice(_core.UartDeviceBase):
+    """The far end of a USART, UART or LPUART, written in Python: it hears what the firmware
+    transmits on the machine's thread at each frame's virtual time, and sends at the baud the
+    firmware configured.
+
+    Attach it with `Machine(devices={"USART1": [device]})` or a machine description's
+    `Periph(devices=[Device(cls)])`, alone on its UART. The UART then has no `UartStream`, no pty
+    and no link of a `System`, each refused with `ConfigError`.
+
+    Thread: `on_attach`, `on_frame` and `on_error` run on the machine's thread with the GIL, one
+    GIL entry per call. A frame cut by a parked register write runs `on_error` on the caller's
+    thread instead. `reset` runs where the reset was called. `send` works from `on_attach`,
+    `on_frame` and `on_error`, wherever they run, and on the machine's thread. It raises inside
+    `reset`.
+
+    Time: `at` and `now` count from the last reset of any kind, as `Machine.time`. Inside `on_frame`
+    and `on_error`, `now` is that call's `at`: the event runs at the first block boundary at or
+    after it, so `Machine.time` can read up to one block later, and a reply placed from `now` keeps
+    its exact distance from the frame.
+
+    Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
+    the time `Frame.at` gives on a `UartStream`. The firmware's transmitter always sends a
+    well-formed frame at its own settings, so the one line error a device hears is
+    `UartError.ABORTED`.
+
+    Reset: a device on the board is not reset with the MCU. `reset` is told every machine reset and
+    keeps the device's state by default. The frames `send` queued and not delivered are dropped by
+    any machine reset.
+
+    Errors: an exception from a hook stops the run as a `ModelError` naming the device.
+
+    Lifetime: a device serves one machine at a time and must not keep a reference to it. It may
+    keep its `board`, which holds no machine.
+    """
+
+    def __init__(self) -> None:
+        """Make a device serving no machine yet."""
+        super().__init__()
+        self._link: _core.UartDeviceLink | None = None
+        self._stamp_ps: int | None = None
+        self._in_reset = False
+        self._peripheral = ""
+
+    @property
+    def board(self) -> DeviceBoard:
+        """What the device may drive on the board of the machine it serves."""
+        return DeviceBoard(self)
+
+    @property
+    def now(self) -> VirtualTime:
+        """The virtual time of the running `on_frame` or `on_error`, else `Machine.time`.
+
+        Raises:
+            ConfigError: The device serves no live machine.
+            MachineRunning: Read off the machine's thread while it runs.
+        """
+        if self._stamp_ps is not None:
+            return VirtualTime(self._stamp_ps)
+        machine = serving(self)
+        if machine is None:
+            raise self._serves_none()
+        return cast(VirtualTime, getattr(machine, "time"))  # noqa: B009
+
+    def on_attach(self) -> None:
+        """The machine runs for the first time since the device was attached, or since a snapshot
+        was restored into its new machine. Called once, at the first event boundary."""
+
+    def on_frame(self, byte: int, at: VirtualTime) -> None:
+        """The firmware transmitted a frame holding `byte`, 0 to 0x1FF, its stop bit ending at
+        `at`."""
+
+    def on_error(self, kind: UartError, at: VirtualTime) -> None:
+        """A line error, `UartError.ABORTED` at the time the firmware cut the frame."""
+
+    def reset(self, kind: ResetKind) -> None:
+        """The machine was reset. Does nothing by default. The machine's first reset comes before
+        `on_attach`, so what `on_attach` builds is absent then."""
+
+    def send(self, data: bytes, *, at: VirtualTime | None = None) -> None:
+        """Queue frames of 8 data bits towards the firmware's receiver, the first start bit at
+        `at`, or at `now` when None, the others back to back. `at` behind frames still queued
+        starts when they end. Each frame lasts the frame time of the UART's settings at its start,
+        so a baud change between frames applies from the next one.
+
+        Raises:
+            TypeError: `data` is no bytes, or `at` no `VirtualTime`.
+            ValueError: `at` is before `now`, or leaves the 64-bit picosecond range.
+            RuntimeError: Called inside `reset`, on any path a reset takes, or off the machine's
+                thread outside `on_frame` and `on_error`.
+            ConfigError: The device serves no live machine.
+        """
+        if not isinstance(cast(object, data), bytes | bytearray | memoryview):
+            raise TypeError(f"send() takes bytes, not {type(data).__name__}")
+        if at is not None and not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"send() takes at as a VirtualTime or None, not {at!r}")
+        link = self._link
+        if link is None or serving(self) is None:
+            raise self._serves_none()
+        if self._in_reset:
+            raise RuntimeError(f"{self!r}: send() is refused inside reset()")
+        if self._stamp_ps is None and not _core.on_host_thread():
+            raise RuntimeError(f"{self!r}: send() runs on the machine's thread")
+        now = self.now.ps
+        start = now if at is None else at.ps
+        if start < now:
+            raise ValueError(f"{self!r}: send() at {at} lies before now, {VirtualTime(now)}")
+        if start > MAX_PS:
+            raise ValueError(f"a send at {at} leaves the 64-bit picosecond range")
+        link.send(bytes(data), start)
+
+    def _bind(self, link: _core.UartDeviceLink, peripheral: str) -> None:
+        self._link = link
+        self._peripheral = peripheral
+
+    def _serves_none(self) -> ConfigError:
+        return ConfigError(
+            f"{self!r} serves no live machine",
+            key="devices",
+            expected="a device serving a live machine",
+        )
+
+    def _attached(self) -> None:
+        self._called(self.on_attach)
+
+    def _frame(self, data: int, at: int) -> None:
+        self._stamp_ps = at
+        try:
+            self._called(self.on_frame, data, VirtualTime(at))
+        finally:
+            self._stamp_ps = None
+
+    def _aborted(self, at: int) -> None:
+        self._stamp_ps = at
+        try:
+            self._called(self.on_error, UartError.ABORTED, VirtualTime(at))
+        finally:
+            self._stamp_ps = None
+
+    def _reset(self, kind: _core.ResetKind) -> None:
+        self._in_reset = True
+        try:
+            self._called(self.reset, ResetKind(kind.value))
+        finally:
+            self._in_reset = False
+
+    def _called[**P](self, hook: Callable[P, None], *args: P.args, **kwargs: P.kwargs) -> None:
+        try:
+            hook(*args, **kwargs)
+        except Exception as error:
+            raise ModelError(
+                f"{self!r}: {getattr(hook, '__name__', 'a hook')} raised {error!r}",
+                peripheral=self._peripheral,
+            ) from error
+
+    def __repr__(self) -> str:
+        where = f" on {self._peripheral}" if self._peripheral else ""
+        return f"<{type(self).__qualname__}{where}>"
 
 
 def serving(device: BusDevice) -> object | None:

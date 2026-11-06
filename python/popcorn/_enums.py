@@ -101,8 +101,9 @@ class I2CPhase(enum.Enum):
 
 
 class UartError(enum.Enum):
-    """A line error `UartStream.write` tags its bytes with, RM0456 66.8 USART_ISR. The flag
-    rises when the byte reaches RDR, behind the bytes ahead of it in the RX FIFO."""
+    """A line error. `UartStream.write` tags its bytes with FRAMING, NOISE or PARITY, RM0456 66.8
+    USART_ISR: the flag rises when the byte reaches RDR, behind the bytes ahead of it in the RX
+    FIFO. `UartDevice.on_error` hears ABORTED."""
 
     FRAMING = 1
     """ISR.FE: the stop bit sampled 0. The byte arrives with its data."""
@@ -110,3 +111,6 @@ class UartError(enum.Enum):
     """ISR.NE: samples of a bit disagreed. The byte arrives with its data."""
     PARITY = 3
     """ISR.PE: the parity bit inverted. With CR1.PCE 0 the byte arrives clean, logged once."""
+    ABORTED = 4
+    """The firmware cleared UE with a frame in flight, on a UART whose UE discards it, or reset the
+    UART through its RCC bit: the frame never completes. `UartStream.write` refuses it."""

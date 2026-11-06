@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <format>
 #include <limits>
@@ -41,7 +42,43 @@ constexpr std::uint32_t linked_due    = 3;
 constexpr std::uint32_t cts_due       = 4;
 constexpr std::uint32_t hold_due      = 5;
 constexpr std::uint32_t release_due   = 6;
+constexpr std::uint32_t host_start    = 7;
+constexpr std::uint32_t attach_due    = 8;
 constexpr std::size_t   fifo_depth    = 8;
+
+/**
+ * @brief Runs far-end hooks and keeps the first error, so the handler they belong to finishes its
+ *        state change before rethrow() raises it.
+ */
+class hook_guard
+{
+public:
+  template <typename Hook> void run(Hook&& hook)
+  {
+    try
+    {
+      std::forward<Hook>(hook)();
+    }
+    catch(...)
+    {
+      if(not failure_)
+      {
+        failure_ = std::current_exception();
+      }
+    }
+  }
+
+  void rethrow() const
+  {
+    if(failure_)
+    {
+      std::rethrow_exception(failure_);
+    }
+  }
+
+private:
+  std::exception_ptr failure_;
+};
 
 constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
 constexpr std::array<std::uint8_t, 4>   half_stop_codes{2, 1, 4, 3};
@@ -191,6 +228,8 @@ struct usart_state
   std::uint16_t                                                      shift{};
   std::uint64_t                                                      tx_end_ps{};
   std::uint64_t                                                      rx_due_ps{};
+  std::uint64_t                                                      host_start_ps{};
+  bool                                                               rx_held{};
   bool                                                               shifting{};
   bool                                                               receiving{};
   bool                                                               idle_pending{};
@@ -438,6 +477,7 @@ private:
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
   [[nodiscard]] auto shape() -> rx_shape;
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
+  auto schedule_receive(std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
   void start_frame(std::uint64_t from_ps);
   void deliver(rx_entry entry);
   void expose();
@@ -448,6 +488,7 @@ private:
   [[nodiscard]] auto board_base() const -> std::uint64_t;
   void               apply_cts(bool ready, std::uint64_t at_ps);
   void               resume_host();
+  void               ask_attached();
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -909,7 +950,7 @@ auto usart::on_write(
   return dispatch_model::on_write(regs, word, 4, old, kept, access);
 }
 
-void usart::reset(register_file&, reset_kind)
+void usart::reset(register_file&, reset_kind kind)
 {
   restore_reset_values(false);
   auto const base = board_base();
@@ -918,15 +959,30 @@ void usart::reset(register_file&, reset_kind)
     auto const due = change.board_ps > base ? change.board_ps - base : 0;
     ctx_.events.schedule_at(vtime{due}, cts_due, change.id, core::host_lane, ctx_.clock);
   }
+  ask_attached();
+  if(far_end_)
+  {
+    far_end_->reset(kind);
+  }
+}
+
+void usart::ask_attached()
+{
+  if(far_end_ and far_end_->awaiting_attach())
+  {
+    ctx_.events.schedule_at(ctx_.clock.time(), attach_due, 0, core::host_lane, ctx_.clock);
+  }
 }
 
 void usart::on_bus_reset()
 {
+  hook_guard guard;
   if(state_.shifting and far_end_)
   {
-    far_end_->aborted(ctx_.clock.time());
+    guard.run([&] { far_end_->aborted(ctx_.clock.time()); });
   }
   restore_reset_values(true);
+  guard.rethrow();
 }
 
 void usart::restore_reset_values(bool keep_host)
@@ -952,6 +1008,8 @@ void usart::restore_reset_values(bool keep_host)
   state_.shifting         = false;
   state_.receiving        = false;
   state_.rx_due_ps        = 0;
+  state_.host_start_ps    = 0;
+  state_.rx_held          = keep_host and not state_.host.empty();
   state_.tx_end_ps        = 0;
   state_.idle_pending     = false;
   state_.cts_hold_from_ps = 0;
@@ -1056,6 +1114,12 @@ auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps
   auto const due = std::max(from_ps + ps, ctx_.clock.time().ps);
   ctx_.events.schedule_at(vtime{due}, kind, state_.generation[kind], ctx_.clock);
   return due;
+}
+
+auto usart::schedule_receive(std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t
+{
+  schedule(receive_due, from_ps, ps);
+  return from_ps + ps;
 }
 
 auto usart::shape() -> rx_shape
@@ -1223,13 +1287,14 @@ void usart::interrupts()
 
 void usart::control_written(std::uint32_t, std::uint32_t)
 {
+  hook_guard guard;
   warn_unsupported();
   if(not enabled())
   {
     auto const finishing = sci2_ and state_.shifting;
     if(state_.shifting and far_end_ and not finishing)
     {
-      far_end_->aborted(ctx_.clock.time());
+      guard.run([&] { far_end_->aborted(ctx_.clock.time()); });
     }
     for(std::size_t kind = 0; kind < state_.generation.size(); ++kind)
     {
@@ -1243,6 +1308,8 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     state_.receiving     = false;
     state_.idle_pending  = false;
     state_.break_pending = false;
+    state_.rx_due_ps     = 0;
+    state_.rx_held       = not state_.host.empty();
     if(not finishing)
     {
       state_.shifting       = false;
@@ -1265,6 +1332,7 @@ void usart::control_written(std::uint32_t, std::uint32_t)
   }
   start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   flags();
+  guard.rethrow();
 }
 
 void usart::break_written()
@@ -1314,11 +1382,13 @@ void usart::load(std::span<std::byte const> in)
   if(not sci2_)
   {
     dispatch_model::load(in);
+    ask_attached();
     return;
   }
   auto saved = reflex::serde::bson::deserializer{in}.load<sci2_saved>();
   state_     = std::move(saved.usart);
   sequence_  = saved.sequence;
+  ask_attached();
 }
 
 void usart::status_written(std::uint32_t old, std::uint32_t now)
@@ -1414,6 +1484,20 @@ auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
 
 void usart::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == attach_due)
+  {
+    if(far_end_ and far_end_->awaiting_attach())
+    {
+      far_end_->attached();
+    }
+    return;
+  }
+  if(kind == host_start)
+  {
+    resume_host();
+    flags();
+    return;
+  }
   if(kind == linked_due)
   {
     if(payload != state_.linked_generation or state_.linked.empty())
@@ -1529,9 +1613,12 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     state_.shifting = false;
     auto const data = state_.shift;
     auto const brk  = std::exchange(state_.break_shifting, false);
+    hook_guard guard;
     if(far_end_)
     {
-      far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
+      guard.run([&] {
+        far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
+      });
     }
     auto next = state_.tx_end_ps;
     if(brk)
@@ -1553,6 +1640,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
       update(regs_, complete_, 1);
     }
     flags();
+    guard.rethrow();
     return;
   }
   if(kind == idle_due)
@@ -1577,10 +1665,14 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   auto const hold = frame->kind == frame_kind::brk
                       ? 4 * ps / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)])
                       : 0;
-  if(ps != 0 and not state_.host.empty() and ready_to_receive())
+  if(ps != 0
+     and not state_.host.empty()
+     and ready_to_receive()
+     and state_.host.front().start_ps <= ctx_.clock.time().ps)
   {
     state_.receiving = true;
-    state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps + hold, ps);
+    state_.rx_due_ps =
+        schedule_receive(std::max(state_.rx_due_ps + hold, state_.host.front().start_ps), ps);
   }
   else if(ps != 0 and not state_.idle_pending and not linked_before(state_.rx_due_ps + ps))
   {
@@ -1591,6 +1683,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   if(not state_.receiving)
   {
     state_.rx_due_ps += hold;
+    resume_host();
   }
   flags();
 }
@@ -1905,17 +1998,33 @@ void usart::receive_frames(std::span<host_frame const> frames)
 
 void usart::resume_host()
 {
-  if(state_.receiving or state_.host.empty() or not ready_to_receive())
+  if(state_.receiving or state_.host.empty())
   {
     return;
   }
-  if(auto const ps = frame_ps(); ps != 0)
+  auto const ps = ready_to_receive() ? frame_ps() : 0;
+  if(ps == 0)
   {
-    state_.receiving = true;
-    ++state_.generation[idle_due];
-    state_.idle_pending = false;
-    state_.rx_due_ps = schedule(receive_due, std::max(ctx_.clock.time().ps, state_.rx_due_ps), ps);
+    state_.rx_held = true;
+    return;
   }
+  auto const now   = ctx_.clock.time().ps;
+  auto const start = state_.host.front().start_ps;
+  if(start > now)
+  {
+    state_.rx_held = false;
+    if(std::exchange(state_.host_start_ps, start) != start)
+    {
+      ctx_.events.schedule_at(vtime{start}, host_start, 0, core::host_lane, ctx_.clock);
+    }
+    return;
+  }
+  state_.receiving = true;
+  ++state_.generation[idle_due];
+  state_.idle_pending = false;
+  auto const from     = start != 0 and not state_.rx_held ? start : now;
+  state_.rx_held      = false;
+  state_.rx_due_ps    = schedule_receive(std::max(from, state_.rx_due_ps), ps);
 }
 
 auto usart::rx_space() const -> bool

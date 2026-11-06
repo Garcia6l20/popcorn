@@ -112,6 +112,9 @@ struct host_frame
   uart_error error{};
   /** @brief Data or a break. */
   frame_kind kind{};
+  /** @brief Virtual time since the last reset the start bit is due, at or after the end of the
+   * frame before it. 0 starts it when the frame before it ended, or at the time it is queued. */
+  std::uint64_t start_ps{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(host_frame const&, host_frame const&) -> bool = default;
@@ -187,6 +190,28 @@ public:
    * @param at Virtual time of the disable, in the sender's time.
    */
   virtual void aborted([[maybe_unused]] vtime at)
+  {}
+
+  /**
+   * @brief The machine was reset, called last by the UART's own reset. The default does nothing.
+   * @param kind The kind of reset.
+   */
+  virtual void reset([[maybe_unused]] reset_kind kind)
+  {}
+
+  /**
+   * @brief Whether the endpoint waits for attached(). The UART then posts one event at the current
+   *        time after each reset and each snapshot load. The default is false.
+   * @return Whether attached() is due.
+   */
+  [[nodiscard]] virtual auto awaiting_attach() const -> bool
+  {
+    return false;
+  }
+
+  /** @brief The event awaiting_attach() asked for runs, on the machine's host thread. The default
+   *         does nothing. */
+  virtual void attached()
   {}
 };
 

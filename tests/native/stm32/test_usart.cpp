@@ -25,6 +25,7 @@
 #include <optional>
 #include <random>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -125,6 +126,17 @@ void spaced(periph::capture_endpoint const& capture, std::uint64_t frame_ps)
   }
 }
 
+auto due_times(rig const& r) -> std::set<std::uint64_t>
+{
+  auto const              snapshot = r.f->target->snapshot();
+  std::set<std::uint64_t> out;
+  for(auto const& pending : snapshot.data().events.pending)
+  {
+    out.insert(pending.due_ps);
+  }
+  return out;
+}
+
 auto frame_of(
     stm32_fixture const& f,
     std::string_view     name,
@@ -200,6 +212,78 @@ TEST_CASE("the first queued frame arrives one frame time after it is queued")
   auto const took  = r.f->target->virtual_clock().time().ps - start.ps;
   CHECK(took + instruction_ps >= frame);
   CHECK(took <= frame + instruction_ps);
+}
+
+TEST_CASE("a stamped host frame counts from its stamp, not from the time it is queued")
+{
+  rig r{"overrun"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  auto const now = r.f->target->virtual_clock().time().ps;
+  REQUIRE(now > 1000);
+  auto const                              stamp = now - 1000;
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 'x', .start_ps = stamp}, {.data = 'y'}}
+  };
+  r.port("USART1").receive_frames(frames);
+  auto const frame = frame_of(*r.f, "USART1", 4'000'000, false);
+  CHECK(due_times(r).contains(stamp + frame));
+}
+
+TEST_CASE("a stamped host frame ahead of the clock leaves the line idle until its stamp")
+{
+  rig r{"overrun"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  auto const start = r.f->target->virtual_clock().time().ps + 1'000'000;
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 'x', .start_ps = start}, {.data = 'y'}}
+  };
+  r.port("USART1").receive_frames(frames);
+  auto const frame = frame_of(*r.f, "USART1", 4'000'000, false);
+  CHECK(due_times(r).contains(start));
+  CHECK_FALSE(due_times(r).contains(start + frame));
+  CHECK(r.f->field("USART1", "ISR_enabled", "BUSY") == 0);
+  auto const started = r.f->run_to_stop(
+      {.max_instructions = icount{10'000'000},
+       .until_time       = popcorn::vtime{start},
+       .hold_from_until  = false});
+  CAPTURE(started.detail);
+  CHECK(due_times(r).contains(start + frame));
+  CHECK(r.f->field("USART1", "ISR_enabled", "BUSY") == 1);
+}
+
+TEST_CASE("a frame after a stamped one starts when the stamped one ends")
+{
+  rig r{"overrun"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  auto const                              start = r.f->target->virtual_clock().time().ps + 1000;
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 'x', .start_ps = start}, {.data = 'y'}}
+  };
+  r.port("USART1").receive_frames(frames);
+  auto const frame = frame_of(*r.f, "USART1", 4'000'000, false);
+  auto const first = r.f->run_to_stop({.max_instructions = icount{10'000'000}, .stop_when = [&] {
+                                         return r.f->field("USART1", "ISR_enabled", "RXFNE") != 0;
+                                       }});
+  REQUIRE(first.reason == stop_reason::user);
+  CHECK(due_times(r).contains(start + 2 * frame));
+}
+
+TEST_CASE("a frame after one shorter than the dispatch lag counts from that one's stamped end")
+{
+  rig r{"overrun"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  auto const                              now   = r.f->target->virtual_clock().time().ps;
+  auto const                              frame = frame_of(*r.f, "USART1", 4'000'000, false);
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 'x', .start_ps = now > 2 * frame ? now - frame - frame / 2 : 1}, {.data = 'y'}}
+  };
+  r.port("USART1").receive_frames(frames);
+  auto const stamp = frames[0].start_ps;
+  auto const stop  = r.f->run_to_stop({.max_instructions = icount{1'000'000}, .stop_when = [&] {
+                                        return r.port("USART1").queued() < 2;
+                                       }});
+  REQUIRE(stop.reason == stop_reason::user);
+  CHECK(due_times(r).contains(stamp + 2 * frame));
 }
 
 TEST_CASE("a frame in flight across a core clock change arrives at its virtual time")

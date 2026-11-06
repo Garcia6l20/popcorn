@@ -285,7 +285,7 @@ class Periph:
         model: The board model replacing the built-in model: a `Use` of a `popcorn.model.Model`
             class, or a `popcorn.plugin.PluginModel`, `PLUGIN.model("rng")`, of a plugin the
             machine description lists in `plugins`.
-        devices: Devices on the bus of an I2C or SPI peripheral.
+        devices: Devices on the bus of an I2C or SPI peripheral, or the one device on a UART.
         connect: "pty" bridges a UART, or the first CDC ACM function of a USB device controller
             with a `host`, to a pseudo terminal on every machine built.
         audio: What the board wires to each audio block of an SAI with the built-in model.
@@ -655,7 +655,7 @@ class MachineDescription:
         Args:
             strict_peripherals: Whether unmodelled peripheral accesses raise ModelError,
                 `strict` when None. Not part of `digest`.
-            devices: Bus devices per I2C or SPI peripheral name or alias, as
+            devices: Devices per I2C, SPI or UART peripheral name or alias, as
                 `Machine(devices=)` takes them. A listed peripheral gets these devices instead
                 of its `board` devices, none for an empty list. A peripheral not listed keeps
                 the machine description's. Not part of `digest`.
@@ -665,8 +665,8 @@ class MachineDescription:
         Raises:
             ValueError: `name` is empty or holds whitespace or a dot.
             ConfigError: As `part_description`, a model is not a `popcorn.model.Model` or a
-                device not a `popcorn.board.I2CTarget`, `SpiTarget`, `SpiController` or
-                `I2CController`, a class refuses its parameters, a model replaces no peripheral
+                device not a `popcorn.board.I2CTarget`, `SpiTarget`, `SpiController`, `UartDevice`
+                or `I2CController`, a class refuses its parameters, a model replaces no peripheral
                 of the description, a plugin fails to build or load or its library names
                 another plugin, as `plugins[i]`, a `PluginModel` names no model its plugin
                 registers, a device of `devices` comes from a plugin not in `plugins`, as
@@ -858,11 +858,12 @@ class MachineDescription:
                     _core.I2CTargetBase
                     | _core.SpiTargetBase
                     | _core.SpiControllerBase
-                    | _core.I2CControllerBase,
+                    | _core.I2CControllerBase
+                    | _core.UartDeviceBase,
                 ):
                     expected = (
-                        "a popcorn.board.I2CTarget, SpiTarget, SpiController or I2CController"
-                        " subclass"
+                        "a popcorn.board.I2CTarget, SpiTarget, SpiController, I2CController or"
+                        " UartDevice subclass"
                     )
                     raise _plain_error(f"{at}.model", f"{expected}, not {_reference(device.cls)}")
                 params = dict(device.params)
@@ -872,6 +873,12 @@ class MachineDescription:
                     if device.address is None:
                         raise _plain_error(f"{at}.address", "the address of an I2C target")
                     self._check_params(cls, (device.address,), params, at)
+                elif issubclass(cls, _core.UartDeviceBase):
+                    if device.address is not None:
+                        raise _plain_error(f"{at}.address", "no address for a UART device")
+                    if device.cs is not None:
+                        raise _plain_error(f"{at}.cs", "no cs for a UART device")
+                    self._check_params(cls, (), params, at)
                 elif issubclass(cls, _core.SpiControllerBase | _core.I2CControllerBase):
                     bus = "an SPI" if issubclass(cls, _core.SpiControllerBase) else "an I2C"
                     if device.address is not None:
@@ -926,6 +933,10 @@ class MachineDescription:
                 elif issubclass(cls, _core.I2CControllerBase):
                     if ip != "I2C":
                         raise _plain_error(f"{at}.model", f"an I2C bus of {description.part}")
+                    built.append(make(**params))
+                elif issubclass(cls, _core.UartDeviceBase):
+                    if ip not in ("USART", "UART", "LPUART"):
+                        raise _plain_error(f"{at}.model", f"a UART of {description.part}")
                     built.append(make(**params))
             except (ValueError, TypeError) as error:
                 raise _plain_error(at, f"arguments {cls.__qualname__} accepts: {error}") from error

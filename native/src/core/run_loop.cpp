@@ -11,6 +11,7 @@
 #include <reflex/enum.hpp>
 
 #include <algorithm>
+#include <exception>
 #include <format>
 #include <limits>
 #include <optional>
@@ -270,11 +271,22 @@ void machine::run_state::reset_notified(reset_kind kind)
       slot->clock_gated   = false;
     }
   }
+  std::exception_ptr failure;
   for(auto const& slot : owner.peripherals_)
   {
     if(slot and slot->model)
     {
-      slot->model->reset(slot->regs, kind);
+      try
+      {
+        slot->model->reset(slot->regs, kind);
+      }
+      catch(...)
+      {
+        if(not failure)
+        {
+          failure = std::current_exception();
+        }
+      }
     }
   }
   owner.trace_.rebase(icount{0});
@@ -284,6 +296,10 @@ void machine::run_state::reset_notified(reset_kind kind)
   if(core_held)
   {
     notify_core_hold(true);
+  }
+  if(failure)
+  {
+    std::rethrow_exception(failure);
   }
 }
 

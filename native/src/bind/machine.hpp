@@ -1236,6 +1236,15 @@ public:
       attach_uart(std::string const& peripheral) -> uart_queue;
 
   /**
+   * @brief What the Python device on a UART of the machine sends through.
+   * @param peripheral UART instance name.
+   * @throws config_error when the description has no such peripheral.
+   * @throws model_error when the peripheral's model is not a UART.
+   */
+  [[= py::doc{"The link of the Python device on a UART."}]] [[nodiscard]] auto
+      uart_device_link_of(std::string const& peripheral) -> uart_device_link;
+
+  /**
    * @brief Names of the peripherals whose model is a built-in SAI, in description order.
    */
   [[= py::doc{"Names of the peripherals whose model is a built-in SAI."}]] [[nodiscard]] auto

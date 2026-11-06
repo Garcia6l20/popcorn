@@ -1046,6 +1046,8 @@ class System:
         try:
             native = ports.link(unit)
         except Exception as error:
+            if isinstance(error, ConfigError) and error.key.startswith("devices."):
+                raise
             raise ConfigError(
                 f"{key}: {end!r} is not a UART of {name}: {error}",
                 key=key,

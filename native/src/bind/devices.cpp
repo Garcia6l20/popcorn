@@ -8,6 +8,7 @@
 #include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
@@ -374,6 +375,21 @@ public:
 };
 
 /**
+ * @brief nanobind trampoline letting a Python class implement periph::uart_endpoint through the
+ *        private methods `_attached`, `_frame`, `_aborted` and `_reset` that
+ *        `popcorn.board.UartDevice` defines. Times cross as picoseconds since the last reset. The
+ *        engine calls it only through an attachment.
+ */
+class python_uart_device final : public periph::uart_endpoint
+{
+public:
+  NB_TRAMPOLINE(periph::uart_endpoint, 4);
+
+  void transmitted(std::uint16_t, vtime, bool) override
+  {}
+};
+
+/**
  * @brief One machine's attachment of a Python device: the machine's engine calls it, and it
  *        calls the device in its own cell. A device reattached to another machine gets a new
  *        attachment, so an old engine still running never calls it in the new machine's
@@ -447,6 +463,55 @@ class attached_i2c_controller final : public i2c_controller_calls<attached_i2c_c
 {
 public:
   using attachment::attachment;
+};
+
+/**
+ * @brief One machine's attachment of a Python UART device. Every hook call takes the GIL, a break
+ *        takes none, and awaiting_attach() takes none. attached() calls the device once for the
+ *        attachment's life.
+ */
+class attached_uart_device final : public periph::uart_endpoint,
+                                   public attachment<python_uart_device>
+{
+public:
+  using attachment::attachment;
+
+  void transmitted(std::uint16_t data, vtime at, bool brk) override
+  {
+    if(brk)
+    {
+      return;
+    }
+    gil_entry const gil;
+    invoke("_frame", data, at.ps);
+  }
+
+  void aborted(vtime at) override
+  {
+    gil_entry const gil;
+    invoke("_aborted", at.ps);
+  }
+
+  void reset(reset_kind kind) override
+  {
+    gil_entry const gil;
+    invoke("_reset", kind);
+  }
+
+  [[nodiscard]] auto awaiting_attach() const -> bool override
+  {
+    return not attach_done_;
+  }
+
+  void attached() override
+  {
+    attach_done_ = true;
+    gil_entry const gil;
+    invoke("_attached");
+  }
+
+private:
+  bool attach_done_{};
 };
 
 auto refused(std::string const& peripheral, std::string expected) -> config_error
@@ -534,6 +599,10 @@ void bind_device_bases(nb::module_ scope)
       scope, "SpiControllerBase",
       "Native side of popcorn.board.SpiController: an SPI controller implemented in Python.")
       .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
+  nb::class_<periph::uart_endpoint, python_uart_device>(
+      scope, "UartDeviceBase",
+      "Native side of popcorn.board.UartDevice: a device on a UART implemented in Python.")
+      .def(nb::init<>());
   nb::class_<periph::i2c_controller_sink, python_i2c_controller>(
       scope, "I2CControllerBase",
       "Native side of popcorn.board.I2CController: an I2C controller implemented in Python.")
@@ -559,19 +628,39 @@ auto prepare_devices(
     auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
       return p.name == peripheral and not p.alias_of;
     });
-    if(unit == description.peripherals.end() or (unit->ip != "I2C" and unit->ip != "SPI"))
+    bool const i2c_bus   = unit != description.peripherals.end() and unit->ip == "I2C";
+    bool const spi_bus   = unit != description.peripherals.end() and unit->ip == "SPI";
+    bool const uart_line = unit != description.peripherals.end()
+                       and (unit->ip == "USART" or unit->ip == "UART" or unit->ip == "LPUART");
+    if(not i2c_bus and not spi_bus and not uart_line)
     {
-      throw refused(peripheral, "an I2C or SPI peripheral of the MCU");
+      throw refused(peripheral, "an I2C, SPI or UART peripheral of the MCU");
     }
-    bool const i2c_bus = unit->ip == "I2C";
-    bool const spi_bus = unit->ip == "SPI";
     if(not objects.empty())
     {
-      served.emplace_back(peripheral, i2c_bus ? "i2c" : "spi");
+      served.emplace_back(peripheral, i2c_bus ? "i2c" : spi_bus ? "spi" : "uarts");
     }
     for(auto const& object : objects)
     {
-      if(std::shared_ptr<periph::i2c_target> target; nb::try_cast(object, target) and target)
+      if(std::shared_ptr<periph::uart_endpoint> device; nb::try_cast(object, device) and device)
+      {
+        if(not uart_line)
+        {
+          throw refused(peripheral, "a UART peripheral for a UartDevice");
+        }
+        if(board.uarts.contains(peripheral))
+        {
+          throw refused(peripheral, "one UartDevice alone on the UART");
+        }
+        adopt<python_uart_device, attached_uart_device>(
+            device, object, peripheral, cells, python_owned);
+        board.uarts[peripheral] = std::move(device);
+      }
+      else if(uart_line)
+      {
+        throw refused(peripheral, "a UartDevice on a UART peripheral");
+      }
+      else if(std::shared_ptr<periph::i2c_target> target; nb::try_cast(object, target) and target)
       {
         adopt<python_i2c_target, attached_i2c_target>(
             target, object, peripheral, cells, python_owned);
@@ -642,7 +731,7 @@ auto prepare_devices(
   {
     if(not reads(peripheral, member))
     {
-      throw refused(peripheral, "a peripheral a built-in I2C or SPI model serves");
+      throw refused(peripheral, "a peripheral a built-in I2C, SPI or UART model serves");
     }
     plan.names.push_back(peripheral);
   }

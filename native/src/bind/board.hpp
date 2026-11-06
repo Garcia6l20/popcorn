@@ -37,6 +37,40 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
 };
 
 /**
+ * @brief What a Python device on a UART sends through. The device stays the UART's far end. Valid
+ *        while the machine lives, send() raises ConfigError after.
+ */
+class[[= py::rename{"UartDeviceLink"}]] uart_device_link
+{
+public:
+  /**
+   * @brief Reaches a port whose far end is a Python device.
+   * @param port The UART.
+   * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which send() reaches the UART.
+   */
+  [[= py::skip]] uart_device_link(
+      periph::uart_port& port,
+      detail::alive_flag alive,
+      detail::host_ref   host);
+
+  /**
+   * @brief Queues frames towards the firmware, the first start bit at @p at_ps, the others back
+   *        to back.
+   * @param data Frames, one per byte.
+   * @param at_ps Virtual time since the last reset of the first start bit, 0 for the time of the
+   *        call.
+   */
+  [[= py::doc{"Queue bytes towards the firmware, the first start bit at at_ps."}]] void
+      send(reflex::py::nb::bytes const& data, std::uint64_t at_ps);
+
+private:
+  periph::uart_port* port_;
+  detail::alive_flag alive_;
+  detail::host_ref   host_;
+};
+
+/**
  * @brief A UART of the machine connected to Python: frames the firmware transmits are queued
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
  *        while the machine lives, every method raises ConfigError after.

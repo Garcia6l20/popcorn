@@ -59,6 +59,28 @@ auto frames_of(reflex::py::nb::bytes const& data) -> std::vector<std::uint16_t>
 }
 }
 
+uart_device_link::uart_device_link(
+    periph::uart_port& port,
+    detail::alive_flag alive,
+    detail::host_ref   host)
+    : port_{&port}, alive_{std::move(alive)}, host_{std::move(host)}
+{}
+
+void uart_device_link::send(reflex::py::nb::bytes const& data, std::uint64_t at_ps)
+{
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  auto frames =
+      frames_of(data)
+      | std::views::transform([](std::uint16_t word) { return periph::host_frame{.data = word}; })
+      | std::ranges::to<std::vector>();
+  if(frames.empty())
+  {
+    return;
+  }
+  frames.front().start_ps = at_ps;
+  detail::host_access(host_, [&] { port_->receive_frames(frames); });
+}
+
 void uart_queue::send(reflex::py::nb::bytes const& data)
 {
   auto const frames = frames_of(data);
@@ -430,6 +452,16 @@ auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue
   return access([&](core::machine& target) {
     return uart_queue{*port, target.reset_counter(), alive_, slot_};
   });
+}
+
+auto machine_handle::uart_device_link_of(std::string const& peripheral) -> uart_device_link
+{
+  auto* const port = dynamic_cast<periph::uart_port*>(engine().model(peripheral));
+  if(port == nullptr)
+  {
+    throw model_error(peripheral, "", 0);
+  }
+  return uart_device_link{*port, alive_, slot_};
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const

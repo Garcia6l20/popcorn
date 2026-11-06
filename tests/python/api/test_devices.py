@@ -327,13 +327,13 @@ type _Devices = Callable[[], Mapping[str, Sequence[I2CTarget | SpiTarget]]]
     ("devices", "reason"),
     [
         (lambda: {"NOPE": [Eeprom24(0x50, 256)]}, "a peripheral of"),
-        (lambda: {"USART1": [Eeprom24(0x50, 256)]}, "an I2C or SPI peripheral"),
-        (lambda: {"RCC": list[I2CTarget]()}, "an I2C or SPI peripheral"),
+        (lambda: {"USART1": [Eeprom24(0x50, 256)]}, "an I2C peripheral for an I2CTarget"),
+        (lambda: {"RCC": list[I2CTarget]()}, "an I2C, SPI or UART peripheral"),
         (lambda: {"SPI1": [Eeprom24(0x50, 256)]}, "an I2C peripheral for an I2CTarget"),
         (lambda: {"I2C1": [JedecDevice(None, (1, 2, 3))]}, "an SPI peripheral for an SpiTarget"),
         (
             lambda: cast(dict[str, list[I2CTarget]], {"I2C1": [object()]}),
-            "I2CTarget, SpiTarget, SpiController or I2CController",
+            "I2CTarget, SpiTarget, SpiController, I2CController or",
         ),
         (lambda: {"SPI1": [JedecDevice("PZ4", (1, 2, 3))]}, "GPIO port"),
     ],
@@ -478,7 +478,7 @@ def test_the_picosecond_bound_is_one_constant_for_every_checking_module() -> Non
 @pytest.mark.parametrize(
     ("peripheral", "device", "reason"),
     [
-        ("RCC", lambda: I2CTarget(0x50), "an I2C or SPI peripheral"),
+        ("RCC", lambda: I2CTarget(0x50), "an I2C, SPI or UART peripheral"),
         ("SPI1", lambda: I2CTarget(0x50), "an SPI peripheral"),
         ("I2C1", lambda: SpiTarget(), "an I2C peripheral"),
         ("I2C1", lambda: object(), "an I2C peripheral"),
@@ -669,7 +669,7 @@ def test_project_devices_through_an_alias_a_config_or_an_empty_list(
     ("devices", "key", "expected"),
     [
         ({"I2C9": [Eeprom24(0x50, 16)]}, "devices.I2C9", "a peripheral of STM32U575QGIx"),
-        ({"USART1": [Eeprom24(0x50, 16)]}, "devices.USART1", "an I2C or SPI peripheral"),
+        ({"USART1": [Eeprom24(0x50, 16)]}, "devices.USART1", "an I2C peripheral for an I2CTarget"),
         (
             {"I2C1": [Eeprom24(0x50, 16)], "SEC_I2C1": [Eeprom24(0x51, 16)]},
             "devices.SEC_I2C1",
@@ -1559,7 +1559,9 @@ def no_row_i2c() -> popcorn.PartDescription:
 
 
 def test_an_i2c_instance_no_row_serves_is_refused_when_it_has_devices() -> None:
-    with pytest.raises(ConfigError, match="a peripheral a built-in I2C or SPI model serves") as e:
+    with pytest.raises(
+        ConfigError, match="a peripheral a built-in I2C, SPI or UART model serves"
+    ) as e:
         popcorn.Machine(no_row_i2c(), devices={"I2C1": [Eeprom24(0x50, 256)]})
     assert e.value.key == "devices.I2C1"
 

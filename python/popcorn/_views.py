@@ -455,6 +455,7 @@ class PeripheralView:
 
         Raises:
             ModelError: The peripheral's model is not a UART.
+            ConfigError: A `UartDevice` is this UART's far end.
         """
         if self._access.ports is None:
             raise AttributeError(f"{self._name} has no port in this machine")

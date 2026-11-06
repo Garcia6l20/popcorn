@@ -358,6 +358,7 @@ class UartStream:
 
         Raises:
             TypeError: `error` is neither a `UartError` nor None, at the call.
+            ValueError: `error` is `UartError.ABORTED`, at the call.
             RuntimeError: Called from a handler or a model, or the UART is linked to another
                 member of a `System`: its receiver hears the link only, inject through
                 `System.tap`.
@@ -366,6 +367,8 @@ class UartStream:
         tag = cast(object, error)
         if not isinstance(tag, UartError | None):
             raise TypeError(f"error must be a UartError or None, not {type(tag).__name__}")
+        if error is UartError.ABORTED:
+            raise ValueError("UartError.ABORTED is what a device hears, a write cannot tag it")
         self._check_writable()
         link = self._link
         data = bytes(data)
@@ -703,7 +706,8 @@ class UartPorts:
 
         Raises:
             ModelError: The peripheral's model is not a UART.
-            ConfigError: The description has no such peripheral.
+            ConfigError: The description has no such peripheral, or a `UartDevice` is the UART's
+                far end.
         """
         name = self.serving(name)
         stream = self._streams.get(name)
@@ -824,7 +828,8 @@ class Board:
             RuntimeError: The UART is linked by a `System`, until its `close()`.
             ModelError: The peripheral's model is neither a UART nor a USB device controller
                 with a virtual host.
-            ConfigError: The description has no such peripheral.
+            ConfigError: The description has no such peripheral, or a `UartDevice` is the UART's
+                far end.
         """
         if self._usb is not None and self._usb.serves(name):
             link = self._usb.cdc_link(name, function)

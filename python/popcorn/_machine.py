@@ -41,6 +41,7 @@ from popcorn._devices import (
     I2CTarget,
     SpiController,
     SpiTarget,
+    UartDevice,
     attach,
     cs_of,
     serving,
@@ -735,12 +736,12 @@ class Machine:
             models: Python model per peripheral name, a `popcorn.model.Model` subclass or a
                 callable building one, such as `functools.partial(Timer, period=5)`. It
                 replaces the registered model of that peripheral.
-            devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets,
+            devices: Devices per I2C, SPI or UART peripheral name, `popcorn.board` targets,
                 `popcorn.devices` devices or native plugin devices derived from the same bases,
                 of one bus kind, in attachment order, or one `popcorn.board.SpiController`
-                alone on an SPI, or one `popcorn.board.I2CController` alone on an I2C. The
-                built-in bus model of the peripheral serves them. A device serves one live
-                machine at a time.
+                alone on an SPI, or one `popcorn.board.I2CController` alone on an I2C, or one
+                `popcorn.board.UartDevice` alone on a UART. The built-in model of the peripheral
+                serves them. A device serves one live machine at a time.
             rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
                 a 16 MHz HSE and a 32.768 kHz LSE.
             audio: Options of SAI audio blocks by SAI instance and block, such as
@@ -852,8 +853,8 @@ class Machine:
         self._images: list[Image] = []
         self._refs: Refs | None = None
         self._ports = UartPorts(
-            self._handle.attach_uart,
-            self._handle.uart_names(),
+            _uart_attacher(self._handle, attached),
+            [name for name in self._handle.uart_names() if name not in attached],
             {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None},
             self._wait_until,
             self._post,
@@ -898,6 +899,10 @@ class Machine:
                     self._device_i2c_phases,
                     peripheral,
                 )
+                if isinstance(target, UartDevice):
+                    target._bind(  # pyright: ignore[reportPrivateUsage]
+                        self._handle.uart_device_link_of(peripheral), peripheral
+                    )
         self._board = Board(
             self._ports,
             attached,
@@ -1151,6 +1156,8 @@ class Machine:
             MachineRunning: The machine is busy, outside its handlers. For a member: the system
                 runs, or the member has a goal pending.
             RuntimeError: For a member, called from a callback of a machine.
+            Exception: The first error a model or device raised from its reset hook. The reset
+                finishes for every model first.
         """
         system = self._linked()
         if system is not None:
@@ -3395,6 +3402,27 @@ def _masked_stop(raw: object) -> tuple[Stop, int]:
     return stop_of(info), mask
 
 
+def _uart_attacher(
+    handle: _core.MachineHandle, attached: Mapping[str, Sequence[BusDevice]]
+) -> Callable[[str], _core.UartQueue]:
+    """Connect a UART of `handle` to Python, refusing a UART whose far end is a device. Holds the
+    handle and not the `Machine`."""
+    devices = {
+        name for name, targets in attached.items() for t in targets if isinstance(t, UartDevice)
+    }
+
+    def connected(name: str) -> _core.UartQueue:
+        if name in devices:
+            raise ConfigError(
+                f"{name} has a UartDevice as its far end: no stream, pty or link next to it",
+                key=f"devices.{name}",
+                expected="a UART with no UartDevice",
+            )
+        return handle.attach_uart(name)
+
+    return connected
+
+
 def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
     """Open pty bridges on `handle`, holding the handle and not the `Machine`."""
 
@@ -3482,6 +3510,7 @@ type AttachedDevice = (
     | SpiTarget
     | SpiController
     | I2CController
+    | UartDevice
     | At25sf
     | Eeprom24xx
     | TableTarget
@@ -3493,20 +3522,31 @@ type AttachedDevice = (
 """A device `Machine(devices=)` takes, of `popcorn.board`, of `popcorn.devices`, or of a native
 plugin, derived from the bases the native bus models serve."""
 
-_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI", SpiController: "SPI", I2CController: "I2C"}
+_BUS_IPS: dict[type, tuple[str, ...]] = {
+    I2CTarget: ("I2C",),
+    SpiTarget: ("SPI",),
+    SpiController: ("SPI",),
+    I2CController: ("I2C",),
+    UartDevice: ("USART", "UART", "LPUART"),
+}
 
 
 _CONTROLLERS: tuple[tuple[type, str], ...] = (
     (_core.SpiControllerBase, "SpiController"),
     (_core.I2CControllerBase, "I2CController"),
+    (_core.UartDeviceBase, "UartDevice"),
 )
 
 
 def _device_kind(
     device: BusDevice,
-) -> type[I2CTarget] | type[SpiTarget] | type[SpiController] | type[I2CController]:
+) -> (
+    type[I2CTarget] | type[SpiTarget] | type[SpiController] | type[I2CController] | type[UartDevice]
+):
     if isinstance(device, _core.I2CTargetBase):
         return I2CTarget
+    if isinstance(device, _core.UartDeviceBase):
+        return UartDevice
     if isinstance(device, _core.SpiControllerBase):
         return SpiController
     if isinstance(device, _core.I2CControllerBase):
@@ -3629,8 +3669,8 @@ def _checked_devices(
         peripheral = peripherals.get(name)
         if peripheral is None:
             raise refuse(name, f"a peripheral of {description.part}")
-        if peripheral.ip not in _BUS_IPS.values():
-            raise refuse(name, "an I2C or SPI peripheral")
+        if not any(peripheral.ip in ips for ips in _BUS_IPS.values()):
+            raise refuse(name, "an I2C, SPI or UART peripheral")
         if name in models:
             raise refuse(name, "a peripheral without a Python model")
         if name in plugin_models:
@@ -3642,18 +3682,21 @@ def _checked_devices(
                 _core.I2CTargetBase
                 | _core.SpiTargetBase
                 | _core.SpiControllerBase
-                | _core.I2CControllerBase,
+                | _core.I2CControllerBase
+                | _core.UartDeviceBase,
             ):
                 raise refuse(
                     name,
-                    "popcorn.board.I2CTarget, SpiTarget, SpiController or I2CController or"
-                    " popcorn.devices instances",
+                    "popcorn.board.I2CTarget, SpiTarget, SpiController, I2CController or"
+                    " UartDevice or popcorn.devices instances",
                 )
             target = candidate
             kind = _device_kind(target)
             listed.append(target)
-            if peripheral.ip != _BUS_IPS[kind]:
-                raise refuse(name, f"an {_BUS_IPS[kind]} peripheral for an {kind.__name__}")
+            if peripheral.ip not in _BUS_IPS[kind]:
+                if kind is UartDevice:
+                    raise refuse(name, "a UART peripheral for a UartDevice")
+                raise refuse(name, f"an {_BUS_IPS[kind][0]} peripheral for an {kind.__name__}")
             if id(target) in seen:
                 raise refuse(name, f"{target!r} listed once")
             seen.add(id(target))

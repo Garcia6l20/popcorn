@@ -17,8 +17,8 @@
 
 namespace popcorn::bind::detail
 {
-/** @brief Binds `I2CTargetBase`, `SpiTargetBase`, `SpiControllerBase` and `I2CControllerBase`,
- *        the trampolines over the bus devices. */
+/** @brief Binds `I2CTargetBase`, `SpiTargetBase`, `SpiControllerBase`, `I2CControllerBase` and
+ *        `UartDeviceBase`, the trampolines over the devices. */
 void bind_device_bases(reflex::py::nb::module_ scope);
 
 class callback_cell;
@@ -43,21 +43,21 @@ struct device_plan
  *        clock sources.
  * @param description The MCU.
  * @param devices Python devices per peripheral name, `popcorn.board.I2CTarget`, `SpiTarget`,
- *        `SpiController` or `I2CController` instances, an SPI target carrying its chip select as
- *        `_cs_port` and `_cs_pin`.
+ *        `SpiController`, `I2CController` or `UartDevice` instances, an SPI target carrying its
+ *        chip select as `_cs_port` and `_cs_pin`.
  * @param rcc Board clock sources of the RCC model, empty for its defaults and no RCC factory.
  * @param inputs Supplies `periph::stm32::board_inputs_of(description)`, called after the bus
  *        checks of every device.
- * @param board Receives the devices in `i2c`, `i2c_controllers`, `spi` and `spi_controllers`, and
- *        @p rcc in `rcc`.
+ * @param board Receives the devices in `i2c`, `i2c_controllers`, `spi`, `spi_controllers` and
+ *        `uarts`, and @p rcc in `rcc`.
  * @param python_owned Receives, borrowed, each Python device of @p devices whose reference a
  *        factory now holds, once per reference.
  * @return The peripherals that get a factory, sorted by name, and the cells to stop.
- * @throws config_error when a named peripheral is not an I2C or SPI peripheral a built-in model
- *         serves, a target is of the other bus kind, an object is not a target, an SpiController
- *         or an I2CController shares its instance with another device. A peripheral with no
- *         targets is skipped. With @p rcc, when no built-in model serves an RCC of
- *         @p description.
+ * @throws config_error when a named peripheral is not an I2C, SPI or UART peripheral a built-in
+ *         model serves, a target is of the other bus kind, an object is not a target, an
+ *         SpiController, an I2CController or a UartDevice shares its instance with another device.
+ *         A peripheral with no targets is skipped. With @p rcc, when no built-in model serves an
+ *         RCC of @p description.
  */
 [[nodiscard]] auto prepare_devices(
     part_description const&                                           description,

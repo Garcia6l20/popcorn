@@ -35,7 +35,8 @@ def test_i2c_error_matches_the_native_errors_but_none() -> None:
     assert _core.I2CError(0).name == "none"
 
 
-def test_uart_error_matches_the_native_errors_but_none() -> None:
+def test_uart_error_matches_the_native_tags_but_none_plus_the_abort_a_device_hears() -> None:
     native = {m.name.upper(): m.value for m in _core.UartError if m.value != 0}
+    native["ABORTED"] = max(native.values()) + 1
     assert {m.name: m.value for m in popcorn.board.UartError} == native
     assert _core.UartError(0).name == "none"
