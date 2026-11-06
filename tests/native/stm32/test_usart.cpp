@@ -2984,6 +2984,27 @@ TEST_CASE("with RTSE and no FIFO RTS drops with RDR full and host frames wait fo
   CHECK(port.queued() == 0);
 }
 
+TEST_CASE("with RTSE an RTS-ignoring frame after one counts from that one's end")
+{
+  auto const p     = flow_rig(cr3_rtse);
+  auto&      port  = p->t.r.port("USART1");
+  auto const frame = usart1_frame(*p);
+  p->advance(3 * frame);
+  auto const stamp = p->t.r.f->target->virtual_clock().time().ps - frame - frame / 2;
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 'x', .start_ps = stamp, .ignores_rts = true}, {.data = 'y', .ignores_rts = true}}
+  };
+  port.receive_frames(frames);
+  auto const stop = p->t.r.f->run_to_stop(
+      {.max_instructions = icount{10'000'000}, .stop_when = [&] { return port.queued() < 2; }});
+  REQUIRE(stop.reason == stop_reason::user);
+  auto const  snapshot = p->t.r.f->target->snapshot();
+  auto const& pending  = snapshot.data().events.pending;
+  CHECK(std::ranges::any_of(pending, [&](core::event const& one) {
+    return one.id.kind == 1 and one.due_ps == stamp + 2 * frame;
+  }));
+}
+
 TEST_CASE("with RTSE in FIFO mode RTS drops only with the RX FIFO full")
 {
   auto const                 p     = flow_rig(cr3_rtse, cr1_fifoen);

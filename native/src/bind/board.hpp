@@ -62,7 +62,32 @@ public:
    *        call.
    */
   [[= py::doc{"Queue bytes towards the firmware, the first start bit at at_ps."}]] void
-      send(reflex::py::nb::bytes const& data, std::uint64_t at_ps);
+      send(reflex::py::nb::bytes const& data, std::uint64_t at_ps, bool ignores_rts);
+
+  /**
+   * @brief Queues one break towards the firmware.
+   * @param at_ps Virtual time since the last reset of its first low bit, 0 for the time of the
+   * call.
+   */
+  [[= py::doc{"Queue a break towards the firmware at at_ps."}]] void
+      send_break(std::uint64_t at_ps);
+
+  /**
+   * @brief Schedules a change of the UART's CTS input, see periph::uart_port::set_cts_stamped.
+   * @param ready Whether the device is ready to receive.
+   * @param at_ps Virtual time since the last reset.
+   * @throws config_error when the UART keeps as many pending changes as it can.
+   */
+  [[= py::doc{"Schedule the UART's CTS input at at_ps, True for clear to send."}]] void
+      set_cts(bool ready, std::uint64_t at_ps);
+
+  /** @brief Whether the firmware's RTS says ready, see periph::uart_port::ready_to_receive. */
+  [[= py::doc{"Whether the firmware's RTS says ready to receive."}]] [[nodiscard]] auto
+      rts_ready() const -> bool;
+
+  /** @brief Whether the instance has CTS and RTS. */
+  [[= py::doc{"Whether the UART instance has CTS and RTS."}]] [[nodiscard]] auto
+      has_flow_control() const -> bool;
 
 private:
   periph::uart_port* port_;

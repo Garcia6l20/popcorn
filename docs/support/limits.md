@@ -2272,8 +2272,9 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 - STM32L1 ES0125 2.11.8, ES0242 2.11.8, ES0224 2.10.8, ES0240 and ES0241 2.12.8 and ES0578 2.11.8
   are modelled: with CTSE 1 a break leaves at the end of the current transmission whatever nCTS
   says. A data frame waits for nCTS.
-- STM32L4 ES0250 2.21.3 and 2.22.2: with RTSE 1 the receiver reads ready to the host while UE or RE
-  is 0, as the erratum describes.
+- STM32L4 ES0250 2.21.3 and 2.22.2: RTS is driven low once RTSE is set, also while UE or RE is 0.
+  The model reads ready to the host while UE is 0, and while RE is 0 with room in RDR. With RE 0
+  and RDR full it reads not ready, inferred: the erratum names no RDR state.
 - STM32L4 LPUART1, RM0351 section 41: 256 times the kernel clock over BRR[19:0] gives the baud,
   and a BRR below 0x300 sends and receives nothing, RM0351 41.4.4. The kernel clock is the
   `RCC_CCIPR` LPUART1SEL selection. RQR has no TXFRQ, a write of bit 4 does nothing.

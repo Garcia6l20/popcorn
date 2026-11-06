@@ -376,17 +376,32 @@ public:
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::uart_endpoint through the
- *        private methods `_attached`, `_frame`, `_aborted` and `_reset` that
+ *        private methods `_attached`, `_frame`, `_break`, `_aborted`, `_reset` and `_rts` that
  *        `popcorn.board.UartDevice` defines. Times cross as picoseconds since the last reset. The
  *        engine calls it only through an attachment.
  */
 class python_uart_device final : public periph::uart_endpoint
 {
 public:
-  NB_TRAMPOLINE(periph::uart_endpoint, 4);
+  NB_TRAMPOLINE(periph::uart_endpoint, 6);
+
+  /**
+   * @brief A device hearing RTS edges or not, fixed for its life.
+   * @param rts Whether its class overrides `on_rts`, so an edge costs no GIL entry otherwise.
+   */
+  explicit python_uart_device(bool rts) : rts_{rts}
+  {}
 
   void transmitted(std::uint16_t, vtime, bool) override
   {}
+
+  [[nodiscard]] auto hears_rts() const -> bool override
+  {
+    return rts_;
+  }
+
+private:
+  bool rts_;
 };
 
 /**
@@ -466,8 +481,8 @@ public:
 };
 
 /**
- * @brief One machine's attachment of a Python UART device. Every hook call takes the GIL, a break
- *        takes none, and awaiting_attach() takes none. attached() calls the device once for the
+ * @brief One machine's attachment of a Python UART device. Every hook call takes the GIL,
+ *        awaiting_attach() and hears_rts() take none. attached() calls the device once for the
  *        attachment's life.
  */
 class attached_uart_device final : public periph::uart_endpoint,
@@ -478,12 +493,24 @@ public:
 
   void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
+    gil_entry const gil;
     if(brk)
     {
+      invoke("_break", at.ps);
       return;
     }
-    gil_entry const gil;
     invoke("_frame", data, at.ps);
+  }
+
+  [[nodiscard]] auto hears_rts() const -> bool override
+  {
+    return device_->hears_rts();
+  }
+
+  void rts_changed(bool ready, vtime at) override
+  {
+    gil_entry const gil;
+    invoke("_rts", ready, at.ps);
   }
 
   void aborted(vtime at) override
@@ -602,7 +629,7 @@ void bind_device_bases(nb::module_ scope)
   nb::class_<periph::uart_endpoint, python_uart_device>(
       scope, "UartDeviceBase",
       "Native side of popcorn.board.UartDevice: a device on a UART implemented in Python.")
-      .def(nb::init<>());
+      .def(nb::init<bool>(), nb::arg("rts"));
   nb::class_<periph::i2c_controller_sink, python_i2c_controller>(
       scope, "I2CControllerBase",
       "Native side of popcorn.board.I2CController: an I2C controller implemented in Python.")

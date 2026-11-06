@@ -922,6 +922,8 @@ def test_a_raising_reset_hook_still_resets_every_other_model(row: Row) -> None:
     raising.hook = "reset"
     with pytest.raises(popcorn.ModelError, match="reset"):
         other.reset(popcorn.ResetKind.SOFTWARE)
+    with pytest.raises(RuntimeError, match="machine's thread"):
+        raising.send(b"x")
     assert other.periph.USART1.BRR.value == 0
     assert other.periph.USART2.BRR.value == 0
     assert other.time.ps == 0
@@ -1033,3 +1035,645 @@ def test_the_host_thread_runs_a_send_from_on_attach(u575: popcorn.PartDescriptio
     m.reset()
     asyncio.run(m.run(for_=us(10)))
     assert on_host == [True]
+
+
+class FlowRecorder(Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.edges: list[tuple[bool, int]] = []
+        self.breaks: list[int] = []
+        self.edge_threads: list[int] = []
+
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        self.edges.append((ready, at.ps))
+        self.edge_threads.append(threading.get_ident())
+
+    def on_break(self, at: VirtualTime) -> None:
+        self.breaks.append(at.ps)
+
+
+class Opening(FlowRecorder):
+    """Runs `opening(self)` when attached."""
+
+    def __init__(self, opening: Callable[[FlowRecorder], None]) -> None:
+        super().__init__()
+        self.opening = opening
+
+    def on_attach(self) -> None:
+        super().on_attach()
+        self.opening(self)
+
+
+def flag(m: popcorn.Machine, row: Row, name: str) -> bool:
+    return getattr(m.periph.USART1[row.status], name) != 0
+
+
+def flush(m: popcorn.Machine, row: Row) -> None:
+    """Empty the receiver through a register write, which frees it as a read does."""
+    uart = m.periph.USART1
+    if row.status == "SR":
+        uart.SR.RXNE = 0
+    else:
+        uart.RQR.RXFRQ = 1
+
+
+def hold_cts_for_two_ms(device: FlowRecorder) -> None:
+    device.drive_cts(False, at=device.now + us(1))
+    device.drive_cts(True, at=device.now + ms(2))
+
+
+def test_cts_holds_the_next_frame_and_releases_it_at_its_stamp(row: Row) -> None:
+    frame_ps = frame_time(row)
+    device = Opening(hold_cts_for_two_ms)
+    m = asleep(row, {"USART1": [device]})
+    m.periph.USART1.CR3.CTSE = 1
+    transmit(m, row, 0x41)
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(2) + ps(frame_ps * 2)))
+    assert device.frames == [(0x41, frame_ps), (0x42, ms(2).ps + frame_ps)]
+
+
+def test_a_cts_release_from_a_hook_counts_from_the_stamp_past_a_block_lag(row: Row) -> None:
+    class Releasing(FlowRecorder):
+        def on_attach(self) -> None:
+            super().on_attach()
+            self.drive_cts(False, at=self.now + us(1))
+
+        def on_frame(self, byte: int, at: VirtualTime) -> None:
+            super().on_frame(byte, at)
+            late.append(m.time.ps - at.ps)
+            self.drive_cts(True)
+
+    late: list[int] = []
+    frame_ps = frame_time(row)
+    device = Releasing()
+    m = asleep(row, {"USART1": [device]})
+    m.mem.write(RAM, NOP * 40 + BRANCH_BACK_40_NOPS)
+    m.periph.USART1.CR3.CTSE = 1
+    transmit(m, row, 0x41)
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ps(frame_ps * 3)))
+    assert late[0] > 0
+    first = device.frames[0][1]
+    assert device.frames[1] == (0x42, first + frame_ps)
+
+
+def test_drive_cts_and_send_break_are_refused_as_send_is(u575: popcorn.PartDescription) -> None:
+    device = FlowRecorder()
+    with pytest.raises(popcorn.ConfigError, match="serves no live machine"):
+        device.drive_cts(True)
+    with pytest.raises(popcorn.ConfigError, match="serves no live machine"):
+        device.send_break()
+    m = popcorn.Machine(u575, devices={"USART1": [device]})
+    m.reset()
+    with pytest.raises(RuntimeError, match=r"drive_cts\(\) runs on the machine's thread"):
+        device.drive_cts(True)
+    with pytest.raises(RuntimeError, match=r"send_break\(\) runs on the machine's thread"):
+        device.send_break()
+    with pytest.raises(TypeError, match="ready as a bool"):
+        device.drive_cts(1)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match="obey_rts as a bool"):
+        device.send(b"x", obey_rts=1)  # pyright: ignore[reportArgumentType]
+
+
+def test_a_uart_without_flow_control_refuses_drive_cts_and_reads_rts_ready() -> None:
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    caught: list[popcorn.ConfigError] = []
+
+    class NoFlow(FlowRecorder):
+        def on_attach(self) -> None:
+            try:
+                self.drive_cts(False)
+            except popcorn.ConfigError as error:
+                caught.append(error)
+
+    try:
+        description = mcu("STM32L152RETx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32L152RETx description: {error}")
+    device = NoFlow()
+    m = popcorn.Machine(description, devices={"UART4": [device]})
+    m.reset()
+    m.mem.write(RAM, WFI_LOOP)
+    m.reg[Reg.PC] = RAM
+    m.reg[Reg.SP] = RAM + 0x800
+    m.reg[Reg.XPSR] = THUMB
+    m.reg[Reg.PRIMASK] = 1
+    asyncio.run(m.run(for_=us(10)))
+    assert "no CTS" in str(caught[0])
+    assert device.rts is True
+
+
+def test_rts_edges_reach_on_rts_at_their_stamps(row: Row) -> None:
+    def two(device: FlowRecorder) -> None:
+        device.send(b"\x41\x42", at=device.now + us(1))
+
+    frame_ps = frame_time(row)
+    device = Opening(two)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    assert device.rts is True
+    start = us(1).ps
+    asyncio.run(m.run(for_=ps(start + frame_ps * 3)))
+    assert device.edges == [(False, start + frame_ps)]
+    assert device.rts is False
+    flush(m, row)
+    released = m.time.ps
+    assert device.rts is True
+    asyncio.run(m.run(for_=ps(frame_ps * 2)))
+    assert device.edges == [
+        (False, start + frame_ps),
+        (True, released),
+        (False, released + frame_ps),
+    ]
+    assert threading.get_ident() not in device.edge_threads
+
+
+def test_a_falling_rts_edge_keeps_the_frame_end_past_a_block_lag(row: Row) -> None:
+    def one(device: FlowRecorder) -> None:
+        device.send(b"\x41", at=device.now + us(1))
+
+    frame_ps = frame_time(row)
+    device = Opening(one)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    m.mem.write(RAM, NOP * 40 + BRANCH_BACK_40_NOPS)
+    asyncio.run(m.run(for_=ps(frame_ps * 2)))
+    assert m.periph.USART1[row.rx].value & 0xFF == 0x41
+    assert device.edges == [(False, us(1).ps + frame_ps)]
+
+
+def test_rts_edges_cost_a_gil_entry_only_when_a_device_hears_them(
+    u575: popcorn.PartDescription,
+) -> None:
+    class Deaf(UartDevice):
+        def on_attach(self) -> None:
+            self.send(b"\x41\x42\x43", at=self.now + us(1))
+
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+
+    def entries(device: UartDevice) -> int:
+        m = asleep(row, {"USART1": [device]}, rtse=True)
+        asyncio.run(m.run(for_=us(10)))
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        before = handle.gil_entries()
+        asyncio.run(m.run(for_=ms(2)))
+        flush(m, row)
+        asyncio.run(m.run(for_=ms(2)))
+        return handle.gil_entries() - before
+
+    def three(device: FlowRecorder) -> None:
+        device.send(b"\x41\x42\x43", at=device.now + us(1))
+
+    hearing = Opening(three)
+    assert entries(Deaf()) == 0
+    assert entries(hearing) == len(hearing.edges) == 3
+
+
+def test_a_machine_reset_with_rts_held_makes_no_edge(row: Row) -> None:
+    def two(device: FlowRecorder) -> None:
+        device.send(b"\x41\x42", at=device.now + us(1))
+
+    device = Opening(two)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    asyncio.run(m.run(for_=ms(2)))
+    assert len(device.edges) == 1
+    m.reset(popcorn.ResetKind.SOFTWARE)
+    arm(m, row)
+    asyncio.run(m.run(for_=ms(1)))
+    assert len(device.edges) == 1
+
+
+def test_a_frame_ignoring_rts_overruns_a_full_receiver_at_its_stamp(row: Row) -> None:
+    def overrunning(device: FlowRecorder) -> None:
+        device.send(b"\x41", at=device.now + us(1))
+        device.send(b"\x42\x43", at=device.now + ms(1), obey_rts=False)
+
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    device = Opening(overrunning)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    run_to(m, ms(1).ps + frame_ps - 2 * step)
+    assert received(m, row)
+    assert not flag(m, row, "ORE")
+    run_to(m, ms(1).ps + frame_ps + 2 * step)
+    assert flag(m, row, "ORE")
+    assert m.periph.USART1[row.rx].value & 0xFF == 0x41
+
+
+def test_a_frame_ignoring_rts_waits_behind_a_held_one(row: Row) -> None:
+    def queued(device: FlowRecorder) -> None:
+        device.send(b"\x41\x42", at=device.now + us(1))
+        device.send(b"\x43", obey_rts=False)
+
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    device = Opening(queued)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    asyncio.run(m.run(for_=ms(5)))
+    assert received(m, row)
+    assert not flag(m, row, "ORE")
+    flush(m, row)
+    released = m.time.ps
+    run_to(m, released + frame_ps + 2 * step)
+    assert m.periph.USART1[row.rx].value & 0xFF == 0x42
+    assert not flag(m, row, "ORE")
+    run_to(m, released + 2 * frame_ps + 2 * step)
+    assert flag(m, row, "ORE")
+    assert m.periph.USART1[row.rx].value & 0xFF == 0x42
+
+
+def test_a_device_break_reads_as_a_zero_byte_with_a_framing_error(row: Row) -> None:
+    def breaking(device: FlowRecorder) -> None:
+        device.send_break(at=device.now + us(50))
+
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    m = asleep(row, {"USART1": [Opening(breaking)]})
+    run_to(m, us(50).ps + frame_ps - 2 * step)
+    assert not received(m, row)
+    run_to(m, us(50).ps + frame_ps + 2 * step)
+    assert received(m, row)
+    assert flag(m, row, "FE")
+    assert m.periph.USART1[row.rx].value & 0xFF == 0
+
+
+def request_break(m: popcorn.Machine, row: Row) -> None:
+    uart = m.periph.USART1
+    if row.status == "SR":
+        uart.CR1.SBK = 1
+    else:
+        uart.RQR.SBKRQ = 1
+
+
+def test_a_firmware_break_reaches_on_break_at_the_stream_stamp(row: Row) -> None:
+    stream = asleep(row)
+    request_break(stream, row)
+    asyncio.run(stream.run(for_=ms(5)))
+    ((data, at, brk),) = [(f.data, f.at.ps, f.brk) for f in stream.periph.USART1.port.take_frames()]
+    assert (data, brk) == (0, True)
+
+    device = FlowRecorder()
+    m = asleep(row, {"USART1": [device]})
+    request_break(m, row)
+    asyncio.run(m.run(for_=ms(5)))
+    assert device.breaks == [at]
+    assert device.frames == []
+
+
+def test_one_device_hears_all_six_hooks(row: Row) -> None:
+    class Hearing(FlowRecorder):
+        def on_attach(self) -> None:
+            super().on_attach()
+            self.send(b"\x55", at=self.now + us(1))
+
+    device = Hearing()
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    request_break(m, row)
+    asyncio.run(m.run(for_=ms(5)))
+    flush(m, row)
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=us(5)))
+    m.periph.RCC.APB2RSTR.USART1RST = 1
+    m.periph.RCC.APB2RSTR.USART1RST = 0
+    assert device.resets == [popcorn.ResetKind.POWER_ON]
+    assert len(device.attaches) == 1
+    assert len(device.breaks) == 1
+    assert [byte for byte, _ in device.frames] == [0x41]
+    assert [kind for kind, _ in device.errors] == [UartError.ABORTED]
+    assert [ready for ready, _ in device.edges][:2] == [False, True]
+
+
+def read_after_a_stamp(
+    row: Row, nops: int, stamp_ps: int, *, rtse: bool
+) -> tuple[FlowRecorder, popcorn.Machine]:
+    """A machine spinning at a branch to itself, with a frame due that fills the receiver and a
+    second stamped at `stamp_ps`. At `RAM` waits a block of `nops` ending in a read of the data
+    register, then a WFI loop."""
+
+    def frames(device: FlowRecorder) -> None:
+        device.send(b"\x41", at=device.now + us(1))
+        device.send(b"\x42", at=VirtualTime(stamp_ps))
+
+    base = next(p.base for p in row.description.peripherals if p.name == "USART1")
+    device = Opening(frames)
+    m = asleep(row, {"USART1": [device]}, rtse=rtse)
+    address = base + m.periph.USART1[row.rx].offset
+    branch_back = (0xE000 | (0x7FF & (-3))).to_bytes(2, "little")
+    m.mem.write(RAM, NOP * nops + LDR_R0_R1 + b"\x30\xbf" + branch_back)
+    m.mem.write(RAM + 0x400, BRANCH_TO_SELF)
+    m.reg[Reg.PC] = RAM + 0x400
+    m.reg[Reg.R1] = address
+    return device, m
+
+
+def test_a_stamp_past_rtse_set_late_counts_from_the_read_where_rtse_is_not_locked(
+    row: Row,
+) -> None:
+    """CR3.RTSE locks while UE is 1 on the rows with `ISR`. On the `SR` row firmware can set it with
+    a stamp already pending, which holds the frame from that write on."""
+    if row.status != "SR":
+        pytest.skip("RTSE is locked while UE is 1 on this row")
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    nops = 40
+    block = frame_ps + frame_ps // 2 + us(2).ps
+    for offset in (4, nops // 2):
+        stamp = block + offset * step
+        device, m = read_after_a_stamp(row, nops, stamp, rtse=False)
+        run_to(m, block)
+        assert received(m, row)
+        m.periph.USART1.CR3.RTSE = 1
+        assert device.rts is False
+        m.reg[Reg.PC] = RAM
+        asyncio.run(m.run(for_=ps((nops + 4) * step)))
+        assert m.reg[Reg.R0] & 0xFF == 0x41
+        due = device.edges[-1][1] + frame_ps
+        assert due > stamp + frame_ps
+        run_to(m, due - 2 * step)
+        assert not received(m, row)
+        run_to(m, due + 2 * step)
+        assert received(m, row)
+
+
+def read_full_register_legs(row: Row, nops: int, *, rtse: bool) -> list[int]:
+    """When the second frame lands, for a stamp before the read block, one dispatched before the
+    read, and for stamps inside the block, past its start, not yet dispatched at the read."""
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    block = frame_ps + frame_ps // 2 + us(2).ps
+    landed: list[int] = []
+    for stamp in (block - frame_ps // 4, block + 4 * step, block + (nops // 2) * step):
+        device, m = read_after_a_stamp(row, nops, stamp, rtse=rtse)
+        run_to(m, block)
+        assert received(m, row)
+        m.reg[Reg.PC] = RAM
+        asyncio.run(m.run(for_=ps((nops + 4) * step)))
+        assert m.reg[Reg.R0] & 0xFF == 0x41
+        assert not received(m, row)
+        due = device.edges[-1][1] + frame_ps if rtse else stamp + frame_ps
+        run_to(m, due - 2 * step)
+        assert not received(m, row), (stamp, due)
+        run_to(m, due + 2 * step)
+        assert received(m, row), (stamp, due)
+        assert m.periph.USART1[row.rx].value & 0xFF == 0x42
+        landed.append(due)
+    return landed
+
+
+@pytest.mark.parametrize("nops", [10, 40])
+def test_a_read_of_a_full_register_leaves_a_stamp_alone_without_rtse(row: Row, nops: int) -> None:
+    read_full_register_legs(row, nops, rtse=False)
+
+
+@pytest.mark.parametrize("nops", [10, 40])
+def test_with_rtse_a_stamp_past_a_full_receiver_counts_from_the_read(row: Row, nops: int) -> None:
+    read_full_register_legs(row, nops, rtse=True)
+
+
+def nop_loop(nops: int) -> bytes:
+    branch = 0xE000 | ((-(2 * nops + 4)) >> 1 & 0x7FF)
+    return NOP * nops + branch.to_bytes(2, "little")
+
+
+class Ordered(FlowRecorder):
+    """Logs each hook with its stamp and `now`, sends a frame at 50 us, holds CTS until `release`
+    past it."""
+
+    def __init__(self, release: VirtualDuration) -> None:
+        super().__init__()
+        self.release = release
+        self.log: list[tuple[str, int, int]] = []
+
+    def on_attach(self) -> None:
+        super().on_attach()
+        self.drive_cts(False, at=self.now)
+        self.send(b"\x41", at=self.now + us(50))
+        self.drive_cts(True, at=self.now + us(50) + self.release)
+
+    def on_frame(self, byte: int, at: VirtualTime) -> None:
+        self.log.append(("frame", at.ps, self.now.ps))
+
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        self.log.append(("rts", at.ps, self.now.ps))
+
+
+def hook_order(row: Row, nops: int, release: int) -> list[tuple[str, int, int]]:
+    device = Ordered(ps(release))
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    m.periph.USART1.CR3.CTSE = 1
+    m.mem.write(RAM, nop_loop(nops))
+    m.mem.write(RAM + 0x400, BRANCH_TO_SELF)
+    m.reg[Reg.PC] = RAM + 0x400
+    asyncio.run(m.run(for_=us(5)))
+    transmit(m, row, 0x42)
+    m.reg[Reg.PC] = RAM
+    asyncio.run(m.run(for_=us(50) + ps(frame_time(row) * 3)))
+    return device.log
+
+
+def test_hooks_run_in_stamp_order_at_any_block_shape(row: Row) -> None:
+    frame_ps = frame_time(row)
+    release = 3 * instruction_ps(asleep(row))
+    short = hook_order(row, 2, release)
+    assert short == hook_order(row, 200, release)
+    assert [name for name, _, _ in short] == ["rts", "frame"]
+    assert short[0][1] == us(50).ps + frame_ps
+    assert short[1][1] == us(50).ps + release + frame_ps
+    assert all(at == now for _, at, now in short)
+
+
+def test_a_far_cts_stamp_after_a_reset_raises(row: Row) -> None:
+    caught: list[ValueError] = []
+
+    class Far(FlowRecorder):
+        def on_frame(self, byte: int, at: VirtualTime) -> None:
+            try:
+                self.drive_cts(True, at=VirtualTime(2**64 - 1000))
+            except ValueError as error:
+                caught.append(error)
+
+    m = asleep(row, {"USART1": [Far()]})
+    asyncio.run(m.run(for_=ms(1)))
+    m.reset(popcorn.ResetKind.SOFTWARE)
+    arm(m, row)
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    assert "64-bit picosecond range" in str(caught[0])
+
+
+def test_rts_falls_at_the_eighth_frame_with_the_fifo_on(row: Row) -> None:
+    if row.enable == "CR1":
+        pytest.skip("this row has no RX FIFO")
+
+    def nine(device: FlowRecorder) -> None:
+        device.send(bytes(range(9)), at=device.now + us(1))
+
+    frame_ps = frame_time(row)
+    device = Opening(nine)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    m.periph.USART1[row.enable].poke(FIFOEN=1)
+    asyncio.run(m.run(for_=ps(us(1).ps + 10 * frame_ps)))
+    assert device.edges == [(False, us(1).ps + 8 * frame_ps)]
+
+
+def held_rts(device: FlowRecorder) -> None:
+    device.send(b"\x41\x42", at=device.now + us(1))
+
+
+def test_a_restored_machine_with_rts_held_goes_on_from_the_held_level(
+    row: Row, tmp_path: Path
+) -> None:
+    class Overrunning(FlowRecorder):
+        def on_rts(self, ready: bool, at: VirtualTime) -> None:
+            super().on_rts(ready, at)
+            if not ready:
+                self.send(b"\x43", obey_rts=False)
+
+    frame_ps = frame_time(row)
+    m = asleep(row, {"USART1": [Opening(held_rts)]}, rtse=True)
+    asyncio.run(m.run(for_=ms(5)))
+    path = tmp_path / "held.snapshot"
+    m.snapshot().save(path)
+    device = Overrunning()
+    other = popcorn.Machine(row.description, devices={"USART1": [device]})
+    other.restore(other.load_snapshot(path))
+    assert device.rts is False
+    asyncio.run(other.run(for_=us(10)))
+    assert device.edges == []
+    flush(other, row)
+    released = other.time.ps
+    asyncio.run(other.run(for_=ps(3 * frame_ps)))
+    assert device.edges[0] == (True, released)
+    assert device.edges[1] == (False, released + frame_ps)
+    assert flag(other, row, "ORE")
+
+
+class RaisingFlow(FlowRecorder):
+    def __init__(self, hook: str) -> None:
+        super().__init__()
+        self.hook = hook
+
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        super().on_rts(ready, at)
+        if self.hook == "on_rts":
+            self.hook = ""
+            raise LookupError("on_rts")
+
+    def on_break(self, at: VirtualTime) -> None:
+        super().on_break(at)
+        if self.hook == "on_break":
+            self.hook = ""
+            raise LookupError("on_break")
+
+
+def test_a_raising_on_rts_is_named_and_the_run_goes_on(row: Row) -> None:
+    class Holding(RaisingFlow):
+        def on_attach(self) -> None:
+            self.send(b"\x41\x42", at=self.now + us(1))
+
+    device = Holding("on_rts")
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    with pytest.raises(popcorn.ModelError, match="on_rts"):
+        asyncio.run(m.run(for_=ms(5)))
+    asyncio.run(m.run(for_=us(10)))
+    flush(m, row)
+    asyncio.run(m.run(for_=ms(5)))
+    assert [ready for ready, _ in device.edges] == [False, True, False]
+    assert m.periph.USART1[row.rx].value & 0xFF == 0x42
+
+
+def test_a_raising_on_break_leaves_the_transmitter_running(row: Row) -> None:
+    device = RaisingFlow("on_break")
+    m = asleep(row, {"USART1": [device]})
+    request_break(m, row)
+    transmit(m, row, 0x41)
+    with pytest.raises(popcorn.ModelError, match="on_break"):
+        asyncio.run(m.run(for_=ms(5)))
+    asyncio.run(m.run(for_=ms(5)))
+    assert [byte for byte, _ in device.frames] == [0x41]
+    assert flag(m, row, "TC")
+
+
+def test_a_device_break_waits_for_rts(row: Row) -> None:
+    def breaking(device: FlowRecorder) -> None:
+        device.send(b"\x41", at=device.now + us(1))
+        device.send_break()
+
+    frame_ps = frame_time(row)
+    step = instruction_ps(asleep(row))
+    m = asleep(row, {"USART1": [Opening(breaking)]}, rtse=True)
+    asyncio.run(m.run(for_=ms(5)))
+    assert not flag(m, row, "FE")
+    assert release_times(row, m, frame_ps, step, lambda: flush(m, row)) == (False, True)
+    assert flag(m, row, "FE")
+    assert m.periph.USART1[row.rx].value & 0xFF == 0
+
+
+def test_a_cts_change_keeps_its_board_instant_across_a_reset(row: Row) -> None:
+    frame_ps = frame_time(row)
+    device = Opening(hold_cts_for_two_ms)
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(1)))
+    before = m.time.ps
+    m.reset(popcorn.ResetKind.SOFTWARE)
+    arm(m, row)
+    m.periph.USART1.CR3.CTSE = 1
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(4)))
+    assert device.frames == [(0x41, ms(2).ps - before + frame_ps)]
+
+
+def test_the_reset_bit_with_rts_held_raises_rts(row: Row) -> None:
+    device = Opening(held_rts)
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    asyncio.run(m.run(for_=ms(5)))
+    assert [ready for ready, _ in device.edges] == [False]
+    m.periph.RCC.APB2RSTR.USART1RST = 1
+    at = m.time.ps
+    m.periph.RCC.APB2RSTR.USART1RST = 0
+    asyncio.run(m.run(for_=us(10)))
+    assert device.edges[1] == (True, at)
+
+
+def test_the_new_hooks_on_a_member_keep_their_stamps_at_any_quantum(
+    u575: popcorn.PartDescription,
+) -> None:
+    def run(third: int | None) -> list[tuple[str, int]]:
+        log: list[tuple[str, int]] = []
+
+        class Hearing(KickedReplier):
+            def on_rts(self, ready: bool, at: VirtualTime) -> None:
+                log.append(("rts", at.ps))
+
+            def on_break(self, at: VirtualTime) -> None:
+                log.append(("break", at.ps))
+
+            def on_frame(self, byte: int, at: VirtualTime) -> None:
+                log.append(("frame", at.ps))
+                self.drive_cts(True, at=at + us(3))
+                super().on_frame(byte, at)
+
+        a = popcorn.Machine(
+            u575,
+            image=popcorn.Image.elf(BOARD_ELF),
+            name="a",
+            devices={"USART1": [Hearing(us(100))]},
+        )
+        b = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF), name="b")
+        for machine in (a, b):
+            machine.reset()
+            asyncio.run(machine.run(until=machine.sym("ready"), budget=1_000_000))
+        a.periph.USART1.CR3.poke(RTSE=1)
+        a.periph.USART1.RQR.SBKRQ = 1
+        links = [UartLink("a.USART2", "b.USART2", latency=us(third or 20), baud=115_200)]
+        with System({"a": a, "b": b}, links) as system:
+            asyncio.run(system.run(for_=ms(5)))
+        return log
+
+    log = run(None)
+    assert {name for name, _ in log} == {"rts", "break", "frame"}
+    assert run(5) == log
+    assert run(1) == log

@@ -66,19 +66,49 @@ uart_device_link::uart_device_link(
     : port_{&port}, alive_{std::move(alive)}, host_{std::move(host)}
 {}
 
-void uart_device_link::send(reflex::py::nb::bytes const& data, std::uint64_t at_ps)
+void uart_device_link::send(
+    reflex::py::nb::bytes const& data,
+    std::uint64_t                at_ps,
+    bool                         ignores_rts)
 {
   detail::require_alive(alive_, "uart", "a UART whose machine still exists");
-  auto frames =
-      frames_of(data)
-      | std::views::transform([](std::uint16_t word) { return periph::host_frame{.data = word}; })
-      | std::ranges::to<std::vector>();
+  auto frames = frames_of(data)
+              | std::views::transform([ignores_rts](std::uint16_t word) {
+                  return periph::host_frame{.data = word, .ignores_rts = ignores_rts};
+                })
+              | std::ranges::to<std::vector>();
   if(frames.empty())
   {
     return;
   }
   frames.front().start_ps = at_ps;
   detail::host_access(host_, [&] { port_->receive_frames(frames); });
+}
+
+void uart_device_link::send_break(std::uint64_t at_ps)
+{
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  std::array<periph::host_frame, 1> const frame{
+      {{.kind = periph::frame_kind::brk, .start_ps = at_ps}}};
+  detail::host_access(host_, [&] { port_->receive_frames(frame); });
+}
+
+void uart_device_link::set_cts(bool ready, std::uint64_t at_ps)
+{
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  detail::host_access(host_, [&] { port_->set_cts_stamped(ready, vtime{at_ps}); });
+}
+
+auto uart_device_link::rts_ready() const -> bool
+{
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  return detail::host_access(host_, [&] { return port_->ready_to_receive(); });
+}
+
+auto uart_device_link::has_flow_control() const -> bool
+{
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  return port_->has_flow_control();
 }
 
 void uart_queue::send(reflex::py::nb::bytes const& data)

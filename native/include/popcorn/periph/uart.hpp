@@ -115,6 +115,9 @@ struct host_frame
   /** @brief Virtual time since the last reset the start bit is due, at or after the end of the
    * frame before it. 0 starts it when the frame before it ended, or at the time it is queued. */
   std::uint64_t start_ps{};
+  /** @brief The frame starts whatever the firmware's RTS says. A frame finding the receiver full
+   * overruns. Frames still start in queue order, so it waits behind a frame that RTS holds. */
+  bool ignores_rts{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(host_frame const&, host_frame const&) -> bool = default;
@@ -213,6 +216,25 @@ public:
    *         does nothing. */
   virtual void attached()
   {}
+
+  /**
+   * @brief Whether the endpoint hears the firmware's RTS. The UART then posts one event per edge,
+   *        on core::host_lane, for rts_changed(). The default is false.
+   * @return Whether rts_changed() is due at each edge.
+   */
+  [[nodiscard]] virtual auto hears_rts() const -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief The firmware's RTS changed, on the machine's host thread, from an event after the edge.
+   *        The default does nothing.
+   * @param ready Whether the receiver is ready, uart_port::ready_to_receive.
+   * @param at Virtual time of the edge.
+   */
+  virtual void rts_changed([[maybe_unused]] bool ready, [[maybe_unused]] vtime at)
+  {}
 };
 
 /**
@@ -284,6 +306,23 @@ public:
    * @throws config_error when the port already keeps as many pending changes as it can.
    */
   virtual void set_cts(bool ready, vtime at) = 0;
+
+  /**
+   * @brief set_cts() for a stamp up to one block behind the machine's time, a device acting at the
+   *        logical time of the event it runs in. The change applies at @p at all the same.
+   * @param ready Whether the far end is ready to receive.
+   * @param at Virtual time of the change.
+   */
+  virtual void set_cts_stamped(bool ready, vtime at)
+  {
+    set_cts(ready, at);
+  }
+
+  /** @brief Whether this instance has CTS and RTS. The default is true. */
+  [[nodiscard]] virtual auto has_flow_control() const -> bool
+  {
+    return true;
+  }
 
   /** @brief Number of changes set_cts() scheduled that have not applied yet. */
   [[nodiscard]] virtual auto pending_cts() const -> std::size_t = 0;

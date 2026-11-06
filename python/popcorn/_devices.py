@@ -919,14 +919,14 @@ class UartDevice(_core.UartDeviceBase):
     `Periph(devices=[Device(cls)])`, alone on its UART. The UART then has no `UartStream`, no pty
     and no link of a `System`, each refused with `ConfigError`.
 
-    Thread: `on_attach`, `on_frame` and `on_error` run on the machine's thread with the GIL, one
-    GIL entry per call. A frame cut by a parked register write runs `on_error` on the caller's
-    thread instead. `reset` runs where the reset was called. `send` works from `on_attach`,
-    `on_frame` and `on_error`, wherever they run, and on the machine's thread. It raises inside
-    `reset`.
+    Thread: `on_attach`, `on_frame`, `on_break`, `on_rts` and `on_error` run on the machine's
+    thread with the GIL, one GIL entry per call. A frame cut by a parked register write runs
+    `on_error` on the caller's thread instead. `reset` runs where the reset was called. `send`,
+    `send_break` and `drive_cts` work from those hooks, wherever they run, and on the machine's
+    thread. They raise inside `reset`.
 
-    Time: `at` and `now` count from the last reset of any kind, as `Machine.time`. Inside `on_frame`
-    and `on_error`, `now` is that call's `at`: the event runs at the first block boundary at or
+    Time: `at` and `now` count from the last reset of any kind, as `Machine.time`. Inside a hook
+    given an `at`, `now` is that `at`: the event runs at the first block boundary at or
     after it, so `Machine.time` can read up to one block later, and a reply placed from `now` keeps
     its exact distance from the frame.
 
@@ -947,7 +947,7 @@ class UartDevice(_core.UartDeviceBase):
 
     def __init__(self) -> None:
         """Make a device serving no machine yet."""
-        super().__init__()
+        super().__init__(type(self).on_rts is not UartDevice.on_rts)
         self._link: _core.UartDeviceLink | None = None
         self._stamp_ps: int | None = None
         self._in_reset = False
@@ -960,7 +960,7 @@ class UartDevice(_core.UartDeviceBase):
 
     @property
     def now(self) -> VirtualTime:
-        """The virtual time of the running `on_frame` or `on_error`, else `Machine.time`.
+        """The `at` of the running hook that was given one, else `Machine.time`.
 
         Raises:
             ConfigError: The device serves no live machine.
@@ -988,37 +988,112 @@ class UartDevice(_core.UartDeviceBase):
         """The machine was reset. Does nothing by default. The machine's first reset comes before
         `on_attach`, so what `on_attach` builds is absent then."""
 
-    def send(self, data: bytes, *, at: VirtualTime | None = None) -> None:
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        """The firmware's RTS changed at `at`, `ready` when its receiver can take a frame. RTS
+        changes with the receiver's not-empty flag, which the model sets at the stop-bit end,
+        inside the stop bit on silicon. Called once per edge, in stamp order with the other hooks,
+        the frame hooks first at a tie.
+        A class that overrides this hears the edges, and any other costs no GIL entry per edge.
+        A machine reset sets the level True with no edge, so a device tracking it also uses
+        `reset`."""
+
+    def on_break(self, at: VirtualTime) -> None:
+        """The firmware sent a break, its last low bit ending at `at`."""
+
+    @property
+    def rts(self) -> bool:
+        """Whether the firmware's RTS says ready: False only with CR3.RTSE 1, CR3.DEM 0 and the
+        receiver full, True on a UART without flow control.
+
+        Raises:
+            ConfigError: The device serves no live machine.
+            MachineRunning: Read off the machine's thread while it runs.
+        """
+        return self._link_of().rts_ready()
+
+    def send(self, data: bytes, *, at: VirtualTime | None = None, obey_rts: bool = True) -> None:
         """Queue frames of 8 data bits towards the firmware's receiver, the first start bit at
         `at`, or at `now` when None, the others back to back. `at` behind frames still queued
         starts when they end. Each frame lasts the frame time of the UART's settings at its start,
         so a baud change between frames applies from the next one.
 
+        RTS: with `obey_rts`, a frame waits before its start bit while `rts` is False, and starts
+        no earlier than the edge that sets it True, whatever its `at`. Without it the frame starts
+        at its time and overruns a full receiver, setting ORE as on silicon. Frames start in the
+        order they were queued, so it still waits behind a frame that RTS holds.
+
         Raises:
-            TypeError: `data` is no bytes, or `at` no `VirtualTime`.
+            TypeError: `data` is no bytes, `at` no `VirtualTime`, or `obey_rts` no bool.
             ValueError: `at` is before `now`, or leaves the 64-bit picosecond range.
             RuntimeError: Called inside `reset`, on any path a reset takes, or off the machine's
-                thread outside `on_frame` and `on_error`.
+                thread outside the device's other hooks.
             ConfigError: The device serves no live machine.
         """
         if not isinstance(cast(object, data), bytes | bytearray | memoryview):
             raise TypeError(f"send() takes bytes, not {type(data).__name__}")
-        if at is not None and not isinstance(cast(object, at), VirtualTime):
-            raise TypeError(f"send() takes at as a VirtualTime or None, not {at!r}")
+        if not isinstance(cast(object, obey_rts), bool):
+            raise TypeError(f"send() takes obey_rts as a bool, not {obey_rts!r}")
+        link, start = self._acting("send", at)
+        link.send(bytes(data), start, not obey_rts)
+
+    def send_break(self, *, at: VirtualTime | None = None) -> None:
+        """Queue one break towards the firmware's receiver after the frames queued, at `at` or
+        `now` when None, placed as `send` places a frame and held by RTS the same way. It reads as a
+        0 byte with the framing error flag, and holds the line one frame time plus 2 bit times.
+
+        Raises:
+            TypeError: `at` is no `VirtualTime`.
+            ValueError: As `send`.
+            RuntimeError: As `send`.
+            ConfigError: As `send`.
+        """
+        link, start = self._acting("send_break", at)
+        link.send_break(start)
+
+    def drive_cts(self, ready: bool, *, at: VirtualTime | None = None) -> None:
+        """Drive the firmware's nCTS input to `ready` at `at`, or at `now` when None. With CR3.CTSE,
+        a frame in flight completes and the next waits for `ready`. The level and the changes
+        pending are board state, kept across every machine reset at their instant.
+
+        Raises:
+            TypeError: `ready` is no bool, or `at` no `VirtualTime`.
+            ValueError: As `send`.
+            RuntimeError: As `send`.
+            ConfigError: As `send`, the UART has no flow control, or at most 65536 changes pend.
+        """
+        if not isinstance(cast(object, ready), bool):
+            raise TypeError(f"drive_cts() takes ready as a bool, not {ready!r}")
+        link, start = self._acting("drive_cts", at)
+        if not link.has_flow_control():
+            raise ConfigError(
+                f"{self!r}: this UART has no CTS",
+                key=f"devices.{self._peripheral}",
+                expected="a UART with hardware flow control",
+            )
+        link.set_cts(ready, start)
+
+    def _link_of(self) -> _core.UartDeviceLink:
         link = self._link
         if link is None or serving(self) is None:
             raise self._serves_none()
+        return link
+
+    def _acting(self, what: str, at: VirtualTime | None) -> tuple[_core.UartDeviceLink, int]:
+        """The link and the time of an action `what` at `at`, refused where it cannot act."""
+        if at is not None and not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"{what}() takes at as a VirtualTime or None, not {at!r}")
+        link = self._link_of()
         if self._in_reset:
-            raise RuntimeError(f"{self!r}: send() is refused inside reset()")
+            raise RuntimeError(f"{self!r}: {what}() is refused inside reset()")
         if self._stamp_ps is None and not _core.on_host_thread():
-            raise RuntimeError(f"{self!r}: send() runs on the machine's thread")
+            raise RuntimeError(f"{self!r}: {what}() runs on the machine's thread")
         now = self.now.ps
         start = now if at is None else at.ps
         if start < now:
-            raise ValueError(f"{self!r}: send() at {at} lies before now, {VirtualTime(now)}")
+            raise ValueError(f"{self!r}: {what}() at {at} lies before now, {VirtualTime(now)}")
         if start > MAX_PS:
-            raise ValueError(f"a send at {at} leaves the 64-bit picosecond range")
-        link.send(bytes(data), start)
+            raise ValueError(f"a {what} at {at} leaves the 64-bit picosecond range")
+        return link, start
 
     def _bind(self, link: _core.UartDeviceLink, peripheral: str) -> None:
         self._link = link
@@ -1038,6 +1113,20 @@ class UartDevice(_core.UartDeviceBase):
         self._stamp_ps = at
         try:
             self._called(self.on_frame, data, VirtualTime(at))
+        finally:
+            self._stamp_ps = None
+
+    def _break(self, at: int) -> None:
+        self._stamp_ps = at
+        try:
+            self._called(self.on_break, VirtualTime(at))
+        finally:
+            self._stamp_ps = None
+
+    def _rts(self, ready: bool, at: int) -> None:
+        self._stamp_ps = at
+        try:
+            self._called(self.on_rts, ready, VirtualTime(at))
         finally:
             self._stamp_ps = None
 
