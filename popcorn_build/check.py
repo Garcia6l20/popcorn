@@ -7,7 +7,7 @@ import click
 from pcons import cli_command
 
 from popcorn_build.config import project_dir
-from popcorn_build.example_parts import EXAMPLE_PARTS
+from popcorn_build.example_parts import extra_runs
 
 Stage = tuple[str, list[str]]
 
@@ -38,44 +38,41 @@ def _clang_format() -> list[str]:
     return [clang_format, "--dry-run", "-Werror", *_native_sources()]
 
 
-def _examples(stop: list[str]) -> list[Stage]:
-    examples = sorted(ini.parent for ini in (project_dir / "examples").glob("*/*/pytest.ini"))
-    stages: list[Stage] = []
-    for example in examples:
-        name = f"{example.parent.name}/{example.name}"
-        path = str(example.relative_to(project_dir))
-        stages.append((name, _python_tool("pytest", "-q", *stop, path)))
-        stages.extend(
-            (f"{name}@{part}", _python_tool("pytest", "-q", *stop, f"--popcorn-part={part}", path))
-            for part in EXAMPLE_PARTS[name].extra
-        )
-    return stages
-
-
 GATE_VARIABLES = ("POPCORN_BUILD_TESTS=ON", "POPCORN_BUILD_EXAMPLES=ON")
 
 
-EXAMPLE_WORKERS = 4
+DEFAULT_JOBS = 8
 
 
-def _pcons_jobs(jobs: int | None) -> list[str]:
-    return [] if jobs is None else ["-j", str(jobs)]
+def _pcons_jobs(jobs: int) -> list[str]:
+    return ["-j", str(jobs)]
 
 
-def _xdist(jobs: int | None, cap: int | None = None) -> list[str]:
-    if jobs is not None and jobs <= 1:
-        return ["-n", "0"]
-    if cap is not None:
-        return ["-n", str(cap if jobs is None else min(jobs, cap))]
-    return ["-n", "auto" if jobs is None else str(jobs)]
+def _xdist(jobs: int) -> list[str]:
+    return ["-n", "0" if jobs <= 1 else str(jobs)]
+
+
+def _example_part_stages(stop: list[str], workers: list[str]) -> list[Stage]:
+    return [
+        (
+            f"{path.removeprefix('examples/')}@{part}",
+            _python_tool("pytest", "-q", *stop, *workers, f"--popcorn-part={part}", path),
+        )
+        for path, part in extra_runs()
+    ]
 
 
 def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only.
 
     The build stages set the test and example switches ON: a package build persists them OFF in
-    the same build directory. @p jobs caps every parallel stage, None leaves each at its default.
+    the same build directory. @p jobs sets the job count of every parallel stage, build, native
+    tests, pytest, examples and the example collection, `DEFAULT_JOBS` when None. 1 runs the tests
+    serially. The examples stage runs every example on its own part, `examples-collect` collects
+    each example directory in its own process to prove it runs standalone, and `examples-parts`
+    each extra part run of `popcorn_build/example_parts.py` is a stage `<chip>/<name>@<part>`.
     With @p fail_fast, each test stage stops at its first failing test."""
+    jobs = DEFAULT_JOBS if jobs is None else jobs
     native_stop = ["--stop-on-fail"] if fail_fast else []
     pytest_stop = ["-x"] if fail_fast else []
     if asan:
@@ -93,11 +90,12 @@ def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list
             "pytest",
             _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs), "tests/python", "tests/docs"),
         ),
-        *_examples(pytest_stop),
+        ("examples", _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs), "examples")),
         (
-            "examples",
-            _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs, EXAMPLE_WORKERS), "examples"),
+            "examples-collect",
+            _python_tool("popcorn_build.example_runs", "collect", "--jobs", str(jobs)),
         ),
+        *_example_part_stages(pytest_stop, []),
         ("docs", _python_tool("popcorn_build.docs")),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
@@ -132,8 +130,7 @@ def register() -> None:
         "-j",
         "--jobs",
         type=click.IntRange(min=1),
-        help="Cap the build and every test stage at this many jobs, 1 runs the tests serially. "
-        "Default: all cores, examples at 4 workers.",
+        help="Jobs of the build and of every test stage, 1 runs the tests serially. Default: 8.",
     )
     @click.option(
         "--fail-fast",
