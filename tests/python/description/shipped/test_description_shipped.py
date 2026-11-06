@@ -31,6 +31,7 @@ from popcorn.stm32.description._shipped import (
 )
 
 from ..conftest import write_layers
+from .composed import composed
 
 M33_JSON = Path(__file__).parents[4] / "tests" / "data" / "core" / "m33.json"
 NAME = "STM32T001ABCx"
@@ -469,7 +470,7 @@ def test_one_large_block_referenced_by_every_instance_is_refused_before_composin
 
 
 def test_a_part_with_its_own_block_composes_back_byte_equal(tmp_path: Path) -> None:
-    reference = cast(dict[str, Any], json.loads(compose_shipped("STM32U575QGIx")))
+    reference = cast(dict[str, Any], json.loads(composed("STM32U575QGIx")))
     other = json.loads(dump(reference))
     other["part"] = "STM32U575CGTx"
     for peripheral in other["peripherals"]:
@@ -528,7 +529,7 @@ def test_a_read_only_cache_still_serves_its_file(
 def test_the_shipped_layers_are_what_factor_writes_for_the_shipped_parts() -> None:
     names = shipped_names()
     assert names
-    descriptions = {name: json.loads(compose_shipped(name)) for name in names}
+    descriptions = {name: json.loads(composed(name)) for name in names}
     references: dict[str, str] = {}
     for path in SHIPPED_DIR.glob("*.line.json.xz"):
         line = cast(dict[str, Any], json.loads(lzma.decompress(path.read_bytes())))
@@ -543,7 +544,7 @@ def test_the_shipped_layers_are_what_factor_writes_for_the_shipped_parts() -> No
 def test_every_alias_of_a_shipped_description_equals_its_base_register_by_register(
     name: str,
 ) -> None:
-    data = cast(dict[str, object], json.loads(compose_shipped(name)))
+    data = cast(dict[str, object], json.loads(composed(name)))
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     aliases = [p for p in peripherals if p.get("alias_of")]

@@ -6,7 +6,9 @@ from functools import cache
 from typing import Any, cast
 
 import pytest
-from popcorn.stm32.description._shipped import compose_shipped, shipped_names
+from popcorn.stm32.description._shipped import shipped_names
+
+from .composed import composed
 
 PERIPHERALS = ["FDCAN2", "SDMMC2", "DLYBSD2", "FMC", "SPI4", "SPI5", "USART10", "UART8", "ETH"]
 H5_PARTS = [n for n in shipped_names() if re.match(r"STM32H5(62|63|73)", n)]
@@ -38,7 +40,7 @@ def absent(name: str) -> set[str]:
 
 @cache
 def _names(name: str) -> frozenset[str]:
-    description = cast(dict[str, Any], json.loads(compose_shipped(name)))
+    description = cast(dict[str, Any], json.loads(composed(name)))
     return frozenset(p["name"] for p in description["peripherals"])
 
 

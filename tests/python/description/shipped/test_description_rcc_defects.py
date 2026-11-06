@@ -5,7 +5,8 @@ from functools import cache
 from typing import Any, cast
 
 import pytest
-from popcorn.stm32.description._shipped import compose_shipped
+
+from .composed import composed
 
 U57X = ["STM32U575QGIx", "STM32U585AIIx"]
 H56X_SWAPPED = ["STM32H562IIKx", "STM32H563IIKx", "STM32H573IIKx"]
@@ -15,7 +16,7 @@ H563_H573 = ["STM32H563IIKx", "STM32H573IIKx"]
 
 @cache
 def _description(name: str) -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(compose_shipped(name)))
+    return cast(dict[str, Any], json.loads(composed(name)))
 
 
 def _register(name: str, peripheral: str, register: str) -> dict[str, Any]:

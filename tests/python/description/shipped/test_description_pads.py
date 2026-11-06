@@ -18,10 +18,11 @@ from popcorn.stm32.description._model import (
     RegisterDesc,
     WriteEffect,
 )
-from popcorn.stm32.description._shipped import build_text, compose_shipped, shipped_names
+from popcorn.stm32.description._shipped import build_text, shipped_names
 from popcorn.stm32.description._sources import pad_reference, pin_data_sources
 
 from ..conftest import require_pin_data
+from .composed import composed
 
 Pads = dict[tuple[int, str], str]
 
@@ -39,12 +40,12 @@ def _pads(peripheral: dict[str, Any]) -> Pads:
 
 
 def _shipped_pads(part: str, adc: str) -> Pads:
-    return _pads(_peripherals(compose_shipped(part))[adc])
+    return _pads(_peripherals(composed(part))[adc])
 
 
 @pytest.mark.parametrize("name", shipped_names())
 def test_every_adc_of_a_shipped_part_has_a_pad_for_each_bonded_channel(name: str) -> None:
-    adcs = [p for p in _peripherals(compose_shipped(name)).values() if p["ip"] == "ADC"]
+    adcs = [p for p in _peripherals(composed(name)).values() if p["ip"] == "ADC"]
     assert adcs
     for adc in adcs:
         pads = _pads(adc)
@@ -67,7 +68,7 @@ def test_the_l476rc_adc1_in5_is_pa0_and_adc1_and_adc2_in9_share_pa4() -> None:
 
 
 def test_the_l476rc_adc3_keeps_its_gpiof_pads_the_lqfp64_does_not_bond() -> None:
-    peripherals = _peripherals(compose_shipped("STM32L476RCTx"))
+    peripherals = _peripherals(composed("STM32L476RCTx"))
     assert peripherals["GPIOF"]["bonded"] == 0
     assert peripherals["ADC3"]["bonded_channels"] >> 6 & 1 == 0
     pads = _pads(peripherals["ADC3"])
@@ -86,7 +87,7 @@ def test_the_cat3_l151vc_in27_comes_from_the_rm0038_table() -> None:
 
 
 def test_the_l100c6_in22_is_pe7_from_the_l151_reference_of_its_die() -> None:
-    peripherals = _peripherals(compose_shipped("STM32L100C6Ux"))
+    peripherals = _peripherals(composed("STM32L100C6Ux"))
     assert peripherals["ADC"]["bonded_channels"] >> 22 & 1 == 0
     assert _pads(peripherals["ADC"])[(22, "positive")] == "PE7"
 

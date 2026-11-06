@@ -15,12 +15,12 @@ from popcorn.stm32.description._patches import corrected_part
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
     build_layers,
-    compose_shipped,
     shipped_names,
 )
 from popcorn.stm32.description._sources import pin_data_sources
 
 from ..conftest import require_pin_data
+from .composed import composed
 
 GOLDEN_DIR = Path(__file__).parents[4] / "tests" / "data" / "stm32" / "golden"
 PATCH_FILES = sorted((Path(_patches.__file__).parent / "patches").glob("*.toml"))
@@ -100,11 +100,11 @@ def test_each_shipped_line_has_the_reference_the_rule_picks_from_the_db() -> Non
     names = shipped_names()
     db_parts = _db_parts(pin_data, {name.partition("-")[0] for name in names})
     ranks: dict[str, tuple[int, int, int]] = {}
-    for name in names:
+    for name in reversed(names):
         db_part = db_parts[name.partition("-")[0]]
         bonded = sum(mask.bit_count() for mask in bonded_pins(db_part).values())
-        composed = cast(dict[str, list[object]], json.loads(compose_shipped(name)))
-        ranks[name] = (len(composed["peripherals"]), bonded, db_part.flash_kib[0])
+        description = cast(dict[str, list[object]], json.loads(composed(name)))
+        ranks[name] = (len(description["peripherals"]), bonded, db_part.flash_kib[0])
     assert choose_reference(ranks) == REFERENCES
     for path in SHIPPED_DIR.glob("*.line.json.xz"):
         line = cast(dict[str, object], json.loads(lzma.decompress(path.read_bytes())))
@@ -121,7 +121,7 @@ def test_a_ship_build_in_a_process_pool_writes_the_shipped_blocks_and_lines() ->
             pytest.skip(f"{part} sources not found: {exc}")
     names = sorted(TWO_PARTS.values())
     files = build_layers(names, pin_data=pin_data, jobs=2)
-    expected = factor({name: json.loads(compose_shipped(name)) for name in names}, TWO_PARTS)
+    expected = factor({name: json.loads(composed(name)) for name in names}, TWO_PARTS)
     assert sorted(files) == sorted(expected)
     for file in files:
         if not file.endswith(".parts.json.xz"):
@@ -136,7 +136,7 @@ def test_failed_builds_in_a_process_pool_raise_the_first_failure_in_name_order()
 
 
 def test_the_shipped_h573_sec_usb_keeps_the_patched_usb_field_kinds() -> None:
-    data = cast(dict[str, object], json.loads(compose_shipped("STM32H573AIIx")))
+    data = cast(dict[str, object], json.loads(composed("STM32H573AIIx")))
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     secure = by_name["SEC_USB"]
