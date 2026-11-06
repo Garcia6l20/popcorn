@@ -8,6 +8,7 @@ import contextlib
 import contextvars
 import gc
 import logging
+import os
 import pathlib
 import subprocess
 import sys
@@ -41,6 +42,8 @@ VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value"
 HOLDER: contextvars.ContextVar[list[object]] = contextvars.ContextVar("host_binding_holder")
 
 CHILD_TIMEOUT = 12
+EXIT_WAIT_UNSET = {"POPCORN_TEST_EXIT_WAIT_MS": ""}
+SHORT_EXIT_WAIT = {"POPCORN_TEST_EXIT_WAIT_MS": "1000"}
 COLLECTED = "a model or device of a collected Machine was called"
 
 
@@ -587,7 +590,9 @@ def _text(data: str | bytes | None) -> str:
     return data.decode(errors="replace") if isinstance(data, bytes) else data
 
 
-def run_child(script: str, timeout: float) -> subprocess.CompletedProcess[str]:
+def run_child(
+    script: str, timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
     try:
         return subprocess.run(
@@ -596,6 +601,7 @@ def run_child(script: str, timeout: float) -> subprocess.CompletedProcess[str]:
             text=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, **EXIT_WAIT_UNSET, **(env or {})},
         )
     except subprocess.TimeoutExpired as expired:
         pytest.fail(
@@ -2844,9 +2850,12 @@ def test_a_machine_halted_and_dropped_after_the_exit_abandon_does_not_hang() -> 
     script = DROPPED_AFTER_EXIT.replace("__JSON__", repr(str(M33_JSON))).replace(
         "__ELF__", repr(str(DRIVER_ELF))
     )
-    child = run_child(script, timeout=30)
+    began = time.monotonic()
+    child = run_child(script, timeout=30, env=SHORT_EXIT_WAIT)
+    took = time.monotonic() - began
     assert child.stdout.strip() == "leaving"
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
+    assert took < 5
 
 
 @pytest.mark.timeout(40)
@@ -2862,7 +2871,10 @@ def test_an_exit_with_a_blocked_handler_abandons_its_machine(interrupted: bool) 
     took = time.monotonic() - began
     assert child.stdout.strip() == "leaving"
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
-    assert took < (5 if interrupted else 15)
+    if interrupted:
+        assert took < 5
+    else:
+        assert 9 <= took < 15
 
 
 def test_no_binding_runs_a_slice_directly() -> None:
