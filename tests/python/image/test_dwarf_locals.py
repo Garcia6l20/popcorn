@@ -17,7 +17,9 @@ import subprocess
 import threading
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import popcorn.image.dwarf
 import pytest
@@ -140,25 +142,41 @@ def test_location_valid_at_no_pc_is_none(types: DebugInfo) -> None:
 
 
 @pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
+def _counting(name: str, reads: dict[str, int]) -> Callable[..., Any]:
+    original = getattr(popcorn.image.dwarf, name)
+
+    def counted(*args: Any) -> Any:
+        reads[name] += 1
+        return original(*args)
+
+    return counted
+
+
 @pytest.mark.parametrize(
     ("locals_", "blocks", "entries", "ranges"),
     [(3000, 0, 3000, 1), (0, 3000, 1, 3000)],
     ids=["shared location list", "shared range list"],
 )
 def test_shared_lists_are_read_once(
-    tmp_path: Path, locals_: int, blocks: int, entries: int, ranges: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    locals_: int,
+    blocks: int,
+    entries: int,
+    ranges: int,
 ) -> None:
     symbols = {"LOCALS": locals_, "BLOCKS": blocks, "ENTRIES": entries, "RANGES": ranges}
     elf = _assemble(tmp_path, "shared_lists.s", symbols)
-    started = time.perf_counter()
+    reads = {"_location_list": 0, "_range_pairs": 0}
+    for name in reads:
+        monkeypatch.setattr(popcorn.image.dwarf, name, _counting(name, reads))
     found = load_debug_info(elf).functions["f"].locals
-    elapsed = time.perf_counter() - started
     assert len(found) == 3000
     first = found[0]
     assert isinstance(first.location, tuple)
     assert len(first.location) == entries
     assert len(first.scopes) == (ranges if blocks else 0)
-    assert elapsed < 1.0
+    assert reads == {"_location_list": 1, "_range_pairs": 1 if blocks else 0}
 
 
 @pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
