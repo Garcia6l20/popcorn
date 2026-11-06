@@ -25,9 +25,10 @@ def entries(cache: Path, name: str) -> list[Path]:
 
 
 def run_python(
-    code: str, cache: Path, extra: dict[str, str] | None = None
+    code: str, cache: Path, extra: dict[str, str] | None = None, timeout: float = 240
 ) -> subprocess.CompletedProcess[str]:
-    """Run @p code in a fresh interpreter with @p cache as POPCORN_PLUGIN_CACHE."""
+    """Run @p code in a fresh interpreter with @p cache as POPCORN_PLUGIN_CACHE, for at most
+    @p timeout seconds."""
     environment = {**os.environ, "POPCORN_PLUGIN_CACHE": str(cache), **(extra or {})}
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
@@ -35,5 +36,5 @@ def run_python(
         text=True,
         env=environment,
         check=False,
-        timeout=240,
+        timeout=timeout,
     )

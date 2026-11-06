@@ -57,10 +57,10 @@ def u575() -> None:
 
 
 @pytest.fixture(scope="module")
-def kit(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Plugin]:
-    """The `kit` fixture plugin, built into a cache of this module."""
+def kit(shared_cache: Path) -> Iterator[Plugin]:
+    """The `kit` fixture plugin, built into the cache the workers of this run share."""
     with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("POPCORN_PLUGIN_CACHE", str(tmp_path_factory.mktemp("kit-cache")))
+        patch.setenv("POPCORN_PLUGIN_CACHE", str(shared_cache))
         yield Plugin.dev(FIXTURES / "kit")
 
 
@@ -629,7 +629,7 @@ def boot_session(root: Path, cache: Path) -> str:
 @pytest.mark.parametrize(
     "board", ['{"UNMODELLED": popcorn.Periph(model=PLUGIN.model("rng"))}', "{}"]
 )
-def test_a_plugin_edit_invalidates_the_boot_cache(tmp_path: Path, board: str) -> None:
+def test_a_plugin_edit_invalidates_the_boot_cache(tmp_path: Path, board: str, kit: Plugin) -> None:
     source = copied("kit", tmp_path)
     root = tmp_path / "tree"
     root.mkdir()
@@ -660,6 +660,8 @@ def test_a_plugin_edit_invalidates_the_boot_cache(tmp_path: Path, board: str) ->
             """))
     (root / "test_boot.py").write_text("def test_boot(machine):\n    pass\n")
     cache = tmp_path / "cache"
+    entry = kit.built().parent.parent
+    shutil.copytree(entry, cache / entry.name)
     assert boot_session(root, cache) == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
     assert boot_session(root, cache) == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
     kit_cpp = source / "kit.cpp"

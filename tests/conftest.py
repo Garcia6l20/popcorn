@@ -78,6 +78,17 @@ def pytest_configure(config: pytest.Config) -> None:
         build_memo.install().share(Path(workerinput[_DIR_KEY]) / "builds")
 
 
+@pytest.fixture(scope="session")
+def run_directory(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A directory every worker of this run shares, private to the run. Under xdist it is removed
+    with the run, without xdist it is the run's base temporary directory, which pytest keeps for
+    its last runs."""
+    workerinput = getattr(request.config, "workerinput", None)
+    if workerinput is not None and _DIR_KEY in workerinput:
+        return Path(workerinput[_DIR_KEY])
+    return tmp_path_factory.getbasetemp()
+
+
 @pytest.hookimpl(optionalhook=True)
 def pytest_configure_node(node: Any) -> None:
     global _controller_dir

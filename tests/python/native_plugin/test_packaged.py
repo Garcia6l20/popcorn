@@ -9,6 +9,7 @@ the plugin runs in its own interpreter, a loaded plugin is never unloaded.
 
 from __future__ import annotations
 
+import fcntl
 import importlib
 import os
 import re
@@ -141,10 +142,21 @@ def u575() -> None:
 
 
 @pytest.fixture(scope="module")
-def installed(tmp_path_factory: pytest.TempPathFactory) -> Installed:
-    root = tmp_path_factory.mktemp("packaged")
-    wheel = built_wheel(project(root), root / "dist")
-    return unpacked(wheel, root / "site")
+def installed(run_directory: Path) -> Installed:
+    """The fixture wheel, built and unpacked once by the first worker to need it. No case writes
+    into the unpacked tree, those that edit it copy it."""
+    root = run_directory / "packaged"
+    root.mkdir(exist_ok=True)
+    with (root / "build.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not (root / "site").is_dir():
+            for stale in ("packaged", "dist", "site.partial"):
+                shutil.rmtree(root / stale, ignore_errors=True)
+            wheel = built_wheel(project(root), root / "dist")
+            unpacked(wheel, root / "site.partial")
+            (root / "site.partial").rename(root / "site")
+    (wheel,) = (root / "dist").glob("*.whl")
+    return Installed(wheel, root / "site")
 
 
 @pytest.mark.timeout(250)

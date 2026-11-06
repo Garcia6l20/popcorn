@@ -1,7 +1,9 @@
 """`Plugin.module()`: the bindings module of a dev plugin, imported after the loader's checks.
 
 Each case runs in its own interpreter: a loaded plugin is never unloaded, and its module name
-`popcorn_plugins.<name>._native` belongs to the first plugin of that name in a process.
+`popcorn_plugins.<name>._native` belongs to the first plugin of that name in a process. The cases
+that test a plugin's load rather than its build share one plugin cache, the last case builds in its
+own.
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ from .support import copied, run_python
 
 
 @pytest.mark.timeout(20)
-def test_the_module_derives_from_core_and_is_imported_once(tmp_path: Path) -> None:
+def test_the_module_derives_from_core_and_is_imported_once(
+    tmp_path: Path, shared_cache: Path
+) -> None:
     source = copied("echo", tmp_path)
     ran = run_python(
         f"""
@@ -38,14 +42,16 @@ def test_the_module_derives_from_core_and_is_imported_once(tmp_path: Path) -> No
         assert record.name == "echo" and record.models == ["rng"]
         print("ok")
         """,
-        tmp_path / "cache",
+        shared_cache,
     )
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.strip() == "ok"
 
 
 @pytest.mark.timeout(30)
-def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path) -> None:
+def test_a_mismatched_tag_is_refused_before_its_constructors_run(
+    tmp_path: Path, shared_cache: Path
+) -> None:
     source = copied("mismatch", tmp_path)
     marker = tmp_path / "constructed"
     ran = run_python(
@@ -59,7 +65,7 @@ def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path)
             print(error.expected)
             raise SystemExit(3)
         """,
-        tmp_path / "cache",
+        shared_cache,
         {"MISMATCH_MARKER": str(marker)},
     )
     assert ran.returncode == 3, ran.stderr
@@ -71,7 +77,9 @@ def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path)
 
 
 @pytest.mark.timeout(30)
-def test_a_name_other_than_the_entry_points_is_refused_naming_both(tmp_path: Path) -> None:
+def test_a_name_other_than_the_entry_points_is_refused_naming_both(
+    tmp_path: Path, shared_cache: Path
+) -> None:
     source = copied("echo", tmp_path)
     ran = run_python(
         f"""
@@ -83,13 +91,15 @@ def test_a_name_other_than_the_entry_points_is_refused_naming_both(tmp_path: Pat
             print(error)
             raise SystemExit(3)
         """,
-        tmp_path / "cache",
+        shared_cache,
     )
     assert ran.returncode == 3, ran.stderr
     assert "POPCORN_PLUGIN echo, not other" in ran.stdout
 
 
-def test_a_plugin_without_bindings_is_refused_before_it_loads(tmp_path: Path) -> None:
+def test_a_plugin_without_bindings_is_refused_before_it_loads(
+    tmp_path: Path, shared_cache: Path
+) -> None:
     source = copied("nobind", tmp_path)
     ran = run_python(
         f"""
@@ -103,14 +113,14 @@ def test_a_plugin_without_bindings_is_refused_before_it_loads(tmp_path: Path) ->
         with open("/proc/self/maps") as maps:
             print("mapped" if str(plugin.built()) in maps.read() else "not mapped")
         """,
-        tmp_path / "cache",
+        shared_cache,
     )
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.splitlines() == ["plugin nobind has no bindings module", "not mapped"]
 
 
 @pytest.mark.timeout(20)
-def test_a_second_plugin_of_one_name_is_refused(tmp_path: Path) -> None:
+def test_a_second_plugin_of_one_name_is_refused(tmp_path: Path, shared_cache: Path) -> None:
     first = copied("echo", tmp_path / "one")
     second = copied("echo", tmp_path / "two")
     (second / "extra.txt").write_text("another copy\n")
@@ -125,7 +135,7 @@ def test_a_second_plugin_of_one_name_is_refused(tmp_path: Path) -> None:
             print(error.key)
             raise SystemExit(3)
         """,
-        tmp_path / "cache",
+        shared_cache,
     )
     assert ran.returncode == 3, ran.stderr
     assert ran.stdout.strip() == "name"

@@ -64,19 +64,19 @@ def test_a_second_build_without_a_change_runs_nothing(
 
 @pytest.mark.timeout(60)
 def test_an_edit_seen_by_a_new_process_builds_a_new_entry(tmp_path: Path, cache: Path) -> None:
-    source = copied("echo", tmp_path)
+    source = copied("nobind", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
     first = run_python(code, cache)
     assert first.returncode == 0, first.stderr
     old = Path(first.stdout.strip())
     stamp = old.stat().st_mtime_ns
-    (source / "echo.cpp").write_text((source / "echo.cpp").read_text() + "\n")
+    (source / "nobind.cpp").write_text((source / "nobind.cpp").read_text() + "\n")
     second = run_python(code, cache)
     assert second.returncode == 0, second.stderr
     new = Path(second.stdout.strip())
     assert new.parent.parent != old.parent.parent
     assert old.stat().st_mtime_ns == stamp
-    assert len(entries(cache, "echo")) == 2
+    assert len(entries(cache, "nobind")) == 2
 
 
 @pytest.mark.timeout(60)
@@ -278,23 +278,23 @@ def test_another_compiler_is_refused_naming_both(
 
 @pytest.mark.timeout(120)
 def test_five_edits_leave_at_most_two_entries(tmp_path: Path, cache: Path) -> None:
-    source = copied("echo", tmp_path)
+    source = copied("nobind", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
     for edit in range(5):
         (source / "edit.txt").write_text(f"{edit}\n")
         ran = run_python(code, cache)
         assert ran.returncode == 0, ran.stderr
-    assert len(entries(cache, "echo")) == 2
+    assert len(entries(cache, "nobind")) == 2
 
 
 @pytest.mark.timeout(90)
 def test_eviction_skips_an_entry_whose_build_lock_is_held(tmp_path: Path, cache: Path) -> None:
-    source = copied("echo", tmp_path)
+    source = copied("nobind", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
 
     def build_edit(edit: int) -> Path:
         (source / "edit.txt").write_text(f"{edit}\n")
-        ran = run_python(code, cache)
+        ran = run_python(code, cache, timeout=45)
         assert ran.returncode == 0, ran.stderr
         return Path(ran.stdout.strip()).parent.parent
 
@@ -312,7 +312,7 @@ def test_eviction_skips_an_entry_whose_build_lock_is_held(tmp_path: Path, cache:
     build_edit(3)
     assert not held.exists()
     assert not lock.exists() and not Path(f"{held}.use").exists()
-    assert len(entries(cache, "echo")) == 2
+    assert len(entries(cache, "nobind")) == 2
 
 
 def test_eviction_removes_staging_copies_a_killed_process_left(cache: Path) -> None:
