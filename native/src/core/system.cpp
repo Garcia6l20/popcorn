@@ -1708,8 +1708,9 @@ void system::reset(held_system const&, std::size_t member, reset_kind kind)
   }
   auto& self = *impl_;
   self.require_paused();
-  auto&      one       = self.slots[member];
-  auto const held_host = one.ref.on->lock();
+  auto&             one       = self.slots[member];
+  auto const        held_host = one.ref.on->lock();
+  owner_scope const owning{*one.ref.on, held_host};
   self.reset_member(one, one.ref.on->member(held_host, 0), kind);
   std::erase_if(self.held, [member](entry const& found) {
     return found.member == member and found.kind == entry_kind::stopped;

@@ -400,3 +400,38 @@ def test_a_member_stop_the_test_never_saw_fails_the_teardown(
     result.stdout.fnmatch_lines(
         ["*EmulationError: a: its run in the system's free run stopped with USER*"]
     )
+
+
+def test_the_close_of_a_system_fixture_runs_a_member_task_to_its_end(
+    layout: Path, pytester: pytest.Pytester, tmp_path: Path
+) -> None:
+    done = tmp_path / "finally.txt"
+    (layout / "test_sys.py").write_text(f"""
+import asyncio
+from pathlib import Path
+
+from popcorn.units import ms
+
+
+async def serve():
+    try:
+        await asyncio.sleep(3600)
+    finally:
+        await asyncio.sleep(0)
+        Path({str(done)!r}).write_text("done")
+
+
+KEPT = []
+
+
+async def test_leaves_a_task(system):
+    KEPT.append(system.members["a"])
+    KEPT[0].loop.create_task(serve())
+    await system.run(for_=ms(1))
+    assert not Path({str(done)!r}).exists()
+
+
+def test_the_finally_ran_in_the_teardown():
+    assert Path({str(done)!r}).read_text() == "done"
+""")
+    run(pytester, "-W", "error::pytest.PytestUnraisableExceptionWarning").assert_outcomes(passed=3)

@@ -596,6 +596,7 @@ def test_a_test_thread_reading_during_a_hook_is_not_taken_for_the_hook(
                 with pytest.raises(popcorn.MachineRunning):
                     device.loop.close()
                 assert not device.loop.is_closed()
+                assert not device.loop.is_running()
                 assert not device.loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
             finally:
                 leave.set()
@@ -1887,3 +1888,76 @@ def test_two_threads_at_the_first_use_get_one_loop(
         thread.join(10)
     assert len(made) == 2
     assert made[0] is made[1]
+
+
+def test_a_parked_call_soon_runs_at_the_clock_of_the_call(u575: popcorn.PartDescription) -> None:
+    log: list[tuple[str, int]] = []
+    m = asleep(u575, code=nop_loop(40))
+    m.loop.call_later(195e-6, lambda: log.append(("timer", stamp(m.loop))))
+    run(m, us(200))
+    parked = m.time.ps
+    assert parked > us(200).ps
+    m.loop.call_soon(lambda: log.append(("parked", stamp(m.loop))))
+    run(m, us(50))
+    assert log == [("timer", us(195).ps), ("parked", parked)]
+
+
+def test_a_parked_call_soon_cancelled_takes_no_gil_entry(u575: popcorn.PartDescription) -> None:
+    m = asleep(u575)
+    m.loop.call_soon(print).cancel()
+    before = gil_entries(m)
+    run(m, ms(1))
+    assert gil_entries(m) == before
+
+
+def test_a_power_cycle_tells_the_device_and_keeps_its_timers(
+    u575: popcorn.PartDescription,
+) -> None:
+    kinds: list[popcorn.ResetKind] = []
+
+    class Noting(Stack):
+        def reset(self, kind: popcorn.ResetKind) -> None:
+            kinds.append(kind)
+            self.loop.call_later(1e-5, self.mark, "later")
+
+    device = Noting()
+    m = asleep(u575, {"USART1": [device]})
+    run(m, us(100))
+    device.loop.call_later(1.5e-4, device.mark, "kept")
+    kinds.clear()
+    device.log.clear()
+    m.power_cycle()
+    parked_on(m)
+    run(m, us(200))
+    assert kinds == [popcorn.ResetKind.POWER_ON]
+    assert [name for name, _, _ in device.log] == ["later", "kept"]
+    assert device.log[1][1] == us(250).ps
+
+
+def lone_step(m: popcorn.Machine) -> None:
+    asyncio.run(m.step())
+
+
+def lone_load(m: popcorn.Machine) -> None:
+    m.load(popcorn.Image.elf(BOARD_ELF))
+
+
+def lone_restore(m: popcorn.Machine) -> None:
+    m.restore(m.snapshot())
+
+
+def lone_remove_hooks(m: popcorn.Machine) -> None:
+    m.remove_hooks()
+
+
+@pytest.mark.parametrize("operation", [lone_step, lone_load, lone_restore, lone_remove_hooks])
+def test_an_operation_on_a_lone_machine_with_a_device_keeps_its_loop(
+    u575: popcorn.PartDescription, operation: Callable[[popcorn.Machine], object]
+) -> None:
+    device = Stack()
+    m = asleep(u575, {"USART1": [device]})
+    run(m, us(100))
+    device.loop.call_later(1e-4, device.mark, "kept")
+    operation(m)
+    run(m, us(200))
+    assert [name for name, _, _ in device.log] == ["kept"]

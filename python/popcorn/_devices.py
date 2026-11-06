@@ -936,9 +936,10 @@ class UartDevice(_core.UartDeviceBase):
     rising `on_rts`, and a frame the firmware started, whose end counts from its store.
 
     Order: hooks and timers run as machine events in instruction count order. At one count lane,
-    then post order decides, the frame hooks ahead of `on_rts`, `on_error` and the timers, and a hook's `at` is held
-    at the last stamp, so `at == now` in every hook and `time()` never goes back. `at` moves by
-    under one instruction period, only at this coincidence, the same way on every run.
+    then post order decides, the frame hooks ahead of `on_rts`, `on_error` and the timers, and a
+    hook's `at` is held at the last stamp, so `at == now` in every hook and `time()` never goes
+    back. `at` moves by under one instruction period, only at this coincidence, the same way on
+    every run.
 
     Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
     the time `Frame.at` gives on a `UartStream`. The firmware's transmitter always sends a

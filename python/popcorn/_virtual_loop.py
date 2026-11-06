@@ -88,6 +88,16 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     to one block later. A stamp is an integer of picoseconds, a delay rounds to the nearest one, and
     a positive delay is at least 1 ps. Outside a step `time()` is the machine's board time.
 
+    A member of a `System` has its own loop on its own thread, its stamps the same at every quantum
+    as the same firmware alone. A callback touching another member raises `MachineRunning`. The way
+    across is a link, stamp plus latency. A parked call counts from the member's own clock: after a
+    time pause that clock is the same at every quantum. After a member stop the member stands at a
+    position that follows the quantum, so place a call from a stamp, with `call_at`. At a time pause
+    an event due within the last quantum, plus the block past it, may still be pending. It fires at
+    its stamp in the next run, so read a stack after a stop it caused or after running past what it
+    awaits. A member reset at that pause drops what it holds with the queue, a timer moving to the
+    reset's stamp, so reset after running past what the stack awaits.
+
     Resets: the loop and its timers go on through every reset kind, each timer at its instant.
     `UartDevice.reset` is told, and a device cancels what it wants there. A snapshot holds nothing
     of the loop. A restore leaves its timers and tasks in place, and stamps count from the restored
@@ -165,8 +175,8 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         return self._time_ps() / 1e12
 
     def is_running(self) -> bool:
-        """Whether a step is running."""
-        return self._stepping is not None
+        """Whether a step runs on the calling thread."""
+        return self._stepping == _get_ident()
 
     def is_closed(self) -> bool:
         """Whether the loop was closed."""
@@ -221,8 +231,8 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     def call_soon(
         self, callback: Any, *args: Any, context: contextvars.Context | None = None
     ) -> asyncio.Handle:
-        """Run `callback` at the current stamp, or at the machine's next dispatch from outside a
-        step.
+        """Run `callback` at the current stamp, or from outside a step as a timer at the machine's
+        clock, so an event already due fires first at its own stamp.
 
         Raises:
             TypeError: `callback` is not callable.
@@ -235,11 +245,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             handle = asyncio.Handle(callback, args, self, context)
             self._ready.append(handle)
             return handle
-        now = self._time_ps()
-        handle = asyncio.Handle(callback, args, self, context)
-        self._ready.append(handle)
-        self._arm(now)
-        return handle
+        return self._timer(self._time_ps(), callback, args, context)
 
     def call_later(
         self,
