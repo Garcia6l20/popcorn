@@ -519,6 +519,11 @@ public:
     invoke("_aborted", at.ps);
   }
 
+  [[nodiscard]] auto aborts_by_event() const -> bool override
+  {
+    return true;
+  }
+
   void reset(reset_kind kind) override
   {
     gil_entry const gil;
@@ -530,11 +535,11 @@ public:
     return not attach_done_;
   }
 
-  void attached() override
+  void attached(vtime at) override
   {
     attach_done_ = true;
     gil_entry const gil;
-    invoke("_attached");
+    invoke("_attached", at.ps);
   }
 
 private:

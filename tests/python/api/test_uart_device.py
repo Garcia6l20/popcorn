@@ -530,6 +530,7 @@ def test_one_device_hears_all_four_hooks(row: Row) -> None:
     transmit(m, row, 0x42)
     asyncio.run(m.run(for_=us(5)))
     pulse_reset_bit(m)
+    asyncio.run(m.run(for_=us(1)))
     assert device.resets == [popcorn.ResetKind.POWER_ON]
     assert len(device.attaches) == 1
     assert [byte for byte, _ in device.frames] == [0x41]
@@ -563,7 +564,8 @@ def abort_reply(row: Row, *, firmware: bool) -> tuple[bool, bool]:
         uart[row.enable if row.enable == "CR1" else "CR1_enabled"].UE = 0
         uart[row.enable].poke(TE=1, RE=1)
         uart[row.enable].UE = 1
-    assert threads == [firmware]
+        asyncio.run(m.run(for_=us(5)))
+    assert threads == [True]
     due = device.errors[0][1] + us(100).ps + frame_ps
     run_to(m, due - 2 * step)
     soon = received(m, row)
@@ -894,8 +896,9 @@ def test_a_raising_on_error_from_a_ue_clear_still_cuts_the_frame(row: Row) -> No
     m = asleep(row, {"USART1": [device]})
     transmit(m, row, 0x41)
     asyncio.run(m.run(for_=us(5)))
+    m.periph.USART1[row.enable if row.enable == "CR1" else "CR1_enabled"].UE = 0
     with pytest.raises(popcorn.ModelError, match="on_error"):
-        m.periph.USART1[row.enable if row.enable == "CR1" else "CR1_enabled"].UE = 0
+        asyncio.run(m.run(for_=us(1)))
     asyncio.run(m.run(for_=ms(1)))
     assert len(device.errors) == 1
     assert device.frames == []
@@ -906,10 +909,11 @@ def test_a_raising_on_error_from_the_reset_bit_still_resets_the_uart(row: Row) -
     m = asleep(row, {"USART1": [device]})
     transmit(m, row, 0x41)
     asyncio.run(m.run(for_=us(5)))
-    with pytest.raises(popcorn.ModelError, match="on_error"):
-        m.periph.RCC.APB2RSTR.USART1RST = 1
+    m.periph.RCC.APB2RSTR.USART1RST = 1
     m.periph.RCC.APB2RSTR.USART1RST = 0
     assert m.periph.USART1.BRR.value == 0
+    with pytest.raises(popcorn.ModelError, match="on_error"):
+        asyncio.run(m.run(for_=us(1)))
     asyncio.run(m.run(for_=ms(1)))
     assert device.frames == []
 
@@ -1338,6 +1342,7 @@ def test_one_device_hears_all_six_hooks(row: Row) -> None:
     asyncio.run(m.run(for_=us(5)))
     m.periph.RCC.APB2RSTR.USART1RST = 1
     m.periph.RCC.APB2RSTR.USART1RST = 0
+    asyncio.run(m.run(for_=us(1)))
     assert device.resets == [popcorn.ResetKind.POWER_ON]
     assert len(device.attaches) == 1
     assert len(device.breaks) == 1

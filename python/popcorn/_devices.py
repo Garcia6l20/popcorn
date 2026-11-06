@@ -16,6 +16,7 @@ from popcorn._enums import I2CError, I2CPhase, ResetKind, UartError
 from popcorn._errors import ConfigError, ModelError
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
+from popcorn._virtual_loop import VirtualLoop
 from popcorn.units import VirtualDuration, VirtualTime
 
 if typing.TYPE_CHECKING:
@@ -920,15 +921,24 @@ class UartDevice(_core.UartDeviceBase):
     and no link of a `System`, each refused with `ConfigError`.
 
     Thread: `on_attach`, `on_frame`, `on_break`, `on_rts` and `on_error` run on the machine's
-    thread with the GIL, one GIL entry per call. A frame cut by a parked register write runs
-    `on_error` on the caller's thread instead. `reset` runs where the reset was called. `send`,
-    `send_break` and `drive_cts` work from those hooks, wherever they run, and on the machine's
-    thread. They raise inside `reset`.
+    thread with the GIL, one GIL entry per call, each inside a step of the machine's `VirtualLoop`,
+    the `loop` here. `get_running_loop()` returns it there, and a task made there takes its first
+    step at the same stamp. All of them share the machine's one context. `reset` runs where the
+    reset was called, also in the loop, and what it schedules runs at the machine's next dispatch.
+    `send`, `send_break` and `drive_cts` work from the hooks and from the loop's callbacks and
+    tasks. They raise inside `reset`.
 
-    Time: `at` and `now` count from the last reset of any kind, as `Machine.time`. Inside a hook
-    given an `at`, `now` is that `at`: the event runs at the first block boundary at or
-    after it, so `Machine.time` can read up to one block later, and a reply placed from `now` keeps
-    its exact distance from the frame.
+    Time: `at` and `now` count from the last reset of any kind, as `Machine.time`. Inside a step
+    `now` is its logical stamp, the `at` of the hook or the due time of the timer: the event runs at
+    the first block boundary at or after it, so `Machine.time` can read up to one block later, and
+    a reply placed from `now` keeps its exact distance from the frame. A stamp a device or a timer
+    set is exact at any block shape. A register access stamps at the end of its block: `on_error`, a
+    rising `on_rts`, and a frame the firmware started, whose end counts from its store.
+
+    Order: hooks and timers run as machine events in instruction count order. At one count lane,
+    then post order decides, the frame hooks ahead of `on_rts`, `on_error` and the timers, and a hook's `at` is held
+    at the last stamp, so `at == now` in every hook and `time()` never goes back. `at` moves by
+    under one instruction period, only at this coincidence, the same way on every run.
 
     Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
     the time `Frame.at` gives on a `UartStream`. The firmware's transmitter always sends a
@@ -937,9 +947,11 @@ class UartDevice(_core.UartDeviceBase):
 
     Reset: a device on the board is not reset with the MCU. `reset` is told every machine reset and
     keeps the device's state by default. The frames `send` queued and not delivered are dropped by
-    any machine reset.
+    any machine reset. The loop's timers run on through a reset, and `rts` reads True with no edge,
+    so a stack holding RTS False or timing the firmware resets that in `reset`.
 
-    Errors: an exception from a hook stops the run as a `ModelError` naming the device.
+    Errors: an exception from a hook stops the run as a `ModelError` naming the device, once the
+    step has finished. `VirtualLoop.set_exception_handler` takes it over.
 
     Lifetime: a device serves one machine at a time and must not keep a reference to it. It may
     keep its `board`, which holds no machine.
@@ -949,7 +961,7 @@ class UartDevice(_core.UartDeviceBase):
         """Make a device serving no machine yet."""
         super().__init__(type(self).on_rts is not UartDevice.on_rts)
         self._link: _core.UartDeviceLink | None = None
-        self._stamp_ps: int | None = None
+        self._loop: VirtualLoop | None = None
         self._in_reset = False
         self._peripheral = ""
 
@@ -959,15 +971,29 @@ class UartDevice(_core.UartDeviceBase):
         return DeviceBoard(self)
 
     @property
+    def loop(self) -> VirtualLoop:
+        """The virtual-time loop of the machine the device serves, `Machine.loop`.
+
+        Raises:
+            ConfigError: The device serves no live machine.
+        """
+        self._link_of()
+        loop = self._loop
+        assert loop is not None
+        return loop
+
+    @property
     def now(self) -> VirtualTime:
-        """The `at` of the running hook that was given one, else `Machine.time`.
+        """The logical stamp of the running loop step, the `at` of a hook or the due time of a
+        timer, else `Machine.time`.
 
         Raises:
             ConfigError: The device serves no live machine.
             MachineRunning: Read off the machine's thread while it runs.
         """
-        if self._stamp_ps is not None:
-            return VirtualTime(self._stamp_ps)
+        loop = self._loop
+        if loop is not None and loop._stepping_here():  # pyright: ignore[reportPrivateUsage]
+            return VirtualTime(loop._stamp_since_reset())  # pyright: ignore[reportPrivateUsage]
         machine = serving(self)
         if machine is None:
             raise self._serves_none()
@@ -982,7 +1008,11 @@ class UartDevice(_core.UartDeviceBase):
         `at`."""
 
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
-        """A line error, `UartError.ABORTED` at the time the firmware cut the frame."""
+        """A line error, `UartError.ABORTED` at the time the firmware cut the frame, the end of the
+        block holding the write, or `Machine.time` for a parked write. It is a machine event at
+        that stamp, so it runs on the machine's thread at the next dispatch, a timer due earlier
+        firing ahead of it, and an exception from it stops that run rather than the write. A machine
+        reset before that dispatch drops it, and `reset` tells the device."""
 
     def reset(self, kind: ResetKind) -> None:
         """The machine was reset. Does nothing by default. The machine's first reset comes before
@@ -993,7 +1023,9 @@ class UartDevice(_core.UartDeviceBase):
         changes with the receiver's not-empty flag, which the model sets at the stop-bit end,
         inside the stop bit on silicon. Called once per edge, in stamp order with the other hooks,
         the frame hooks first at a tie.
-        A class that overrides this hears the edges, and any other costs no GIL entry per edge.
+        A class that overrides this hears the edges, and any other costs no GIL entry per edge. The
+        choice is the class's, fixed at construction, so a stack built in `on_attach` that registers
+        its handler later needs the override, forwarding to it.
         A machine reset sets the level True with no edge, so a device tracking it also uses
         `reset`."""
 
@@ -1085,7 +1117,9 @@ class UartDevice(_core.UartDeviceBase):
         link = self._link_of()
         if self._in_reset:
             raise RuntimeError(f"{self!r}: {what}() is refused inside reset()")
-        if self._stamp_ps is None and not _core.on_host_thread():
+        loop = self._loop
+        stepping = loop is not None and loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        if not stepping and not _core.on_host_thread():
             raise RuntimeError(f"{self!r}: {what}() runs on the machine's thread")
         now = self.now.ps
         start = now if at is None else at.ps
@@ -1095,9 +1129,10 @@ class UartDevice(_core.UartDeviceBase):
             raise ValueError(f"a {what} at {at} leaves the 64-bit picosecond range")
         return link, start
 
-    def _bind(self, link: _core.UartDeviceLink, peripheral: str) -> None:
+    def _bind(self, link: _core.UartDeviceLink, peripheral: str, loop: VirtualLoop) -> None:
         self._link = link
         self._peripheral = peripheral
+        self._loop = loop
 
     def _serves_none(self) -> ConfigError:
         return ConfigError(
@@ -1106,41 +1141,43 @@ class UartDevice(_core.UartDeviceBase):
             expected="a device serving a live machine",
         )
 
-    def _attached(self) -> None:
-        self._called(self.on_attach)
+    def _attached(self, at: int) -> None:
+        loop = self._loop
+        assert loop is not None
+        loop._run_hook(at, self._called, self.on_attach)  # pyright: ignore[reportPrivateUsage]
 
     def _frame(self, data: int, at: int) -> None:
-        self._stamp_ps = at
-        try:
-            self._called(self.on_frame, data, VirtualTime(at))
-        finally:
-            self._stamp_ps = None
+        self._stamped(at, self.on_frame, data)
 
     def _break(self, at: int) -> None:
-        self._stamp_ps = at
-        try:
-            self._called(self.on_break, VirtualTime(at))
-        finally:
-            self._stamp_ps = None
+        self._stamped(at, self.on_break)
 
     def _rts(self, ready: bool, at: int) -> None:
-        self._stamp_ps = at
-        try:
-            self._called(self.on_rts, ready, VirtualTime(at))
-        finally:
-            self._stamp_ps = None
+        self._stamped(at, self.on_rts, ready)
 
     def _aborted(self, at: int) -> None:
-        self._stamp_ps = at
-        try:
-            self._called(self.on_error, UartError.ABORTED, VirtualTime(at))
-        finally:
-            self._stamp_ps = None
+        self._stamped(at, self.on_error, UartError.ABORTED)
+
+    def _stamped(self, at: int, hook: Callable[..., None], *args: object) -> None:
+        loop = self._loop
+        assert loop is not None
+
+        def held_at_the_stamp() -> None:
+            stamp = VirtualTime(loop._stamp_since_reset())  # pyright: ignore[reportPrivateUsage]
+            self._called(hook, *args, stamp)
+
+        loop._run_hook(at, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
 
     def _reset(self, kind: _core.ResetKind) -> None:
         self._in_reset = True
         try:
-            self._called(self.reset, ResetKind(kind.value))
+            loop = self._loop
+            if loop is None:
+                self._called(self.reset, ResetKind(kind.value))
+            else:
+                loop._run_alone(  # pyright: ignore[reportPrivateUsage]
+                    0, self._called, self.reset, ResetKind(kind.value)
+                )
         finally:
             self._in_reset = False
 

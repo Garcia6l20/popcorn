@@ -94,6 +94,7 @@ from popcorn._views import (
     RegisterView,
     ScalarView,
 )
+from popcorn._virtual_loop import VirtualLoop, VirtualLoopUnsupported
 
 __all__ = [
     "F32",
@@ -187,6 +188,8 @@ __all__ = [
     "Use",
     "ValueKind",
     "Var",
+    "VirtualLoop",
+    "VirtualLoopUnsupported",
     "Watch",
     "WatchAction",
     "WatchHit",

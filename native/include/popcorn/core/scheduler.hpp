@@ -75,6 +75,13 @@ struct event
  */
 inline constexpr std::uint32_t host_lane = std::numeric_limits<std::uint32_t>::max();
 
+/**
+ * @brief Owner of the one event of a machine's virtual-time loop, machine::arm_loop(), next to
+ *        arch::arch_event_owner above every peripheral index. Its payload is the loop's stamp in
+ *        board time.
+ */
+inline constexpr std::uint32_t loop_event_owner = std::numeric_limits<std::uint32_t>::max() - 1;
+
 static_assert(std::is_trivially_copyable_v<event_id>);
 static_assert(std::is_trivially_copyable_v<event>);
 

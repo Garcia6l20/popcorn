@@ -1245,6 +1245,13 @@ public:
       uart_device_link_of(std::string const& peripheral) -> uart_device_link;
 
   /**
+   * @brief What the Python loop of the machine arms its event through.
+   * @param relay What the event calls with the loop's stamp in picoseconds.
+   */
+  [[= py::doc{"The port of the machine's virtual-time loop."}]] [[nodiscard]] auto
+      virtual_loop_port_of(reflex::py::nb::object relay) -> virtual_loop_port;
+
+  /**
    * @brief Names of the peripherals whose model is a built-in SAI, in description order.
    */
   [[= py::doc{"Names of the peripherals whose model is a built-in SAI."}]] [[nodiscard]] auto
@@ -1857,6 +1864,7 @@ private:
   std::shared_ptr<std::atomic<bool>>          thread_live_;
   std::shared_ptr<detail::delivered_end>      delivered_;
   std::shared_ptr<std::atomic<bool>>          collected_;
+  reflex::py::nb::object                      models_cell_ = reflex::py::nb::none();
   std::shared_ptr<std::atomic<std::uint64_t>> gil_entries_;
   std::shared_ptr<detail::boundary_gate>      gate_ = std::make_shared<detail::boundary_gate>();
   std::shared_ptr<core::machine>              engine_owner_;

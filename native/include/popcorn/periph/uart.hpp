@@ -196,6 +196,17 @@ public:
   {}
 
   /**
+   * @brief Whether aborted() comes from an event posted at its time on core::host_lane, on the
+   *        machine's host thread, rather than from inside the write that cut the frame. The
+   *        default is false.
+   * @return Whether the UART posts an event per abort.
+   */
+  [[nodiscard]] virtual auto aborts_by_event() const -> bool
+  {
+    return false;
+  }
+
+  /**
    * @brief The machine was reset, called last by the UART's own reset. The default does nothing.
    * @param kind The kind of reset.
    */
@@ -212,9 +223,12 @@ public:
     return false;
   }
 
-  /** @brief The event awaiting_attach() asked for runs, on the machine's host thread. The default
-   *         does nothing. */
-  virtual void attached()
+  /**
+   * @brief The event awaiting_attach() asked for runs, on the machine's host thread. The default
+   *        does nothing.
+   * @param at Virtual time the event was posted for.
+   */
+  virtual void attached([[maybe_unused]] vtime at)
   {}
 
   /**

@@ -620,6 +620,26 @@ public:
   [[nodiscard]] auto snapshot() const -> core::snapshot;
 
   /**
+   * @brief Sets what the armed loop event calls on the machine's thread, replacing any earlier
+   *        one.
+   * @param handler Called with the armed board time, or the machine's last reset in board time
+   *        when that is later. An exception it throws stops the run as a model's does.
+   */
+  void set_loop_handler(std::move_only_function<void(std::uint64_t)> handler);
+
+  /**
+   * @brief Arms the machine's one loop event at a board time, clock::board_time(), replacing the
+   *        one armed. It is a queue entry on host_lane of owner loop_event_owner, so the idle jump
+   *        reaches it. It keeps its instant through every reset and restore, a due before the reset
+   *        or the restored clock moving to that time, and a snapshot leaves it out.
+   * @param board_ps Board time in picoseconds. A time already passed fires at the next dispatch.
+   */
+  void arm_loop(std::uint64_t board_ps);
+
+  /** @brief Withdraws the armed loop event, if any. */
+  void disarm_loop();
+
+  /**
    * @brief Restores a snapshot, whatever changed since.
    *
    * Order, each step complete before the next starts:

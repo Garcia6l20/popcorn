@@ -218,6 +218,40 @@ void machine::run_state::reset_machine(reset_kind kind)
   reset_notified(kind);
 }
 
+void machine::run_state::post_loop()
+{
+  if(not loop_armed_ps)
+  {
+    return;
+  }
+  auto const& clock = owner.clock_;
+  auto const  base  = clock.board_time().ps - clock.time().ps;
+  auto const  stamp = std::max(*loop_armed_ps, base);
+  loop_seq          = owner.scheduler_.schedule_at(
+      vtime{stamp - base}, event_id{.owner = loop_event_owner, .kind = 0}, stamp, host_lane, clock);
+}
+
+void machine::set_loop_handler(std::move_only_function<void(std::uint64_t)> handler)
+{
+  run_->loop_handler = std::move(handler);
+}
+
+void machine::arm_loop(std::uint64_t board_ps)
+{
+  disarm_loop();
+  run_->loop_armed_ps = board_ps;
+  run_->post_loop();
+}
+
+void machine::disarm_loop()
+{
+  if(run_->loop_armed_ps)
+  {
+    scheduler_.cancel(run_->loop_seq, loop_event_owner);
+    run_->loop_armed_ps.reset();
+  }
+}
+
 void machine::run_state::reset_notified(reset_kind kind)
 {
   ++memory_generation;
@@ -236,6 +270,7 @@ void machine::run_state::reset_notified(reset_kind kind)
   fresh.core_hz         = core_clock_hz(owner.description_, owner.options_);
   fresh.cpi             = owner.options_.cpi;
   owner.clock_driver_.restore(fresh);
+  post_loop();
   unmapped.reset();
   trap.reset();
   bus_fault.reset();
@@ -854,6 +889,14 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     {
       arch->on_event(due->id.kind, due->payload);
     }
+    else if(due->id.owner == loop_event_owner)
+    {
+      loop_armed_ps.reset();
+      if(loop_handler)
+      {
+        loop_handler(due->payload);
+      }
+    }
     else
     {
       auto const& peripherals = owner.peripherals_;
@@ -904,9 +947,9 @@ auto machine::run_state::count_instant(event const& due) -> std::optional<slice_
     return std::nullopt;
   }
   instant_events  = 0;
-  auto const name = due.id.owner == arch::arch_event_owner
-                      ? std::string{"arch"}
-                      : owner.peripherals_[due.id.owner]->desc.name;
+  auto const name = due.id.owner == arch::arch_event_owner ? std::string{"arch"}
+                  : due.id.owner == loop_event_owner ? std::string{"loop"}
+                                                     : owner.peripherals_[due.id.owner]->desc.name;
   return slice_end{make_stop(
       stop_reason::spin,
       std::format("events repeat without time passing: {} kind {}", name, due.id.kind),

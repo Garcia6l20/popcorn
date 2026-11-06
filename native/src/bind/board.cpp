@@ -2,6 +2,7 @@
 #include "../periph/stm32/pin_range.hpp"
 #include "gil_locks.hpp"
 #include "machine.hpp"
+#include "python_callable.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -103,6 +104,61 @@ auto uart_device_link::rts_ready() const -> bool
 {
   detail::require_alive(alive_, "uart", "a UART whose machine still exists");
   return detail::host_access(host_, [&] { return port_->ready_to_receive(); });
+}
+
+struct virtual_loop_port::fire_state
+{
+  detail::callback_cell                    cell;
+  std::shared_ptr<detail::python_callable> relay;
+};
+
+virtual_loop_port::virtual_loop_port(
+    core::machine&         engine,
+    detail::alive_flag     alive,
+    detail::alive_flag     collected,
+    detail::host_ref       host,
+    reflex::py::nb::object cell,
+    reflex::py::nb::object relay)
+    : engine_{&engine}, alive_{alive}, host_{std::move(host)}, fire_{std::make_shared<fire_state>()}
+{
+  fire_->cell.run_in(std::move(cell), std::move(alive), std::move(collected));
+  fire_->relay = detail::held_bare(std::move(relay));
+}
+
+void virtual_loop_port::arm(std::uint64_t board_ps)
+{
+  detail::require_alive(alive_, "loop", "a loop whose machine still exists");
+  detail::host_access(host_, [&] {
+    if(not std::exchange(installed_, true))
+    {
+      engine_->set_loop_handler([fire = fire_](std::uint64_t stamp) {
+        detail::gil_entry const gil;
+        fire->cell.call([&] { return fire->relay->fn(stamp); });
+      });
+    }
+    engine_->arm_loop(board_ps);
+  });
+}
+
+void virtual_loop_port::disarm()
+{
+  detail::require_alive(alive_, "loop", "a loop whose machine still exists");
+  detail::host_access(host_, [&] { engine_->disarm_loop(); });
+}
+
+auto virtual_loop_port::board_time_ps() const -> std::uint64_t
+{
+  detail::require_alive(alive_, "loop", "a loop whose machine still exists");
+  return detail::host_access(host_, [&] { return engine_->virtual_clock().board_time().ps; });
+}
+
+auto virtual_loop_port::board_base_ps() const -> std::uint64_t
+{
+  detail::require_alive(alive_, "loop", "a loop whose machine still exists");
+  return detail::host_access(host_, [&] {
+    auto const& clock = engine_->virtual_clock();
+    return clock.board_time().ps - clock.time().ps;
+  });
 }
 
 auto uart_device_link::has_flow_control() const -> bool
@@ -492,6 +548,11 @@ auto machine_handle::uart_device_link_of(std::string const& peripheral) -> uart_
     throw model_error(peripheral, "", 0);
   }
   return uart_device_link{*port, alive_, slot_};
+}
+
+auto machine_handle::virtual_loop_port_of(reflex::py::nb::object relay) -> virtual_loop_port
+{
+  return virtual_loop_port{engine(), alive_, collected_, slot_, models_cell_, std::move(relay)};
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const

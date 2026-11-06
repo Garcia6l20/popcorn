@@ -136,6 +136,83 @@ def test_machine_factory(pytester: pytest.Pytester) -> None:
     run(pytester).assert_outcomes(passed=2)
 
 
+def test_the_fixtures_close_the_loop_of_a_machine_they_drop(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile("""
+        import asyncio
+
+        OUT = []
+
+        async def serve():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                await asyncio.sleep(0)
+                OUT.append("done")
+
+        def test_leaves_a_task(machine_factory, description):
+            m = machine_factory(description)
+            m.loop.create_task(serve())
+            asyncio.run(m.step())
+            assert OUT == []
+
+        def test_the_finally_ran_to_its_end():
+            assert OUT == ["done"]
+        """)
+    run(pytester).assert_outcomes(passed=2)
+
+
+def test_a_session_end_closes_the_loop_of_a_reused_machine(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile(f"""
+        import asyncio
+        from pathlib import Path
+
+        async def serve():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                await asyncio.sleep(0)
+                Path({str(pytester.path / "finally.txt")!r}).write_text("done")
+
+        def test_leaves_a_task(machine):
+            machine.loop.create_task(serve())
+            asyncio.run(machine.step())
+        """)
+    run(pytester, "-W", "error").assert_outcomes(passed=1)
+    assert (pytester.path / "finally.txt").read_text() == "done"
+
+
+def test_a_rebuild_closes_the_loop_of_the_spoiled_machine(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    done = pytester.path / "finally.txt"
+    pytester.makepyfile(f"""
+        import asyncio
+        from pathlib import Path
+
+        import popcorn
+
+        async def serve():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                await asyncio.sleep(0)
+                Path({str(done)!r}).write_text("done")
+
+        def test_spoils(machine):
+            machine.loop.create_task(serve())
+            asyncio.run(machine.step())
+            machine.load(popcorn.Image.elf({str(CALLEE_ELF)!r}))
+
+        def test_the_finally_ran_to_its_end():
+            assert Path({str(done)!r}).read_text() == "done"
+        """)
+    run(pytester).assert_outcomes(passed=2)
+
+
 def test_factory_names_its_machines_and_boots_once(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester)

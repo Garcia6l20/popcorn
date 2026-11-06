@@ -45,6 +45,7 @@ constexpr std::uint32_t release_due   = 6;
 constexpr std::uint32_t host_start    = 7;
 constexpr std::uint32_t attach_due    = 8;
 constexpr std::uint32_t rts_due       = 9;
+constexpr std::uint32_t abort_due     = 10;
 constexpr std::size_t   fifo_depth    = 8;
 
 /**
@@ -308,7 +309,8 @@ struct lock
  *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
  *        For a link to another machine, the endpoint hears each frame when its start bit leaves,
- *        `uart_endpoint::started`, and a clear of UE with a frame in flight, `aborted`. Frames
+ *        `uart_endpoint::started`, and a clear of UE with a frame in flight, `aborted`, which a
+ *        Python device hears through an event at the time of the write. Frames
  *        from another machine, `receive_at`, reach the receiver at their own stop-bit end, IDLE
  *        one receiver frame time after the last one unless the next starts before. Deviations:
  *        an aborted frame delivers nothing and holds the line until the abort, where the chip
@@ -498,6 +500,7 @@ private:
   void               note_rts(std::uint64_t at_ps);
   [[nodiscard]] auto head_ready() const -> bool;
   void               ask_attached();
+  void               note_abort(hook_guard& guard);
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -979,8 +982,20 @@ void usart::ask_attached()
 {
   if(far_end_ and far_end_->awaiting_attach())
   {
-    ctx_.events.schedule_at(ctx_.clock.time(), attach_due, 0, core::host_lane, ctx_.clock);
+    auto const at = ctx_.clock.time();
+    ctx_.events.schedule_at(at, attach_due, at.ps, core::host_lane, ctx_.clock);
   }
+}
+
+void usart::note_abort(hook_guard& guard)
+{
+  auto const at = ctx_.clock.time();
+  if(far_end_->aborts_by_event())
+  {
+    ctx_.events.schedule_at(at, abort_due, at.ps, core::host_lane, ctx_.clock);
+    return;
+  }
+  guard.run([&] { far_end_->aborted(at); });
 }
 
 void usart::on_bus_reset()
@@ -988,7 +1003,7 @@ void usart::on_bus_reset()
   hook_guard guard;
   if(state_.shifting and far_end_)
   {
-    guard.run([&] { far_end_->aborted(ctx_.clock.time()); });
+    note_abort(guard);
   }
   restore_reset_values(true);
   guard.rethrow();
@@ -1308,7 +1323,7 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     auto const finishing = sci2_ and state_.shifting;
     if(state_.shifting and far_end_ and not finishing)
     {
-      guard.run([&] { far_end_->aborted(ctx_.clock.time()); });
+      note_abort(guard);
     }
     for(std::size_t kind = 0; kind < state_.generation.size(); ++kind)
     {
@@ -1502,7 +1517,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     if(far_end_ and far_end_->awaiting_attach())
     {
-      far_end_->attached();
+      far_end_->attached(vtime{payload});
     }
     return;
   }
@@ -1510,6 +1525,14 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     resume_host();
     flags();
+    return;
+  }
+  if(kind == abort_due)
+  {
+    if(far_end_)
+    {
+      far_end_->aborted(vtime{payload});
+    }
     return;
   }
   if(kind == rts_due)

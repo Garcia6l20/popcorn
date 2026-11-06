@@ -123,10 +123,11 @@ auto machine::snapshot() const -> core::snapshot
       data.models.push_back(std::move(part));
     }
   }
-  auto const pending = scheduler_.pending();
-  data.events        = {
-      .pending       = std::vector<event>(pending.begin(), pending.end()),
-      .next_seq      = scheduler_.next_seq(),
+  data.events = {
+      .pending  = scheduler_.pending()
+                | std::views::filter([](event const& e) { return e.id.owner != loop_event_owner; })
+                | std::ranges::to<std::vector>(),
+      .next_seq = scheduler_.next_seq(),
       .next_lane_seq = scheduler_.next_lane_seq()};
   data.clock = clock_driver_.state();
   for(auto const& [id, entry] : run.intercepts)
@@ -332,6 +333,7 @@ void machine::restore(core::snapshot const& saved)
   }
   scheduler_.restore(data.events.pending, data.events.next_seq, data.events.next_lane_seq);
   clock_driver_.restore(data.clock);
+  run.post_loop();
   trace_.rebase(clock_.now());
   run.rebase_sinks(clock_.now());
   arch_->load(data.arch.data);

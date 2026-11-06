@@ -377,6 +377,7 @@ class PopcornSession:
         old = self._slots[key, name]
         self._slots[key, name] = slot
         self.collect(old.machine)
+        old.machine._close_loop()  # pyright: ignore[reportPrivateUsage]
         old.machine.board.close()
         self.rebuilds += 1
         return slot
@@ -416,14 +417,13 @@ class PopcornSession:
                 unclaimed(owner, ended)
 
     def close(self) -> None:
-        """Close the pty bridges of the boot machines no fixture took, the reused machines and
-        those whose boot failed."""
-        for booted in self._booted.values():
-            if not booted.adopted:
-                booted.machine.board.close()
-        for slot in self._slots.values():
-            slot.machine.board.close()
-        for machine in self._failed_machines.values():
+        """Close the loops and pty bridges of the boot machines no fixture took, the reused machines
+        and those whose boot failed."""
+        machines = [booted.machine for booted in self._booted.values() if not booted.adopted]
+        machines += [slot.machine for slot in self._slots.values()]
+        machines += self._failed_machines.values()
+        for machine in machines:
+            machine._close_loop()  # pyright: ignore[reportPrivateUsage]
             machine.board.close()
 
     def _save_boot_coverage(self, key: Key, machine: Machine, snapshot: Snapshot) -> None:

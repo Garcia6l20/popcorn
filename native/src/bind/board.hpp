@@ -96,6 +96,56 @@ private:
 };
 
 /**
+ * @brief What `popcorn.VirtualLoop` arms its one machine event through. Holds no reference to the
+ *        machine and calls its Python end through a weak relay. Valid while the machine lives,
+ *        each method raises ConfigError after.
+ */
+class[[= py::rename{"VirtualLoopPort"}]] virtual_loop_port
+{
+public:
+  /**
+   * @brief Reaches a machine's loop event.
+   * @param engine The machine.
+   * @param alive Cleared when the machine is destroyed.
+   * @param collected Set when the `Machine` is found garbage.
+   * @param host The machine's host.
+   * @param cell Weak reference to the machine's context cell, or None.
+   * @param relay Called with the stamp in picoseconds, the callable a `Relay`, the GIL held.
+   */
+  [[= py::skip]] virtual_loop_port(
+      core::machine&         engine,
+      detail::alive_flag     alive,
+      detail::alive_flag     collected,
+      detail::host_ref       host,
+      reflex::py::nb::object cell,
+      reflex::py::nb::object relay);
+
+  /** @brief See core::machine::arm_loop. */
+  [[= py::doc{"Arm the loop's one machine event at a board time in picoseconds."}]] void
+      arm(std::uint64_t board_ps);
+
+  /** @brief See core::machine::disarm_loop. */
+  [[= py::doc{"Withdraw the loop's machine event."}]] void disarm();
+
+  /** @brief The machine's clock::board_time() in picoseconds. */
+  [[= py::doc{"The machine's board time in picoseconds."}]] [[nodiscard]] auto board_time_ps() const
+      -> std::uint64_t;
+
+  /** @brief Board time of the machine's last reset in picoseconds. */
+  [[= py::doc{"Board time of the machine's last reset in picoseconds."}]] [[nodiscard]] auto
+      board_base_ps() const -> std::uint64_t;
+
+private:
+  struct fire_state;
+
+  core::machine*              engine_;
+  detail::alive_flag          alive_;
+  detail::host_ref            host_;
+  std::shared_ptr<fire_state> fire_;
+  bool                        installed_{};
+};
+
+/**
  * @brief A UART of the machine connected to Python: frames the firmware transmits are queued
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
  *        while the machine lives, every method raises ConfigError after.

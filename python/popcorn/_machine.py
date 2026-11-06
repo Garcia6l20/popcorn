@@ -10,6 +10,7 @@ import difflib
 import functools
 import os
 import sys
+import threading
 import types
 import warnings
 import weakref
@@ -119,6 +120,7 @@ from popcorn._supply import SupplyOptions
 from popcorn._unwind import Functions, Read32, return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
+from popcorn._virtual_loop import VirtualLoop
 from popcorn.arm import Registers
 from popcorn.devices import (
     At25sf,
@@ -284,6 +286,8 @@ _FIRST_IRQ = 16
 _SYSTEM_EXCEPTIONS = {2: "NMI", 14: "PendSV", 15: "SysTick"}
 
 atexit.register(_core.shutdown_hosts)
+
+_FIRST_LOOP = threading.RLock()
 
 
 class _ContextCell:
@@ -655,6 +659,7 @@ class Machine:
         "_last_stop",
         "_log_forwarder",
         "_logs",
+        "_loop",
         "_memory",
         "_model_context",
         "_name",
@@ -888,6 +893,8 @@ class Machine:
             self._ports.bridges,
         )
         self._devices = attached
+        self._callback_table = CallbackTable()
+        self._loop: VirtualLoop | None = None
         for peripheral, targets in attached.items():
             for target in targets:
                 attach(
@@ -901,7 +908,7 @@ class Machine:
                 )
                 if isinstance(target, UartDevice):
                     target._bind(  # pyright: ignore[reportPrivateUsage]
-                        self._handle.uart_device_link_of(peripheral), peripheral
+                        self._handle.uart_device_link_of(peripheral), peripheral, self.loop
                     )
         self._board = Board(
             self._ports,
@@ -925,7 +932,6 @@ class Machine:
         self._nvic = Nvic(self._memory, description.core.num_irqs)
         self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
-        self._callback_table = CallbackTable()
         self._posted_bodies = PostedBodies(self._callback_table)
         self._log_forwarder = LogForwarder(self._name)
         self._handle.forward_logs(self._log_forwarder)
@@ -966,6 +972,7 @@ class Machine:
             return
         handle = getattr(self, "_handle", None)
         table = getattr(self, "_callback_table", None)
+        loop = getattr(self, "_loop", None)
         del self
         if table is not None:
             table.close()
@@ -973,6 +980,9 @@ class Machine:
         if handle is None:
             return
         handle.mark_collected()
+        if loop is not None:
+            loop._finalize()  # pyright: ignore[reportPrivateUsage]
+        del loop
         if handle.owns_engine():
             return
         try:
@@ -986,6 +996,29 @@ class Machine:
                 raise unclaimed
             finally:
                 del unclaimed
+
+    @property
+    def loop(self) -> VirtualLoop:
+        """The machine's virtual-time asyncio loop, made at first use, the same one for every
+        `UartDevice` on it. A member of a `System` has its own. See `VirtualLoop`."""
+        loop = self._loop
+        if loop is not None:
+            return loop
+        with _FIRST_LOOP:
+            loop = self._loop
+            if loop is None:
+                loop = VirtualLoop(self._name)
+                key = self._callback_table.add(loop._fire)  # pyright: ignore[reportPrivateUsage]
+                loop._bind(  # pyright: ignore[reportPrivateUsage]
+                    self._handle.virtual_loop_port_of(Relay(self._callback_table, key, quiet=True))
+                )
+                self._loop = loop
+            return loop
+
+    def _close_loop(self) -> None:
+        """Close the loop of a machine about to be dropped, if it has one."""
+        if self._loop is not None:
+            self._loop.close()
 
     @property
     def description(self) -> PartDescription:
@@ -2495,6 +2528,8 @@ class Machine:
     def _restore(self, snapshot: Snapshot) -> None:
         self._require_idle()
         self._handle.restore(snapshot.native)
+        if self._loop is not None:
+            self._loop._rewound()  # pyright: ignore[reportPrivateUsage]
         self._last_stop = None
         self._ports.discard()
         self._audio.discard()

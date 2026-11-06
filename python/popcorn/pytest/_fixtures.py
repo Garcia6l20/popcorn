@@ -56,6 +56,7 @@ class _Factory:
                 if len(ends) > 1:
                     unclaimed(f"{label} of {self._item.nodeid}", ended)
             self._session.collect(machine)
+            machine._close_loop()  # pyright: ignore[reportPrivateUsage]
             machine.board.close()
         self._machines.clear()
         if ends:

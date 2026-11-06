@@ -1172,6 +1172,12 @@ struct machine::run_state
     has_requested.store(false, std::memory_order_relaxed);
     return std::exchange(requested, std::nullopt);
   }
+  /** @brief What the armed loop event calls, machine::set_loop_handler(). */
+  std::move_only_function<void(std::uint64_t)> loop_handler{};
+  /** @brief Board time of the armed loop event, machine::arm_loop(). */
+  std::optional<std::uint64_t> loop_armed_ps{};
+  /** @brief Sequence number of the queue entry of the armed loop event. */
+  std::uint64_t loop_seq{};
   /** @brief Reset requested through machine_services. */
   std::optional<reset_kind> reset_requested{};
   /** @brief Kind of the last RESET_REQUEST stop, until a reset or a restore,
@@ -2096,6 +2102,9 @@ struct machine::run_state
    *        told already.
    */
   void reset_notified(reset_kind kind);
+
+  /** @brief Queues the armed loop event for the current clock, at or after its last reset. */
+  void post_loop();
 
   /**
    * @brief Calls every model's `power_cut()` in description order, inside a handler scope,

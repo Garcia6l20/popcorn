@@ -1573,3 +1573,124 @@ TEST_CASE("a predicate made true by executed code stops at the next event at any
   CHECK(run(7) == whole);
   CHECK(run(301) == whole);
 }
+
+TEST_CASE("the armed loop event is reached by the idle jump and fires once with its stamp")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const                 stamp = f.target->virtual_clock().board_time().ps + ps_per_second;
+  std::vector<std::uint64_t> fired;
+  f.target->set_loop_handler([&](std::uint64_t at) { fired.push_back(at); });
+  f.target->arm_loop(stamp + 1);
+  f.target->arm_loop(stamp);
+  while(not f.run().stopped)
+  {
+  }
+  CHECK(fired == std::vector{stamp});
+  CHECK(f.target->virtual_clock().board_time().ps >= stamp);
+}
+
+TEST_CASE("a loop event that fired does not come back at a reset")
+{
+  auto       f     = booted("calls");
+  auto const stamp = f.target->virtual_clock().board_time().ps + 1;
+  auto       fired = 0;
+  f.target->set_loop_handler([&](std::uint64_t) { ++fired; });
+  f.target->arm_loop(stamp);
+  std::ignore = f.run({.budget_left = icount{100}});
+  REQUIRE(fired == 1);
+  f.target->reset(popcorn::reset_kind::software);
+  std::ignore = f.run({.budget_left = icount{100}});
+  CHECK(fired == 1);
+}
+
+TEST_CASE("a withdrawn loop event leaves the machine idle at once")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const start = f.target->virtual_clock().board_time().ps;
+  auto       fired = 0;
+  f.target->set_loop_handler([&](std::uint64_t) { ++fired; });
+  f.target->arm_loop(start + ps_per_second);
+  f.target->disarm_loop();
+  f.target->disarm_loop();
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  CHECK(fired == 0);
+  CHECK(f.target->virtual_clock().board_time().ps < start + ps_per_second);
+}
+
+TEST_CASE("the armed loop event keeps its board instant through every reset kind")
+{
+  for(auto const kind :
+      {popcorn::reset_kind::software, popcorn::reset_kind::watchdog, popcorn::reset_kind::power_on})
+  {
+    auto f = booted("calls");
+    f.target->reset(popcorn::reset_kind::software);
+    std::ignore             = f.run_to_stop({.budget_left = icount{1000}});
+    auto const& clock       = f.target->virtual_clock();
+    auto const  stamp       = clock.board_time().ps + ps_per_second / 1000;
+    auto        fired       = std::vector<std::uint64_t>{};
+    auto        fired_at_ps = std::uint64_t{};
+    auto const* clock_at    = &clock;
+    f.target->set_loop_handler([&](std::uint64_t at) {
+      fired.push_back(at);
+      fired_at_ps = clock_at->board_time().ps;
+    });
+    f.target->arm_loop(stamp);
+    f.target->reset(kind);
+    auto const base = clock.board_time().ps;
+    REQUIRE(base < stamp);
+    CHECK(clock.time().ps == 0);
+    for(auto slices = 0; slices != 1000 and fired.empty(); ++slices)
+    {
+      std::ignore = f.run({.budget_left = icount{100'000}});
+    }
+    CHECK(fired == std::vector{stamp});
+    CHECK(fired_at_ps >= stamp);
+  }
+}
+
+TEST_CASE("a loop event due before a reset fires after it, stamped at the reset")
+{
+  auto        f     = booted("calls");
+  auto const& clock = f.target->virtual_clock();
+  auto const  due   = clock.board_time().ps + 1;
+  auto        fired = std::vector<std::uint64_t>{};
+  std::ignore       = f.run_to_stop({.budget_left = icount{10}});
+  f.target->set_loop_handler([&](std::uint64_t at) { fired.push_back(at); });
+  f.target->arm_loop(due);
+  f.target->reset(popcorn::reset_kind::software);
+  auto const base = clock.board_time().ps;
+  REQUIRE(base > due);
+  std::ignore = f.run_to_stop({.budget_left = icount{10}});
+  CHECK(fired == std::vector{base});
+}
+
+TEST_CASE("a snapshot leaves the loop event out and a restore queues it again")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const plain = f.target->snapshot();
+  auto const stamp = f.target->virtual_clock().board_time().ps + ps_per_second;
+  auto       fired = std::vector<std::uint64_t>{};
+  f.target->set_loop_handler([&](std::uint64_t at) { fired.push_back(at); });
+  f.target->arm_loop(stamp);
+  auto const armed = f.target->snapshot();
+  CHECK(armed.data().events.pending == plain.data().events.pending);
+  f.target->restore(armed);
+  while(not f.run().stopped)
+  {
+  }
+  CHECK(fired == std::vector{stamp});
+}
+
+TEST_CASE("a loop event that rearms without time passing stops as a spin naming the loop")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  f.target->set_loop_handler([&](std::uint64_t at) { f.target->arm_loop(at); });
+  f.target->arm_loop(f.target->virtual_clock().board_time().ps + 1);
+  auto const stop = f.run_to_stop();
+  CHECK(stop.reason == stop_reason::spin);
+  CHECK(stop.detail.contains("loop kind 0"));
+}

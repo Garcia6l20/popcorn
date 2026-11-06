@@ -509,6 +509,10 @@ machine_handle::machine_handle(part_description const& description, machine_conf
       throw reflex::py::nb::python_error();
     }
   }
+  if(cell.is_valid())
+  {
+    models_cell_ = cell;
+  }
   std::unique_ptr<core::machine> built;
   {
     detail::building_scope const building{
