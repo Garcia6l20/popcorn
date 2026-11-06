@@ -7,7 +7,6 @@ import click
 from pcons import cli_command
 
 from popcorn_build.config import project_dir
-from popcorn_build.example_parts import extra_runs
 
 Stage = tuple[str, list[str]]
 
@@ -52,16 +51,6 @@ def _xdist(jobs: int) -> list[str]:
     return ["-n", "0" if jobs <= 1 else str(jobs)]
 
 
-def _example_part_stages(stop: list[str], workers: list[str]) -> list[Stage]:
-    return [
-        (
-            f"{path.removeprefix('examples/')}@{part}",
-            _python_tool("pytest", "-q", *stop, *workers, f"--popcorn-part={part}", path),
-        )
-        for path, part in extra_runs()
-    ]
-
-
 def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only.
 
@@ -70,11 +59,12 @@ def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list
     tests, pytest, examples and the example collection, `DEFAULT_JOBS` when None. 1 runs the tests
     serially. The examples stage runs every example on its own part, `examples-collect` collects
     each example directory in its own process to prove it runs standalone, and `examples-parts`
-    each extra part run of `popcorn_build/example_parts.py` is a stage `<chip>/<name>@<part>`.
+    runs one pytest per extra part over the examples listing that part, @p jobs at a time.
     With @p fail_fast, each test stage stops at its first failing test."""
     jobs = DEFAULT_JOBS if jobs is None else jobs
     native_stop = ["--stop-on-fail"] if fail_fast else []
     pytest_stop = ["-x"] if fail_fast else []
+    runs_stop = ["--fail-fast"] if fail_fast else []
     if asan:
         return [
             (
@@ -93,9 +83,12 @@ def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list
         ("examples", _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs), "examples")),
         (
             "examples-collect",
-            _python_tool("popcorn_build.example_runs", "collect", "--jobs", str(jobs)),
+            _python_tool("popcorn_build.example_runs", "collect", "--jobs", str(jobs), *runs_stop),
         ),
-        *_example_part_stages(pytest_stop, []),
+        (
+            "examples-parts",
+            _python_tool("popcorn_build.example_runs", "parts", "--jobs", str(jobs), *runs_stop),
+        ),
         ("docs", _python_tool("popcorn_build.docs")),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),

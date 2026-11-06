@@ -1,13 +1,13 @@
 """Which parts each shipped example runs on, and the class decoding behind that choice.
 
 The gate runs every example on its `conftest.py` part, then once more on each extra part of
-`EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped U5 and
-H5 parts, and of the STM32L1 parts of `L1_GROUP_A` and the STM32L4 parts of `L4_GROUP_A`, under
-at least one example. The other shipped STM32L1 names, every order code of the line, carry
-attach and reach evidence only, as do the shipped STM32L4 names that are neither in `L4_GROUP_A`
-nor an extra. The three L4 extras run the example rows that list them. An extra
-run moves every machine of the example onto its part, so each of the example's ELFs fits each
-extra part.
+`EXAMPLE_PARTS` through `--popcorn-part`, one pytest per part over the examples that list it.
+Together the runs put every class of the shipped U5 and H5 parts, and of the STM32L1 parts of
+`L1_GROUP_A` and the STM32L4 parts of `L4_GROUP_A`, under at least one example. The other shipped
+STM32L1 names, every order code of the line, carry attach and reach evidence only, as do the shipped
+STM32L4 names that are neither in `L4_GROUP_A` nor an extra. The three L4 extras run the example
+rows that list them. An extra run moves every machine of the example onto its part, so each of the
+example's ELFs fits each extra part.
 `python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>` line per
 extra run.
 """
