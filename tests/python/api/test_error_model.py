@@ -202,6 +202,23 @@ def _config(key: str) -> Callable[[popcorn.PopcornError], bool]:
     return lambda e: isinstance(e, popcorn.ConfigError) and key in e.key
 
 
+def refused_snapshot(_: Path, __: Machines) -> object:
+    from popcorn.arm import Reg
+    from popcorn.board import UartDevice
+    from popcorn.stm32 import mcu
+
+    device = UartDevice()
+    m = popcorn.Machine(mcu("STM32U575QGIx"), devices={"USART1": [device]})
+    m.reset()
+    m.mem.write(0x2000_0000, b"\x30\xbf\xfd\xe7")
+    m.reg[Reg.PC] = 0x2000_0000
+    m.reg[Reg.XPSR] = 1 << 24
+    m.reg[Reg.PRIMASK] = 1
+    device.loop.call_soon(device.send, b"A")
+    asyncio.run(m.run(for_=ms(1)))
+    return m.snapshot()
+
+
 CASES = [
     Case("missing description", missing_description, popcorn.ConfigError, lambda e: bool(e.args)),
     Case("missing image", missing_image, popcorn.MissingInput, _missing("absent.elf")),
@@ -251,6 +268,12 @@ CASES = [
     Case("garbage snapshot", garbage_snapshot, popcorn.ConfigError, lambda e: bool(e.args)),
     Case("state while running", state_while_running, popcorn.MachineRunning, lambda e: True),
     Case("second run", second_run, popcorn.MachineBusy, lambda e: True),
+    Case(
+        "refused snapshot",
+        refused_snapshot,
+        popcorn.SnapshotRefused,
+        lambda e: isinstance(e, popcorn.SnapshotRefused) and "USART1" in e.device,
+    ),
     Case("usb stall", usb_stall, popcorn.UsbStall, _usb("stalled")),
     Case("usb not configured", usb_not_configured, popcorn.UsbTimeout, _usb("DETACHED")),
     Case("usb no device", usb_no_device, popcorn.UsbError, _usb("cancelled")),

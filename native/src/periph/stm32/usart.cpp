@@ -248,6 +248,7 @@ struct usart_state
   std::uint32_t                                                      cts_fired{};
   std::vector<line_hold>                                             holds;
   std::uint64_t                                                      hold_events{};
+  std::vector<std::byte>                                             far_end;
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -1398,12 +1399,18 @@ void usart::clear_sequence(std::uint32_t flags)
 
 void usart::save(std::vector<std::byte>& out) const
 {
+  auto copy = state_;
+  if(far_end_)
+  {
+    far_end_->save(copy.far_end);
+  }
   if(not sci2_)
   {
-    dispatch_model::save(out);
+    reflex::serde::bson::serializer{out}.dump(copy);
     return;
   }
-  reflex::serde::bson::serializer{out}.dump(sci2_saved{.usart = state_, .sequence = sequence_});
+  reflex::serde::bson::serializer{out}.dump(
+      sci2_saved{.usart = std::move(copy), .sequence = sequence_});
 }
 
 void usart::load(std::span<std::byte const> in)
@@ -1411,13 +1418,22 @@ void usart::load(std::span<std::byte const> in)
   if(not sci2_)
   {
     dispatch_model::load(in);
-    ask_attached();
-    return;
   }
-  auto saved = reflex::serde::bson::deserializer{in}.load<sci2_saved>();
-  state_     = std::move(saved.usart);
-  sequence_  = saved.sequence;
-  ask_attached();
+  else
+  {
+    auto saved = reflex::serde::bson::deserializer{in}.load<sci2_saved>();
+    state_     = std::move(saved.usart);
+    sequence_  = saved.sequence;
+  }
+  auto const far_end = std::exchange(state_.far_end, {});
+  if(far_end.empty())
+  {
+    ask_attached();
+  }
+  else if(far_end_)
+  {
+    far_end_->load(far_end);
+  }
 }
 
 void usart::status_written(std::uint32_t old, std::uint32_t now)

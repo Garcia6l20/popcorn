@@ -11,6 +11,7 @@ import itertools
 import logging
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Coroutine
 from typing import Any, NoReturn, cast
 
@@ -58,6 +59,12 @@ async def _close_asyncgen(agen: Any) -> None:
     await agen.aclose()
 
 
+def _steps_a_task(handle: asyncio.Handle) -> bool:
+    """Whether `handle` is the step or the wakeup of a task: dropping it would leave the task
+    stuck, so it stays for the cancel to reach the task."""
+    return isinstance(getattr(cast(Any, handle)._callback, "__self__", None), asyncio.Task)
+
+
 class _Timer(asyncio.TimerHandle):
     """A timer whose cancel from outside a step withdraws the machine event it armed."""
 
@@ -99,9 +106,20 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     reset's stamp, so reset after running past what the stack awaits.
 
     Resets: the loop and its timers go on through every reset kind, each timer at its instant.
-    `UartDevice.reset` is told, and a device cancels what it wants there. A snapshot holds nothing
-    of the loop. A restore leaves its timers and tasks in place, and stamps count from the restored
-    clock.
+    `UartDevice.reset` is told, and a device cancels what it wants there.
+
+    Restores: a snapshot holds nothing of the loop. A restore empties the loop ahead of the
+    machine's state, on the thread calling `restore`, with the machine parked: it drops every timer
+    and ready callback, cancels every task and runs it to its `finally`, closes each async generator
+    left unfinished, and clears the exception handler and the task factory. A `finally` sees the old
+    timeline, an `await` in it that stays pending past that drain ends with its task, and a machine
+    call that needs the machine parked raises `MachineRunning` there. Stamps then count from the
+    restored clock, and each `UartDevice` rebuilds its stack, see `UartDevice.restore`. An error
+    from a `finally` raises from `restore` as a `ModelError` once the restore has finished, the
+    machine usable, the first one raised and the others as its notes. A device sets its handler
+    again in `restore`. The machine's context starts again from its copy made at `Machine()`, so a
+    contextvar a stack set ends with the stack. The `popcorn.pytest` fixtures empty the loop of a
+    lent machine at the end of each test too, so its errors land on that test.
 
     Threads: callbacks and tasks run on the machine's thread. A parked machine takes `call_soon`,
     `call_later`, `call_at`, `create_task` and a timer's `cancel` from the test thread, and they run
@@ -155,6 +173,9 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._closed = False
         self._closing = False
         self._close_pending = False
+        self._emptying = False
+        self._dropped: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+        self._at_fire: list[Callable[[], None]] = []
         self._debug = False
         self._task_factory: Any = None
         self._exception_handler: Any = None
@@ -360,6 +381,8 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         known = set(pending)
         others = [task for task in asyncio.all_tasks(self) if task not in known]
         pending += sorted(others, key=lambda task: task.get_name())
+        self._at_fire.clear()
+        self._ready = collections.deque(h for h in self._ready if _steps_a_task(h))
         entered = self._enter()
         try:
             for task in pending:
@@ -444,7 +467,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             cast(Any, heapq.heappop(timers)[2])._scheduled = False
             self._cancelled_timers -= 1
         due: int | None
-        if self._ready:
+        if self._ready or self._at_fire:
             if self._armed is not None and self._armed <= now:
                 return
             due = now
@@ -464,7 +487,26 @@ class VirtualLoop(asyncio.AbstractEventLoop):
 
     def _fire(self, stamp: int) -> None:
         self._armed = None
-        self._step(stamp, None, ())
+        at_fire = self._at_fire
+        if at_fire:
+            self._at_fire = []
+            self._step(stamp, self._run_at_fire, (at_fire,))
+        else:
+            self._step(stamp, None, ())
+
+    def _run_at_fire(self, callbacks: list[Callable[[], None]]) -> None:
+        for callback in callbacks:
+            self._call_hook(callback, ())
+
+    def _call_at_fire(self, callback: Callable[[], None]) -> None:
+        """Run `callback` at the start of the loop's next event, which runs behind every other
+        event of its count, so what was pending at the restored clock has run by then."""
+        if self._stepping == _get_ident():
+            self._at_fire.append(callback)
+            return
+        now = self._time_ps()
+        self._at_fire.append(callback)
+        self._arm(now)
 
     def _run_hook(self, at: int, hook: Callable[..., None], *args: Any) -> None:
         """Run a device hook at `at`, in `Machine.time`'s base, inside a step, and the step on to
@@ -574,7 +616,9 @@ class VirtualLoop(asyncio.AbstractEventLoop):
 
     def _task_done(self, task: asyncio.Task[Any]) -> None:
         self._tasks.pop(task, None)
-        if cast(Any, task)._log_traceback:
+        if task in self._dropped:
+            cast(Any, task)._log_traceback = False
+        elif cast(Any, task)._log_traceback:
             self._failed.append(task)
 
     def _settle_failed(self) -> None:
@@ -602,15 +646,18 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             return
         self._settle_failed()
         self._arm(self._now_ps)
+        error = self._take_error()
+        if error is not None:
+            raise error
+
+    def _take_error(self) -> ModelError | None:
         if self._overrun is not None:
             overrun = self._overrun
             self._overrun = None
             self._errors.clear()
-            raise overrun
-        if self._errors:
-            self._raise_errors()
-
-    def _raise_errors(self) -> NoReturn:
+            return overrun
+        if not self._errors:
+            return None
         first, *others = self._errors
         self._errors = []
         cause = first.get("exception")
@@ -621,7 +668,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             error.__cause__ = cause
         for other in others:
             error.add_note(f"then {other.get('message')}: {other.get('exception')!r}")
-        raise error
+        return error
 
     def _note_asyncgen(self, agen: Any) -> None:
         self._asyncgens[agen] = None
@@ -629,12 +676,100 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             self._asyncgens = {a: None for a in self._asyncgens if a.ag_frame is not None}
             self._asyncgen_sweep = max(_ASYNCGEN_SWEEP_FROM, 2 * len(self._asyncgens))
 
+    def _empty(self) -> ModelError | None:
+        """Drop everything the loop holds, the loop left open, see the class doc.
+
+        Returns:
+            What a `finally` or a callback run here raised, as `_finish` raises it.
+        """
+        if self._closed:
+            return None
+        port = self._port
+        assert port is not None
+        self._now_ps = self._time_ps()
+        self._base_ps = port.board_base_ps()
+        self._callbacks = 0
+        self._emptying = True
+        try:
+            self._drop_timers()
+            self._ready = collections.deque(h for h in self._ready if _steps_a_task(h))
+            entered = self._enter()
+            try:
+                for task in self._unfinished():
+                    task.cancel()
+                self._drain()
+                for agen in list(self._asyncgens):
+                    self.create_task(_close_asyncgen(agen))
+                self._drain()
+                self._drop_tasks()
+            finally:
+                self._leave(entered)
+            self._settle_failed()
+        finally:
+            self._emptying = False
+        self._at_fire.clear()
+        self._drop_timers()
+        for handle in self._ready:
+            asyncio.Handle.cancel(handle)
+        self._ready.clear()
+        self._tasks.clear()
+        self._asyncgens.clear()
+        self._cancelled_timers = 0
+        error = self._take_error()
+        self._exception_handler = None
+        self._task_factory = None
+        self._now_ps = 0
+        self._stamp_counted = -1
+        self._armed = None
+        port.disarm()
+        if self._close_pending:
+            self._close_pending = False
+            self._close_now()
+        return error
+
+    def _unfinished(self) -> list[asyncio.Task[Any]]:
+        known = [task for task in self._tasks if task not in self._dropped]
+        others = [
+            task
+            for task in asyncio.all_tasks(self)
+            if task not in self._tasks and task not in self._dropped
+        ]
+        return known + sorted(others, key=lambda task: task.get_name())
+
+    def _drop_timers(self) -> None:
+        for _, _, handle in self._timers:
+            cast(Any, handle)._scheduled = False
+            asyncio.TimerHandle.cancel(handle)
+        self._timers.clear()
+
+    def _drop_tasks(self) -> None:
+        for task in self._unfinished():
+            self._dropped.add(task)
+            cast(Any, task)._log_destroy_pending = False
+            try:
+                task.get_coro().close()  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
+            except RuntimeError as error:
+                _logger.error("%s: dropped %s: %s", self._name, task.get_name(), error)
+            except Exception as error:
+                self.call_exception_handler(
+                    {
+                        "message": f"task {task.get_name()} raised as it was dropped",
+                        "exception": error,
+                        "task": task,
+                    }
+                )
+
     def _rewound(self) -> None:
         """The machine restored a snapshot: stamps count from its clock again."""
         port = self._port
         assert port is not None
         self._now_ps = port.board_time_ps()
+        self._base_ps = port.board_base_ps()
         self._stamp_counted = -1
+
+    def _is_emptying(self) -> bool:
+        """Whether a restore is emptying the loop."""
+        return self._emptying
 
     def _stepping_here(self) -> bool:
         """Whether a step runs on the calling thread."""

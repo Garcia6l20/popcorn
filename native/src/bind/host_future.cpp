@@ -537,6 +537,15 @@ auto on_host_thread() -> bool
   return core::detail::on_host_thread;
 }
 
+void run_in_cell(reflex::py::nb::handle weak_cell, reflex::py::nb::handle callable)
+{
+  detail::cell_entry const entered{weak_cell};
+  if(not entered.dead())
+  {
+    callable();
+  }
+}
+
 auto host_locks_held() -> std::uint64_t
 {
   return static_cast<std::uint64_t>(core::detail::host_locks_held);

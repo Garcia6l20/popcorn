@@ -630,8 +630,10 @@ public:
   /**
    * @brief Arms the machine's one loop event at a board time, clock::board_time(), replacing the
    *        one armed. It is a queue entry on host_lane of owner loop_event_owner, so the idle jump
-   *        reaches it. It keeps its instant through every reset and restore, a due before the reset
-   *        or the restored clock moving to that time, and a snapshot leaves it out.
+   *        reaches it, behind every other event of its count, and it takes no sequence number, so
+   *        the saved sequence counters and the saved events' numbers do not follow it. It keeps
+   *        its instant through every reset and restore, a due before the reset or the restored
+   *        clock moving to that time, and a snapshot leaves it out.
    * @param board_ps Board time in picoseconds. A time already passed fires at the next dispatch.
    */
   void arm_loop(std::uint64_t board_ps);
@@ -694,6 +696,16 @@ public:
    *         `trustzone` when its `machine_options::trustzone` or `machine_options::idau` differs.
    */
   void restore(core::snapshot const& saved);
+
+  /**
+   * @brief Runs every refusal of restore() and changes nothing.
+   * @param saved Snapshot to check.
+   * @throws machine_running As restore().
+   * @throws machine_busy As restore().
+   * @throws emulation_error As restore().
+   * @throws config_error As restore().
+   */
+  void check_restore(core::snapshot const& saved);
 
   /**
    * @brief Intercepts calls to a code address: a code hook on exactly that address, with the
@@ -895,6 +907,8 @@ public:
   [[nodiscard]] auto clock_gated(std::string_view name) const -> bool;
 
 private:
+  void restore_checked(core::snapshot const& saved, bool apply);
+
   struct engine_closer
   {
     void operator()(uc_struct* engine) const noexcept;

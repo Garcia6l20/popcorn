@@ -1101,6 +1101,15 @@ public:
       restore(snapshot_handle const& saved);
 
   /**
+   * @brief Runs every refusal of restore() and changes nothing.
+   * @param saved The snapshot.
+   * @throws config_error As restore().
+   * @throws emulation_error As restore().
+   */
+  [[= py::doc{"Raise what restore would refuse with, changing nothing."}]] void
+      check_restore(snapshot_handle const& saved);
+
+  /**
    * @brief Begins a guest function call, saving the interrupted context.
    * @param frame The call.
    * @throws machine_busy when a call is already in progress.

@@ -123,13 +123,13 @@ TEST_CASE("a saved form with a future format is a config_error")
   CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
 }
 
-TEST_CASE("a saved form of format 14 is a config_error naming the format")
+TEST_CASE("a saved form of format 15 is a config_error naming the format")
 {
   auto data   = filled();
-  data.format = 14;
+  data.format = 15;
   CHECK_THROWS_WITH_AS(
       std::ignore = core::decode_snapshot(core::encode_snapshot(data)),
-      doctest::Contains("format, expected snapshot_format_version 15, bytes have 14"),
+      doctest::Contains("format, expected snapshot_format_version 16, bytes have 15"),
       popcorn::config_error);
 }
 

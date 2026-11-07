@@ -160,6 +160,16 @@ auto machine::snapshot() const -> core::snapshot
 
 void machine::restore(core::snapshot const& saved)
 {
+  restore_checked(saved, true);
+}
+
+void machine::check_restore(core::snapshot const& saved)
+{
+  restore_checked(saved, false);
+}
+
+void machine::restore_checked(core::snapshot const& saved, bool apply)
+{
   require_stopped(*this);
   if(in_call())
   {
@@ -318,6 +328,10 @@ void machine::restore(core::snapshot const& saved)
       }
     }
     plan.models.push_back(part);
+  }
+  if(not apply)
+  {
+    return;
   }
 
   auto& run   = *run_;

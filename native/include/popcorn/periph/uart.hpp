@@ -214,8 +214,23 @@ public:
   {}
 
   /**
+   * @brief Appends the endpoint's state to the snapshot bytes of its UART. The default adds none.
+   * @param out The bytes to append to.
+   */
+  virtual void save([[maybe_unused]] std::vector<std::byte>& out) const
+  {}
+
+  /**
+   * @brief Loads what save() appended, called only when it appended something.
+   * @param in The bytes save() appended.
+   */
+  virtual void load([[maybe_unused]] std::span<std::byte const> in)
+  {}
+
+  /**
    * @brief Whether the endpoint waits for attached(). The UART then posts one event at the current
-   *        time after each reset and each snapshot load. The default is false.
+   *        time after each reset, and after a snapshot load when the snapshot holds nothing of the
+   *        endpoint. The default is false.
    * @return Whether attached() is due.
    */
   [[nodiscard]] virtual auto awaiting_attach() const -> bool

@@ -58,7 +58,9 @@ from popcorn._errors import (
     FaultError,
     MachineBusy,
     MachineRunning,
+    ModelError,
     SymbolError,
+    raise_first,
 )
 from popcorn._hooks import (
     CallbackTable,
@@ -297,11 +299,20 @@ class _ContextCell:
     current at `Machine()`, and the exceptions that ended free runs, by token, each while native
     code holds its end. Native code holds the cell weakly, so a cycle through it is collectable."""
 
-    __slots__ = ("__weakref__", "context", "held")
+    __slots__ = ("__weakref__", "context", "first", "held")
 
     def __init__(self, context: contextvars.Context) -> None:
         self.context = context
+        self.first = context.copy()
         self.held: dict[int, BaseException] = {}
+
+    def restart(self) -> None:
+        """Run the next callbacks in a new copy of the context current at `Machine()`."""
+        self.context = self.first.copy()
+
+    def run(self, callback: Callable[[], object]) -> None:
+        """Call `callback` in the context, so a callback native code enters inside it nests."""
+        _core.run_in_cell(weakref.ref(self), callback)
 
 
 def _check_duration(for_: VirtualDuration | None) -> None:
@@ -674,6 +685,7 @@ class Machine:
         "_posted_bodies",
         "_refs",
         "_registers",
+        "_restore_done",
         "_ring",
         "_sentinel",
         "_strict_peripherals",
@@ -898,6 +910,7 @@ class Machine:
         self._devices = attached
         self._callback_table = CallbackTable()
         self._pin_watches = PinWatches()
+        self._restore_done = False
         self._loop: VirtualLoop | None = None
         for peripheral, targets in attached.items():
             for target in targets:
@@ -1012,7 +1025,8 @@ class Machine:
             loop = self._loop
             if loop is None:
                 loop = VirtualLoop(self._name)
-                key = self._callback_table.add(loop._fire)  # pyright: ignore[reportPrivateUsage]
+                fire = loop._fire  # pyright: ignore[reportPrivateUsage]
+                key = self._callback_table.add(fire, in_caller=True)
                 loop._bind(  # pyright: ignore[reportPrivateUsage]
                     self._handle.virtual_loop_port_of(Relay(self._callback_table, key, quiet=True))
                 )
@@ -2475,6 +2489,7 @@ class Machine:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: its state is taken with
                 the others, `System.snapshot`.
+            SnapshotRefused: A `UartDevice` refused, see `UartDevice.snapshot`.
         """
         self._refuse_member("snapshot")
         return self._snapshot()
@@ -2497,6 +2512,9 @@ class Machine:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: restore it with the
                 others, `System.restore`.
+            ModelError: Once the restore has finished, the machine usable: a `finally` that ran as
+                the loop was emptied raised, or a `UartDevice.restore` did. The first one, the
+                others as its notes.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -2512,10 +2530,17 @@ class Machine:
         yet sent, and its streams run or not as the snapshot had them. A `PdmMic` drops its
         queued input, resets its modulator and clears `idle_bits`, a `FilterTap` drops the
         samples not read yet and `dropped` restarts at 0.
+
+        The machine's `VirtualLoop` is emptied ahead of the machine's state, and each `UartDevice`
+        then rebuilds its stack through `UartDevice.restore`. A `DeviceBoard.watch_pin` watch stays,
+        and pin levels change with no edge. A refused restore has changed none of it. Every hook
+        of the machine, a Python model's and a bus device's too, then runs in a new copy of the
+        context current at `Machine()`, so a contextvar a hook set ends at the restore.
         """
+        self._restore_done = False
         self._refuse_member("restore")
         self._check_snapshot(snapshot)
-        self._restore(snapshot)
+        raise_first(self._restore(snapshot))
 
     def _check_snapshot(self, snapshot: Snapshot) -> None:
         self._require_idle()
@@ -2528,12 +2553,81 @@ class Machine:
                 key="machine",
                 expected="restore into the machine that took it, or load its saved form",
             )
+        self._handle.check_restore(snapshot.native)
 
-    def _restore(self, snapshot: Snapshot) -> None:
+    def _restore(self, snapshot: Snapshot) -> list[ModelError]:
+        """Empty, restore and rebuild, the refusals already run.
+
+        Returns:
+            What raised on the way, for the caller to raise once its restore has finished.
+        """
+        self._require_idle()
+        error = self._emptied()
+        try:
+            self._restore_state(snapshot)
+        except BaseException as failed:
+            if error is not None:
+                failed.add_note(f"then {error}")
+            raise
+        return ([] if error is None else [error]) + self._rebuilt()
+
+    def _emptied(self) -> ModelError | None:
+        """Empty the loop and restart the machine's context.
+
+        Returns:
+            What a `finally` raised as the loop was emptied.
+        """
+        loop = self._loop
+        error = None if loop is None else loop._empty()  # pyright: ignore[reportPrivateUsage]
+        self._model_context.restart()
+        return error
+
+    def _pin_watch_keys(self) -> set[int]:
+        """The keys of the pin watches standing, for `_end_pin_watches_but`."""
+        return set(self._pin_watches)
+
+    def _end_pin_watches_but(self, kept: set[int]) -> None:
+        """End every pin watch whose key is not in `kept`."""
+        for key in list(self._pin_watches):
+            if key not in kept:
+                Unwatch(self._pin_watches, self._callback_table, key).remove()
+
+    def _rebuilt(self) -> list[ModelError]:
+        """Set the loop's stamp from the restored clock and call each `UartDevice.restore`.
+
+        Returns:
+            What raised.
+        """
+        if self._loop is None:
+            return []
+        self._loop._rewound()  # pyright: ignore[reportPrivateUsage]
+        errors: list[ModelError] = []
+        for device in self._uart_devices():
+            try:
+                self._model_context.run(device._rebuild)  # pyright: ignore[reportPrivateUsage]
+            except ModelError as error:
+                errors.append(error)
+        return errors
+
+    def _uart_devices(self) -> list[UartDevice]:
+        return [
+            device
+            for targets in self._devices.values()
+            for device in targets
+            if isinstance(device, UartDevice)
+        ]
+
+    def _check_devices_snapshot(self) -> None:
+        """Raise what the `snapshot` of each Python device raises, ahead of any change."""
+        for targets in self._devices.values():
+            for device in targets:
+                if isinstance(device, I2CTarget | SpiTarget | UartDevice):
+                    self._model_context.run(device._save)  # pyright: ignore[reportPrivateUsage]
+
+    def _restore_state(self, snapshot: Snapshot) -> None:
         self._require_idle()
         self._handle.restore(snapshot.native)
-        if self._loop is not None:
-            self._loop._rewound()  # pyright: ignore[reportPrivateUsage]
+        self._restore_done = True
         self._last_stop = None
         self._ports.discard()
         self._audio.discard()
@@ -2767,6 +2861,7 @@ class Machine:
         run: bool = False,
         returning: _Resolver | None = None,
     ) -> Stop:
+        self._refuse_in_step()
         self._last_stop = None
         system = self._linked()
         if system is not None:
@@ -3085,6 +3180,7 @@ class Machine:
         for_: VirtualDuration | None,
         deadline: VirtualTime | None = None,
     ) -> Stop:
+        self._refuse_in_step()
         self._last_stop = None
         system = self._linked()
         if system is not None:
@@ -3371,7 +3467,12 @@ class Machine:
                 f" system's {what}()"
             )
 
+    def _refuse_in_step(self) -> None:
+        if self._loop is not None and self._loop.is_running():
+            raise MachineRunning(f"{_RUNNING}, handlers included")
+
     def _require_idle(self) -> None:
+        self._refuse_in_step()
         if self.busy:
             raise MachineRunning(f"{_RUNNING}, handlers included")
 
@@ -3389,7 +3490,7 @@ class Machine:
     def _device_pin_watch(
         self, port: str, pin: int, handler: Callable[[bool, int], None]
     ) -> Unwatch:
-        key = self._callback_table.add(handler)
+        key = self._callback_table.add(handler, in_caller=True)
         try:
             native = self._handle.gpio_watch(
                 port, pin, Relay(self._callback_table, key, quiet=True)

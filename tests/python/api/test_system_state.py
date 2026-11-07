@@ -514,7 +514,7 @@ def test_a_failed_restore_gives_every_member_its_state_back(
     handle = system._handle  # pyright: ignore[reportPrivateUsage]
     failing_load = cast(_core.SystemHandle, FailingLoad(handle))
     system._handle = failing_load  # pyright: ignore[reportPrivateUsage]
-    restore = popcorn.Machine._restore  # pyright: ignore[reportPrivateUsage]
+    restore = popcorn.Machine._restore_state  # pyright: ignore[reportPrivateUsage]
     calls: list[popcorn.Machine] = []
 
     def failing(machine: popcorn.Machine, snapshot: popcorn.Snapshot) -> None:
@@ -523,7 +523,7 @@ def test_a_failed_restore_gives_every_member_its_state_back(
             raise ValueError("a refused its own state")
         restore(machine, snapshot)
 
-    monkeypatch.setattr(popcorn.Machine, "_restore", failing)
+    monkeypatch.setattr(popcorn.Machine, "_restore_state", failing)
     with pytest.raises(ValueError, match="a refused") as raised:
         system.restore(taken)
     assert isinstance(raised.value.__cause__, popcorn.ConfigError)

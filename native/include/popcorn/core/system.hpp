@@ -314,8 +314,10 @@ public:
   void load(held_system const& held, std::span<std::byte const> in) pre(held.holds(*this));
 
   /**
-   * @brief Checks that load() would accept @p in, changing nothing: the same refusals, the
-   *        document, its members and links, and every link's state, each loaded and put back.
+   * @brief Checks that load() would accept @p in, changing nothing: the same refusals on the
+   *        state, the document, its members and links, and every link's state, each loaded and put
+   *        back. A goal, a held entry, a member stop not delivered and a system not started pass
+   *        here, so a caller can check before it releases a stop, and load() refuses those.
    *        For a caller that restores the member machines before load() and must know first.
    * @throws config_error, std::logic_error as load().
    */

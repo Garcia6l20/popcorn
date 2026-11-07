@@ -1590,6 +1590,19 @@ TEST_CASE("the armed loop event is reached by the idle jump and fires once with 
   CHECK(f.target->virtual_clock().board_time().ps >= stamp);
 }
 
+TEST_CASE("an armed loop event takes no sequence number and a snapshot does not hold it")
+{
+  auto       f      = booted("calls");
+  auto const before = f.target->snapshot();
+  f.target->arm_loop(f.target->virtual_clock().board_time().ps + 1'000'000);
+  f.target->arm_loop(f.target->virtual_clock().board_time().ps + 2'000'000);
+  auto const after = f.target->snapshot();
+  CHECK(after.data().events.next_seq == before.data().events.next_seq);
+  CHECK(after.data().events.next_lane_seq == before.data().events.next_lane_seq);
+  CHECK(after.data().events.pending == before.data().events.pending);
+  f.target->disarm_loop();
+}
+
 TEST_CASE("a loop event that fired does not come back at a reset")
 {
   auto       f     = booted("calls");

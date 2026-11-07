@@ -234,6 +234,28 @@ class ModelError(PopcornError):
         self.offset = offset
 
 
+class SnapshotRefused(PopcornError):
+    """A device cannot be snapshotted in its current state: `popcorn.board.UartDevice.snapshot`.
+
+    Attributes:
+        device: The device, as `repr` gives it.
+    """
+
+    def __init__(self, message: str, *, device: str = "") -> None:
+        super().__init__(message)
+        self.device = device
+
+
+def raise_first(errors: Sequence[ModelError]) -> None:
+    """Raise the first of `errors`, the others as its notes. Does nothing without any."""
+    if not errors:
+        return
+    first, *others = errors
+    for other in others:
+        first.add_note(f"then {other}")
+    raise first
+
+
 class UnmodelledConfig(ModelError):
     """A model met a register setting it does not implement. Raised by the MDF and ADF models
     when the setting takes effect, such as an enable bit set with an unmodelled mode.

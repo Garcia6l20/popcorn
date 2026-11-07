@@ -681,6 +681,11 @@ void machine_handle::restore(snapshot_handle const& saved)
   });
 }
 
+void machine_handle::check_restore(snapshot_handle const& saved)
+{
+  access([&](core::machine& target) { target.check_restore(saved.native()); });
+}
+
 auto machine_handle::open_uart_pty(std::string name, uart_queue const& link) -> pty_handle
 {
   return open_pty(std::move(name), link.bridged_link());

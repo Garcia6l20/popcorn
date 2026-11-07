@@ -1238,24 +1238,26 @@ def test_cancelled_timers_do_not_pile_up(u575: popcorn.PartDescription) -> None:
     assert len(timers) <= 202
 
 
-def test_a_snapshot_leaves_the_armed_event_out_and_the_timer_goes_on(
+def test_a_snapshot_leaves_the_armed_event_out_and_a_restore_drops_the_timer(
     u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     fired: list[int] = []
     m = asleep(u575)
-    m.loop.call_later(0.001, lambda: fired.append(stamp(m.loop)))
+    timer = m.loop.call_later(0.001, lambda: fired.append(stamp(m.loop)))
     armed = m.snapshot()
     path = tmp_path / "armed.snapshot"
     armed.save(path)
     run(m, us(10))
     m.restore(armed)
     assert stamp(m.loop) == m.time.ps
+    assert timer.cancelled()
+    assert m.loop._armed is None  # pyright: ignore[reportPrivateUsage]
     run(m, ms(2))
-    assert fired == [ms(1).ps]
+    assert fired == []
     other = popcorn.Machine(u575)
     other.restore(other.load_snapshot(path))
     run(other, ms(2))
-    assert len(fired) == 1
+    assert fired == []
 
 
 def test_a_stamp_after_a_restore_counts_from_the_restored_clock(
@@ -1942,15 +1944,11 @@ def lone_load(m: popcorn.Machine) -> None:
     m.load(popcorn.Image.elf(BOARD_ELF))
 
 
-def lone_restore(m: popcorn.Machine) -> None:
-    m.restore(m.snapshot())
-
-
 def lone_remove_hooks(m: popcorn.Machine) -> None:
     m.remove_hooks()
 
 
-@pytest.mark.parametrize("operation", [lone_step, lone_load, lone_restore, lone_remove_hooks])
+@pytest.mark.parametrize("operation", [lone_step, lone_load, lone_remove_hooks])
 def test_an_operation_on_a_lone_machine_with_a_device_keeps_its_loop(
     u575: popcorn.PartDescription, operation: Callable[[popcorn.Machine], object]
 ) -> None:

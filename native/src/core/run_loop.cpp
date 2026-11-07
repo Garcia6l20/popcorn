@@ -227,7 +227,7 @@ void machine::run_state::post_loop()
   auto const& clock = owner.clock_;
   auto const  base  = clock.board_time().ps - clock.time().ps;
   auto const  stamp = std::max(*loop_armed_ps, base);
-  loop_seq          = owner.scheduler_.schedule_at(
+  loop_seq          = owner.scheduler_.schedule_unnumbered(
       vtime{stamp - base}, event_id{.owner = loop_event_owner, .kind = 0}, stamp, host_lane, clock);
 }
 

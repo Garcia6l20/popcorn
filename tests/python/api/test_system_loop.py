@@ -706,10 +706,6 @@ def member_start_halt(system: System, _: popcorn.Machine) -> None:
     asyncio.run(body())
 
 
-def member_restore(system: System, _: popcorn.Machine) -> None:
-    system.restore(system.snapshot())
-
-
 def member_step(_: System, a: popcorn.Machine) -> None:
     asyncio.run(a.step())
 
@@ -729,7 +725,6 @@ def member_remove_hooks(_: System, a: popcorn.Machine) -> None:
 @pytest.mark.parametrize(
     "operation",
     [
-        member_restore,
         member_step,
         member_load,
         member_mem,

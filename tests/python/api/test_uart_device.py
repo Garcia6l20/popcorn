@@ -448,7 +448,7 @@ def test_a_restored_snapshot_attaches_a_fresh_device_once(
     assert len(second.attaches) == 1
     m.restore(saved)
     asyncio.run(m.run(for_=us(10)))
-    assert len(first.attaches) == 1
+    assert len(first.attaches) == 2
 
 
 @pytest.mark.parametrize(
@@ -1537,8 +1537,15 @@ def test_a_restored_machine_with_rts_held_goes_on_from_the_held_level(
             if not ready:
                 self.send(b"\x43", obey_rts=False)
 
+    class Saving(Opening):
+        def snapshot(self) -> bytes:
+            return b""
+
+        def restore(self, data: bytes) -> None:
+            pass
+
     frame_ps = frame_time(row)
-    m = asleep(row, {"USART1": [Opening(held_rts)]}, rtse=True)
+    m = asleep(row, {"USART1": [Saving(held_rts)]}, rtse=True)
     asyncio.run(m.run(for_=ms(5)))
     path = tmp_path / "held.snapshot"
     m.snapshot().save(path)

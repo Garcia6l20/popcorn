@@ -376,14 +376,14 @@ public:
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::uart_endpoint through the
- *        private methods `_attached`, `_frame`, `_break`, `_aborted`, `_reset` and `_rts` that
- *        `popcorn.board.UartDevice` defines. Times cross as picoseconds since the last reset. The
- *        engine calls it only through an attachment.
+ *        private methods `_attached`, `_frame`, `_break`, `_aborted`, `_reset`, `_rts`, `_save` and
+ *        `_load` that `popcorn.board.UartDevice` defines. Times cross as picoseconds since the last
+ *        reset. The engine calls it only through an attachment.
  */
 class python_uart_device final : public periph::uart_endpoint
 {
 public:
-  NB_TRAMPOLINE(periph::uart_endpoint, 6);
+  NB_TRAMPOLINE(periph::uart_endpoint, 8);
 
   /**
    * @brief A device hearing RTS edges or not, fixed for its life.
@@ -483,7 +483,9 @@ public:
 /**
  * @brief One machine's attachment of a Python UART device. Every hook call takes the GIL,
  *        awaiting_attach() and hears_rts() take none. attached() calls the device once for the
- *        attachment's life.
+ *        attachment's life. Its snapshot bytes are whether that happened, then what `_save`
+ *        returned, and load() hands both to `_load`, which only keeps them: the device's `restore`
+ *        runs once the machine has finished its restore.
  */
 class attached_uart_device final : public periph::uart_endpoint,
                                    public attachment<python_uart_device>
@@ -540,6 +542,21 @@ public:
     attach_done_ = true;
     gil_entry const gil;
     invoke("_attached", at.ps);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    out.push_back(attach_done_ ? std::byte{1} : std::byte{0});
+    gil_entry const gil;
+    append(invoke("_save"), out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    attach_done_         = in.front() != std::byte{0};
+    auto const      data = in.subspan(1);
+    gil_entry const gil;
+    invoke("_load", attach_done_, nb::bytes(data.data(), data.size()));
   }
 
 private:

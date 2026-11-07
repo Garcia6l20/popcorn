@@ -13,7 +13,7 @@ from typing import cast
 
 from popcorn import _core
 from popcorn._enums import I2CError, I2CPhase, PinMode, ResetKind, UartError
-from popcorn._errors import ConfigError, ModelError
+from popcorn._errors import ConfigError, ModelError, SnapshotRefused
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn._virtual_loop import VirtualLoop
@@ -274,8 +274,25 @@ class DeviceBoard:
 
         Reading a pin inside the callback gives its level at the callback's dispatch, after every
         store of the block that ended there. A pin nobody watches costs no event and no GIL entry.
-        The watch stays across every machine reset, which changes levels with no edge and drops the
-        edges still pending, so read `pin_level` after one.
+        The watch stays across every machine reset and restore, which change levels with no edge,
+        so read `pin_level` after one. A reset drops the edges still pending. A restore brings back
+        those its snapshot holds, and the watches standing hear them as the run that went on heard
+        them. A snapshot holds no watch, so a new machine has none until a stack makes it. When a
+        `UartDevice`'s default `restore` runs `on_attach` again, the watches the device made from
+        the loop end just before it, after those edges, as `on_attach` makes them again.
+
+        A `UartDevice`'s watch made from the loop belongs to its stack: an edge delivered to it
+        after the attach stamp counts as traffic, so the default `snapshot` refuses, since a stack
+        started again would lose what the edge told it. That holds for an edge pending at a restore
+        too, which reaches the old watch ahead of the rerun, as the run that went on heard it, so
+        both refuse the next default `snapshot`. What that edge arms stays beside the new stack, so
+        a stack that arms from the edge and from the level in `on_attach` checks it armed once. At
+        the attach stamp an edge does not count: a rerun reads the same level with `pin_level`. A
+        watch made from the test thread counts nothing. A device that overrides `snapshot` decides
+        for itself.
+
+        `on_edge` runs in the context of the machine's hooks, whichever thread made the watch, see
+        `Machine.restore`.
 
         Raises:
             TypeError: `pin` is no str or `on_edge` not callable.
@@ -291,14 +308,21 @@ class DeviceBoard:
         machine = self._machine()
         loop = machine.loop
         stamp_of = loop._stamp_since_reset  # pyright: ignore[reportPrivateUsage]
+        stepping = loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        stack = self._device if stepping and isinstance(self._device, UartDevice) else None
 
         def edge(level: bool, at_ps: int) -> None:
             def held_at_the_stamp() -> None:
+                if stack is not None:
+                    stack._note_pin()  # pyright: ignore[reportPrivateUsage]
                 self._called("on_edge", on_edge, level, VirtualTime(stamp_of()))
 
             loop._run_hook(at_ps, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
 
-        return machine._device_pin_watch(port, number, edge)  # pyright: ignore[reportPrivateUsage]
+        watch = machine._device_pin_watch(port, number, edge)  # pyright: ignore[reportPrivateUsage]
+        if stack is not None:
+            stack._note_watch(watch)  # pyright: ignore[reportPrivateUsage]
+        return watch
 
     def drive_pin(self, pin: str, level: bool, *, at: VirtualTime | None = None) -> None:
         """Drive `pin` to `level` from outside the MCU at `at`, or at `now` when None, as
@@ -309,6 +333,13 @@ class DeviceBoard:
         machine's `VirtualLoop`, as `UartDevice.send` does, so a call from the test while the
         machine is parked goes through `Machine.loop.call_soon`, which makes it a timer at the
         machine's clock.
+
+        From a `UartDevice` after the attach stamp it counts as traffic, so the default `snapshot`
+        refuses, since a rerun of `on_attach` would drive the firmware's input again. So does a
+        call at the attach stamp with `at` past it. A drive at the attach stamp does not count: a
+        rerun repeats it at the restored clock. A drive from `restore` does not count either, at
+        any place against `super().restore`, unless its `at` lies past the restored clock: every
+        restore repeats it.
 
         Raises:
             TypeError: `level` is no bool, or `at` no `VirtualTime`.
@@ -340,6 +371,9 @@ class DeviceBoard:
         if start > MAX_PS:
             raise ValueError(f"a drive_pin at {at} leaves the 64-bit picosecond range")
         machine._device_pin_drive(port, number, level, start)  # pyright: ignore[reportPrivateUsage]
+        device = self._device
+        if isinstance(device, UartDevice):
+            device._note_pin(later=start > now)  # pyright: ignore[reportPrivateUsage]
 
     def pin_level(self, pin: str) -> bool:
         """Level of `pin` as its input data register reads it, whatever its mode. An alternate
@@ -636,7 +670,9 @@ class I2CTarget(_core.I2CTargetBase):
         """The machine was reset. Does nothing by default."""
 
     def snapshot(self) -> bytes:
-        """The target state as bytes: the declared state fields, in declaration order."""
+        """The target state as bytes: the declared state fields, in declaration order.
+        `System.snapshot` and `System.restore` call it once more ahead of any change and drop those
+        bytes, so it changes no state."""
         return _snapshot(self, I2CTarget)
 
     def restore(self, data: bytes) -> None:
@@ -753,7 +789,9 @@ class SpiTarget(_core.SpiTargetBase):
         """The machine was reset. Does nothing by default."""
 
     def snapshot(self) -> bytes:
-        """The device state as bytes: the declared state fields, in declaration order."""
+        """The device state as bytes: the declared state fields, in declaration order.
+        `System.snapshot` and `System.restore` call it once more ahead of any change and drop those
+        bytes, so it changes no state."""
         return _snapshot(self, SpiTarget)
 
     def restore(self, data: bytes) -> None:
@@ -1153,15 +1191,37 @@ class UartDevice(_core.UartDeviceBase):
     rising `on_rts`, and a frame the firmware started, whose end counts from its store.
 
     Order: hooks and timers run as machine events in instruction count order. At one count lane,
-    then post order decides, the frame hooks ahead of `on_rts`, `on_error` and the timers, and a
-    hook's `at` is held at the last stamp, so `at == now` in every hook and `time()` never goes
-    back. `at` moves by under one instruction period, only at this coincidence, the same way on
-    every run.
+    then post order decides, the frame hooks ahead of `on_rts` and `on_error`, the timers behind
+    every other event of their count, and a hook's `at` is held at the last stamp, so `at == now`
+    in every hook and `time()` never goes back. `at` moves by under one instruction period, only at
+    this coincidence, the same way on every run. A timer sharing a count with a hook of a later
+    stamp runs in that hook's step, at that stamp, under one instruction period past its own.
 
     Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
     the time `Frame.at` gives on a `UartStream`. The firmware's transmitter always sends a
     well-formed frame at its own settings, so the one line error a device hears is
     `UartError.ABORTED`.
+
+    Restore: a device's Python attributes are never rewound, so a stack keeps its state in what
+    `on_attach` builds, or in the bytes of `snapshot` that `restore` reads. A restore empties the
+    loop, see `VirtualLoop`, and then calls `restore`, whose default runs `on_attach` again in the
+    loop's event at the restored clock, behind every event pending at it. A rerun starts the stack
+    from its first state and its timers from the restored clock, so the stack's stamps equal the
+    first run's only for a snapshot at the attach stamp, and a fixture boot gets the stamps of a
+    stack started at `boot.until`.
+
+    The default `snapshot` raises `SnapshotRefused` once traffic crossed since the last attach, what
+    a rerun cannot rebuild: a `send`, a `send_break`, a `drive_cts`, an `on_frame`, an `on_break`,
+    an `on_error`, an `on_rts` delivered to a class that overrides it, and past the attach stamp a
+    `drive_pin` or an edge delivered to a `watch_pin` watch made from the loop. During the rerun
+    `send`, `send_break` and `drive_cts` raise `RuntimeError`, from `on_attach` and from what runs
+    at its stamp. A timer it arms for later is the device's own, and acts when it fires. The rerun
+    ends the `watch_pin` watches the device made from the loop first, as `on_attach` makes them
+    again. A device whose stack talks at boot, or whose `on_attach` builds no whole stack, overrides
+    `snapshot` and `restore`. `System.restore` takes a snapshot of each member ahead of any change,
+    so a device that refuses raises there too, naming the device, with nothing changed: a member
+    whose default stack heard traffic, an edge included, cannot restore even a quiet snapshot, where
+    a lone machine can.
 
     Reset: a device on the board is not reset with the MCU. `reset` is told every machine reset and
     keeps the device's state by default. The frames `send` queued and not delivered are dropped by
@@ -1180,8 +1240,14 @@ class UartDevice(_core.UartDeviceBase):
         super().__init__(type(self).on_rts is not UartDevice.on_rts)
         self._link: _core.UartDeviceLink | None = None
         self._loop: VirtualLoop | None = None
-        self._in_reset = False
+        self._refusing = ""
         self._peripheral = ""
+        self._traffic = False
+        self._held: tuple[bool, bytes] | None = None
+        self._reattach = False
+        self._rerun_stamp: int | None = None
+        self._attach_stamp: int | None = None
+        self._watches: list[Unwatch] = []
 
     @property
     def board(self) -> DeviceBoard:
@@ -1218,8 +1284,9 @@ class UartDevice(_core.UartDeviceBase):
         return cast(VirtualTime, getattr(machine, "time"))  # noqa: B009
 
     def on_attach(self) -> None:
-        """The machine runs for the first time since the device was attached, or since a snapshot
-        was restored into its new machine. Called once, at the first event boundary."""
+        """The machine runs for the first time since the device was attached, at the first event
+        boundary. The default `restore` calls it again after a restore of a snapshot taken after
+        that first call, in the same machine or in a new one."""
 
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         """The firmware transmitted a frame holding `byte`, 0 to 0x1FF, its stop bit ending at
@@ -1236,6 +1303,41 @@ class UartDevice(_core.UartDeviceBase):
         """The machine was reset. Does nothing by default. The machine's first reset comes before
         `on_attach`, so what `on_attach` builds is absent then."""
 
+    def snapshot(self) -> bytes:
+        """The device state as bytes for `restore`. By default none. `System.snapshot` and
+        `System.restore` call it once more ahead of any change and drop those bytes, so it changes
+        no state.
+
+        Raises:
+            SnapshotRefused: By default, when traffic crossed since the last attach, see the class
+                doc. Override this and `restore` for such a device.
+        """
+        self._check_quiet()
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        """A snapshot was restored, `data` what `snapshot` returned for it. It runs in the loop on
+        the thread that called `restore`, at the restored clock, once the machine has finished its
+        restore, the loop emptied, in the context the hooks run in. So a `call_later` here counts
+        from the restored clock, and what it schedules runs at the machine's next dispatch. `send`,
+        `send_break` and `drive_cts` raise here. By default it runs `on_attach` again in the loop's
+        event at the restored clock, behind every event pending at it, when the snapshot was taken
+        after the first one, and an override runs it only by calling this. That rerun starts the
+        stack's timers from the restored clock, so its stamps equal the first run's only for a
+        snapshot at the attach stamp. It ends the watches the device made from the loop, those made
+        here included, so a device calling this watches in `on_attach`. An edge pending at the
+        restored clock reaches the old stack's watches ahead of the rerun and what it arms stays, so
+        a stack that arms from the edge and from the level in `on_attach` checks it armed once. An
+        exception raises from the machine's `restore` as a `ModelError`, once that has finished."""
+        loop = self._loop
+        if (
+            self._reattach
+            and type(self).on_attach is not UartDevice.on_attach
+            and loop is not None
+            and not loop.is_closed()
+        ):
+            loop._call_at_fire(self._attach_again)  # pyright: ignore[reportPrivateUsage]
+
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         """The firmware's RTS changed at `at`, `ready` when its receiver can take a frame. RTS
         changes with the receiver's not-empty flag, which the model sets at the stop-bit end,
@@ -1245,7 +1347,9 @@ class UartDevice(_core.UartDeviceBase):
         choice is the class's, fixed at construction, so a stack built in `on_attach` that registers
         its handler later needs the override, forwarding to it.
         A machine reset sets the level True with no edge, so a device tracking it also uses
-        `reset`."""
+        `reset`. A delivery to a class that overrides this counts as traffic, so the default
+        `snapshot` refuses, since a stack started again would lose what the edge told it. The base
+        hook counts nothing, and a rerun reads `rts`."""
 
     def on_break(self, at: VirtualTime) -> None:
         """The firmware sent a break, its last low bit ending at `at`."""
@@ -1275,8 +1379,9 @@ class UartDevice(_core.UartDeviceBase):
         Raises:
             TypeError: `data` is no bytes, `at` no `VirtualTime`, or `obey_rts` no bool.
             ValueError: `at` is before `now`, or leaves the 64-bit picosecond range.
-            RuntimeError: Called inside `reset`, on any path a reset takes, or off the machine's
-                thread outside the device's other hooks.
+            RuntimeError: Called inside `reset` or `restore`, on any path they take, while a restore
+                empties the loop, while `on_attach` runs again, or off the machine's thread outside
+                the device's other hooks.
             ConfigError: The device serves no live machine.
         """
         if not isinstance(cast(object, data), bytes | bytearray | memoryview):
@@ -1285,6 +1390,7 @@ class UartDevice(_core.UartDeviceBase):
             raise TypeError(f"send() takes obey_rts as a bool, not {obey_rts!r}")
         link, start = self._acting("send", at)
         link.send(bytes(data), start, not obey_rts)
+        self._traffic = True
 
     def send_break(self, *, at: VirtualTime | None = None) -> None:
         """Queue one break towards the firmware's receiver after the frames queued, at `at` or
@@ -1299,6 +1405,7 @@ class UartDevice(_core.UartDeviceBase):
         """
         link, start = self._acting("send_break", at)
         link.send_break(start)
+        self._traffic = True
 
     def drive_cts(self, ready: bool, *, at: VirtualTime | None = None) -> None:
         """Drive the firmware's nCTS input to `ready` at `at`, or at `now` when None. With CR3.CTSE,
@@ -1321,6 +1428,7 @@ class UartDevice(_core.UartDeviceBase):
                 expected="a UART with hardware flow control",
             )
         link.set_cts(ready, start)
+        self._traffic = True
 
     def _link_of(self) -> _core.UartDeviceLink:
         link = self._link
@@ -1333,10 +1441,18 @@ class UartDevice(_core.UartDeviceBase):
         if at is not None and not isinstance(cast(object, at), VirtualTime):
             raise TypeError(f"{what}() takes at as a VirtualTime or None, not {at!r}")
         link = self._link_of()
-        if self._in_reset:
-            raise RuntimeError(f"{self!r}: {what}() is refused inside reset()")
+        if self._refusing:
+            raise RuntimeError(f"{self!r}: {what}() is refused inside {self._refusing}()")
         loop = self._loop
         stepping = loop is not None and loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        if stepping:
+            assert loop is not None
+            if loop._is_emptying():  # pyright: ignore[reportPrivateUsage]
+                raise RuntimeError(
+                    f"{self!r}: {what}() is refused while a restore empties the loop"
+                )
+            if self._rerun_stamp == loop._now_ps:  # pyright: ignore[reportPrivateUsage]
+                raise RuntimeError(f"{self!r}: {what}() is refused while on_attach runs again")
         if not stepping and not _core.on_host_thread():
             raise RuntimeError(f"{self!r}: {what}() runs on the machine's thread")
         now = self.now.ps
@@ -1362,18 +1478,28 @@ class UartDevice(_core.UartDeviceBase):
     def _attached(self, at: int) -> None:
         loop = self._loop
         assert loop is not None
-        loop._run_hook(at, self._called, self.on_attach)  # pyright: ignore[reportPrivateUsage]
+        loop._run_hook(at, self._first_attach)  # pyright: ignore[reportPrivateUsage]
+
+    def _first_attach(self) -> None:
+        loop = self._loop
+        assert loop is not None
+        self._attach_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
+        self._called(self.on_attach)
 
     def _frame(self, data: int, at: int) -> None:
+        self._traffic = True
         self._stamped(at, self.on_frame, data)
 
     def _break(self, at: int) -> None:
+        self._traffic = True
         self._stamped(at, self.on_break)
 
     def _rts(self, ready: bool, at: int) -> None:
+        self._traffic = True
         self._stamped(at, self.on_rts, ready)
 
     def _aborted(self, at: int) -> None:
+        self._traffic = True
         self._stamped(at, self.on_error, UartError.ABORTED)
 
     def _stamped(self, at: int, hook: Callable[..., None], *args: object) -> None:
@@ -1387,7 +1513,7 @@ class UartDevice(_core.UartDeviceBase):
         loop._run_hook(at, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
 
     def _reset(self, kind: _core.ResetKind) -> None:
-        self._in_reset = True
+        self._refusing = "reset"
         try:
             loop = self._loop
             if loop is None:
@@ -1397,7 +1523,76 @@ class UartDevice(_core.UartDeviceBase):
                     0, self._called, self.reset, ResetKind(kind.value)
                 )
         finally:
-            self._in_reset = False
+            self._refusing = ""
+
+    def _save(self) -> bytes:
+        data = _saved(self, typing.cast(object, self.snapshot()))
+        return (b"\x01" if self._traffic else b"\x00") + data
+
+    def _load(self, attached: bool, data: bytes) -> None:
+        self._held = (attached, data)
+
+    def _check_quiet(self) -> None:
+        if self._traffic:
+            raise SnapshotRefused(
+                f"{self!r}: traffic crossed the wire since its last attach, so running on_attach"
+                " again cannot rebuild its stack: override snapshot() and restore()",
+                device=repr(self),
+            )
+
+    def _note_pin(self, later: bool = False) -> None:
+        """A pin crossed for this device: traffic once its stack has attached, past that stamp, or
+        at it for a drive due `later`. A drive from `restore` repeats at every restore."""
+        loop = self._loop
+        if self._attach_stamp is None or loop is None:
+            return
+        if self._refusing == "restore" and not later:
+            return
+        stepping = loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        now = loop._now_ps  # pyright: ignore[reportPrivateUsage]
+        if stepping and now == self._attach_stamp and not later:
+            return
+        self._traffic = True
+
+    def _end_watches(self) -> None:
+        for watch in self._watches:
+            watch.remove()
+        self._watches.clear()
+
+    def _rebuild(self) -> None:
+        """Call `restore` with the bytes the machine's restore loaded."""
+        held = self._held
+        if held is None:
+            return
+        self._held = None
+        attached, data = held
+        loop = self._loop
+        assert loop is not None
+        self._traffic = data[0] != 0
+        self._reattach = attached
+        self._rerun_stamp = None
+        self._attach_stamp = -1 if attached else None
+        if not attached:
+            self._end_watches()
+        self._refusing = "restore"
+        try:
+            loop._run_alone(  # pyright: ignore[reportPrivateUsage]
+                0, self._called, self.restore, data[1:]
+            )
+        finally:
+            self._refusing = ""
+
+    def _note_watch(self, watch: Unwatch) -> None:
+        self._watches = [standing for standing in self._watches if standing.active]
+        self._watches.append(watch)
+
+    def _attach_again(self) -> None:
+        loop = self._loop
+        assert loop is not None
+        self._rerun_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
+        self._attach_stamp = self._rerun_stamp
+        self._end_watches()
+        self._called(self.on_attach)
 
     def _called[**P](self, hook: Callable[P, None], *args: P.args, **kwargs: P.kwargs) -> None:
         try:

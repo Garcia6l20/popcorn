@@ -1606,7 +1606,7 @@ void system::save(held_system const&, std::vector<std::byte>& out) const
 
 auto system::impl::load_links(std::span<std::byte const> in, bool keep) -> saved_system
 {
-  if(not stopped)
+  if(keep and not stopped)
   {
     require_savable();
   }

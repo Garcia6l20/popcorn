@@ -83,6 +83,17 @@ struct pending_edge
   friend auto operator==(pending_edge const&, pending_edge const&) -> bool = default;
 };
 
+struct watch_note
+{
+  std::uint64_t id{};
+  std::uint64_t upto{};
+  std::uint64_t at_ps{};
+  std::uint8_t  pin{};
+  bool          level{};
+
+  friend auto operator==(watch_note const&, watch_note const&) -> bool = default;
+};
+
 struct gpio_state
 {
   std::uint32_t                                driven{};
@@ -94,6 +105,8 @@ struct gpio_state
   std::uint64_t                                next_edge{};
   std::array<std::optional<std::uint32_t>, 16> analog_board{};
   std::array<std::optional<std::uint32_t>, 16> analog_chip{};
+  std::vector<watch_note>                      notes;
+  std::uint64_t                                next_note{};
 
   friend auto operator==(gpio_state const&, gpio_state const&) -> bool = default;
 };
@@ -128,15 +141,6 @@ struct watch_table
   std::uint64_t            next{};
   std::uint16_t            watched{};
   std::vector<watch_entry> entries;
-};
-
-struct watch_note
-{
-  std::uint64_t id{};
-  std::uint64_t upto{};
-  std::uint64_t at_ps{};
-  std::uint8_t  pin{};
-  bool          level{};
 };
 
 /**
@@ -226,6 +230,7 @@ public:
   [[nodiscard]] auto on_analog_changing(std::move_only_function<void(std::uint8_t pin)> listener)
       -> subscription override;
   [[nodiscard]] auto edge_ps() const -> std::uint64_t override;
+  void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
@@ -780,10 +785,23 @@ auto gpio::signal_level(std::string_view signal) const -> std::optional<bool>
   return routed()[static_cast<std::size_t>(found - signals_.begin())] != 0;
 }
 
+void gpio::save(std::vector<std::byte>& out) const
+{
+  auto copy      = state_;
+  copy.notes     = notes_;
+  copy.next_note = next_note_;
+  reflex::serde::bson::serializer{out}.dump(copy);
+}
+
 void gpio::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
-  notes_.clear();
+  notes_     = std::exchange(state_.notes, {});
+  next_note_ = state_.next_note;
+  for(auto& note : notes_)
+  {
+    note.upto = std::min(note.upto, watchers_->next);
+  }
   route_pins();
   forwarded_  = routed();
   forwarding_ = routed_pins_ != 0;

@@ -150,6 +150,24 @@ public:
       clock const&  time) -> std::uint64_t pre(lane > 0);
 
   /**
+   * @brief Schedules an event as the lane overload does, behind every other event of its lane and
+   *        count, without taking a sequence number, so next_seq() and next_lane_seq() stay as they
+   *        were. One such event per @p id owner.
+   * @param due Virtual time since reset.
+   * @param id Owner and kind.
+   * @param payload Passed back to the owner.
+   * @param lane Delivery lane, 1 and up.
+   * @param time Clock converting @p due at its current rate.
+   * @return unnumbered_seq, the cancel() handle with the owner.
+   */
+  auto schedule_unnumbered(
+      vtime         due,
+      event_id      id,
+      std::uint64_t payload,
+      std::uint32_t lane,
+      clock const&  time) -> std::uint64_t pre(lane > 0);
+
+  /**
    * @brief Recomputes the instruction count of every deadline::time event at @p time's current
    *        rate, never before its current instruction for a lane 0 event, and keeps the tie
    *        order. A lane event follows the rule of the lane overload of schedule_at(). Called by
@@ -204,6 +222,9 @@ public:
 
   /** @brief First sequence number of lane events, above any local one. */
   static constexpr std::uint64_t lane_seq_base = std::uint64_t{1} << 63;
+
+  /** @brief Sequence number of a schedule_unnumbered() event, above any lane one. */
+  static constexpr std::uint64_t unnumbered_seq = std::numeric_limits<std::uint64_t>::max();
 
   /**
    * @brief Replaces the queue with a snapshot's content, tie order and sequence counter included.

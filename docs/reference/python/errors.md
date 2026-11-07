@@ -16,6 +16,8 @@ Every exception popcorn raises derives from `PopcornError`.
 
 ::: popcorn.UnmodelledConfig
 
+::: popcorn.SnapshotRefused
+
 ::: popcorn.EmulationError
 
 ::: popcorn.BusAccessError

@@ -431,4 +431,13 @@ void count_interruptible_wait() noexcept;
 [[= py::doc{
     "Host mutexes the calling thread holds, above 0 inside a parked section."}]] [[nodiscard]] auto
     host_locks_held() -> std::uint64_t;
+
+/**
+ * @brief Calls @p callable in the context of a cell, as a native callback enters it, so a callback
+ *        native code enters inside the call nests in that context.
+ * @param weak_cell A weak reference to the cell. A dead one calls nothing.
+ * @param callable What to call, with no argument.
+ */
+[[= py::doc{"Call `callable` in the context of the weakly referenced cell."}]] void
+    run_in_cell(reflex::py::nb::handle weak_cell, reflex::py::nb::handle callable);
 }

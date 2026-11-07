@@ -18,7 +18,14 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 from popcorn import _core
 from popcorn._devices import chip_select
 from popcorn._enums import I2CPhase, ResetKind, StopReason
-from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
+from popcorn._errors import (
+    ConfigError,
+    EmulationError,
+    MachineBusy,
+    MachineRunning,
+    ModelError,
+    raise_first,
+)
 from popcorn._host import awaited, watch_awaits
 from popcorn._machine_description import (
     MachineDescription,
@@ -1602,9 +1609,12 @@ class System:
                 `run` delivers it.
             EmulationError: The system was closed, or stopped on an error before.
             RuntimeError: Called from a callback of a machine.
+            SnapshotRefused: A member's device refused, see `UartDevice.snapshot`.
         """
         self._require_quiet("snapshot")
         self._handle.check_caller()
+        for machine in self._machines.values():
+            machine._check_devices_snapshot()  # pyright: ignore[reportPrivateUsage]
         self._release_undecided()
         try:
             state = self._handle.save()
@@ -1629,6 +1639,13 @@ class System:
         error stopped the system it clears the error, as a lone machine restores after an
         error, and the system runs again.
 
+        Each member's `VirtualLoop` is emptied ahead of every member's state, and each
+        `UartDevice.restore` runs once the whole system is restored, so its stamps count from the
+        restored clock. A `DeviceBoard.watch_pin` watch stays. An error from those raises once the
+        restore has finished, with nothing rolled back. The snapshot of each member taken ahead of
+        any change holds each device's `snapshot`, so a device that refuses raises here, nothing
+        changed: such a system's restore needs that device's override, a quiet snapshot's too.
+
         Raises:
             TypeError: `snapshot` is no SystemSnapshot.
             ValueError: `snapshot` holds other members.
@@ -1637,6 +1654,10 @@ class System:
             MachineRunning: As `snapshot`, or inside `wait_for`'s predicate.
             EmulationError: The system was closed.
             RuntimeError: Called from a callback of a machine.
+            SnapshotRefused: A member's device refused, see `UartDevice.snapshot`. Nothing
+                was touched.
+            ModelError: Once the restore has finished: a `finally` that ran as a loop was emptied
+                raised, or a `UartDevice.restore` did. The first one, the others as its notes.
         """
         if not isinstance(cast(object, snapshot), SystemSnapshot):
             raise TypeError(f"snapshot must be a SystemSnapshot, not {type(snapshot).__name__}")
@@ -1651,30 +1672,41 @@ class System:
         for name, machine in self._machines.items():
             machine._check_snapshot(snapshot.members[name])  # pyright: ignore[reportPrivateUsage]
         self._handle.check_caller()
+        self._handle.check_state(snapshot.state)
+        for machine in self._machines.values():
+            machine._check_devices_snapshot()  # pyright: ignore[reportPrivateUsage]
         if not failed:
             self._release_undecided()
             try:
                 self._handle.save()
             except RuntimeError as error:
                 raise MachineRunning(_UNDELIVERED) from error
-        self._handle.check_state(snapshot.state)
         kept = {
             name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
             for name, machine in self._machines.items()
         }
+        errors: list[ModelError] = []
+        for machine in self._machines.values():
+            emptied = machine._emptied()  # pyright: ignore[reportPrivateUsage]
+            if emptied is not None:
+                errors.append(emptied)
         try:
             for name, machine in self._machines.items():
-                machine._restore(snapshot.members[name])  # pyright: ignore[reportPrivateUsage]
+                member = snapshot.members[name]
+                machine._restore_state(member)  # pyright: ignore[reportPrivateUsage]
             self._handle.load(snapshot.state)
         except BaseException as error:
             unrestored: BaseException | None = None
             for name, machine in self._machines.items():
                 try:
-                    machine._restore(kept[name])  # pyright: ignore[reportPrivateUsage]
+                    machine._restore_state(kept[name])  # pyright: ignore[reportPrivateUsage]
+                    raise_first(machine._rebuilt())  # pyright: ignore[reportPrivateUsage]
                 except BaseException as failed:
                     unrestored = unrestored or failed
             if unrestored is not None:
                 raise unrestored from error
+            for held in errors:
+                error.add_note(f"then {held}")
             raise
         self._failed = None
         self._undecided.clear()
@@ -1692,6 +1724,9 @@ class System:
                     self._handle.spi_tap_take(wired.bus)
                 case _I2CWired():
                     self._handle.i2c_tap_take(wired.bus)
+        for machine in self._machines.values():
+            errors += machine._rebuilt()  # pyright: ignore[reportPrivateUsage]
+        raise_first(errors)
 
     def _require_halted(self, what: str) -> None:
         if self._flight is not None or self._free or self._halting:

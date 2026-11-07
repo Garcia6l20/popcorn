@@ -187,6 +187,26 @@ auto scheduler::schedule_at(
   return added.seq;
 }
 
+auto scheduler::schedule_unnumbered(
+    vtime         due,
+    event_id      id,
+    std::uint64_t payload,
+    std::uint32_t lane,
+    clock const&  time) -> std::uint64_t
+{
+  event const added{
+      .at      = external_instruction_of(due.ps, time),
+      .seq     = unnumbered_seq,
+      .id      = id,
+      .payload = payload,
+      .due_ps  = due.ps,
+      .kind    = deadline::time,
+      .lane    = lane};
+  queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
+  refresh_earliest();
+  return added.seq;
+}
+
 void scheduler::rekey(clock const& time)
 {
   for(auto& pending : queue_)

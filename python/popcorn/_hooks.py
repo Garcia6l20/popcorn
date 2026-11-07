@@ -30,16 +30,19 @@ class CallbackTable:
     def __init__(self) -> None:
         self.closed = False
         self._next = 0
-        self._table: dict[int, tuple[Callable[..., object], contextvars.Context]] = {}
+        self._table: dict[int, tuple[Callable[..., object], contextvars.Context | None]] = {}
         self._running: set[int] = set()
         self._once: set[int] = set()
 
-    def add(self, handler: Callable[..., object], *, once: bool = False) -> int:
+    def add(
+        self, handler: Callable[..., object], *, once: bool = False, in_caller: bool = False
+    ) -> int:
         """Store a handler and a copy of the current context, returning its key. A `once`
-        handler is dropped after its first call returns."""
+        handler is dropped after its first call returns. An `in_caller` handler runs in the
+        context of its caller, the machine's own for a native hook entered through its cell."""
         key = self._next
         self._next += 1
-        self._table[key] = (handler, contextvars.copy_context())
+        self._table[key] = (handler, None if in_caller else contextvars.copy_context())
         if once:
             self._once.add(key)
         return key
@@ -58,7 +61,7 @@ class CallbackTable:
 
     def __call__(self, key: int, *args: object) -> object:
         handler, context = self._table[key]
-        if key in self._running:
+        if context is None or key in self._running:
             return handler(*args)
         self._running.add(key)
         try:

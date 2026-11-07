@@ -45,7 +45,7 @@ another configuration, and the error names the digest that differs.
 A snapshot restores only into a machine with the same set of peripheral models. One taken by a
 popcorn build that lacked a model the current build has is refused. Take it again.
 
-A saved snapshot carries its format version. popcorn reads format 15 and raises `ConfigError` on
+A saved snapshot carries its format version. popcorn reads format 16 and raises `ConfigError` on
 the key `format` for a file of any other format. Take the snapshot again with the current build.
 
 A snapshot keeps the analog levels on the pins: the board drive of each GPIO pin and the level a
@@ -65,6 +65,34 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
 - A CDC stream drops the bytes the device sent and Python did not read, and gets back the bytes
   written and not yet taken by the device.
 - A `PdmMic` drops its queued input and resets its modulator.
+- A machine's `VirtualLoop` holds nothing in a snapshot. A restore empties it first: it drops every
+  timer and ready callback, cancels every task and runs it to its `finally`, closes the async
+  generators left unfinished and clears its exception handler and task factory. A `finally` runs on
+  the thread calling `restore` and sees the old timeline. Its error raises as a `ModelError` once
+  the restore has finished.
+- A `UartDevice` keeps its Python attributes, and its `restore(data)` runs at the restored clock
+  with what its `snapshot()` returned. By default that runs `on_attach` again in the loop's event at
+  the restored clock, behind every event pending at it. A rerun starts the stack's timers from the
+  restored clock, so its stamps equal the first run's only for a snapshot at the attach stamp, and a
+  fixture boot gets the stamps of a stack started at `boot.until`.
+- The default `snapshot()` raises `SnapshotRefused` once traffic crossed since the last attach:
+  `send`, `send_break`, `drive_cts`, `on_frame`, `on_break`, `on_error`, an `on_rts` delivered to a
+  class that overrides it, and past the attach stamp a `drive_pin` or an edge delivered to a
+  `watch_pin` watch made from the loop. A watch made from the test thread counts nothing, and a
+  drive at the attach stamp or from `restore` still snapshots. A device with such traffic overrides
+  `snapshot()` and `restore()`. `System.restore` takes a snapshot of each member first, so a member
+  whose default stack heard traffic cannot restore even a quiet snapshot, where a lone machine can.
+  On the fixtures' boot path a refusal is a failed boot: every test of that machine
+  description errors with the refusal, which names the device.
+- A `watch_pin` watch stays across a restore, and pin levels change with no edge, so read
+  `pin_level` after one. An edge pending in the snapshot is heard in the run after the restore, as
+  the run that went on heard it, by the watches standing ahead of a rerun, and both runs refuse the
+  next default `snapshot()`. What such an edge arms stays beside the new stack, so a stack that arms
+  from the edge and from the level in `on_attach` checks it armed once. A snapshot holds no watch, so a new machine has none until a stack
+  makes it. A default `restore` that runs `on_attach` again ends the watches the device made from
+  the loop just before it.
+- A frame's `on_error` pending in a snapshot, a cut the firmware made just before it, replays in the
+  run after the restore. A machine reset drops it.
 
 ## Hooks across a restore
 

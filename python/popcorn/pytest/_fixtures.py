@@ -306,17 +306,20 @@ def lending(
     `request`, reported and traced under `name`.
 
     The machine gets the test's budget and, with `--popcorn-trace-on-fail`, a trace. At exit it
-    is parked, its trace kept or deleted, and it is replaced when spoiled, else its hooks and
-    call baseline are reset. What ended a free run by itself and never reached the test is
-    raised then.
+    is parked, its trace kept or deleted, and it is replaced when spoiled, else its loop is
+    emptied, the pin watches made since the restore ended and its hooks and call baseline reset.
+    What ended a free run by itself and never reached the test is raised then, and so is what a
+    `finally` raised as the loop was emptied.
 
     Raises:
         BaseException: What ended the first such free run, at exit.
+        ModelError: A `finally` raised as the loop was emptied, at exit.
     """
     item = item_of(request)
     lent = _Lent(session, key, name)
     with booting(item, session, key, name):
         m = lent.restored()
+    watches = m._pin_watch_keys()  # pyright: ignore[reportPrivateUsage]
     track(item, name, m, key)
     m.default_budget = test.budget
     settings = session.settings
@@ -341,6 +344,13 @@ def lending(
         if not closed or lent.spoiled():
             lent.rebuild()
         else:
+            emptied = m._emptied()  # pyright: ignore[reportPrivateUsage]
+            if emptied is not None:
+                if held is None:
+                    held = emptied
+                else:
+                    unclaimed(item.nodeid, emptied)
+            m._end_pin_watches_but(watches)  # pyright: ignore[reportPrivateUsage]
             m.remove_hooks()
             m.set_call_baseline(None)
     if held is not None:
@@ -411,6 +421,8 @@ def _restored(
     try:
         machine.restore(snapshot)
     except PopcornError:
+        if machine._restore_done:  # pyright: ignore[reportPrivateUsage]
+            raise
         machine, snapshot = rebuilt()
         machine.restore(snapshot)
     machine.ring.clear()
