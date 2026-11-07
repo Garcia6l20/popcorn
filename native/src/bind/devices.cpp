@@ -19,6 +19,7 @@
 #include <nanobind/trampoline.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -376,14 +377,15 @@ public:
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::uart_endpoint through the
- *        private methods `_attached`, `_frame`, `_break`, `_aborted`, `_reset`, `_rts`, `_save` and
- *        `_load` that `popcorn.board.UartDevice` defines. Times cross as picoseconds since the last
- *        reset. The engine calls it only through an attachment.
+ *        private methods of `popcorn.board.UartDevice`: `_attached`, `_frame`, `_break`,
+ *        `_aborted`, `_received`, `_reset`, `_rts`, `_save` and `_load`, nine names, the
+ *        trampoline's slot count. Times cross as picoseconds since the last reset. The engine
+ *        calls it only through an attachment.
  */
 class python_uart_device final : public periph::uart_endpoint
 {
 public:
-  NB_TRAMPOLINE(periph::uart_endpoint, 8);
+  NB_TRAMPOLINE(periph::uart_endpoint, 9);
 
   /**
    * @brief A device hearing RTS edges or not, fixed for its life.
@@ -400,8 +402,21 @@ public:
     return rts_;
   }
 
+  /** @brief Whether the device records the frames it is sent, see set_tapping(). */
+  [[nodiscard]] auto tapping() const -> bool
+  {
+    return tapping_.load(std::memory_order_relaxed);
+  }
+
+  /** @brief Turns the tap of frames queued towards the firmware on or off, from any thread. */
+  void set_tapping(bool on)
+  {
+    tapping_.store(on, std::memory_order_relaxed);
+  }
+
 private:
-  bool rts_;
+  bool              rts_;
+  std::atomic<bool> tapping_{false};
 };
 
 /**
@@ -493,15 +508,32 @@ class attached_uart_device final : public periph::uart_endpoint,
 public:
   using attachment::attachment;
 
+  void ending(periph::line_frame const& frame) override
+  {
+    ending_ = frame;
+  }
+
   void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
     gil_entry const gil;
     if(brk)
     {
-      invoke("_break", at.ps);
+      invoke("_break", at.ps, ending_.start.ps);
       return;
     }
-    invoke("_frame", data, at.ps);
+    invoke("_frame", data, at.ps, ending_.start.ps);
+  }
+
+  void received(periph::line_frame const& frame) override
+  {
+    if(not device_->tapping())
+    {
+      return;
+    }
+    gil_entry const gil;
+    invoke(
+        "_received", frame.data, frame.start.ps, frame.end.ps,
+        frame.kind == periph::frame_kind::brk);
   }
 
   [[nodiscard]] auto hears_rts() const -> bool override
@@ -517,8 +549,10 @@ public:
 
   void aborted(vtime at) override
   {
+    auto const bits = ending_.word_bits - (ending_.parity == periph::line_parity::none ? 0u : 1u);
+    auto const data = static_cast<std::uint16_t>(ending_.data & ((1u << bits) - 1u));
     gil_entry const gil;
-    invoke("_aborted", at.ps);
+    invoke("_aborted", at.ps, ending_.start.ps, data);
   }
 
   [[nodiscard]] auto aborts_by_event() const -> bool override
@@ -560,7 +594,8 @@ public:
   }
 
 private:
-  bool attach_done_{};
+  bool               attach_done_{};
+  periph::line_frame ending_{};
 };
 
 auto refused(std::string const& peripheral, std::string expected) -> config_error
@@ -651,7 +686,13 @@ void bind_device_bases(nb::module_ scope)
   nb::class_<periph::uart_endpoint, python_uart_device>(
       scope, "UartDeviceBase",
       "Native side of popcorn.board.UartDevice: a device on a UART implemented in Python.")
-      .def(nb::init<bool>(), nb::arg("rts"));
+      .def(nb::init<bool>(), nb::arg("rts"))
+      .def(
+          "set_tapping",
+          [](periph::uart_endpoint& device, bool on) {
+            dynamic_cast<python_uart_device&>(device).set_tapping(on);
+          },
+          nb::arg("on"));
   nb::class_<periph::i2c_controller_sink, python_i2c_controller>(
       scope, "I2CControllerBase",
       "Native side of popcorn.board.I2CController: an I2C controller implemented in Python.")

@@ -33,6 +33,7 @@ from popcorn._machine_description import (
 )
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
+from popcorn._tap import TapFrame
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -444,44 +445,6 @@ class SystemSnapshot:
     members: Mapping[str, Snapshot]
     state: bytes
     target: VirtualTime | None
-
-
-@dataclass(frozen=True, slots=True)
-class TapFrame:
-    """One frame on one direction of a link, as `UartTap` shows it. Times are system times.
-
-    Attributes:
-        data: Data bits, 0 for a break, the parity bit stripped as in `Frame.data`.
-        index: Number of the frame among its sender's frames in this direction, from 0 at
-            system start, or among the frames injected in this direction for an injected one:
-            the index `UartTap.replace` and `drop` take for a sender's frame.
-        start: Start-bit edge at the sender, at the receiver for an injected frame.
-        end: Stop-bit end at the sender, the abort time for a frame the sender aborted, at the
-            receiver for an injected frame. A frame a cut made lost keeps its stop-bit end.
-        arrival: When the receiver sees the frame end: `end` plus the link's latency, `end` for
-            an injected frame.
-        towards: The receiving end, `"<member>.<UART>"`.
-        injected: Whether `UartTap.inject` put it on the line.
-        brk: Whether it is a break.
-        lost: Whether the sender aborted it, its UART disabled mid-frame, or a cut made it
-            cross the cut's start or end.
-        dropped: Whether an armed `UartTap.drop` kept it off the line: the receiver saw an idle
-            line.
-        cut: Whether a line cut touched it, `UartTap.cut`: it starts inside the cut, or crosses
-            the cut's start, also `lost` then. A dropped frame is never `cut`.
-    """
-
-    data: int
-    index: int
-    start: VirtualTime
-    end: VirtualTime
-    arrival: VirtualTime
-    towards: str
-    injected: bool
-    brk: bool
-    lost: bool
-    dropped: bool
-    cut: bool
 
 
 @dataclass(frozen=True)

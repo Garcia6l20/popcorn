@@ -45,7 +45,7 @@ another configuration, and the error names the digest that differs.
 A snapshot restores only into a machine with the same set of peripheral models. One taken by a
 popcorn build that lacked a model the current build has is refused. Take it again.
 
-A saved snapshot carries its format version. popcorn reads format 16 and raises `ConfigError` on
+A saved snapshot carries its format version. popcorn reads format 17 and raises `ConfigError` on
 the key `format` for a file of any other format. Take the snapshot again with the current build.
 
 A snapshot keeps the analog levels on the pins: the board drive of each GPIO pin and the level a
@@ -84,6 +84,12 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
   whose default stack heard traffic cannot restore even a quiet snapshot, where a lone machine can.
   On the fixtures' boot path a refusal is a failed boot: every test of that machine
   description errors with the refusal, which names the device.
+- A `UartDevice` with `tapping = True` records the frames of its port as `TapFrame`, both
+  directions, and `tap_frames()` takes them. A restore drops the frames the tap holds and restarts
+  `index` and `tap_dropped` at 0, a machine reset keeps them. The tap is no traffic: it never makes
+  the default `snapshot()` refuse, and taking its frames never lifts a refusal. A machine restored
+  from a snapshot at the attach stamp goes on as the run it was saved from, tapped or not, and taps
+  the same frames at the same times.
 - A `watch_pin` watch stays across a restore, and pin levels change with no edge, so read
   `pin_level` after one. An edge pending in the snapshot is heard in the run after the restore, as
   the run that went on heard it, by the watches standing ahead of a rerun, and both runs refuse the

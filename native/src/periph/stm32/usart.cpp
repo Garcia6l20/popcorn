@@ -228,7 +228,15 @@ struct usart_state
   [[= reflex::serde::rename{"rx_entries"}]] std::vector<rx_entry>    rx_fifo;
   [[= reflex::serde::rename{"host_frames"}]] std::vector<host_frame> host;
   std::uint16_t                                                      shift{};
+  std::uint64_t                                                      tx_start_ps{};
   std::uint64_t                                                      tx_end_ps{};
+  std::uint64_t                                                      rx_start_ps{};
+  std::uint64_t                                                      abort_start_ps{};
+  std::uint32_t                                                      abort_shift{};
+  std::uint32_t                                                      abort_word_bits{};
+  std::uint32_t                                                      abort_half_stops{};
+  std::uint32_t                                                      abort_parity{};
+  bool                                                               abort_brk{};
   std::uint64_t                                                      rx_due_ps{};
   std::uint64_t                                                      host_start_ps{};
   bool                                                               rx_held{};
@@ -502,6 +510,7 @@ private:
   [[nodiscard]] auto head_ready() const -> bool;
   void               ask_attached();
   void               note_abort(hook_guard& guard);
+  auto               tx_frame(std::uint64_t end_ps) const -> line_frame;
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -988,15 +997,38 @@ void usart::ask_attached()
   }
 }
 
+auto usart::tx_frame(std::uint64_t end_ps) const -> line_frame
+{
+  return {
+      .data       = state_.shift,
+      .word_bits  = static_cast<std::uint8_t>(word_bits()),
+      .half_stops = half_stop_codes[get(regs_, stop_)],
+      .parity     = parity(),
+      .kind       = state_.break_shifting ? frame_kind::brk : frame_kind::data,
+      .frame_ps   = end_ps - state_.tx_start_ps,
+      .start      = vtime{state_.tx_start_ps},
+      .end        = vtime{end_ps}};
+}
+
 void usart::note_abort(hook_guard& guard)
 {
   auto const at = ctx_.clock.time();
   if(far_end_->aborts_by_event())
   {
+    auto const frame        = tx_frame(at.ps);
+    state_.abort_start_ps   = frame.start.ps;
+    state_.abort_shift      = frame.data;
+    state_.abort_word_bits  = frame.word_bits;
+    state_.abort_half_stops = frame.half_stops;
+    state_.abort_parity     = static_cast<std::uint32_t>(frame.parity);
+    state_.abort_brk        = frame.kind == frame_kind::brk;
     ctx_.events.schedule_at(at, abort_due, at.ps, core::host_lane, ctx_.clock);
     return;
   }
-  guard.run([&] { far_end_->aborted(at); });
+  guard.run([&] {
+    far_end_->ending(tx_frame(at.ps));
+    far_end_->aborted(at);
+  });
 }
 
 void usart::on_bus_reset()
@@ -1033,6 +1065,8 @@ void usart::restore_reset_values(bool keep_host)
   state_.shifting       = false;
   state_.receiving      = false;
   state_.rx_due_ps      = 0;
+  state_.rx_start_ps    = 0;
+  state_.tx_start_ps    = 0;
   state_.host_start_ps  = 0;
   state_.rx_held        = keep_host and not state_.host.empty();
   if(not keep_host)
@@ -1148,6 +1182,7 @@ auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps
 auto usart::schedule_receive(std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t
 {
   schedule(receive_due, from_ps, ps);
+  state_.rx_start_ps = from_ps;
   return from_ps + ps;
 }
 
@@ -1222,8 +1257,9 @@ void usart::start_frame(std::uint64_t from_ps)
     state_.shift = with_parity(state_.tx_fifo.front(), word_bits(), parity());
     state_.tx_fifo.erase(state_.tx_fifo.begin());
   }
-  state_.shifting  = true;
-  state_.tx_end_ps = schedule(transmit_done, from_ps, ps);
+  state_.shifting    = true;
+  state_.tx_end_ps   = schedule(transmit_done, from_ps, ps);
+  state_.tx_start_ps = state_.tx_end_ps - ps;
   if(far_end_)
   {
     far_end_->started(
@@ -1339,12 +1375,14 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     state_.idle_pending  = false;
     state_.break_pending = false;
     state_.rx_due_ps     = 0;
+    state_.rx_start_ps   = 0;
     state_.rx_held       = not state_.host.empty();
     if(not finishing)
     {
       state_.shifting       = false;
       state_.break_shifting = false;
       state_.tx_end_ps      = 0;
+      state_.tx_start_ps    = 0;
       update(regs_, complete_, 1);
     }
     if(not state_.break_shifting)
@@ -1547,6 +1585,15 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     if(far_end_)
     {
+      far_end_->ending(
+          {.data       = static_cast<std::uint16_t>(state_.abort_shift),
+           .word_bits  = static_cast<std::uint8_t>(state_.abort_word_bits),
+           .half_stops = static_cast<std::uint8_t>(state_.abort_half_stops),
+           .parity     = static_cast<line_parity>(state_.abort_parity),
+           .kind       = state_.abort_brk ? frame_kind::brk : frame_kind::data,
+           .frame_ps   = payload - state_.abort_start_ps,
+           .start      = vtime{state_.abort_start_ps},
+           .end        = vtime{payload}});
       far_end_->aborted(vtime{payload});
     }
     return;
@@ -1671,13 +1718,15 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   if(kind == transmit_done)
   {
-    state_.shifting = false;
-    auto const data = state_.shift;
-    auto const brk  = std::exchange(state_.break_shifting, false);
+    state_.shifting   = false;
+    auto const data   = state_.shift;
+    auto const ending = far_end_ ? tx_frame(state_.tx_end_ps) : line_frame{};
+    auto const brk    = std::exchange(state_.break_shifting, false);
     hook_guard guard;
     if(far_end_)
     {
       guard.run([&] {
+        far_end_->ending(ending);
         far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
       });
     }
@@ -1720,6 +1769,18 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     flags();
     return;
+  }
+  if(far_end_)
+  {
+    far_end_->received(
+        {.data       = frame->data,
+         .word_bits  = static_cast<std::uint8_t>(word_bits()),
+         .half_stops = half_stop_codes[get(regs_, stop_)],
+         .parity     = parity(),
+         .kind       = frame->kind,
+         .frame_ps   = state_.rx_due_ps - state_.rx_start_ps,
+         .start      = vtime{state_.rx_start_ps},
+         .end        = vtime{state_.rx_due_ps}});
   }
   deliver(entry_of(*frame));
   note_rts(state_.rx_due_ps);

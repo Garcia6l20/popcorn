@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import typing
 import weakref
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -16,8 +17,11 @@ from popcorn._enums import I2CError, I2CPhase, PinMode, ResetKind, UartError
 from popcorn._errors import ConfigError, ModelError, SnapshotRefused
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
+from popcorn._tap import TapFrame
 from popcorn._virtual_loop import VirtualLoop
 from popcorn.units import VirtualDuration, VirtualTime
+
+_TAP_KEEP = 1 << 20
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
@@ -1231,6 +1235,24 @@ class UartDevice(_core.UartDeviceBase):
     whose default stack heard traffic, an edge included, cannot restore even a quiet snapshot, where
     a lone machine can.
 
+    Tap: `tapping = True` records every frame of the port in both directions as a `TapFrame`, off
+    by default. The frames the firmware sent are `towards` `"device"`, with the start-bit and
+    stop-bit times of the UART's transmitter, a break ending at its last low bit, a frame the
+    firmware aborted `lost` with the time of the abort, an aborted break as lost data 0. The
+    frames the device sent are `towards` the UART's name, with the start-bit and stop-bit times
+    of the frame on the wire, noted when its stop-bit time passes, a frame the receiver drops
+    included. Each start is kept from when the frame began, so a baud change or a restore in the
+    middle of a frame leaves it as the run that went on. The times are the native ones and
+    `arrival` equals `end`: a hook's `at` is held at the last stamp and can differ. `index`
+    counts the frames tapped in a direction since tapping began or since the last restore. A tap
+    keeps 1 Mi frames per direction not taken, about 440 bytes each, the oldest dropped and
+    counted in `tap_dropped`. `tap_frames` takes them. Frames tapped before a machine reset stay,
+    with the times of the epoch they were seen in, and `index` goes on. A restore drops them, in
+    flight ones included, and restarts `index` and `tap_dropped` at 0, whatever the snapshot held
+    for this device. Tapping keeps its setting through both and costs one GIL entry per frame
+    the device is sent. Switching it from a thread while the machine runs takes effect at each
+    direction's next frame.
+
     Reset: a device on the board is not reset with the MCU. `reset` is told every machine reset and
     keeps the device's state by default. The frames `send` queued and not delivered are dropped by
     any machine reset. The loop's timers run on through a reset, and `rts` reads True with no edge,
@@ -1256,6 +1278,85 @@ class UartDevice(_core.UartDeviceBase):
         self._rerun_stamp: int | None = None
         self._attach_stamp: int | None = None
         self._watches: list[Unwatch] = []
+        self._tapping = False
+        self._tapped = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
+        self._tap_index = [0, 0]
+        self._tap_lost = 0
+
+    @property
+    def tapping(self) -> bool:
+        """Whether the port records its frames, see the class doc. Off by default, settable from
+        any thread."""
+        return self._tapping
+
+    @tapping.setter
+    def tapping(self, on: bool) -> None:
+        if not isinstance(cast(object, on), bool):
+            raise TypeError(f"tapping takes a bool, not {on!r}")
+        self.set_tapping(on)
+        self._tapping = on
+
+    @property
+    def tap_dropped(self) -> int:
+        """Frames the tap dropped because it held its limit, since the last restore."""
+        return self._tap_lost
+
+    def tap_frames(self, towards: str | None = None) -> list[TapFrame]:
+        """Take the frames the tap holds, oldest first, and forget them.
+
+        Args:
+            towards: `"device"` for the frames the firmware sent, the UART's name for the frames
+                the device sent, None for both, ordered by `end` and the firmware's first at a tie.
+
+        Raises:
+            TypeError: `towards` is no str or None.
+            ValueError: `towards` names neither end.
+            ConfigError: The device serves no live machine and `towards` names the UART.
+        """
+        if towards is not None and not isinstance(cast(object, towards), str):
+            raise TypeError(f"tap_frames() takes towards as a str or None, not {towards!r}")
+        if towards is None:
+            taken = [*self._take_tapped(0), *self._take_tapped(1)]
+            taken.sort(key=lambda frame: (frame.end.ps, frame.towards != "device"))
+            return taken
+        if towards == "device":
+            return self._take_tapped(0)
+        if self._peripheral and towards == self._peripheral:
+            return self._take_tapped(1)
+        raise ValueError(f"towards {towards!r} is neither 'device' nor {self._peripheral!r}")
+
+    def _take_tapped(self, direction: int) -> list[TapFrame]:
+        held = self._tapped[direction]
+        taken: list[TapFrame] = []
+        while held:
+            taken.append(held.popleft())
+        return taken
+
+    def _record(
+        self, direction: int, data: int, start: int, end: int, *, brk: bool, lost: bool
+    ) -> None:
+        if not self._tapping:
+            return
+        held = self._tapped[direction]
+        if len(held) == _TAP_KEEP:
+            self._tap_lost += 1
+        index = self._tap_index[direction]
+        self._tap_index[direction] = index + 1
+        held.append(
+            TapFrame(
+                data=data,
+                index=index,
+                start=VirtualTime(start),
+                end=VirtualTime(end),
+                arrival=VirtualTime(end),
+                towards="device" if direction == 0 else self._peripheral,
+                injected=False,
+                brk=brk,
+                lost=lost,
+                dropped=False,
+                cut=False,
+            )
+        )
 
     @property
     def board(self) -> DeviceBoard:
@@ -1494,20 +1595,26 @@ class UartDevice(_core.UartDeviceBase):
         self._attach_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
         self._called(self.on_attach)
 
-    def _frame(self, data: int, at: int) -> None:
+    def _frame(self, data: int, at: int, start: int) -> None:
         self._traffic = True
+        self._record(0, data, start, at, brk=False, lost=False)
         self._stamped(at, self.on_frame, data)
 
-    def _break(self, at: int) -> None:
+    def _break(self, at: int, start: int) -> None:
         self._traffic = True
+        self._record(0, 0, start, at, brk=True, lost=False)
         self._stamped(at, self.on_break)
+
+    def _received(self, data: int, start: int, end: int, brk: bool) -> None:
+        self._record(1, data, start, end, brk=brk, lost=False)
 
     def _rts(self, ready: bool, at: int) -> None:
         self._traffic = True
         self._stamped(at, self.on_rts, ready)
 
-    def _aborted(self, at: int) -> None:
+    def _aborted(self, at: int, start: int, data: int) -> None:
         self._traffic = True
+        self._record(0, data, start, at, brk=False, lost=True)
         self._stamped(at, self.on_error, UartError.ABORTED)
 
     def _stamped(self, at: int, hook: Callable[..., None], *args: object) -> None:
@@ -1569,6 +1676,10 @@ class UartDevice(_core.UartDeviceBase):
 
     def _rebuild(self) -> None:
         """Call `restore` with the bytes the machine's restore loaded."""
+        for taken in self._tapped:
+            taken.clear()
+        self._tap_index = [0, 0]
+        self._tap_lost = 0
         held = self._held
         if held is None:
             return

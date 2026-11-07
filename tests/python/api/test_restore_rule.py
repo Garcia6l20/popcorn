@@ -2143,3 +2143,48 @@ def test_a_finally_error_becomes_a_note_on_a_failed_native_restore(
     with pytest.raises(popcorn.ConfigError) as raised:
         m.restore(saved)
     assert "the finally" in " ".join(raised.value.__notes__)
+
+
+@pytest.mark.parametrize("tap", [False, True])
+def test_a_tap_adds_no_traffic_and_taking_its_frames_clears_none(
+    u575: popcorn.PartDescription, tap: bool
+) -> None:
+    device = Stack()
+    device.tapping = tap
+    m = asleep(u575, {"USART1": [device]})
+    run(m, us(10))
+    m.snapshot()
+    device.loop.call_soon(sends, device)
+    run(m, ms(1))
+    assert len(device.tap_frames()) == (1 if tap else 0)
+    with pytest.raises(SnapshotRefused):
+        m.snapshot()
+
+
+@pytest.mark.parametrize("tap", [False, True])
+def test_a_tapped_boot_restored_goes_on_as_the_run_it_was_saved_from(
+    u575: popcorn.PartDescription, tap: bool
+) -> None:
+    def later(stack: Stack) -> None:
+        stack.loop.call_later(5e-4, stack.send, b"Z")
+
+    device = Stack(later)
+    device.tapping = tap
+    m = asleep(u575, {"USART1": [device]})
+    saved = m.snapshot()
+
+    def outcome() -> tuple[object, ...]:
+        run(m, ms(2))
+        return (
+            m.periph.USART1.RDR.value,
+            m.time.ps,
+            m.periph.USART1.ISR_enabled.RXFNE,
+            list(device.log),
+            device.tap_frames(),
+        )
+
+    went_on = outcome()
+    m.restore(saved)
+    device.log.clear()
+    assert outcome() == went_on
+    assert len(cast("list[object]", went_on[4])) == (1 if tap else 0)

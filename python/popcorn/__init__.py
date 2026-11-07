@@ -83,10 +83,10 @@ from popcorn._system import (
     SystemDescription,
     SystemSnapshot,
     SystemStop,
-    TapFrame,
     UartLink,
     UartTap,
 )
+from popcorn._tap import TapFrame
 from popcorn._views import (
     Memory,
     Peripherals,

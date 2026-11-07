@@ -188,6 +188,28 @@ public:
   {}
 
   /**
+   * @brief The frame the next transmitted() or aborted() call ends, called just ahead of it: data
+   *        with its parity bit, kind and word shape as the transmitter held them, `start` the
+   *        start-bit edge kept from when the frame began, `end` the stop-bit end or the abort
+   *        time. A frame cut by a disable reports the shape of the registers at the abort. The
+   *        default does nothing.
+   * @param frame The frame.
+   */
+  virtual void ending([[maybe_unused]] line_frame const& frame)
+  {}
+
+  /**
+   * @brief A frame queued with uart_port::receive_frames() reached the receiver, called at its
+   *        stop-bit end from the receive event, ahead of the receiver taking it. The default
+   *        does nothing.
+   * @param frame The frame: data, kind and word shape as the receiver reads it, `end` the
+   *        stop-bit end, `start` that end less one frame time at the receiver's settings then, in
+   *        the machine's virtual time since its last reset.
+   */
+  virtual void received([[maybe_unused]] line_frame const& frame)
+  {}
+
+  /**
    * @brief The firmware disabled the transmitter with a frame in flight: that frame will not
    *        complete. Not called on a reset. The default does nothing.
    * @param at Virtual time of the disable, in the sender's time.

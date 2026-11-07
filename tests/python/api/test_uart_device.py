@@ -4,6 +4,7 @@ firmware's baud, on every USART row."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1689,3 +1690,496 @@ def test_the_new_hooks_on_a_member_keep_their_stamps_at_any_quantum(
     assert {name for name, _ in log} == {"rts", "break", "frame"}
     assert run(5) == log
     assert run(1) == log
+
+
+def tapped(device: UartDevice, towards: str | None = None) -> list[popcorn.TapFrame]:
+    return device.tap_frames(towards)
+
+
+def test_the_tap_is_off_by_default_and_records_nothing(row: Row) -> None:
+    device = Recorder()
+    assert not device.tapping
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(3)))
+    assert len(device.frames) == 1
+    assert tapped(device) == []
+    assert device.tap_dropped == 0
+    with pytest.raises(TypeError):
+        device.tapping = 1  # type: ignore[assignment]
+
+
+def test_a_firmware_frame_is_tapped_with_the_native_start_and_stop_stamps(row: Row) -> None:
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(3)))
+    ((data, end_ps),) = device.frames
+    (frame,) = tapped(device)
+    assert (frame.data, frame.index, frame.towards) == (data, 0, "device")
+    assert frame.end.ps == end_ps == frame.arrival.ps
+    assert frame.end.ps - frame.start.ps == frame_time(row)
+    assert not (frame.brk or frame.lost or frame.injected or frame.dropped or frame.cut)
+    assert tapped(device) == []
+
+
+def test_a_reply_is_tapped_back_to_back_after_the_frame_it_answers(row: Row) -> None:
+    device = Replier(us(100))
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    (sent,) = tapped(device, "device")
+    (reply,) = tapped(device, "USART1")
+    assert (reply.data, reply.index, reply.towards) == (0xBE, 0, "USART1")
+    assert reply.start.ps == sent.end.ps + us(100).ps
+    assert reply.end.ps - reply.start.ps == frame_time(row)
+    assert received(m, row)
+    assert tapped(device) == []
+
+
+def test_a_burst_from_the_device_is_tapped_in_order_with_the_gaps_the_uart_gave(row: Row) -> None:
+    device = Starter(b"\x11\x22\x33", 200)
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(5)))
+    frames = tapped(device)
+    assert [frame.data for frame in frames] == [0x11, 0x22, 0x33]
+    assert [frame.index for frame in frames] == [0, 1, 2]
+    assert frames[0].start.ps >= us(200).ps
+    for before, after in itertools.pairwise(frames):
+        assert after.start.ps == before.end.ps
+    assert all(frame.end.ps - frame.start.ps == frame_time(row) for frame in frames)
+
+
+def test_both_directions_come_ordered_by_their_end_and_a_direction_alone_is_filtered(
+    row: Row,
+) -> None:
+    device = Replier(us(100))
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    both = tapped(device)
+    assert [frame.towards for frame in both] == ["device", "USART1"]
+    assert both[0].end.ps < both[1].end.ps
+    with pytest.raises(ValueError, match="neither"):
+        device.tap_frames("USART2")
+    with pytest.raises(TypeError):
+        device.tap_frames(5)  # type: ignore[arg-type]
+
+
+class Breaking(Recorder):
+    def on_attach(self) -> None:
+        super().on_attach()
+        self.send_break(at=self.now + us(20))
+
+
+def test_a_break_from_the_device_is_tapped_as_a_break(row: Row) -> None:
+    device = Breaking()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(5)))
+    (frame,) = tapped(device)
+    assert frame.brk and frame.data == 0 and frame.towards == "USART1"
+    assert frame.start.ps >= us(20).ps
+
+
+def test_a_frame_aborted_by_the_uart_reset_bit_is_tapped_lost_at_the_abort(row: Row) -> None:
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=us(5)))
+    at = m.time
+    m.periph.RCC.APB2RSTR.USART1RST = 1
+    m.periph.RCC.APB2RSTR.USART1RST = 0
+    asyncio.run(m.run(for_=ms(1)))
+    (frame,) = tapped(device)
+    assert frame.lost and frame.data == 0x41 and frame.end.ps == at.ps
+    assert frame.start.ps < frame.end.ps
+
+
+def test_tapped_frames_stay_across_a_machine_reset_and_their_index_goes_on(row: Row) -> None:
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(3)))
+    m.reset()
+    arm(m, row)
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(3)))
+    first, second = tapped(device)
+    assert (first.data, first.index) == (0x41, 0)
+    assert (second.data, second.index) == (0x42, 1)
+    assert device.tapping
+    assert second.end.ps == first.end.ps
+
+
+def test_a_restore_drops_the_tapped_frames_and_restarts_index_and_dropped(row: Row) -> None:
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    saved = m.snapshot()
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(3)))
+    assert len(device.frames) == 1
+    m.restore(saved)
+    assert tapped(device) == []
+    assert device.tap_dropped == 0
+    assert device.tapping
+    arm(m, row)
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(3)))
+    (frame,) = tapped(device)
+    assert (frame.data, frame.index) == (0x42, 0)
+
+
+def test_the_tap_keeps_a_bounded_number_and_counts_the_oldest_it_dropped(
+    u575: popcorn.PartDescription, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from popcorn import _devices
+
+    monkeypatch.setattr(_devices, "_TAP_KEEP", 3)
+    device = Starter(b"abcde", 100)
+    device.tapping = True
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(10)))
+    frames = tapped(device)
+    assert [frame.data for frame in frames] == [ord(c) for c in "cde"]
+    assert [frame.index for frame in frames] == [2, 3, 4]
+    assert device.tap_dropped == 2
+
+
+def test_a_tapped_device_costs_one_gil_entry_per_frame_it_is_sent_and_none_untapped(
+    u575: popcorn.PartDescription,
+) -> None:
+    def entries(tap: bool) -> int:
+        device = Starter(b"abcdefgh")
+        device.tapping = tap
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF), devices={"USART1": [device]})
+        m.reset()
+        asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+        before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(m.run(for_=ms(20)))
+        return m._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
+
+    assert entries(False) == 8
+    assert entries(True) == 16
+
+
+class Everything(Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard: set[str] = set()
+
+    def on_attach(self) -> None:
+        self.heard.add("attach")
+        self.send(b"\x11", at=self.now)
+
+    def on_frame(self, byte: int, at: VirtualTime) -> None:
+        self.heard.add("frame")
+
+    def on_break(self, at: VirtualTime) -> None:
+        self.heard.add("break")
+
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        self.heard.add("rts")
+
+    def on_error(self, kind: UartError, at: VirtualTime) -> None:
+        self.heard.add("error")
+
+    def reset(self, kind: popcorn.ResetKind) -> None:
+        self.heard.add("reset")
+
+    def snapshot(self) -> bytes:
+        self.heard.add("save")
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        self.heard.add("load")
+
+
+def test_one_tapped_device_runs_every_native_hook_in_one_life(
+    u575: popcorn.PartDescription,
+) -> None:
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+    device = Everything()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]}, rtse=True)
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(2)))
+    m.periph.USART1.RQR.SBKRQ = 1
+    asyncio.run(m.run(for_=ms(2)))
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=us(5)))
+    m.periph.RCC.APB2RSTR.USART1RST = 1
+    m.periph.RCC.APB2RSTR.USART1RST = 0
+    asyncio.run(m.run(for_=ms(1)))
+    kinds = {(frame.towards, frame.brk, frame.lost) for frame in device.tap_frames()}
+    assert kinds == {
+        ("device", False, False),
+        ("device", True, False),
+        ("device", False, True),
+        ("USART1", False, False),
+    }
+    saved = m.snapshot()
+    m.restore(saved)
+    asyncio.run(m.run(for_=us(10)))
+    assert device.heard == {
+        "attach",
+        "frame",
+        "break",
+        "rts",
+        "error",
+        "reset",
+        "save",
+        "load",
+    }
+
+
+class SwitchOn(Recorder):
+    def on_frame(self, byte: int, at: VirtualTime) -> None:
+        super().on_frame(byte, at)
+        self.tapping = True
+
+
+def test_tapping_set_from_a_thread_or_from_a_hook_taps_the_frames_after_it(row: Row) -> None:
+    device = SwitchOn()
+    m = asleep(row, {"USART1": [device]})
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(3)))
+    assert tapped(device) == []
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(3)))
+    assert [frame.data for frame in tapped(device)] == [0x42]
+    device.tapping = False
+    thread = threading.Thread(target=setattr, args=(device, "tapping", True))
+    thread.start()
+    thread.join()
+    assert device.tapping
+    transmit(m, row, 0x43)
+    asyncio.run(m.run(for_=ms(3)))
+    assert [frame.data for frame in tapped(device)] == [0x43]
+
+
+class SeesTraffic(Starter):
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.flags: list[bool] = []
+
+    def _received(self, data: int, start: int, end: int, brk: bool) -> None:
+        self.flags.append(self._traffic)
+        super()._received(data, start, end, brk)
+        self.flags.append(self._traffic)
+
+
+def test_a_received_frame_finds_the_traffic_flag_already_set(row: Row) -> None:
+    device = SeesTraffic(b"ab")
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(5)))
+    assert len(tapped(device)) == 2
+    assert device.flags == [True] * 4
+
+
+def test_a_frame_in_flight_at_a_snapshot_keeps_its_start_after_a_restore(
+    row: Row, tmp_path: Path
+) -> None:
+    ft = frame_time(row)
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=us(100)))
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ps(ft // 2)))
+    saved = m.snapshot()
+    path = tmp_path / "mid.snap"
+    saved.save(path)
+    asyncio.run(m.run(for_=ms(2)))
+    went_on = tapped(device)
+    assert len(went_on) == 1
+    assert went_on[0].end.ps - went_on[0].start.ps == ft
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(2)))
+    tapped(device)
+    m.restore(saved)
+    asyncio.run(m.run(for_=ms(2)))
+    assert tapped(device) == went_on
+    fresh = Recorder()
+    fresh.tapping = True
+    other = asleep(row, {"USART1": [fresh]})
+    other.restore(other.load_snapshot(path))
+    asyncio.run(other.run(for_=ms(2)))
+    assert tapped(fresh) == went_on
+
+
+@pytest.mark.parametrize("divisor", [2, 0.5])
+def test_a_baud_change_inside_a_device_frame_leaves_its_start_at_the_send(
+    row: Row, divisor: float
+) -> None:
+    ft = frame_time(row)
+    device = Starter(b"\x11\x22", 100)
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=us(100) + ps(ft // 2)))
+    m.periph.USART1.BRR.value = int(BRR / divisor)
+    asyncio.run(m.run(for_=ms(3)))
+    first, second = tapped(device)
+    assert first.start.ps == us(100).ps
+    assert first.end.ps - first.start.ps == ft
+    assert second.start.ps == first.end.ps
+
+
+def test_a_deviceless_snapshot_restored_into_a_tapping_device_taps_its_queued_frames(
+    row: Row, tmp_path: Path
+) -> None:
+    source = asleep(row)
+    source.periph.USART1.port.write(b"\x33\x44")
+    asyncio.run(source.run(for_=us(3)))
+    path = tmp_path / "queued.snap"
+    source.snapshot().save(path)
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    m.restore(m.load_snapshot(path))
+    asyncio.run(m.run(for_=ms(3)))
+    saved = m.snapshot()
+    assert [(frame.data, frame.towards) for frame in tapped(device)] == [
+        (0x33, "USART1"),
+        (0x44, "USART1"),
+    ]
+    m.restore(saved)
+    m.snapshot()
+
+
+def test_a_restore_from_a_deviceless_snapshot_drops_the_tap_and_restarts_its_index(
+    row: Row, tmp_path: Path
+) -> None:
+    source = asleep(row)
+    path = tmp_path / "plain.snap"
+    source.snapshot().save(path)
+    device = Starter(b"\x11", 10)
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(1)))
+    m.restore(m.load_snapshot(path))
+    assert tapped(device) == []
+    assert device.tap_dropped == 0
+    assert device._tap_index == [0, 0]  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_parity_and_two_stop_bits_tap_both_directions_at_the_longer_frame(
+    u575: popcorn.PartDescription,
+) -> None:
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+    device = Replier(us(100))
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    uart = m.periph.USART1
+    uart.CR1_enabled.UE = 0
+    uart.CR2.STOP = 2
+    uart.CR1_disabled.poke(UE=1, TE=1, RE=1, PCE=1)
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    (sent,) = tapped(device, "device")
+    (reply,) = tapped(device, "USART1")
+    longer = frame_time(row) * 11 // 10
+    assert sent.end.ps - sent.start.ps == longer
+    assert reply.end.ps - reply.start.ps == longer
+
+
+@pytest.mark.parametrize("divisor", [2, 0.5])
+def test_a_baud_change_inside_a_firmware_frame_leaves_its_start_at_the_write(
+    row: Row, divisor: float
+) -> None:
+    ft = frame_time(row)
+
+    def frame(scale: float) -> popcorn.TapFrame:
+        device = Recorder()
+        device.tapping = True
+        m = asleep(row, {"USART1": [device]})
+        asyncio.run(m.run(for_=us(100)))
+        transmit(m, row, 0x41)
+        asyncio.run(m.run(for_=ps(ft // 2)))
+        m.periph.USART1.BRR.value = int(BRR / scale)
+        asyncio.run(m.run(for_=ms(3)))
+        (only,) = tapped(device)
+        return only
+
+    assert frame(divisor) == frame(1)
+
+
+@pytest.mark.parametrize("route", ["ue", "bus_reset"])
+def test_a_nine_bit_frame_aborted_keeps_its_word_in_the_tap(
+    u575: popcorn.PartDescription, route: str
+) -> None:
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+    device = Recorder()
+    device.tapping = True
+    m = asleep(row, {"USART1": [device]})
+    uart = m.periph.USART1
+    uart.CR1_enabled.UE = 0
+    uart.CR1_disabled.poke(UE=1, TE=1, RE=1, M0=1)
+    uart.TDR.value = 0x1A5
+    asyncio.run(m.run(for_=us(5)))
+    if route == "ue":
+        uart.CR1_enabled.UE = 0
+    else:
+        m.periph.RCC.APB2RSTR.USART1RST = 1
+        m.periph.RCC.APB2RSTR.USART1RST = 0
+    asyncio.run(m.run(for_=ms(1)))
+    (frame,) = tapped(device)
+    assert frame.lost and frame.data == 0x1A5
+
+
+@pytest.mark.parametrize("leg", ["same_after_a_later_frame", "fresh"])
+def test_a_pending_abort_in_a_snapshot_taps_the_frame_the_run_that_went_on_tapped(
+    row: Row, leg: str, tmp_path: Path
+) -> None:
+    def build() -> tuple[Recorder, popcorn.Machine]:
+        device = Recorder()
+        device.tapping = True
+        m = asleep(row, {"USART1": [device]})
+        uart = m.periph.USART1
+        if row.enable == "CR1_disabled":
+            uart[row.enable].poke(UE=0)
+            uart[row.enable].poke(M0=1)
+            uart[row.enable].poke(UE=1, TE=1, RE=1)
+            transmit(m, row, 0x1A5)
+        else:
+            transmit(m, row, 0x65)
+        asyncio.run(m.run(for_=us(5)))
+        return device, m
+
+    def seen(device: Recorder) -> tuple[list[popcorn.TapFrame], list[tuple[UartError, int]]]:
+        return tapped(device), list(device.errors)
+
+    device, m = build()
+    m.periph.RCC.APB2RSTR.USART1RST = 1
+    m.periph.RCC.APB2RSTR.USART1RST = 0
+    saved = m.snapshot()
+    asyncio.run(m.run(for_=ms(1)))
+    went_on = seen(device)
+    assert len(went_on[0]) == 1 and went_on[0][0].lost
+    if leg == "fresh":
+        path = tmp_path / "abort.snap"
+        saved.save(path)
+        other, target = build()
+        tapped(other)
+        other.errors.clear()
+        target.restore(target.load_snapshot(path))
+        asyncio.run(target.run(for_=ms(1)))
+        assert seen(other) == went_on
+        return
+    arm(m, row)
+    transmit(m, row, 0x42)
+    asyncio.run(m.run(for_=ms(2)))
+    device.errors.clear()
+    tapped(device)
+    m.restore(saved)
+    asyncio.run(m.run(for_=ms(1)))
+    assert seen(device) == went_on

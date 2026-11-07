@@ -753,6 +753,7 @@ class mailbox final : public periph::uart_endpoint
 {
 public:
   std::vector<line_post>              posts;
+  std::vector<periph::line_frame>     endings;
   std::vector<periph::captured_frame> sent;
   int                                 transmissions = 0;
 
@@ -765,6 +766,11 @@ public:
   void started(periph::line_frame const& frame) override
   {
     posts.push_back({.frame = frame});
+  }
+
+  void ending(periph::line_frame const& frame) override
+  {
+    endings.push_back(frame);
   }
 
   void aborted(vtime at) override
@@ -2383,6 +2389,14 @@ TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low
   CHECK(a.box->sent[1].brk);
   CHECK(a.box->sent[1].data == 0);
   CHECK_FALSE(a.box->sent[2].brk);
+  REQUIRE(a.box->endings.size() == 3);
+  for(std::size_t n = 0; n < 3; ++n)
+  {
+    CHECK(a.box->endings[n].kind == posts[n].frame.kind);
+    CHECK(a.box->endings[n].start == posts[n].frame.start);
+    CHECK(a.box->endings[n].end == posts[n].frame.end);
+  }
+  CHECK(a.box->endings[1].kind == periph::frame_kind::brk);
 
   member again{"break_tx"};
   REQUIRE(again.to(posts[1].frame.start.ps - a.origin + frame / 2) == stop_reason::time);
