@@ -675,7 +675,6 @@ class Machine:
         "_loop",
         "_memory",
         "_model_context",
-        "_model_names",
         "_name",
         "_nvic",
         "_parked_ends",
@@ -841,8 +840,7 @@ class Machine:
         config.config_digest = config_digest
         config.arena_start = arena_base
         config.arena_size = arena_size if arena_base is not None else 0
-        makers = _model_makers(description, models or {})
-        config.python_models = makers
+        config.python_models = _model_makers(description, models or {})
         chosen = _chosen_plugin_models(description, models or {}, _plugin_models or {})
         config.plugin_models = chosen
         attached = _checked_devices(description, devices or {}, models or {}, chosen)
@@ -910,7 +908,6 @@ class Machine:
             self._ports.bridges,
         )
         self._devices = attached
-        self._model_names = tuple(makers)
         self._callback_table = CallbackTable()
         self._pin_watches = PinWatches()
         self._restore_done = False
@@ -2619,17 +2616,6 @@ class Machine:
             for device in targets
             if isinstance(device, UartDevice)
         ]
-
-    def _check_devices_snapshot(self) -> None:
-        """Raise what the `snapshot` of each Python device and model raises, ahead of any change."""
-        for name in self._model_names:
-            model = self.model(name)
-            if model is not None:
-                self._model_context.run(model._save)  # pyright: ignore[reportPrivateUsage]
-        for targets in self._devices.values():
-            for device in targets:
-                if isinstance(device, I2CTarget | SpiTarget | UartDevice):
-                    self._model_context.run(device._save)  # pyright: ignore[reportPrivateUsage]
 
     def _restore_state(self, snapshot: Snapshot) -> None:
         self._require_idle()

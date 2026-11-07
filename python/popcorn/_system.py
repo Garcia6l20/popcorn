@@ -1576,17 +1576,15 @@ class System:
         """
         self._require_quiet("snapshot")
         self._handle.check_caller()
-        for machine in self._machines.values():
-            machine._check_devices_snapshot()  # pyright: ignore[reportPrivateUsage]
+        members = {
+            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
+            for name, machine in self._machines.items()
+        }
         self._release_undecided()
         try:
             state = self._handle.save()
         except RuntimeError as error:
             raise MachineRunning(_UNDELIVERED) from error
-        members = {
-            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
-            for name, machine in self._machines.items()
-        }
         target = None if self._target is None else VirtualTime(self._target)
         return SystemSnapshot(members, state, target)
 
@@ -1636,18 +1634,16 @@ class System:
             machine._check_snapshot(snapshot.members[name])  # pyright: ignore[reportPrivateUsage]
         self._handle.check_caller()
         self._handle.check_state(snapshot.state)
-        for machine in self._machines.values():
-            machine._check_devices_snapshot()  # pyright: ignore[reportPrivateUsage]
+        kept = {
+            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
+            for name, machine in self._machines.items()
+        }
         if not failed:
             self._release_undecided()
             try:
                 self._handle.save()
             except RuntimeError as error:
                 raise MachineRunning(_UNDELIVERED) from error
-        kept = {
-            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
-            for name, machine in self._machines.items()
-        }
         errors: list[ModelError] = []
         for machine in self._machines.values():
             emptied = machine._emptied()  # pyright: ignore[reportPrivateUsage]

@@ -2254,3 +2254,55 @@ def test_a_reset_inside_restore_leaves_the_refusal_of_restore_standing(
     m.restore(saved)
     assert len(raised) == 1
     assert "refused inside restore()" in raised[0]
+
+
+class Draining(Model):
+    def __init__(self) -> None:
+        super().__init__()
+        self.log = bytearray(b"abc")
+        self.calls: list[str] = []
+
+    def snapshot(self) -> bytes:
+        self.calls.append("snapshot")
+        saved = bytes(self.log)
+        self.log.clear()
+        return saved
+
+    def restore(self, data: bytes) -> None:
+        self.calls.append("restore")
+        self.log = bytearray(data)
+
+
+def draining_pair(u575: popcorn.PartDescription) -> tuple[System, popcorn.Machine, Draining]:
+    a = popcorn.Machine(u575, models={"CRC": Draining}, name="a")
+    a.reset()
+    a.mem.write(RAM, WFI_LOOP)
+    a.reg[Reg.PC] = RAM
+    a.reg[Reg.XPSR] = THUMB
+    b = asleep(u575, code=nop_loop(40), name="b")
+    uart_on(a, "USART2")
+    uart_on(b, "USART2")
+    link = UartLink("a.USART2", "b.USART2", latency=us(20), baud=114_285)
+    model = a.model("CRC")
+    assert isinstance(model, Draining)
+    return System({"a": a, "b": b}, [link]), b, model
+
+
+def test_a_model_that_drains_in_snapshot_keeps_its_bytes_and_runs_once_per_call(
+    u575: popcorn.PartDescription,
+) -> None:
+    system, b, model = draining_pair(u575)
+    with system:
+        asyncio.run(system.run(for_=us(20)))
+        model.calls.clear()
+        model.log[:] = b"abc"
+        b.mem.write(RAM, BKPT)
+        b.reg[Reg.PC] = RAM
+        assert asyncio.run(system.run(for_=us(20))).member == "b"
+        saved = system.snapshot()
+        assert model.calls == ["snapshot"]
+        model.log[:] = b"xyz"
+        model.calls.clear()
+        system.restore(saved)
+        assert model.calls == ["snapshot", "restore"]
+        assert bytes(model.log) == b"abc"

@@ -682,9 +682,7 @@ class I2CTarget(_core.I2CTargetBase):
         """The machine was reset. Does nothing by default."""
 
     def snapshot(self) -> bytes:
-        """The target state as bytes: the declared state fields, in declaration order.
-        `System.snapshot` and `System.restore` call it once more ahead of any change and drop those
-        bytes, so it changes no state."""
+        """The target state as bytes: the declared state fields, in declaration order."""
         return _snapshot(self, I2CTarget)
 
     def restore(self, data: bytes) -> None:
@@ -801,9 +799,7 @@ class SpiTarget(_core.SpiTargetBase):
         """The machine was reset. Does nothing by default."""
 
     def snapshot(self) -> bytes:
-        """The device state as bytes: the declared state fields, in declaration order.
-        `System.snapshot` and `System.restore` call it once more ahead of any change and drop those
-        bytes, so it changes no state."""
+        """The device state as bytes: the declared state fields, in declaration order."""
         return _snapshot(self, SpiTarget)
 
     def restore(self, data: bytes) -> None:
@@ -1413,9 +1409,7 @@ class UartDevice(_core.UartDeviceBase):
         `on_attach`, so what `on_attach` builds is absent then."""
 
     def snapshot(self) -> bytes:
-        """The device state as bytes for `restore`. By default none. `System.snapshot` and
-        `System.restore` call it once more ahead of any change and drop those bytes, so it changes
-        no state.
+        """The device state as bytes for `restore`. By default none.
 
         Raises:
             SnapshotRefused: By default, when traffic crossed since the last attach, see the class
