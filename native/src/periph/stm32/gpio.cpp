@@ -533,16 +533,22 @@ void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     auto const note = *found;
     notes_.erase(found);
-    std::vector<std::shared_ptr<std::move_only_function<void(bool, vtime)>>> calls;
+    std::vector<std::uint64_t> ids;
     for(auto const& entry : watchers_->entries)
     {
       if(entry.pin == note.pin and entry.id < note.upto)
       {
-        calls.push_back(entry.call);
+        ids.push_back(entry.id);
       }
     }
-    for(auto const& call : calls)
+    for(auto const id : ids)
     {
+      auto const entry = std::ranges::find(watchers_->entries, id, &watch_entry::id);
+      if(entry == watchers_->entries.end())
+      {
+        continue;
+      }
+      auto const call = entry->call;
       (*call)(note.level, vtime{note.at_ps});
     }
     return;

@@ -4,6 +4,7 @@ stamps, on every GPIO row and on every device kind."""
 from __future__ import annotations
 
 import asyncio
+import struct
 import threading
 import weakref
 from collections.abc import Callable, Mapping, Sequence
@@ -334,6 +335,21 @@ def test_pin_mode_tells_a_driven_low_output_from_a_released_input(
     assert probed(u575, released).seen == [(PinMode.INPUT, False, True)]
 
 
+def test_pin_mode_reads_an_open_drain_output_at_one_as_output_and_its_level_follows_the_pulls(
+    u575: popcorn.PartDescription,
+) -> None:
+    def released(pull: int) -> Callable[[popcorn.Machine], None]:
+        def setup(m: popcorn.Machine) -> None:
+            m.periph.GPIOA.OTYPER.OT5 = 1
+            m.periph.GPIOA.ODR.OD5 = 1
+            m.periph.GPIOA.PUPDR.PUPD5 = pull
+
+        return setup
+
+    assert probed(u575, released(0)).seen == [(PinMode.OUTPUT, False, True)]
+    assert probed(u575, released(1)).seen == [(PinMode.OUTPUT, True, True)]
+
+
 def test_an_alternate_function_pin_reads_its_rts_through_the_device(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -402,7 +418,8 @@ def test_a_drive_from_another_thread_while_the_machine_runs_is_refused(
 
     asyncio.run(body())
     assert len(errors) == 1
-    assert isinstance(errors[0], RuntimeError | popcorn.MachineRunning)
+    assert type(errors[0]) is RuntimeError
+    assert "machine's thread" in str(errors[0])
 
 
 def test_gil_entries_equal_the_edges_and_an_unwatched_pin_costs_none(
@@ -551,6 +568,167 @@ def test_an_edge_pending_at_a_reset_request_is_dropped_with_the_queue(
     asyncio.run(m.run(for_=us(20)))
     assert listener.edges["PA5"] == []
     assert not device.board.pin_level("PA5")
+
+
+class Dispatching(UartDevice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.log: list[str] = []
+        self.watches: list[Unwatch] = []
+
+    def named(self, name: str) -> Callable[[bool, VirtualTime], None]:
+        def heard(level: bool, at: VirtualTime) -> None:
+            self.log.append(name)
+
+        return heard
+
+
+def test_two_watchers_of_one_pin_are_called_in_registration_order(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Dispatching()
+    m = start(u575, {"USART1": [device]})
+    for name in ("a", "b", "c"):
+        device.watches.append(device.board.watch_pin("PA0", device.named(name)))
+    m.periph.GPIOA.pin(0).level = True
+    run(m, us(5))
+    m.periph.GPIOA.pin(0).level = False
+    run(m, us(5))
+    assert device.log == ["a", "b", "c", "a", "b", "c"]
+
+
+def test_a_watcher_removing_a_sibling_during_an_edge_ends_no_run_and_the_sibling_is_not_called(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Dispatching()
+    m = start(u575, {"USART1": [device]})
+
+    def first(level: bool, at: VirtualTime) -> None:
+        device.log.append("a")
+        device.watches[1].remove()
+
+    device.watches.append(device.board.watch_pin("PA0", first))
+    device.watches.append(device.board.watch_pin("PA0", device.named("b")))
+    device.watches.append(device.board.watch_pin("PA0", device.named("c")))
+    m.periph.GPIOA.pin(0).level = True
+    run(m, us(5))
+    assert device.log == ["a", "c"]
+    assert [watch.active for watch in device.watches] == [True, False, True]
+
+
+def test_a_watch_removed_inside_a_running_machine_raises_machine_running_and_stays(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Plain()
+    m = start(u575, {"USART1": [device]}, nop_loop(40))
+    heard: list[bool] = []
+    watch = device.board.watch_pin("PA0", lambda level, at: heard.append(level))
+
+    async def body() -> None:
+        async with m.running():
+            with pytest.raises(popcorn.MachineRunning):
+                watch.remove()
+            assert watch.active
+
+    asyncio.run(body())
+    assert watch.active
+    m.periph.GPIOA.pin(0).level = True
+    run(m, us(5))
+    assert heard == [True]
+    watch.remove()
+    assert not watch.active
+
+
+class Resetting(UartDevice):
+    def reset(self, kind: popcorn.ResetKind) -> None:
+        self.board.drive_pin("PA0", True)
+
+
+def test_a_device_driving_a_pin_from_reset_makes_its_edge_at_the_reset_instant_each_time(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Resetting()
+    m = start(u575, {"USART1": [device]}, nop_loop(40))
+    listener = listening(device, "PA0")
+    run(m, us(7))
+    for count in (2, 3):
+        m.reset()
+        m.periph.RCC.AHB2ENR1.GPIOAEN = 1
+        set_mode(m, 0, 0)
+        m.reg[Reg.PC] = RAM
+        m.reg[Reg.SP] = RAM + 0x800
+        m.reg[Reg.XPSR] = THUMB
+        run(m, us(3))
+        assert len(listener.edges["PA0"]) == count
+        assert listener.edges["PA0"][-1] == (True, 0)
+        assert device.board.pin_level("PA0")
+
+
+def test_a_restore_keeps_the_watch_changes_the_level_with_no_edge_and_the_watch_hears_on(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Plain()
+    m = start(u575, {"USART1": [device]}, nop_loop(40))
+    listener = listening(device, "PA0")
+    saved = m.snapshot()
+    m.periph.GPIOA.pin(0).level = True
+    run(m, us(5))
+    assert [level for level, _ in listener.edges["PA0"]] == [True]
+    assert device.board.pin_level("PA0")
+    m.restore(saved)
+    assert not device.board.pin_level("PA0")
+    assert all(watch.active for watch in listener.watches)
+    run(m, us(5))
+    assert [level for level, _ in listener.edges["PA0"]] == [True]
+    m.periph.GPIOA.pin(0).level = True
+    run(m, us(5))
+    assert [level for level, _ in listener.edges["PA0"]] == [True, True]
+
+
+def two_stores(first: int, second: int, *, split: bool) -> bytes:
+    store = {5: 0x6001, 6: 0x6002}
+    words = [0x4803, 0x2120, 0x2240, store[first]]
+    words += [0xE7FF] if split else []
+    words += [store[second], 0xE7FE]
+    words += [0] * (8 - len(words))
+    return struct.pack("<8H", *words) + (ROWS["u575"].gpio_base + 0x18).to_bytes(4, "little")
+
+
+class Tracking(UartDevice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard: list[tuple[str, bool, bool]] = []
+        self.pa6 = False
+
+    def watch(self) -> None:
+        self.board.watch_pin("PA6", self.track)
+        self.board.watch_pin("PA5", self.edge5)
+
+    def track(self, level: bool, at: VirtualTime) -> None:
+        self.pa6 = level
+        self.heard.append(("PA6", level, level))
+
+    def edge5(self, level: bool, at: VirtualTime) -> None:
+        self.heard.append(("PA5", self.board.pin_level("PA6"), self.pa6))
+
+
+def two_stores_heard(
+    description: popcorn.PartDescription, first: int, second: int, *, split: bool
+) -> list[tuple[str, bool, bool]]:
+    device = Tracking()
+    m = start(description, {"USART1": [device]}, two_stores(first, second, split=split))
+    set_mode(m, 6, 1)
+    device.watch()
+    run(m, us(5))
+    return device.heard
+
+
+def test_a_callback_reads_the_block_end_level_of_another_pin_and_tracking_it_gives_store_order(
+    u575: popcorn.PartDescription,
+) -> None:
+    assert two_stores_heard(u575, 6, 5, split=False) == [("PA6", True, True), ("PA5", True, True)]
+    assert two_stores_heard(u575, 5, 6, split=False) == [("PA5", True, False), ("PA6", True, True)]
+    assert two_stores_heard(u575, 5, 6, split=True) == [("PA5", False, False), ("PA6", True, True)]
 
 
 class BoardDevice(UartDevice):

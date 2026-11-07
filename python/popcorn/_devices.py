@@ -273,7 +273,11 @@ class DeviceBoard:
         the order the edges were posted, after the model events due earlier.
 
         Reading a pin inside the callback gives its level at the callback's dispatch, after every
-        store of the block that ended there. A pin nobody watches costs no event and no GIL entry.
+        store of the block that ended there. Two stores of one block share one stamp, so the
+        callback of the first reads the level the second left. To know another pin's level at an
+        edge, watch that pin too and keep its level from its own callback. The callbacks of one
+        block come in store order, so the kept level is the one after the stores before this edge,
+        also inside a block. A pin nobody watches costs no event and no GIL entry.
         The watch stays across every machine reset and restore, which change levels with no edge,
         so read `pin_level` after one. A reset drops the edges still pending. A restore brings back
         those its snapshot holds, and the watches standing hear them as the run that went on heard
@@ -329,10 +333,10 @@ class DeviceBoard:
         `Pin.drive_at` does: the level reaches the input data register at the next event dispatch,
         the pin watchers, EXTI and the timers see the edge at `at`, and it is board state kept
         across a machine reset. In a hook or a loop callback `now` is the held stamp,
-        `UartDevice.now`. It works from the hooks of the device and the callbacks of the
-        machine's `VirtualLoop`, as `UartDevice.send` does, so a call from the test while the
-        machine is parked goes through `Machine.loop.call_soon`, which makes it a timer at the
-        machine's clock.
+        `UartDevice.now`. It works from the hooks of the device, `reset` included, where `now` is
+        the reset instant, and from the callbacks of the machine's `VirtualLoop`, as
+        `UartDevice.send` does, so a call from the test while the machine is parked goes through
+        `Machine.loop.call_soon`, which makes it a timer at the machine's clock.
 
         From a `UartDevice` after the attach stamp it counts as traffic, so the default `snapshot`
         refuses, since a rerun of `on_attach` would drive the firmware's input again. So does a
@@ -392,7 +396,11 @@ class DeviceBoard:
 
     def pin_mode(self, pin: str) -> PinMode:
         """Mode the firmware configured for `pin`. An input is released, an output driven, an
-        alternate function belongs to a peripheral, and an analog pin reads 0.
+        alternate function belongs to a peripheral, and an analog pin reads 0. An open-drain
+        output reads `OUTPUT` whatever its output data bit: at 1 the pin is released and
+        `pin_level` follows the pulls, 0 with none, so `OUTPUT` at level 0 can be driven low or
+        released with no pull. What separates an output driven low from a pin the firmware
+        switched to input is the mode.
 
         Raises:
             TypeError: `pin` is no str.

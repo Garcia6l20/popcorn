@@ -537,6 +537,32 @@ TEST_CASE("a watcher removed before its event runs is not called, one added afte
   CHECK_THROWS_AS(pc.watch(16, [](bool, vtime) {}), popcorn::config_error);
 }
 
+TEST_CASE("watchers of one pin are called in order, a sibling removed by the first is not")
+{
+  auto                                       f     = idling();
+  auto&                                      pc    = port(f, "GPIOC");
+  auto const                                 start = f.target->virtual_clock().time().ps;
+  std::vector<std::uint32_t>                 order;
+  decltype(pc.watch(13, [](bool, vtime) {})) second;
+  auto                                       first = pc.watch(13, [&](bool, vtime) {
+    order.push_back(1);
+    second.reset();
+  });
+  second     = pc.watch(13, [&](bool, vtime) { order.push_back(2); });
+  auto third = pc.watch(13, [&](bool, vtime) { order.push_back(3); });
+  pc.drive(13, true);
+  run_until(f, start + us_ps, 1'000'000);
+  CHECK(order == std::vector<std::uint32_t>{1, 3});
+  order.clear();
+  third.reset();
+  first.reset();
+  second = pc.watch(13, [&](bool, vtime) { order.push_back(2); });
+  third  = pc.watch(13, [&](bool, vtime) { order.push_back(3); });
+  pc.drive(13, false);
+  run_until(f, start + 2 * us_ps, 1'000'000);
+  CHECK(order == std::vector<std::uint32_t>{2, 3});
+}
+
 TEST_CASE("a snapshot with pending edges restores them, a drive leaves them in place")
 {
   auto       f     = idling();
