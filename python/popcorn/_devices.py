@@ -395,8 +395,8 @@ class DeviceBoard:
         return self._pin_state(port, number)[0]
 
     def pin_mode(self, pin: str) -> PinMode:
-        """Mode the firmware configured for `pin`. An input is released, an output driven, an
-        alternate function belongs to a peripheral, and an analog pin reads 0. An open-drain
+        """Mode the firmware configured for `pin`. An input is released, a push-pull output driven,
+        an alternate function belongs to a peripheral, and an analog pin reads 0. An open-drain
         output reads `OUTPUT` whatever its output data bit: at 1 the pin is released and
         `pin_level` follows the pulls, 0 with none, so `OUTPUT` at level 0 can be driven low or
         released with no pull. What separates an output driven low from a pin the firmware
