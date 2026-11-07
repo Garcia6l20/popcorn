@@ -446,7 +446,11 @@ class Model(_core.ModelBase):
         self.reset(ResetKind.PERIPHERAL)
 
     def snapshot(self) -> bytes:
-        """The model state as bytes: the declared state fields, in declaration order."""
+        """The model state as bytes: the declared state fields, in declaration order.
+
+        It runs at each `snapshot` and at `System.restore` ahead of any change, so it changes no
+        state.
+        """
         out = bytearray()
         for name, kind in _spec_of(type(self)).state:
             value: object = getattr(self, name)

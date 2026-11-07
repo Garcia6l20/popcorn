@@ -1628,6 +1628,7 @@ class UartDevice(_core.UartDeviceBase):
         loop._run_hook(at, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
 
     def _reset(self, kind: _core.ResetKind) -> None:
+        refusing = self._refusing
         self._refusing = "reset"
         try:
             loop = self._loop
@@ -1638,7 +1639,7 @@ class UartDevice(_core.UartDeviceBase):
                     0, self._called, self.reset, ResetKind(kind.value)
                 )
         finally:
-            self._refusing = ""
+            self._refusing = refusing
 
     def _save(self) -> bytes:
         data = _saved(self, typing.cast(object, self.snapshot()))

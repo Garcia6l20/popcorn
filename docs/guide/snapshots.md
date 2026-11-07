@@ -82,8 +82,8 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
   drive at the attach stamp or from `restore` still snapshots. A device with such traffic overrides
   `snapshot()` and `restore()`. `System.restore` takes a snapshot of each member first, so a member
   whose default stack heard traffic cannot restore even a quiet snapshot, where a lone machine can.
-  On the fixtures' boot path a refusal is a failed boot: every test of that machine
-  description errors with the refusal, which names the device.
+  On the fixtures' boot path a refusal is a failed boot: every test of that machine description
+  errors with the refusal, which names the device.
 - A `UartDevice` with `tapping = True` records the frames of its port as `TapFrame`, both
   directions, and `tap_frames()` takes them. A restore drops the frames the tap holds and restarts
   `index` and `tap_dropped` at 0, a machine reset keeps them. The tap is no traffic: it never makes
@@ -94,9 +94,9 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
   `pin_level` after one. An edge pending in the snapshot is heard in the run after the restore, as
   the run that went on heard it, by the watches standing ahead of a rerun, and both runs refuse the
   next default `snapshot()`. What such an edge arms stays beside the new stack, so a stack that arms
-  from the edge and from the level in `on_attach` checks it armed once. A snapshot holds no watch, so a new machine has none until a stack
-  makes it. A default `restore` that runs `on_attach` again ends the watches the device made from
-  the loop just before it.
+  from the edge and from the level in `on_attach` checks it armed once. A snapshot holds no watch,
+  so a new machine has none until a stack makes it. A default `restore` that runs `on_attach` again
+  ends the watches the device made from the loop just before it.
 - A frame's `on_error` pending in a snapshot, a cut the firmware made just before it, replays in the
   run after the restore. A machine reset drops it.
 

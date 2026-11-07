@@ -15,6 +15,7 @@ import pytest
 from popcorn import MachineRunning, ModelError, SnapshotRefused, System, UartLink
 from popcorn.arm import Reg
 from popcorn.board import I2CTarget, SpiTarget, UartDevice, UartError
+from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .conftest import collected
@@ -2188,3 +2189,68 @@ def test_a_tapped_boot_restored_goes_on_as_the_run_it_was_saved_from(
     device.log.clear()
     assert outcome() == went_on
     assert len(cast("list[object]", went_on[4])) == (1 if tap else 0)
+
+
+class RefusingModel(Model):
+    refuses = False
+
+    def snapshot(self) -> bytes:
+        if self.refuses:
+            raise LookupError("not now")
+        return super().snapshot()
+
+
+def test_a_raising_model_snapshot_leaves_a_member_stop_undelivered(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = popcorn.Machine(u575, models={"CRC": RefusingModel}, name="a")
+    a.reset()
+    a.mem.write(RAM, WFI_LOOP)
+    a.reg[Reg.PC] = RAM
+    a.reg[Reg.XPSR] = THUMB
+    b = asleep(u575, code=nop_loop(40), name="b")
+    uart_on(a, "USART2")
+    uart_on(b, "USART2")
+    system = System(
+        {"a": a, "b": b}, [UartLink("a.USART2", "b.USART2", latency=us(20), baud=114_285)]
+    )
+    with system:
+        asyncio.run(system.run(for_=us(20)))
+        saved = system.snapshot()
+        b.mem.write(RAM, BKPT)
+        b.reg[Reg.PC] = RAM
+        assert asyncio.run(system.run(for_=us(20))).member == "b"
+        undecided = dict(system._undecided)  # pyright: ignore[reportPrivateUsage]
+        assert undecided
+        model = a.model("CRC")
+        assert isinstance(model, RefusingModel)
+        model.refuses = True
+        with pytest.raises(LookupError):
+            system.restore(saved)
+        assert system._undecided == undecided  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(LookupError):
+            system.snapshot()
+        assert system._undecided == undecided  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_reset_inside_restore_leaves_the_refusal_of_restore_standing(
+    u575: popcorn.PartDescription,
+) -> None:
+    holder: list[popcorn.Machine] = []
+    raised: list[str] = []
+
+    class Resetting(Saved):
+        def restore(self, data: bytes) -> None:
+            holder[0].reset(popcorn.ResetKind.SOFTWARE)
+            try:
+                self.send(b"x")
+            except RuntimeError as error:
+                raised.append(str(error))
+
+    m = asleep(u575, {"USART1": [Resetting()]})
+    holder.append(m)
+    run(m, us(5))
+    saved = m.snapshot()
+    m.restore(saved)
+    assert len(raised) == 1
+    assert "refused inside restore()" in raised[0]
