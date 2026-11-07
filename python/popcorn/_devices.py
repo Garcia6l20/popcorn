@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from popcorn import _core
-from popcorn._enums import I2CError, I2CPhase, ResetKind, UartError
+from popcorn._enums import I2CError, I2CPhase, PinMode, ResetKind, UartError
 from popcorn._errors import ConfigError, ModelError
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
@@ -21,6 +21,7 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
+    from popcorn._hooks import CallbackTable
     from popcorn._refs import Pending
 
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
@@ -162,11 +163,76 @@ type _Attachment = tuple[
 ]
 
 
+class PinWatches(dict[int, _core.PinWatch]):
+    """The native pin watches of one machine by table key. They live as long as the machine,
+    whether or not the device kept its `Unwatch`."""
+
+
+class Unwatch:
+    """A pin watch of `DeviceBoard.watch_pin`: call it, or `remove()`, to end the watch. The watch
+    lasts until then or until the machine is gone, whether or not this handle is kept. It holds
+    no machine."""
+
+    __slots__ = ("_key", "_table", "_watches")
+
+    def __init__(self, watches: PinWatches, table: CallbackTable, key: int) -> None:
+        """Own a handle to a watch of `watches`. `DeviceBoard.watch_pin` builds it."""
+        self._watches = weakref.ref(watches)
+        self._table = weakref.ref(table)
+        self._key = key
+
+    @property
+    def active(self) -> bool:
+        """Whether the watch is still installed."""
+        watches = self._watches()
+        return watches is not None and self._key in watches
+
+    def remove(self) -> None:
+        """End the watch: no edge posted before is heard. Calling it again does nothing.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        watches = self._watches()
+        if watches is None or self._key not in watches:
+            return
+        watches[self._key].remove()
+        del watches[self._key]
+        table = self._table()
+        if table is not None:
+            table.drop(self._key)
+
+    def __call__(self) -> None:
+        self.remove()
+
+
+class _PinMachine(typing.Protocol):
+    loop: VirtualLoop
+    time: VirtualTime
+
+    def _device_pin_watch(  # pyright: ignore[reportPrivateUsage]
+        self, port: str, pin: int, handler: Callable[[bool, int], None]
+    ) -> Unwatch: ...
+
+    def _device_pin_read(  # pyright: ignore[reportPrivateUsage]
+        self, port: str, pin: int
+    ) -> tuple[bool, PinMode]: ...
+
+    def _device_pin_drive(  # pyright: ignore[reportPrivateUsage]
+        self, port: str, pin: int, level: bool, at_ps: int
+    ) -> None: ...
+
+
 class DeviceBoard:
     """What a bus device may drive on the board of the machine it serves, `target.board`.
 
     It holds no machine: each call finds the live machine through the device's weak
     attachment, so a device keeping this object keeps nothing alive.
+
+    Pins are named by package pin, "PA5", and refused when the part's package does not bond them.
+    An edge callback runs on the machine's thread in the machine's `VirtualLoop` at the edge's
+    stamp, as the hooks of a `UartDevice` do. The stamp counts from the last reset of any kind, as
+    `Machine.time`.
     """
 
     __slots__ = ("_device",)
@@ -194,8 +260,159 @@ class DeviceBoard:
             )
         clock(self._device, sai, block, frame_hz)
 
+    def watch_pin(self, pin: str, on_edge: Callable[[bool, VirtualTime], None]) -> Unwatch:
+        """Call `on_edge(level, at)` at every level change of `pin`, whoever causes it: a firmware
+        store, a pin drive of the board, a device's `drive_pin`. `level` is the new level the input
+        data register reads. `at` is the edge time EXTI and the timers see, in the loop step that
+        runs the callback, where `device.loop` and `get_running_loop()` are the machine's loop.
+
+        An edge from a firmware store is posted as a machine event at its stamp, so the callback
+        runs at the first event boundary at or after it and never inside the store. A register
+        access stamps at the end of its block, so `at` follows the block shape, as `UartDevice`'s
+        `on_error`. An edge of a pin drive stamps at its exact time. At a tie the callbacks run in
+        the order the edges were posted, after the model events due earlier.
+
+        Reading a pin inside the callback gives its level at the callback's dispatch, after every
+        store of the block that ended there. A pin nobody watches costs no event and no GIL entry.
+        The watch stays across every machine reset, which changes levels with no edge and drops the
+        edges still pending, so read `pin_level` after one.
+
+        Raises:
+            TypeError: `pin` is no str or `on_edge` not callable.
+            ValueError: `pin` is no pin name such as "PA5", pin 0 to 15.
+            ConfigError: The device serves no live machine, or the port has no such pin or the
+                package does not bond it.
+            ModelError: The part has no such GPIO port.
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        port, number = _pin_of(pin)
+        if not callable(cast(object, on_edge)):
+            raise TypeError(f"watch_pin() takes a callable, not {on_edge!r}")
+        machine = self._machine()
+        loop = machine.loop
+        stamp_of = loop._stamp_since_reset  # pyright: ignore[reportPrivateUsage]
+
+        def edge(level: bool, at_ps: int) -> None:
+            def held_at_the_stamp() -> None:
+                self._called("on_edge", on_edge, level, VirtualTime(stamp_of()))
+
+            loop._run_hook(at_ps, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
+
+        return machine._device_pin_watch(port, number, edge)  # pyright: ignore[reportPrivateUsage]
+
+    def drive_pin(self, pin: str, level: bool, *, at: VirtualTime | None = None) -> None:
+        """Drive `pin` to `level` from outside the MCU at `at`, or at `now` when None, as
+        `Pin.drive_at` does: the level reaches the input data register at the next event dispatch,
+        the pin watchers, EXTI and the timers see the edge at `at`, and it is board state kept
+        across a machine reset. In a hook or a loop callback `now` is the held stamp,
+        `UartDevice.now`. It works from the hooks of the device and the callbacks of the
+        machine's `VirtualLoop`, as `UartDevice.send` does, so a call from the test while the
+        machine is parked goes through `Machine.loop.call_soon`, which makes it a timer at the
+        machine's clock.
+
+        Raises:
+            TypeError: `level` is no bool, or `at` no `VirtualTime`.
+            ValueError: `pin` is no pin name, or `at` lies before now or leaves the 64-bit
+                picosecond range.
+            RuntimeError: Called off the machine's thread outside the device's hooks and the
+                loop's callbacks.
+            ConfigError: As `watch_pin`, or the port keeps as many pending edges as it can.
+            ModelError: As `watch_pin`.
+        """
+        port, number = _pin_of(pin)
+        if not isinstance(cast(object, level), bool):
+            raise TypeError(f"drive_pin() takes level as a bool, not {level!r}")
+        if at is not None and not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"drive_pin() takes at as a VirtualTime or None, not {at!r}")
+        machine = self._machine()
+        loop = machine.loop
+        stepping = loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        if not stepping and not _core.on_host_thread():
+            raise RuntimeError(f"{self!r}: drive_pin() runs on the machine's thread")
+        now = (
+            loop._stamp_since_reset()  # pyright: ignore[reportPrivateUsage]
+            if stepping
+            else machine.time.ps
+        )
+        start = now if at is None else at.ps
+        if start < now:
+            raise ValueError(f"{self!r}: drive_pin() at {at} lies before now, {VirtualTime(now)}")
+        if start > MAX_PS:
+            raise ValueError(f"a drive_pin at {at} leaves the 64-bit picosecond range")
+        machine._device_pin_drive(port, number, level, start)  # pyright: ignore[reportPrivateUsage]
+
+    def pin_level(self, pin: str) -> bool:
+        """Level of `pin` as its input data register reads it, whatever its mode. An alternate
+        function pin reads its GPIO level, not the peripheral's signal, so read `pin_mode` and
+        `UartDevice.rts` for RTS.
+
+        Raises:
+            TypeError: `pin` is no str.
+            ValueError: `pin` is no pin name.
+            ConfigError: As `watch_pin`.
+            ModelError: As `watch_pin`.
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        port, number = _pin_of(pin)
+        return self._pin_state(port, number)[0]
+
+    def pin_mode(self, pin: str) -> PinMode:
+        """Mode the firmware configured for `pin`. An input is released, an output driven, an
+        alternate function belongs to a peripheral, and an analog pin reads 0.
+
+        Raises:
+            TypeError: `pin` is no str.
+            ValueError: `pin` is no pin name.
+            ConfigError: As `watch_pin`.
+            ModelError: As `watch_pin`.
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        port, number = _pin_of(pin)
+        return self._pin_state(port, number)[1]
+
+    def _pin_state(self, port: str, number: int) -> tuple[bool, PinMode]:
+        read = self._machine()._device_pin_read  # pyright: ignore[reportPrivateUsage]
+        return read(port, number)
+
+    def _machine(self) -> _PinMachine:
+        machine = serving(self._device)
+        if machine is None:
+            raise ConfigError(
+                f"{self._device!r} serves no live machine",
+                key="devices",
+                expected="a device serving a live machine",
+            )
+        return cast(_PinMachine, machine)
+
+    def _called[**P](
+        self, name: str, hook: Callable[P, None], *args: P.args, **kwargs: P.kwargs
+    ) -> None:
+        try:
+            hook(*args, **kwargs)
+        except Exception as error:
+            held = _ATTACHED.get(id(self._device))
+            raise ModelError(
+                f"{self._device!r}: {name} raised {error!r}",
+                peripheral="" if held is None else held[5],
+            ) from error
+
     def __repr__(self) -> str:
         return f"DeviceBoard({self._device!r})"
+
+
+def _pin_of(pin: str) -> tuple[str, int]:
+    """The GPIO port and pin number of the package pin `pin`, such as ("GPIOA", 5) for "PA5".
+
+    Raises:
+        TypeError: `pin` is no str.
+        ValueError: `pin` is no pin name such as "PA5", pin 0 to 15.
+    """
+    if not isinstance(cast(object, pin), str):
+        raise TypeError(f"a pin is named as a str such as 'PA5', not {pin!r}")
+    matched = _CS.fullmatch(pin)
+    if matched is None or int(matched[2]) > 15:
+        raise ValueError(f"a pin is named such as 'PA5', pin 0 to 15, not {pin!r}")
+    return f"GPIO{matched[1]}", int(matched[2])
 
 
 def chip_select(cs: str | None) -> tuple[str, int | None]:

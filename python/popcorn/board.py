@@ -13,6 +13,7 @@ from popcorn._devices import (
     SpiController,
     SpiTarget,
     UartDevice,
+    Unwatch,
 )
 from popcorn._enums import I2CError, I2CPhase, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
@@ -88,6 +89,7 @@ __all__ = [
     "UartDevice",
     "UartError",
     "UartStream",
+    "Unwatch",
     "UsbData",
     "UsbEndpoint",
     "UsbHost",

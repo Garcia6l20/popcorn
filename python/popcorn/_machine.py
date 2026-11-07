@@ -40,15 +40,17 @@ from popcorn._devices import (
     BusDevice,
     I2CController,
     I2CTarget,
+    PinWatches,
     SpiController,
     SpiTarget,
     UartDevice,
+    Unwatch,
     attach,
     cs_of,
     serving,
 )
 from popcorn._dwarf_views import Var
-from popcorn._enums import FloatAbi, ResetKind, StopReason, ValueKind
+from popcorn._enums import FloatAbi, PinMode, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
     BudgetExceeded,
     ConfigError,
@@ -667,6 +669,7 @@ class Machine:
         "_parked_ends",
         "_pdm",
         "_peripherals",
+        "_pin_watches",
         "_ports",
         "_posted_bodies",
         "_refs",
@@ -894,6 +897,7 @@ class Machine:
         )
         self._devices = attached
         self._callback_table = CallbackTable()
+        self._pin_watches = PinWatches()
         self._loop: VirtualLoop | None = None
         for peripheral, targets in attached.items():
             for target in targets:
@@ -3381,6 +3385,29 @@ class Machine:
                 expected=f"the device {device!r}",
             )
         self._audio.stream(name, block).external_frame_hz = frame_hz
+
+    def _device_pin_watch(
+        self, port: str, pin: int, handler: Callable[[bool, int], None]
+    ) -> Unwatch:
+        key = self._callback_table.add(handler)
+        try:
+            native = self._handle.gpio_watch(
+                port, pin, Relay(self._callback_table, key, quiet=True)
+            )
+        except BaseException:
+            self._callback_table.drop(key)
+            raise
+        self._pin_watches[key] = native
+        return Unwatch(self._pin_watches, self._callback_table, key)
+
+    def _device_pin_read(self, port: str, pin: int) -> tuple[bool, PinMode]:
+        return (
+            self._handle.gpio_level(port, pin),
+            PinMode(self._handle.gpio_mode(port, pin).value),
+        )
+
+    def _device_pin_drive(self, port: str, pin: int, level: bool, at_ps: int) -> None:
+        self._handle.gpio_drive_stamped(port, pin, level, at_ps)
 
     def _device_bus_hold(
         self, peripheral: str, at: VirtualTime | None, for_: VirtualDuration

@@ -1347,6 +1347,38 @@ public:
       gpio_drive(std::string const& peripheral, std::uint8_t pin, std::optional<bool> level);
 
   /**
+   * @brief Watches the level changes of a GPIO pin, see periph::stm32::gpio_port::watch.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @param relay Called with the new level and the edge time in picoseconds on the machine's
+   *        thread with the GIL, the callable a `Relay`.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Watch the level changes of a GPIO pin."}]] [[nodiscard]] auto
+      gpio_watch(std::string const& peripheral, std::uint8_t pin, reflex::py::nb::object relay)
+          -> pin_watch;
+
+  /**
+   * @brief Drives a GPIO pin at a virtual time the machine may have passed, see
+   *        periph::stm32::gpio_port::drive_stamped.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @param level Level driven.
+   * @param at_ps Virtual time since the last reset.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded, or the
+   *         port keeps as many pending edges as it can.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   * @throws std::invalid_argument when @p at_ps leaves the 64-bit picosecond range.
+   */
+  [[= py::doc{"Drive a GPIO pin at a virtual time, the machine's time or earlier."}]] void
+      gpio_drive_stamped(
+          std::string const& peripheral,
+          std::uint8_t       pin,
+          bool               level,
+          std::uint64_t      at_ps);
+
+  /**
    * @brief Level of a GPIO pin as its input data register reads it.
    * @param peripheral GPIO port name.
    * @param pin Pin number, 0 to 15.

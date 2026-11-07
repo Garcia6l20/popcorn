@@ -69,8 +69,9 @@ auto pin_fields(gpio_variant const& variant)
   }
   return out;
 }
-constexpr std::uint32_t edge_due = 0;
-constexpr std::uint8_t  released = 2;
+constexpr std::uint32_t edge_due  = 0;
+constexpr std::uint32_t watch_due = 1;
+constexpr std::uint8_t  released  = 2;
 
 struct pending_edge
 {
@@ -113,6 +114,29 @@ struct analog_table
 {
   std::uint64_t             next{};
   std::vector<analog_entry> entries;
+};
+
+struct watch_entry
+{
+  std::uint64_t                                                        id{};
+  std::uint8_t                                                         pin{};
+  std::shared_ptr<std::move_only_function<void(bool level, vtime at)>> call;
+};
+
+struct watch_table
+{
+  std::uint64_t            next{};
+  std::uint16_t            watched{};
+  std::vector<watch_entry> entries;
+};
+
+struct watch_note
+{
+  std::uint64_t id{};
+  std::uint64_t upto{};
+  std::uint64_t at_ps{};
+  std::uint8_t  pin{};
+  bool          level{};
 };
 
 /**
@@ -185,11 +209,14 @@ public:
 
   void               drive(std::uint8_t pin, std::optional<bool> level) override;
   void               drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) override;
+  void               drive_stamped(std::uint8_t pin, std::optional<bool> level, vtime at) override;
   [[nodiscard]] auto pending_edges() const -> std::size_t override;
   [[nodiscard]] auto level(std::uint8_t pin) const -> bool override;
   [[nodiscard]] auto mode(std::uint8_t pin) const -> pin_mode override;
   [[nodiscard]] auto alternate(std::uint8_t pin) const -> std::uint8_t override;
   [[nodiscard]] auto on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
+      -> subscription override;
+  [[nodiscard]] auto watch(std::uint8_t pin, std::move_only_function<void(bool, vtime)> watcher)
       -> subscription override;
   [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
   void drive_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) override;
@@ -222,6 +249,8 @@ private:
   [[nodiscard]] auto board_level(std::uint8_t pin) const -> bool override;
   [[nodiscard]] auto board_drive(std::uint8_t pin) const -> std::optional<bool> override;
   void               settle(bool notify);
+  void               post_edge(std::uint8_t pin, std::optional<bool> level, vtime at);
+  void               post_watch(std::uint8_t pin, bool level);
   void               restore_reset_values();
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
   void               route_pins();
@@ -271,6 +300,9 @@ private:
   std::uint32_t                                                          notifying_{};
   std::shared_ptr<listener_table>           listeners_        = std::make_shared<listener_table>();
   std::shared_ptr<analog_table>             analog_listeners_ = std::make_shared<analog_table>();
+  std::shared_ptr<watch_table>              watchers_         = std::make_shared<watch_table>();
+  std::vector<watch_note>                   notes_;
+  std::uint64_t                             next_note_{};
   std::uint16_t                             analog_warned_{};
   std::vector<std::string>                  signals_;
   std::vector<std::array<std::uint16_t, 3>> alternates_;
@@ -464,6 +496,7 @@ void gpio::on_bus_reset()
 
 void gpio::reset(register_file&, reset_kind)
 {
+  notes_.clear();
   restore_reset_values();
   settle(false);
   auto const base = board_base();
@@ -486,6 +519,29 @@ auto gpio::pending() const -> std::span<pending_edge const>
 
 void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == watch_due)
+  {
+    auto const found = std::ranges::find(notes_, payload, &watch_note::id);
+    if(found == notes_.end())
+    {
+      return;
+    }
+    auto const note = *found;
+    notes_.erase(found);
+    std::vector<std::shared_ptr<std::move_only_function<void(bool, vtime)>>> calls;
+    for(auto const& entry : watchers_->entries)
+    {
+      if(entry.pin == note.pin and entry.id < note.upto)
+      {
+        calls.push_back(entry.call);
+      }
+    }
+    for(auto const& call : calls)
+    {
+      (*call)(note.level, vtime{note.at_ps});
+    }
+    return;
+  }
   if(kind != edge_due)
   {
     return;
@@ -527,13 +583,24 @@ void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
 void gpio::drive_at(std::uint8_t pin, std::optional<bool> level, vtime at)
 {
   check_pin(pin);
-  auto const now  = ctx_.clock.time().ps;
-  auto const base = board_base();
+  auto const now = ctx_.clock.time().ps;
   if(at.ps < now)
   {
     throw std::invalid_argument(
         std::format("a pin edge at {} ps lies before the machine time {} ps", at.ps, now));
   }
+  post_edge(pin, level, at);
+}
+
+void gpio::drive_stamped(std::uint8_t pin, std::optional<bool> level, vtime at)
+{
+  check_pin(pin);
+  post_edge(pin, level, at);
+}
+
+void gpio::post_edge(std::uint8_t pin, std::optional<bool> level, vtime at)
+{
+  auto const base = board_base();
   if(at.ps > std::numeric_limits<std::uint64_t>::max() - base)
   {
     throw std::invalid_argument("a pin edge time leaves the 64-bit picosecond range");
@@ -716,6 +783,7 @@ auto gpio::signal_level(std::string_view signal) const -> std::optional<bool>
 void gpio::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
+  notes_.clear();
   route_pins();
   forwarded_  = routed();
   forwarding_ = routed_pins_ != 0;
@@ -773,6 +841,10 @@ void gpio::settle(bool notify)
         (*listener)(pin, high);
       }
     }
+    if(((watchers_->watched >> pin) & 1u) != 0)
+    {
+      post_watch(pin, high);
+    }
     if(exti != nullptr)
     {
       exti->pin_changed(port_, pin, high);
@@ -780,6 +852,15 @@ void gpio::settle(bool notify)
   }
   --notifying_;
   forward();
+}
+
+void gpio::post_watch(std::uint8_t pin, bool level)
+{
+  auto const at = edge_ps();
+  auto const id = next_note_++;
+  notes_.push_back(
+      watch_note{.id = id, .upto = watchers_->next, .at_ps = at, .pin = pin, .level = level});
+  ctx_.events.schedule_at(vtime{at}, watch_due, id, core::host_lane, ctx_.clock);
 }
 
 template <std::size_t Which> void gpio::config_written(std::uint32_t old, std::uint32_t now)
@@ -1130,6 +1211,30 @@ auto gpio::on_analog_changing(std::move_only_function<void(std::uint8_t pin)> li
     if(auto const live = table.lock())
     {
       std::erase_if(live->entries, [id](auto const& entry) { return entry.first == id; });
+    }
+  }};
+}
+
+auto gpio::watch(std::uint8_t pin, std::move_only_function<void(bool, vtime)> watcher)
+    -> subscription
+{
+  check_pin(pin);
+  auto const id = watchers_->next++;
+  watchers_->entries.push_back(
+      watch_entry{
+          .id  = id,
+          .pin = pin,
+          .call =
+              std::make_shared<std::move_only_function<void(bool, vtime)>>(std::move(watcher))});
+  watchers_->watched = static_cast<std::uint16_t>(watchers_->watched | (1u << pin));
+  return subscription{[table = std::weak_ptr<watch_table>{watchers_}, id, pin] {
+    if(auto const live = table.lock())
+    {
+      std::erase_if(live->entries, [id](auto const& entry) { return entry.id == id; });
+      if(std::ranges::none_of(live->entries, [pin](auto const& entry) { return entry.pin == pin; }))
+      {
+        live->watched = static_cast<std::uint16_t>(live->watched & ~(1u << pin));
+      }
     }
   }};
 }

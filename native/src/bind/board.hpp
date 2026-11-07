@@ -146,6 +146,49 @@ private:
 };
 
 /**
+ * @brief A watch on the level changes of one GPIO pin, calling Python on the machine's thread at
+ *        each change's edge time. Holds no reference to the machine and calls its Python end
+ * through a weak relay. Removing it, or dropping it, ends the calls.
+ */
+class[[= py::rename{"PinWatch"}]] pin_watch
+{
+public:
+  struct fire_state;
+
+  /**
+   * @brief Owns a watch.
+   * @param watch The GPIO model's registration.
+   * @param host The machine's host, through which removal reaches the model.
+   * @param fire The Python end the watch calls, kept alive with it.
+   */
+  [[= py::skip]] pin_watch(
+      periph::stm32::subscription watch,
+      detail::host_ref            host,
+      std::shared_ptr<fire_state> fire) noexcept;
+  /** @brief Takes over @p other's watch. */
+  [[= py::skip]] pin_watch(pin_watch&& other) noexcept = default;
+  /** @brief Not move-assignable. */
+  auto operator=(pin_watch&&) -> pin_watch& = delete;
+  /** @brief Removes the watch through detail::retire(), safe on any thread while it runs. */
+  ~pin_watch();
+
+  /**
+   * @brief Removes the watch, so no call posted before is made.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Remove the watch."}]] void remove();
+
+  /** @brief Whether the watch is still installed. */
+  [[= py::doc{"Whether the watch is still installed."}]] [[nodiscard]] auto active() const noexcept
+      -> bool;
+
+private:
+  std::shared_ptr<periph::stm32::subscription> watch_;
+  detail::host_ref                             host_;
+  std::shared_ptr<fire_state>                  fire_;
+};
+
+/**
  * @brief A UART of the machine connected to Python: frames the firmware transmits are queued
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
  *        while the machine lives, every method raises ConfigError after.

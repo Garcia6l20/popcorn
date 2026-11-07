@@ -161,6 +161,38 @@ auto virtual_loop_port::board_base_ps() const -> std::uint64_t
   });
 }
 
+struct pin_watch::fire_state
+{
+  detail::callback_cell                    cell;
+  std::shared_ptr<detail::python_callable> relay;
+};
+
+pin_watch::pin_watch(
+    periph::stm32::subscription watch,
+    detail::host_ref            host,
+    std::shared_ptr<fire_state> fire) noexcept
+    : watch_{std::make_shared<periph::stm32::subscription>(std::move(watch))},
+      host_{std::move(host)}, fire_{std::move(fire)}
+{}
+
+pin_watch::~pin_watch()
+{
+  if(watch_ != nullptr)
+  {
+    detail::retire(host_, [owned = std::move(watch_)] { owned->reset(); });
+  }
+}
+
+void pin_watch::remove()
+{
+  detail::host_access(host_, [this] { watch_->reset(); });
+}
+
+auto pin_watch::active() const noexcept -> bool
+{
+  return watch_ != nullptr and watch_->active();
+}
+
 auto uart_device_link::has_flow_control() const -> bool
 {
   detail::require_alive(alive_, "uart", "a UART whose machine still exists");
@@ -553,6 +585,36 @@ auto machine_handle::uart_device_link_of(std::string const& peripheral) -> uart_
 auto machine_handle::virtual_loop_port_of(reflex::py::nb::object relay) -> virtual_loop_port
 {
   return virtual_loop_port{engine(), alive_, collected_, slot_, models_cell_, std::move(relay)};
+}
+
+auto machine_handle::gpio_watch(
+    std::string const&     peripheral,
+    std::uint8_t           pin,
+    reflex::py::nb::object relay) -> pin_watch
+{
+  auto fire = std::make_shared<pin_watch::fire_state>();
+  fire->cell.run_in(models_cell_, alive_, collected_);
+  fire->relay = detail::held_bare(std::move(relay));
+  return access([&](core::machine&) {
+    auto& port = gpio(peripheral, pin);
+    return pin_watch{
+        port.watch(
+            pin,
+            [fire](bool level, vtime at) {
+              detail::gil_entry const gil;
+              fire->cell.call([&] { return fire->relay->fn(level, at.ps); });
+            }),
+        slot_, fire};
+  });
+}
+
+void machine_handle::gpio_drive_stamped(
+    std::string const& peripheral,
+    std::uint8_t       pin,
+    bool               level,
+    std::uint64_t      at_ps)
+{
+  access([&](core::machine&) { gpio(peripheral, pin).drive_stamped(pin, level, vtime{at_ps}); });
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const

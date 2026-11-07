@@ -69,6 +69,12 @@ public:
     reset();
   }
 
+  /** @brief Whether the handle still holds a listener. */
+  [[nodiscard]] auto active() const noexcept -> bool
+  {
+    return static_cast<bool>(cancel_);
+  }
+
   /** @brief Removes the listener now, leaving the handle empty. */
   void reset()
   {
@@ -131,6 +137,20 @@ public:
    */
   virtual void drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) = 0;
 
+  /**
+   * @brief drive_at() for a time the machine may already have passed: a device hook placed at a
+   *        stamp the current block has gone beyond. The edge applies at the next event dispatch,
+   *        and its edge time, the one EXTI and the timers capture, is @p at.
+   * @param pin Pin number, a pin of the port, 0 to 15 on a full port.
+   * @param level Level driven, empty to release the pin to its pull.
+   * @param at Time of the edge, machine time since reset.
+   * @throws config_error when the port has no pin @p pin.
+   * @throws std::invalid_argument when @p at leaves the 64-bit picosecond range once the board
+   *         base is added.
+   * @throws config_error when the port already keeps max_pending_edges pending edges.
+   */
+  virtual void drive_stamped(std::uint8_t pin, std::optional<bool> level, vtime at) = 0;
+
   /** @brief Number of edges drive_at() scheduled that have not applied yet. */
   [[nodiscard]] virtual auto pending_edges() const -> std::size_t = 0;
 
@@ -182,6 +202,23 @@ public:
    */
   [[nodiscard]] virtual auto
       on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
+          -> subscription = 0;
+
+  /**
+   * @brief Adds a watcher called once for every level change of one pin, with the new level and
+   *        the edge time the EXTI model sees. The call is a model event on core::host_lane at that
+   *        time, so it runs on the machine's thread at the next event dispatch, never inside the
+   *        store that changed the pin, after the listeners of on_change(). A machine reset
+   *        changes levels with no call and drops the calls still pending. A port with no watcher
+   *        posts no event.
+   * @param pin Pin number, a pin of the port.
+   * @param watcher Called with the new level and the edge time, machine time since reset.
+   * @return Handle whose destruction removes the watcher, which then receives no call posted
+   *         before.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  [[nodiscard]] virtual auto
+      watch(std::uint8_t pin, std::move_only_function<void(bool level, vtime at)> watcher)
           -> subscription = 0;
 
   /**

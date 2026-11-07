@@ -481,6 +481,62 @@ TEST_CASE("an edge before the machine time is refused, a full port refuses the n
   CHECK(pc.pending_edges() == stm32::max_pending_edges);
 }
 
+TEST_CASE("a watcher is called by an event at the edge time and a pin nobody watches posts none")
+{
+  auto       f     = idling();
+  auto&      pc    = port(f, "GPIOC");
+  auto const base  = f.target->pending_events();
+  auto const start = f.target->virtual_clock().time().ps;
+  pc.drive(13, true);
+  CHECK(f.target->pending_events() == base);
+  std::vector<timed_change> seen;
+  auto watch = pc.watch(13, [&](bool level, vtime at) { seen.push_back({13, level, at.ps}); });
+  auto other = pc.watch(12, [&](bool, vtime) { FAIL("another pin"); });
+  pc.drive(13, false);
+  CHECK(f.target->pending_events() == base + 1);
+  CHECK(seen.empty());
+  run_until(f, start + us_ps, 1'000'000);
+  CHECK(
+      seen
+      == std::vector<timed_change>{
+          {13, false, start}
+  });
+  pc.drive_stamped(13, true, vtime{start});
+  run_until(f, start + 2 * us_ps, 1'000'000);
+  CHECK(
+      seen
+      == std::vector<timed_change>{
+          {13, false, start},
+          {13, true,  start}
+  });
+  watch.reset();
+  pc.drive(13, false);
+  CHECK(f.target->pending_events() == base);
+  CHECK(seen.size() == 2);
+}
+
+TEST_CASE("a watcher removed before its event runs is not called, one added after the post is not")
+{
+  auto          f      = idling();
+  auto&         pc     = port(f, "GPIOC");
+  auto const    start  = f.target->virtual_clock().time().ps;
+  std::uint32_t first  = 0;
+  std::uint32_t second = 0;
+  pc.drive(13, true);
+  auto one = pc.watch(13, [&](bool, vtime) { ++first; });
+  pc.drive(13, false);
+  auto two = pc.watch(13, [&](bool, vtime) { ++second; });
+  run_until(f, start + us_ps, 1'000'000);
+  CHECK(first == 1);
+  CHECK(second == 0);
+  pc.drive(13, true);
+  one.reset();
+  run_until(f, start + 2 * us_ps, 1'000'000);
+  CHECK(first == 1);
+  CHECK(second == 1);
+  CHECK_THROWS_AS(pc.watch(16, [](bool, vtime) {}), popcorn::config_error);
+}
+
 TEST_CASE("a snapshot with pending edges restores them, a drive leaves them in place")
 {
   auto       f     = idling();
