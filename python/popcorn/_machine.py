@@ -2738,7 +2738,9 @@ class Machine:
     async def step(self, n: int = 1) -> Stop:
         """Execute exactly `n` instructions, a BUDGET stop, or an earlier stop.
 
-        After a RESET_REQUEST stop it first applies that reset, as `run` does.
+        After a RESET_REQUEST stop it first applies that reset, as `run` does. A repeating timer
+        of the machine's loop counts as something due, so while the core sleeps `step` returns
+        only at an earlier stop.
 
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active.

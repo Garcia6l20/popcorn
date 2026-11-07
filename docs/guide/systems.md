@@ -66,9 +66,20 @@ A frame whose stop bit ends at the sender at system time `t` ends at the receive
 time. The receiver's USART raises IDLE one frame after the last frame of a message.
 
 The members meet every `Q` of system time, `Q` being the smallest latency of the system
-and `system.quantum` its value. `Q` sets how often they meet, never what happens. The frames,
-their times and every member's state are the same at any quantum, any slicing and any thread
-timing.
+and `system.quantum` its value. Once the system runs on, what happens is the same at any
+quantum, any slicing and any thread timing: the frames, their times and every member's state.
+The one part that follows `Q` is what a parked action does at a TIME pause, since the events a
+member has fired by that pause depend on the quantum. At such a pause these differ between
+quanta:
+
+- a register read, such as `ISR.TC` of a USART or the frames a stream holds
+- a write of `UE = 0`, which cuts a frame in flight at one quantum and not at another
+- an RCC peripheral reset pulse
+- a parked `system.reset` of a member
+- a member's `snapshot()` followed by `restore()`
+- the bytes a member's `snapshot()` saves
+
+Two runs at one quantum repeat exactly, whatever the slicing and the thread timing.
 
 ### Latency and wall time
 
@@ -258,7 +269,8 @@ SCL holds the phases after it.
 - A UART, an SPI or an I2C belongs to one link or bus. The targets of a bus are on members
   other than the controller's.
 - Every link and bus declares its latency. `system.quantum` is the smallest of them, and the
-  results of every medium are the same at any quantum, slicing and thread timing.
+  results of every medium are the same at any quantum, slicing and thread timing, except for
+  what a parked action does at a TIME pause, see above.
 - `system.tap(end, kind)` takes `UartTap`, `SpiTap` or `I2CTap`. The tap of any end of a bus is
   the same object.
 
