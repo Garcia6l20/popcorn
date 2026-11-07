@@ -1211,7 +1211,9 @@ class UartDevice(_core.UartDeviceBase):
     `UartError.ABORTED`.
 
     Restore: a device's Python attributes are never rewound, so a stack keeps its state in what
-    `on_attach` builds, or in the bytes of `snapshot` that `restore` reads. A restore empties the
+    `on_attach` builds, or in the bytes of `snapshot` that `restore` reads. State set in `__init__`
+    survives a restore, so `on_attach` must set every attribute the stack changes, or a rerun starts
+    from the last run's values and can answer twice. A restore empties the
     loop, see `VirtualLoop`, and then calls `restore`, whose default runs `on_attach` again in the
     loop's event at the restored clock, behind every event pending at it. A rerun starts the stack
     from its first state and its timers from the restored clock, so the stack's stamps equal the

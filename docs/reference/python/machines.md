@@ -22,6 +22,8 @@ Run and inspect an emulated MCU: the machine, its calls, stops, snapshots and ob
 
 ::: popcorn.Snapshot
 
+::: popcorn.VirtualLoop
+
 ::: popcorn.ResetKind
 
 ::: popcorn.Arena

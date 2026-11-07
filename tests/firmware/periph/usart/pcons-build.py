@@ -56,3 +56,5 @@ add_ll_firmware(
         "link_ue_toggle",
     ],
 )
+
+add_ll_firmware("peer_ll", [here / "peer_ll.c"], ["rcc", "usart"], ["peer_host"])

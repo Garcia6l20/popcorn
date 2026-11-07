@@ -35,3 +35,5 @@ Every exception popcorn raises derives from `PopcornError`.
 ::: popcorn.UsbStall
 
 ::: popcorn.UsbTimeout
+
+::: popcorn.VirtualLoopUnsupported
