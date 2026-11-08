@@ -1261,6 +1261,15 @@ public:
       virtual_loop_port_of(reflex::py::nb::object relay) -> virtual_loop_port;
 
   /**
+   * @brief Calls @p relay with the end time in picoseconds on the machine's thread after each
+   *        frame @p link's block transmitted.
+   * @param link The block's link.
+   * @param relay A callable, or None to stop the calls.
+   */
+  [[= py::doc{"Call a relay after each frame the block transmits, None to stop."}]] void
+      audio_frame_hook(audio_link const& link, reflex::py::nb::object relay);
+
+  /**
    * @brief Names of the peripherals whose model is a built-in SAI, in description order.
    */
   [[= py::doc{"Names of the peripherals whose model is a built-in SAI."}]] [[nodiscard]] auto

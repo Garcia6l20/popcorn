@@ -15,6 +15,7 @@
 #include <reflex/py.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -430,7 +431,7 @@ public:
   /** @brief Transmitted frames dropped because the queue held its limit. */
   [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
       dropped() const -> std::uint64_t;
-  /** @brief Words written and not served to the receiver yet. */
+  /** @brief Words written and not served to the receiver yet, readable after the machine ended. */
   [[= py::doc{"Words written and not served to the receiver yet."}]] [[nodiscard]] auto
       queued() const -> std::uint64_t;
   /**
@@ -457,6 +458,15 @@ public:
               "reset resets counts from."}]] auto
       drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
           -> std::vector<audio_record>;
+  /**
+   * @brief Frames the receiver took while no word was queued for one of its slots, readable after
+   *        the machine ended.
+   */
+  [[= py::doc{"Frames the receiver took with a slot no word was queued for."}]] [[nodiscard]] auto
+      starved() const -> std::uint64_t;
+  /** @brief Sets the call made on the machine's thread after each transmitted frame, empty for
+   *         none. */
+  [[= py::skip]] void set_hook(std::function<void(std::uint64_t)> hook) const;
   /**
    * @brief Queues words for a receiving block, one per slot in slot order.
    * @param words Words, inactive slots included.

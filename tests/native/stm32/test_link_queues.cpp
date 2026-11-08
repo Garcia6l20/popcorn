@@ -150,6 +150,81 @@ TEST_CASE("an audio queue moves frames and written words across threads without 
   CHECK(received.size() + queue.queued(held) <= words);
 }
 
+TEST_CASE("an audio queue calls its hook after each kept frame and counts a starved receive")
+{
+  detail::audio_queue_endpoint queue;
+  std::vector<std::uint64_t>   ends;
+  {
+    auto const held = queue.lock();
+    std::ignore     = queue.set_hook(held, [&](std::uint64_t end) { ends.push_back(end); });
+  }
+  for(std::uint64_t at = 0; at < 4; ++at)
+  {
+    std::array<std::uint32_t, 2> const slots{1, 2};
+    queue.transmitted(slots, stereo, vtime{at}, vtime{at + 10});
+  }
+  CHECK(ends == std::vector<std::uint64_t>{10, 11, 12, 13});
+  {
+    auto const held = queue.lock();
+    queue.write(held, std::array<std::uint32_t, 3>{7, 8, 9});
+  }
+  std::array<std::uint32_t, 2> in{};
+  queue.receive(in, stereo, vtime{0});
+  queue.receive(in, stereo, vtime{1});
+  auto const held = queue.lock();
+  CHECK(queue.starved(held) == 1);
+  CHECK(in[0] == 9);
+  CHECK(in[1] == 0);
+  queue.discard(held);
+  CHECK(queue.starved(held) == 0);
+}
+
+TEST_CASE("an audio queue holds no link lock while its hook runs, so the hook may write words")
+{
+  detail::audio_queue_endpoint queue;
+  std::size_t                  calls = 0;
+  {
+    auto const held = queue.lock();
+    std::ignore     = queue.set_hook(held, [&](std::uint64_t) {
+      CHECK(popcorn::core::detail::link_locks_held == 0);
+      if(popcorn::core::detail::link_locks_held == 0)
+      {
+        auto const inner = queue.lock();
+        queue.write(inner, std::array<std::uint32_t, 2>{1, 2});
+      }
+      ++calls;
+    });
+  }
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{0}, vtime{10});
+  CHECK(calls == 1);
+  auto const held = queue.lock();
+  CHECK(queue.queued(held) == 2);
+}
+
+TEST_CASE("an audio queue swapped its hook while the engine transmits stays consistent")
+{
+  detail::audio_queue_endpoint queue;
+  std::atomic<bool>            done{false};
+  std::atomic<std::uint64_t>   calls{0};
+  std::thread                  binding{[&] {
+    while(not done.load(std::memory_order_acquire))
+    {
+      auto const held = queue.lock();
+      std::ignore     = queue.set_hook(
+          held, [&](std::uint64_t) { calls.fetch_add(1, std::memory_order_relaxed); });
+    }
+  }};
+  for(std::uint64_t at = 0; at < 100'000; ++at)
+  {
+    std::array<std::uint32_t, 2> const slots{1, 2};
+    queue.transmitted(slots, stereo, vtime{at}, vtime{at + 1});
+  }
+  done.store(true, std::memory_order_release);
+  binding.join();
+  CHECK(calls.load() <= 100'000);
+}
+
 TEST_CASE("an audio queue discarded and trimmed to 1 while the engine fills it stays consistent")
 {
   detail::audio_queue_endpoint queue;

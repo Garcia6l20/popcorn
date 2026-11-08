@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <format>
 #include <memory>
@@ -159,28 +160,31 @@ auto sai_writes(bool pdm) -> std::span<write_entry<sai> const>;
  *        into the slot, section 69.4.7, which moves no FIFO access. A frame keeps the timing it
  *        started with across a clock change. A transmitter takes a FIFO word when each active slot
  *        starts, slot 0's word again for slot 1 in mono mode with two slots, and hands the frame to
- *        its endpoint when it ends. A master transmitter starts its first frame when the FIFO first
- *        holds data, section 69.4.3. A receiver takes the frame from its endpoint when its first
- *        active slot ends, and stores each active slot's word when the slot ends, section 69.4.7,
- *        slot 0 only in mono mode. A slot running past the frame end, the last slot of a full frame
- *        with FSOFF, stores its word that many bit times into the next frame, or at the frame end
- *        when no next frame starts, that frame ends first, or a later slot of the same frame also
- *        runs past its end. A block enabled with slots breaking the rules of section 69.4.7, FBOFF
- *        + DS above the slot size, the slots longer than the frame or an odd slot count with FSDEF,
- *        logs it once and runs as configured. A synchronous follower is checked against the frame
- *        of the block it follows, when both run. Endpoints get the frame's start time and its
- *        layout, audio_format. A frame shorter than 8 bits never runs, logged once, section 69.4.6.
- *        Underrun and overrun set OVRUDR and keep the slot position, section 69.4.14: a transmitter
- *        sends 0 and a receiver drops words until the FIFO serves the slot where it happened. FLVL
- *        and FREQ follow the FIFO level against FTH for the block's direction, section 69.4.9, also
- *        while SAIEN is clear. Clearing SAIEN takes effect at the end of the frame in progress,
- *        section 69.4.15. A master with NODIV = 0 and FRL + 1 not a power of 2 from 8 sets WCKCFG
- *        and stays disabled. FRCR.FSDEF is writable, as RM0456 69.6.4 describes it and ST's HAL
- *        writes it, although the register map marks it read-only. The IRQ follows the status flags
- *        of both blocks with their enables. With CR1.DMAEN, the block's DMA request
- *        `<instance>_a_dma` or `<instance>_b_dma` follows FREQ, section 69.4.16, through the GPDMA
- *        peer, also while SAIEN is clear, levels announced again in reset. Not modelled, logged
- *        once: SPDIF, AC'97, PDM, companding, mute, synchronization with another SAI.
+ *        its endpoint when it ends. An endpoint that throws from a frame lets the frame event
+ *        finish and the exception leaves at its end, so the block keeps sending. Two endpoints
+ *        throwing in one event give the first exception, the second is dropped. A master
+ *        transmitter starts its first frame when the FIFO first holds data, section 69.4.3. A
+ *        receiver takes the frame from its endpoint when its first active slot ends, and stores
+ *        each active slot's word when the slot ends, section 69.4.7, slot 0 only in mono mode. A
+ *        slot running past the frame end, the last slot of a full frame with FSOFF, stores its word
+ *        that many bit times into the next frame, or at the frame end when no next frame starts,
+ *        that frame ends first, or a later slot of the same frame also runs past its end. A block
+ *        enabled with slots breaking the rules of section 69.4.7, FBOFF + DS above the slot size,
+ *        the slots longer than the frame or an odd slot count with FSDEF, logs it once and runs as
+ *        configured. A synchronous follower is checked against the frame of the block it follows,
+ *        when both run. Endpoints get the frame's start time and its layout, audio_format. A frame
+ *        shorter than 8 bits never runs, logged once, section 69.4.6. Underrun and overrun set
+ *        OVRUDR and keep the slot position, section 69.4.14: a transmitter sends 0 and a receiver
+ *        drops words until the FIFO serves the slot where it happened. FLVL and FREQ follow the
+ *        FIFO level against FTH for the block's direction, section 69.4.9, also while SAIEN is
+ *        clear. Clearing SAIEN takes effect at the end of the frame in progress, section 69.4.15. A
+ *        master with NODIV = 0 and FRL + 1 not a power of 2 from 8 sets WCKCFG and stays disabled.
+ *        FRCR.FSDEF is writable, as RM0456 69.6.4 describes it and ST's HAL writes it, although the
+ *        register map marks it read-only. The IRQ follows the status flags of both blocks with
+ *        their enables. With CR1.DMAEN, the block's DMA request `<instance>_a_dma` or
+ *        `<instance>_b_dma` follows FREQ, section 69.4.16, through the GPDMA peer, also while SAIEN
+ *        is clear, levels announced again in reset. Not modelled, logged once: SPDIF, AC'97, PDM,
+ *        companding, mute, synchronization with another SAI.
  *
  *        The external clock of each block is board state saved in snapshots: a rate and the time of
  *        one of its frame boundaries since power-on. A power-on or brown-out reset powers the codec
@@ -266,12 +270,13 @@ private:
       -> std::uint32_t;
   [[nodiscard]] auto time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t;
 
-  void               start(std::size_t source, std::uint64_t from_ps);
-  void               follow_clock(std::size_t b);
-  void               open(std::size_t source);
-  void               run(std::size_t source, std::uint32_t position);
-  void               begin(std::size_t b);
-  void               take(std::size_t b, std::size_t slot);
+  void start(std::size_t source, std::uint64_t from_ps);
+  void follow_clock(std::size_t b);
+  void open(std::size_t source);
+  void run(std::size_t source, std::uint32_t position);
+  void run_frames(std::size_t source, std::uint32_t position, std::exception_ptr& failure);
+  void begin(std::size_t b);
+  void take(std::size_t b, std::size_t slot);
   [[nodiscard]] auto received(std::size_t b, std::size_t slot, std::size_t source)
       -> std::optional<std::uint32_t>;
   void store(std::size_t b, std::size_t slot, std::size_t source);
@@ -865,6 +870,16 @@ auto sai::time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t
 
 void sai::run(std::size_t source, std::uint32_t position)
 {
+  std::exception_ptr failure;
+  run_frames(source, position, failure);
+  if(failure)
+  {
+    std::rethrow_exception(failure);
+  }
+}
+
+void sai::run_frames(std::size_t source, std::uint32_t position, std::exception_ptr& failure)
+{
   auto&                    block = state_.block[source];
   std::array<bool, blocks> members{};
   for(;;)
@@ -917,7 +932,17 @@ void sai::run(std::size_t source, std::uint32_t position)
     {
       if(members[b] and state_.block[b].active)
       {
-        finish(b, bits, start_ps, end_ps);
+        try
+        {
+          finish(b, bits, start_ps, end_ps);
+        }
+        catch(...)
+        {
+          if(not failure)
+          {
+            failure = std::current_exception();
+          }
+        }
       }
     }
     for(std::size_t b = 0; b < blocks; ++b)
@@ -1140,13 +1165,21 @@ void sai::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  if(state_.block[kind].position == 0)
+  try
   {
-    open(kind);
+    if(state_.block[kind].position == 0)
+    {
+      open(kind);
+    }
+    else
+    {
+      run(kind, state_.block[kind].position);
+    }
   }
-  else
+  catch(...)
   {
-    run(kind, state_.block[kind].position);
+    flags();
+    throw;
   }
   flags();
 }

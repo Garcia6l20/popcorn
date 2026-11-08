@@ -4,6 +4,7 @@ stamps, on every GPIO row and on every device kind."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import struct
 import threading
 import weakref
@@ -15,7 +16,7 @@ import pytest
 from popcorn import System, UartLink
 from popcorn.arm import Reg
 from popcorn.board import DeviceBoard, I2CTarget, PinMode, SpiTarget, UartDevice, Unwatch
-from popcorn.units import VirtualDuration, VirtualTime, us
+from popcorn.units import VirtualDuration, VirtualTime, ps, us
 
 from .conftest import collected
 
@@ -791,3 +792,35 @@ def test_a_member_parked_drive_stamps_at_the_clock_and_repeats_at_one_quantum(
         assert listener.edges["PA0"] == [(True, at)]
         runs.append(listener.edges["PA0"])
     assert runs[0] == runs[1]
+
+
+def test_a_raising_on_edge_stops_the_run_and_the_pin_goes_on_toggling(
+    u575: popcorn.PartDescription,
+) -> None:
+    chosen = ROWS["u575"]
+
+    def edges_of(raise_at: int | None) -> tuple[Edges, int]:
+        device = Plain()
+        m = start(u575, {"USART1": [device]}, toggle_for(chosen), clock=chosen.clock)
+        seen: Edges = []
+        raised = 0
+
+        def heard(level: bool, at: VirtualTime) -> None:
+            nonlocal raised
+            seen.append((level, at.ps))
+            if len(seen) == raise_at:
+                raised += 1
+                raise LookupError("a bug in the device")
+
+        device.board.watch_pin("PA5", heard)
+        end = m.time.ps + us(60).ps
+        while m.time.ps < end:
+            with contextlib.suppress(popcorn.ModelError):
+                run(m, ps(end - m.time.ps))
+        return seen, raised
+
+    control, _ = edges_of(None)
+    seen, raised = edges_of(3)
+    assert raised == 1
+    assert len(control) > 6
+    assert seen == control

@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -281,7 +282,66 @@ public:
       vtime                          at,
       vtime                          end) override
   {
+    std::function<void(std::uint64_t)> hook;
+    {
+      auto const held = lock();
+      hook            = hook_;
+      keep(held, slots, format, at, end);
+    }
+    if(hook)
+    {
+      hook(end.ps);
+    }
+  }
+
+  void
+      receive(std::span<std::uint32_t> slots, periph::stm32::audio_format format, vtime at) override
+  {
     auto const held = lock();
+    received_       = queued_audio_frame{.format = format, .at_ps = at.ps};
+    bool starved    = false;
+    for(auto& slot : slots)
+    {
+      if(pending_.empty())
+      {
+        slot    = 0;
+        starved = true;
+        continue;
+      }
+      slot = pending_.front();
+      pending_.pop_front();
+    }
+    if(starved)
+    {
+      ++starved_;
+    }
+  }
+
+  /** @brief Frames the receiver took while no word was queued for one of its slots. */
+  [[nodiscard]] auto starved(core::link_guard const& held) const noexcept -> std::uint64_t
+      pre(held.guards(mutex_))
+  {
+    return starved_;
+  }
+
+  /**
+   * @brief Sets the call made after each transmitted frame was kept, with the frame's end time,
+   *        outside the link lock. Empty for none.
+   */
+  auto set_hook(core::link_guard const& held, std::function<void(std::uint64_t)> hook)
+      -> std::function<void(std::uint64_t)> pre(held.guards(mutex_))
+  {
+    return std::exchange(hook_, std::move(hook));
+  }
+
+  /** @brief Keeps a transmitted frame. */
+  void keep(
+      core::link_guard const&        held,
+      std::span<std::uint32_t const> slots,
+      periph::stm32::audio_format    format,
+      vtime                          at,
+      vtime                          end) pre(held.guards(mutex_))
+  {
     trim(held, limit_ - 1);
     auto const count = static_cast<std::uint8_t>(slots.size());
     if(runs_.empty() or runs_.back().format != format or runs_.back().slots != count)
@@ -293,23 +353,6 @@ public:
     starts_.push_back(at.ps);
     ends_.push_back(end.ps);
     tags_.push_back(resets_.load());
-  }
-
-  void
-      receive(std::span<std::uint32_t> slots, periph::stm32::audio_format format, vtime at) override
-  {
-    auto const held = lock();
-    received_       = queued_audio_frame{.format = format, .at_ps = at.ps};
-    for(auto& slot : slots)
-    {
-      if(pending_.empty())
-      {
-        slot = 0;
-        continue;
-      }
-      slot = pending_.front();
-      pending_.pop_front();
-    }
   }
 
   /** @brief Frames transmitted and not taken yet. */
@@ -398,6 +441,7 @@ public:
     runs_.clear();
     pending_.clear();
     dropped_ = 0;
+    starved_ = 0;
   }
 
   /**
@@ -434,15 +478,17 @@ private:
     }
   }
 
-  core::reset_counter               resets_;
-  std::deque<std::uint32_t>         words_;
-  std::deque<std::uint64_t>         starts_;
-  std::deque<std::uint64_t>         ends_;
-  std::deque<std::uint64_t>         tags_;
-  std::deque<format_run>            runs_;
-  std::deque<std::uint32_t>         pending_;
-  std::optional<queued_audio_frame> received_;
-  std::uint64_t                     limit_ = audio_frame_limit;
-  std::uint64_t                     dropped_{};
+  core::reset_counter                resets_;
+  std::deque<std::uint32_t>          words_;
+  std::deque<std::uint64_t>          starts_;
+  std::deque<std::uint64_t>          ends_;
+  std::deque<std::uint64_t>          tags_;
+  std::deque<format_run>             runs_;
+  std::deque<std::uint32_t>          pending_;
+  std::optional<queued_audio_frame>  received_;
+  std::uint64_t                      limit_ = audio_frame_limit;
+  std::uint64_t                      dropped_{};
+  std::uint64_t                      starved_{};
+  std::function<void(std::uint64_t)> hook_;
 };
 }

@@ -2183,3 +2183,25 @@ def test_a_pending_abort_in_a_snapshot_taps_the_frame_the_run_that_went_on_tappe
     m.restore(saved)
     asyncio.run(m.run(for_=ms(1)))
     assert seen(device) == went_on
+
+
+def test_a_raising_on_frame_stops_the_run_and_the_uart_goes_on(
+    u575: popcorn.PartDescription,
+) -> None:
+    class Raising(Recorder):
+        def on_frame(self, byte: int, at: VirtualTime) -> None:
+            super().on_frame(byte, at)
+            if len(self.frames) == 2:
+                raise LookupError("a bug in the device")
+
+    row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+    device = Raising()
+    m = asleep(row, {"USART1": [device]})
+    for byte in (0x41, 0x42, 0x43):
+        transmit(m, row, byte)
+        try:
+            asyncio.run(m.run(for_=ms(2)))
+        except popcorn.ModelError:
+            assert byte == 0x42
+    assert [frame for frame, _ in device.frames] == [0x41, 0x42, 0x43]
+    assert m.periph.USART1.ISR_enabled.TC == 1

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from popcorn import _core
-from popcorn._errors import ConfigError, ModelError
+from popcorn._errors import ConfigError, MachineRunning, ModelError
 from popcorn._streams import Poster, Waiter, check_wait, read_tagged, written
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -295,10 +295,96 @@ def _is_frame_rate(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 32
 
 
+class DeviceAudio:
+    """One audio block owned by a bus device, `DeviceBoard.audio_port(sai, block, on_frame)`.
+
+    The device is the far end of the block: it hears the frames a transmitting guest block sends
+    and queues the words a receiving guest block takes. Frames the block sent before the device
+    owned it are dropped at the claim. The block has one owner: an
+    `AudioStream` of the block, taken or asked for, and a device on it refuse each other.
+
+    Frames: `on_frame(frame)` runs on the machine's thread in the machine's `VirtualLoop` when a
+    frame ends, at its end stamp, `AudioFrame.at` the start, the words and layout as an
+    `AudioStream` capture of the same run gives them. Every frame costs one GIL entry for the hook
+    and one loop step. After `loop.close()` a frame still costs the GIL entry, which drains it and
+    drops it, so `queued` and `starved` go on counting.
+
+    Cost: measured on `duplex_irq`, 33 frames, 80 runs of each kind interleaved, twice: about 10
+    us of wall time per frame for a hook that returns at once (7 and 10 us), 12 to 14 us with a
+    callback that keeps the frame and its stamp. The spread of one run is as large
+    as the difference, so the figure holds to a few us. At 16 kHz that is 16 000 entries and about
+    160 ms of wall time per virtual second. Nothing batches the frames, so a stack answers a
+    frame inside its own frame time.
+
+    Layouts: the device hears every layout the block is configured for, the slots and the data
+    bits an `AudioStream` capture of the same run gives, such as 4 slots or 32 data bits.
+
+    Reads: `queued` and `starved` read the same after the machine ended, `Machine.close` or its
+    collection, `write` needs the machine and raises `ConfigError`.
+
+    Words: `write` queues one word per slot in slot order for a receiving block. A frame the
+    block takes with no word queued for one of its slots gets 0 there and counts in `starved`, the
+    model sets no flag of its own for a far end that has nothing to send. A restore drops the
+    queued words, resets `starved`, and keeps the owner and the hook: the restored device builds
+    its stack again. A write counts as traffic for a `UartDevice` unless it runs in `on_attach`,
+    so the default `snapshot` refuses once words were queued that the stack cannot recreate.
+    """
+
+    __slots__ = ("_link", "_owner", "block", "name")
+
+    def __init__(self, name: str, block: Block, link: _core.AudioLink, owner: object) -> None:
+        self.name = name
+        self.block = block
+        self._link = link
+        self._owner = owner
+
+    @property
+    def queued(self) -> int:
+        """Words written and not served to the receiving block yet."""
+        return self._link.queued()
+
+    @property
+    def starved(self) -> int:
+        """Frames the receiving block took while a slot had no word queued, since power-on or
+        the last `Machine.restore`."""
+        return self._link.starved()
+
+    def write(self, words: Sequence[int]) -> None:
+        """Queue words for the receiving block, one per slot in slot order, inactive slots
+        included. They are served from the next frame the block takes, behind what is queued.
+        Allowed from the machine's thread and from the test thread while the machine is parked.
+        A running machine has no deterministic frame to take them, so a test writes with
+        `loop.post(audio.write, words, at=)`, which runs the write at a stamp.
+
+        Raises:
+            ValueError: A word is outside 0 to 2**32 - 1.
+            MachineRunning: Called off the machine's thread while the machine runs.
+        """
+        values = list(words)
+        for word in values:
+            if isinstance(word, bool) or not 0 <= word < 1 << 32:
+                raise ValueError(f"an audio word is 0 to 2**32 - 1, not {word!r}")
+        from popcorn._devices import UartDevice, parked
+
+        owner = self._owner
+        try:
+            parked(cast(UartDevice, owner), lambda: self._link.write(values))
+        except MachineRunning as error:
+            raise MachineRunning(
+                f"{self!r}.write() runs on a machine that is running: use"
+                " loop.post(audio.write, words, at=) to write at a stamp"
+            ) from error
+        if isinstance(owner, UartDevice):
+            owner._note_pin()  # pyright: ignore[reportPrivateUsage]
+
+    def __repr__(self) -> str:
+        return f"DeviceAudio({self.name}.{self.block})"
+
+
 class AudioPorts:
     """The Python ends of a machine's SAI blocks, one link and one stream per block."""
 
-    __slots__ = ("_aliases", "_links", "_post", "_streams", "_wait")
+    __slots__ = ("_aliases", "_links", "_owners", "_post", "_streams", "_wait")
 
     def __init__(
         self,
@@ -326,16 +412,17 @@ class AudioPorts:
                     chosen.clocked_by is not None,
                 )
         self._streams: dict[tuple[str, Block], AudioStream] = {}
+        self._owners: dict[tuple[str, Block], object] = {}
 
     def serving(self, name: str) -> str:
         """The SAI that serves `name`, `name` itself unless it is an alias."""
         return self._aliases.get(name, name)
 
-    def stream(self, name: str, block: str) -> AudioStream:
+    def stream(self, name: str, block: str, *, owned_ok: bool = False) -> AudioStream:
         """The stream of audio block `block` of SAI `name`.
 
         Raises:
-            ConfigError: `block` is neither "A" nor "B".
+            ConfigError: `block` is neither "A" nor "B", or a device owns the block.
             ModelError: The peripheral's model is not the built-in SAI.
         """
         if block not in BLOCKS:
@@ -347,6 +434,12 @@ class AudioPorts:
         chosen: Block = "A" if block == "A" else "B"
         name = self.serving(name)
         key = (name, chosen)
+        if key in self._owners and not owned_ok:
+            raise ConfigError(
+                f"{name}.audio({chosen!r}): a device owns this audio block, so it has no stream",
+                key=f"{name}.audio",
+                expected="a block no device owns",
+            )
         stream = self._streams.get(key)
         if stream is None:
             link = self._links.get(key)
@@ -356,6 +449,44 @@ class AudioPorts:
                 )
             stream = self._streams[key] = AudioStream(name, chosen, link, self._wait, self._post)
         return stream
+
+    def claim(self, name: str, block: str, owner: object) -> DeviceAudio:
+        """Give audio block `block` of SAI `name` to `owner`, for a device that listens and
+        serves it.
+
+        Raises:
+            ConfigError: `block` is neither "A" nor "B", another device owns it, or an
+                `AudioStream` of it was taken.
+            ModelError: The peripheral's model is not the built-in SAI.
+        """
+        if block not in BLOCKS:
+            raise ConfigError(
+                f"{name}.audio: an audio block A or B, not {block!r}",
+                key=f"{name}.audio",
+                expected="an audio block A or B",
+            )
+        chosen: Block = "A" if block == "A" else "B"
+        name = self.serving(name)
+        key = (name, chosen)
+        link = self._links.get(key)
+        if link is None:
+            raise ModelError(
+                f"{name} has no built-in SAI model, so no audio block", peripheral=name
+            )
+        held = self._owners.get(key)
+        if (held is not None and held is not owner) or key in self._streams:
+            raise ConfigError(
+                f"{name}.audio({chosen!r}): the block has an owner already, an AudioStream or"
+                " another device",
+                key=f"{name}.audio",
+                expected="a block with no other owner",
+            )
+        self._owners[key] = owner
+        return DeviceAudio(name, chosen, link, owner)
+
+    def link(self, name: str, block: str) -> _core.AudioLink:
+        """The native link of a block, for the machine's own wiring."""
+        return self._links[self.serving(name), "A" if block == "A" else "B"]
 
     def discard(self) -> None:
         """Drop kept frames, unserved words, receive layouts and the drop counts, at a

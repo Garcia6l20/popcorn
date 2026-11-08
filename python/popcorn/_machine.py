@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtim
 
 from popcorn import _core
 from popcorn._arena import Arena
-from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block
+from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
     F32,
     I32_SLOT,
@@ -656,6 +656,7 @@ class Machine:
         "__weakref__",
         "_arena",
         "_audio",
+        "_audio_hooks",
         "_board",
         "_call_baseline",
         "_callback_table",
@@ -910,6 +911,7 @@ class Machine:
         self._devices = attached
         self._callback_table = CallbackTable()
         self._pin_watches = PinWatches()
+        self._audio_hooks: dict[tuple[str, str], int] = {}
         self._restore_done = False
         self._loop: VirtualLoop | None = None
         for peripheral, targets in attached.items():
@@ -3480,7 +3482,34 @@ class Machine:
                 key=key,
                 expected=f"the device {device!r}",
             )
-        self._audio.stream(name, block).external_frame_hz = frame_hz
+        self._audio.stream(name, block, owned_ok=True).external_frame_hz = frame_hz
+
+    def _device_audio(
+        self,
+        owner: BusDevice,
+        sai: str,
+        block: str,
+        handler: Callable[[int], None],
+        claimed: Callable[[DeviceAudio], None],
+    ) -> DeviceAudio:
+        audio = self._audio.claim(sai, block, owner)
+        link = self._audio.link(audio.name, audio.block)
+        link.drain(link.available())
+        claimed(audio)
+        key = self._callback_table.add(handler, in_caller=True)
+        old = self._audio_hooks.pop((audio.name, audio.block), None)
+        try:
+            self._handle.audio_frame_hook(
+                self._audio.link(audio.name, audio.block),
+                Relay(self._callback_table, key, quiet=True),
+            )
+        except BaseException:
+            self._callback_table.drop(key)
+            raise
+        self._audio_hooks[audio.name, audio.block] = key
+        if old is not None:
+            self._callback_table.drop(old)
+        return audio
 
     def _device_pin_watch(
         self, port: str, pin: int, handler: Callable[[bool, int], None]

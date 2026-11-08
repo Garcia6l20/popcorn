@@ -24,7 +24,7 @@ from popcorn.units import VirtualDuration, VirtualTime
 _TAP_KEEP = 1 << 20
 
 if typing.TYPE_CHECKING:
-    from popcorn._audio import Block
+    from popcorn._audio import AudioFrame, Block, DeviceAudio
     from popcorn._hooks import CallbackTable
     from popcorn._refs import Pending
 
@@ -218,6 +218,15 @@ class _PinMachine(typing.Protocol):
         self, port: str, pin: int, handler: Callable[[bool, int], None]
     ) -> Unwatch: ...
 
+    def _device_audio(  # pyright: ignore[reportPrivateUsage]
+        self,
+        owner: BusDevice,
+        sai: str,
+        block: str,
+        handler: Callable[[int], None],
+        claimed: Callable[[DeviceAudio], None],
+    ) -> DeviceAudio: ...
+
     def _device_pin_read(  # pyright: ignore[reportPrivateUsage]
         self, port: str, pin: int
     ) -> tuple[bool, PinMode]: ...
@@ -263,6 +272,51 @@ class DeviceBoard:
                 expected="a device serving a live machine",
             )
         clock(self._device, sai, block, frame_hz)
+
+    def audio_port(
+        self, sai: str, block: Block, on_frame: Callable[[AudioFrame], None]
+    ) -> DeviceAudio:
+        """Own an SAI audio block as its far end, the guest being the master. `on_frame(frame)` is
+        called for every frame a transmitting block sends, and the returned `DeviceAudio` queues
+        the words a receiving block takes. See `DeviceAudio`. A device owning both blocks of an
+        SAI calls this once for each. Calling again for a block the device owns replaces its
+        callback, as a restored stack does.
+
+        `on_frame` runs on the machine's thread in the machine's `VirtualLoop` at the frame's end
+        stamp, whichever thread made the port. A frame heard from a `UartDevice` counts as
+        traffic, and so does a `DeviceAudio.write` outside `on_attach`, so its default `snapshot`
+        refuses: override `snapshot` and `restore`. A closed loop drops the frames.
+
+        Raises:
+            TypeError: `on_frame` is not callable.
+            ConfigError: The device serves no live machine, `block` is neither "A" nor "B", or the
+                block has an owner, an `AudioStream` of it or another device.
+            ModelError: The part has no such built-in SAI.
+        """
+        if not callable(cast(object, on_frame)):
+            raise TypeError(f"audio_port() takes a callable, not {on_frame!r}")
+        from popcorn._audio import _audio_frames  # pyright: ignore[reportPrivateUsage]
+
+        machine = self._machine()
+        loop = machine.loop
+        stack = self._device if isinstance(self._device, UartDevice) else None
+        taken: list[DeviceAudio] = []
+
+        def heard(end_ps: int) -> None:
+            frames = _audio_frames(taken[0]._link.drain(1))  # pyright: ignore[reportPrivateUsage]
+            if not frames or loop.is_closed():
+                return
+            frame = frames[0]
+
+            def call() -> None:
+                if stack is not None:
+                    stack._traffic = True  # pyright: ignore[reportPrivateUsage]
+                self._called("on_frame", on_frame, frame)
+
+            loop._run_hook(end_ps, call)  # pyright: ignore[reportPrivateUsage]
+
+        claim = machine._device_audio  # pyright: ignore[reportPrivateUsage]
+        return claim(self._device, sai, block, heard, taken.append)
 
     def watch_pin(self, pin: str, on_edge: Callable[[bool, VirtualTime], None]) -> Unwatch:
         """Call `on_edge(level, at)` at every level change of `pin`, whoever causes it: a firmware

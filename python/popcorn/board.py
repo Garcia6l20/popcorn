@@ -4,7 +4,7 @@ I2C controllers, the clock sources of the RCC, the supply voltages and the RNG w
 
 from __future__ import annotations
 
-from popcorn._audio import AudioFrame, AudioLayout, AudioOptions, AudioStream
+from popcorn._audio import AudioFrame, AudioLayout, AudioOptions, AudioStream, DeviceAudio
 from popcorn._devices import (
     DeviceBoard,
     I2CAnswer,
@@ -57,6 +57,7 @@ __all__ = [
     "CdcLineCoding",
     "CdcPacket",
     "CdcStream",
+    "DeviceAudio",
     "DeviceBoard",
     "FilterSample",
     "FilterTap",

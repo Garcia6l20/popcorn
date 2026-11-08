@@ -447,7 +447,7 @@ auto audio_link::dropped() const -> std::uint64_t
 
 auto audio_link::queued() const -> std::uint64_t
 {
-  auto& queue = endpoint();
+  auto& queue = *endpoint_;
   return detail::link_locked(
       queue, [&](core::link_guard const& held) { return queue.queued(held); });
 }
@@ -503,6 +503,20 @@ auto audio_link::drain_until(
        | std::views::as_rvalue
        | std::views::transform(record_of)
        | std::ranges::to<std::vector>();
+}
+
+auto audio_link::starved() const -> std::uint64_t
+{
+  auto& queue = *endpoint_;
+  return detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.starved(held); });
+}
+
+void audio_link::set_hook(std::function<void(std::uint64_t)> hook) const
+{
+  auto&      queue    = endpoint();
+  auto const replaced = detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.set_hook(held, std::move(hook)); });
 }
 
 void audio_link::write(std::vector<std::uint32_t> const& words)
@@ -564,6 +578,22 @@ auto machine_handle::attach_audio(
     return audio_link{
         *port,  which, decimation, external_frame_hz, clock_wired, target.reset_counter(),
         alive_, slot_};
+  });
+}
+
+void machine_handle::audio_frame_hook(audio_link const& link, reflex::py::nb::object relay)
+{
+  if(relay.is_none())
+  {
+    link.set_hook({});
+    return;
+  }
+  auto fire = std::make_shared<pin_watch::fire_state>();
+  fire->cell.run_in(models_cell_, alive_, collected_);
+  fire->relay = detail::held_bare(std::move(relay));
+  link.set_hook([fire](std::uint64_t end_ps) {
+    detail::gil_entry const gil;
+    fire->cell.call([&] { return fire->relay->fn(end_ps); });
   });
 }
 

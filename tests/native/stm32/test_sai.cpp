@@ -22,8 +22,10 @@
 #include <optional>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -379,6 +381,47 @@ TEST_CASE("a polled master transmitter sends the ramp one 64 us frame apart, twi
       CHECK(state == first_state);
     }
   }
+}
+
+TEST_CASE("an endpoint that throws at frame 5 leaves the transmitter sending the rest")
+{
+  class failing final : public stm32::audio_endpoint
+  {
+  public:
+    std::size_t frames = 0;
+
+    void transmitted(std::span<std::uint32_t const>, stm32::audio_format, vtime, vtime) override
+    {
+      if(++frames == 5)
+      {
+        throw std::runtime_error("a bug in the far end");
+      }
+    }
+
+    void receive(std::span<std::uint32_t> slots, stm32::audio_format, vtime) override
+    {
+      std::ranges::fill(slots, 0);
+    }
+  };
+
+  auto const   a = std::make_shared<failing>();
+  stm32::board board{};
+  board.audio["SAI1_A"] = {.endpoint = a};
+  board.audio["SAI1_B"] = {.endpoint = std::make_shared<recorder>(source_words(256))};
+  auto options          = popcorn::testing::stm32_options();
+  options.models        = stm32::factories(board, u575());
+  stm32_fixture f{u575(), "sai_ll", std::move(options)};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("sai_ll", "tx_poll"));
+  CHECK_THROWS_AS(std::ignore = f.run_to_stop(), std::runtime_error);
+  CHECK(a->frames == 5);
+  auto const second = f.run_to_stop();
+  CHECK(second.reason == stop_reason::user);
+  CHECK(a->frames == 64);
+  CHECK(f.log() == std::vector<std::uint32_t>{0});
 }
 
 TEST_CASE("block B synchronous with block A receives its endpoint's words through the IRQ")
