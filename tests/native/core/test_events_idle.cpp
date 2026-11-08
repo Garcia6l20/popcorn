@@ -1590,6 +1590,22 @@ TEST_CASE("the armed loop event is reached by the idle jump and fires once with 
   CHECK(f.target->virtual_clock().board_time().ps >= stamp);
 }
 
+TEST_CASE("a native restore keeps the armed loop event and it fires once at its stamp")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const                 stamp = f.target->virtual_clock().board_time().ps + ps_per_second;
+  std::vector<std::uint64_t> fired;
+  f.target->set_loop_handler([&](std::uint64_t at) { fired.push_back(at); });
+  auto const saved = f.target->snapshot();
+  f.target->arm_loop(stamp);
+  f.target->restore(saved);
+  while(not f.run().stopped)
+  {
+  }
+  CHECK(fired == std::vector{stamp});
+}
+
 TEST_CASE("an armed loop event takes no sequence number and a snapshot does not hold it")
 {
   auto       f      = booted("calls");

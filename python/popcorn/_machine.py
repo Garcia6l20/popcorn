@@ -1027,8 +1027,10 @@ class Machine:
                 loop = VirtualLoop(self._name)
                 fire = loop._fire  # pyright: ignore[reportPrivateUsage]
                 key = self._callback_table.add(fire, in_caller=True)
+                machine: weakref.ReferenceType[Machine] = weakref.ref(self)
                 loop._bind(  # pyright: ignore[reportPrivateUsage]
-                    self._handle.virtual_loop_port_of(Relay(self._callback_table, key, quiet=True))
+                    self._handle.virtual_loop_port_of(Relay(self._callback_table, key, quiet=True)),
+                    lambda op, at_ps: _submitted(machine, op, at_ps),
                 )
                 self._loop = loop
             return loop
@@ -3610,6 +3612,15 @@ def _option_bytes_config(option_bytes: OptionBytes) -> _core.OptionBytesConfig:
     config.swap_bank = option_bytes.swap_bank
     config.dualbank = option_bytes.dualbank
     return config
+
+
+def _submitted(machine: weakref.ReferenceType[Machine], op: Any, at_ps: int) -> Any:
+    held = machine()
+    if held is None:
+        raise RuntimeError("the loop's machine was collected")
+    ops = [] if op is None else [op]
+    handle = held._handle  # pyright: ignore[reportPrivateUsage]
+    return handle.submit_ops(ops, [""] * len(ops), at_ps)
 
 
 def _model_makers(

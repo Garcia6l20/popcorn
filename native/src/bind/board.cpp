@@ -140,6 +140,18 @@ void virtual_loop_port::arm(std::uint64_t board_ps)
   });
 }
 
+auto virtual_loop_port::command_post(std::uint64_t id, std::uint64_t at_ps) const -> access_op
+{
+  detail::require_alive(alive_, "loop", "a loop whose machine still exists");
+  return access_op{[fire = fire_, id, at_ps](core::machine& target) -> op_value {
+    auto const&             clock = target.virtual_clock();
+    auto const              base  = clock.board_time().ps - clock.time().ps;
+    detail::gil_entry const gil;
+    fire->cell.call([&] { return fire->relay->fn(base + at_ps, id); });
+    return std::monostate{};
+  }};
+}
+
 void virtual_loop_port::disarm()
 {
   detail::require_alive(alive_, "loop", "a loop whose machine still exists");

@@ -185,6 +185,33 @@ def test_a_session_end_closes_the_loop_of_a_reused_machine(pytester: pytest.Pyte
     assert (pytester.path / "finally.txt").read_text() == "done"
 
 
+def test_a_session_end_closes_the_loop_itself_of_a_reused_machine(
+    pytester: pytest.Pytester,
+) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    marker = pytester.path / "closed.txt"
+    pytester.makeconftest(pytester.path.joinpath("conftest.py").read_text() + f"""
+
+LOOPS = []
+
+def pytest_unconfigure(config):
+    from pathlib import Path
+    Path({str(marker)!r}).write_text(",".join(str(one.is_closed()) for one in LOOPS))
+""")
+    pytester.makepyfile("""
+        import conftest
+
+        def test_a(machine):
+            conftest.LOOPS.append(machine.loop)
+
+        def test_b(machine):
+            assert machine.loop is conftest.LOOPS[0]
+        """)
+    run(pytester).assert_outcomes(passed=2)
+    assert marker.read_text() == "True"
+
+
 def test_a_rebuild_closes_the_loop_of_the_spoiled_machine(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester)

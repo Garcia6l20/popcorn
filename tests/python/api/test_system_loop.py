@@ -7,7 +7,7 @@ import asyncio
 import os
 import threading
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 import popcorn
 import pytest
@@ -752,3 +752,45 @@ def test_a_member_with_a_device_refuses_a_power_cycle_and_its_own_snapshot(
             a.power_cycle()
         with pytest.raises(popcorn.MachineBusy, match="no snapshot"):
             a.snapshot()
+
+
+POSTS_US = (3, 10, 19, 21, 37)
+
+
+def post_log(u575: popcorn.PartDescription, third: int | str) -> list[tuple[int, int, int]]:
+    """The stamps of posts made from the test at fixed times of member a's clock, alone or in a
+    System of quantum `third`."""
+    out: list[tuple[int, int, int]] = []
+    a = member(u575, "a", code=nop_loop(40))
+
+    def callback(index: int) -> None:
+        out.append((index, stamp(a.loop), a.time.ps))
+
+    async def go(runner: Callable[[], Awaitable[object]]) -> None:
+        pending = [
+            a.loop.post(callback, index, at=a.time + us(offset))
+            for index, offset in enumerate(POSTS_US)
+        ]
+        await runner()
+        for one in pending:
+            await one
+
+    if third == "alone":
+        asyncio.run(go(lambda: a.run(for_=us(60))))
+        return out
+    b = member(u575, "b", code=nop_loop(40))
+    assert not isinstance(third, str)
+    with System({"a": a, "b": b}, links(third)) as system:
+        asyncio.run(go(lambda: system.run(for_=us(60))))
+    return out
+
+
+def test_posts_on_a_member_land_at_their_stamps_at_every_quantum(
+    u575: popcorn.PartDescription,
+) -> None:
+    alone = post_log(u575, "alone")
+    assert [(index, at) for index, at, _ in alone] == [
+        (index, us(offset).ps) for index, offset in enumerate(POSTS_US)
+    ]
+    for third in (20, 5, 1):
+        assert post_log(u575, third) == alone

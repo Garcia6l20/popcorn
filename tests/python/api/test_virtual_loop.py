@@ -1959,3 +1959,515 @@ def test_an_operation_on_a_lone_machine_with_a_device_keeps_its_loop(
     operation(m)
     run(m, us(200))
     assert [name for name, _, _ in device.log] == ["kept"]
+
+
+def ran_at(m: popcorn.Machine, out: list[tuple[int, int, int]]) -> Callable[[int], int]:
+    def callback(value: int) -> int:
+        out.append((value, stamp(m.loop), m.time.ps))
+        return value * 2
+
+    return callback
+
+
+def test_a_parked_post_runs_at_its_stamp_on_the_machine_thread_and_returns_the_result(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    out: list[tuple[int, int, int]] = []
+    threads: list[bool] = []
+
+    def callback(value: int) -> int:
+        threads.append(m.loop.is_running())
+        return ran_at(m, out)(value)
+
+    async def go() -> int:
+        pending = m.loop.post(callback, 5, at=m.time + us(300))
+        await m.run(for_=ms(1))
+        return await pending
+
+    assert asyncio.run(go()) == 10
+    assert out == [(5, us(300).ps, us(300).ps)]
+    assert threads == [True]
+
+
+def test_a_running_post_runs_at_its_stamp_on_every_run(u575: popcorn.PartDescription) -> None:
+    def once() -> tuple[int, list[tuple[int, int, int]]]:
+        m = asleep(u575)
+        out: list[tuple[int, int, int]] = []
+
+        async def go() -> int:
+            at = m.time
+            async with m.running():
+                first = m.loop.post(ran_at(m, out), 2, at=at + us(700))
+                second = m.loop.post(ran_at(m, out), 1, at=at + ms(2))
+                return await first + await second
+
+        return asyncio.run(go()), out
+
+    first = once()
+    assert first == (6, [(2, us(700).ps, us(700).ps), (1, ms(2).ps, ms(2).ps)])
+    assert once() == first
+
+
+def test_a_post_in_the_past_a_closed_loop_and_a_wrong_type_raise(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    run(m, us(100))
+    with pytest.raises(ValueError, match="post"):
+        m.loop.post(len, [], at=VirtualTime(1))
+    with pytest.raises(TypeError):
+        m.loop.post(5, at=m.time)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        m.loop.post(len, at=1)  # type: ignore[arg-type]
+    m.loop.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        m.loop.post(len, [], at=m.time + us(1))
+
+
+def test_an_exception_of_a_post_reaches_the_result_and_stops_nothing(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    out: list[tuple[int, int, int]] = []
+
+    def bad() -> None:
+        raise KeyError("posted")
+
+    async def go() -> None:
+        failing = m.loop.post(bad, at=m.time + us(10))
+        after = m.loop.post(ran_at(m, out), 3, at=m.time + us(20))
+        await m.run(for_=us(50))
+        with pytest.raises(KeyError, match="posted"):
+            await failing
+        assert await after == 6
+
+    asyncio.run(go())
+    assert out == [(3, us(20).ps, us(20).ps)]
+
+
+def test_a_post_waits_behind_the_events_due_before_its_stamp(u575: popcorn.PartDescription) -> None:
+    m = asleep(u575)
+    order: list[str] = []
+    m.loop.call_later(10e-6, order.append, "timer before")
+    m.loop.call_later(30e-6, order.append, "timer after")
+
+    async def go() -> None:
+        pending = m.loop.post(order.append, "post", at=m.time + us(20))
+        await m.run(for_=us(50))
+        await pending
+
+    asyncio.run(go())
+    assert order == ["timer before", "post", "timer after"]
+
+
+def test_a_post_whose_loop_closes_before_its_stamp_fails_with_runtime_error(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+
+    async def go() -> None:
+        pending = m.loop.post(len, [], at=m.time + us(20))
+        m.loop.close()
+        await m.run(for_=us(50))
+        with pytest.raises(RuntimeError, match="closed"):
+            await pending
+
+    asyncio.run(go())
+
+
+def test_call_soon_threadsafe_is_refused_and_names_post(u575: popcorn.PartDescription) -> None:
+    m = asleep(u575)
+    with pytest.raises(VirtualLoopUnsupported, match="call_soon_threadsafe"):
+        m.loop.call_soon_threadsafe(len, [])
+
+
+class Posting(UartDevice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tapping = True
+
+    def go(self, data: bytes) -> None:
+        self.send(data)
+
+
+def posted_bytes(u575: popcorn.PartDescription, *, running: bool) -> list[tuple[int, int, int]]:
+    device = Posting()
+    m = asleep(u575, {"USART1": [device]})
+
+    async def go() -> None:
+        at = m.time
+        if running:
+            async with m.running():
+                pending = [
+                    device.loop.post(device.go, bytes([n]), at=at + us(100 + 300 * n))
+                    for n in range(5)
+                ]
+                for one in pending:
+                    await one
+                await asyncio.sleep(0)
+        else:
+            pending = [
+                device.loop.post(device.go, bytes([n]), at=at + us(100 + 300 * n)) for n in range(5)
+            ]
+            await m.run(for_=ms(3))
+            for one in pending:
+                await one
+        await m.run(for_=ms(3))
+
+    asyncio.run(go())
+    return [(f.data, f.start.ps, f.end.ps) for f in device.tap_frames("USART1")]
+
+
+def test_two_runs_posting_at_fixed_stamps_give_the_same_bytes_and_stamps(
+    u575: popcorn.PartDescription,
+) -> None:
+    first = posted_bytes(u575, running=False)
+    assert [data for data, _, _ in first] == [0, 1, 2, 3, 4]
+    assert [start for _, start, _ in first] == [us(100 + 300 * n).ps for n in range(5)]
+    assert posted_bytes(u575, running=False) == first
+    assert posted_bytes(u575, running=True) == first
+
+
+def test_a_parked_post_at_the_clock_runs_on_the_machine_thread_in_the_next_run(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    run(m, us(10))
+    threads: list[bool] = []
+    stamps: list[int] = []
+
+    def callback() -> int:
+        threads.append(_core.on_host_thread())
+        stamps.append(stamp(m.loop))
+        return 7
+
+    async def go() -> int:
+        pending = m.loop.post(callback, at=m.time)
+        assert not pending.done()
+        assert threads == []
+        await m.run(for_=us(5))
+        return await pending
+
+    assert asyncio.run(go()) == 7
+    assert threads == [True]
+    assert stamps == [us(10).ps]
+
+
+def test_a_post_at_the_clock_fails_with_the_restore_that_comes_first(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    run(m, us(10))
+    saved = m.snapshot()
+    ran: list[int] = []
+
+    async def go() -> None:
+        pending = m.loop.post(ran.append, 1, at=m.time)
+        m.restore(saved)
+        await m.run(for_=us(5))
+        with pytest.raises(popcorn.EmulationError, match="superseded"):
+            await pending
+
+    asyncio.run(go())
+    assert ran == []
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_the_table_of_posts_stays_empty_across_cancel_restore_reset_and_close(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    saved = m.snapshot()
+    loop = m.loop
+
+    async def go() -> None:
+        for round_ in range(1000):
+            pending = loop.post(len, [], at=m.time + us(500))
+            if round_ % 4 == 0:
+                task = asyncio.ensure_future(pending)
+                await asyncio.sleep(0)
+                task.cancel()
+            elif round_ % 4 == 1:
+                m.restore(saved)
+                with pytest.raises(popcorn.EmulationError):
+                    await pending
+            elif round_ % 4 == 2:
+                m.reset()
+                with pytest.raises(popcorn.EmulationError):
+                    await pending
+                m.mem.write(RAM, WFI_LOOP)
+                m.reg[Reg.PC] = RAM
+            else:
+                await m.run(for_=us(600))
+                await pending
+        assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+        loop.close()
+
+    asyncio.run(go())
+    assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+    assert len(loop._fire_posts) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("at_clock", [False, True], ids=["stamped", "at_the_clock"])
+def test_cancelling_the_awaiting_task_leaves_no_post_and_the_callback_never_runs(
+    u575: popcorn.PartDescription, at_clock: bool
+) -> None:
+    m = asleep(u575)
+    loop = m.loop
+    ran: list[int] = []
+
+    async def go() -> None:
+        for round_ in range(1000):
+            pending = loop.post(ran.append, round_, at=m.time if at_clock else m.time + us(50))
+            task = asyncio.ensure_future(pending)
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+        assert len(loop._fire_posts) == 0  # pyright: ignore[reportPrivateUsage]
+        assert len(loop._at_fire) == 0  # pyright: ignore[reportPrivateUsage]
+        await m.run(for_=us(100))
+
+    asyncio.run(go())
+    assert ran == []
+    assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_task_cancelled_before_its_first_step_withdraws_the_post(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    loop = m.loop
+    ran: list[str] = []
+
+    async def go() -> None:
+        stamped = asyncio.ensure_future(loop.post(ran.append, "stamped", at=m.time + us(50)))
+        deferred = asyncio.ensure_future(loop.post(ran.append, "deferred", at=m.time))
+        stamped.cancel()
+        deferred.cancel()
+        for task in (stamped, deferred):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await m.run(for_=us(100))
+
+    asyncio.run(go())
+    assert ran == []
+    assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_loop_closed_with_a_stamped_post_queued_fails_it_at_once(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+
+    async def go() -> None:
+        far = m.loop.post(len, [], at=VirtualTime(2**63))
+        near = m.loop.post(len, [], at=m.time + us(50))
+        waiting = asyncio.ensure_future(far)
+        await asyncio.sleep(0)
+        m.loop.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            await asyncio.wait_for(near, 2)
+        with pytest.raises(RuntimeError, match="closed"):
+            await asyncio.wait_for(waiting, 2)
+
+    asyncio.run(go())
+
+
+def test_a_timer_due_at_the_parked_clock_runs_ahead_of_a_post_at_the_clock(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    order: list[str] = []
+
+    async def go() -> None:
+        first = m.loop.post(order.append, "post 1", at=m.time)
+        m.loop.call_later(0, order.append, "timer")
+        second = m.loop.post(order.append, "post 2", at=m.time)
+        await m.run(for_=us(5))
+        await first
+        await second
+
+    asyncio.run(go())
+    assert order == ["timer", "post 1", "post 2"]
+
+
+def test_a_failed_submit_leaves_no_post(u575: popcorn.PartDescription) -> None:
+    m = asleep(u575)
+    loop = m.loop
+
+    def on_machine_thread() -> None:
+        with pytest.raises(RuntimeError, match="directly"):
+            loop.post(len, [], at=m.time + us(1))
+
+    loop.call_soon(on_machine_thread)
+    run(m, us(5))
+    assert len(loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_stamped_post_counts_one_gil_entry_and_posts_at_the_clock_share_their_step(
+    u575: popcorn.PartDescription,
+) -> None:
+    def entries(posts: int, *, at_clock: bool) -> int:
+        m = asleep(u575)
+        out: list[tuple[int, int, int]] = []
+
+        async def go() -> None:
+            pending = [
+                m.loop.post(
+                    ran_at(m, out), index, at=m.time if at_clock else m.time + us(10 * (index + 1))
+                )
+                for index in range(posts)
+            ]
+            await m.run(for_=us(100))
+            for one in pending:
+                await one
+
+        before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(go())
+        assert len(out) == posts
+        return m._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
+
+    assert entries(5, at_clock=False) - entries(0, at_clock=False) == 5
+    assert entries(5, at_clock=True) - entries(0, at_clock=True) == 1
+
+
+def test_a_post_waits_behind_a_timer_at_its_stamp_and_two_posts_run_in_call_order(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    order: list[str] = []
+
+    async def go() -> None:
+        first = m.loop.post(order.append, "post 1", at=m.time + us(20))
+        m.loop.call_later(20e-6, order.append, "timer")
+        second = m.loop.post(order.append, "post 2", at=m.time + us(20))
+        await m.run(for_=us(50))
+        await first
+        await second
+
+    asyncio.run(go())
+    assert order == ["timer", "post 1", "post 2"]
+
+
+def test_a_restore_or_a_reset_before_the_stamp_fails_the_post(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    saved = m.snapshot()
+    ran: list[int] = []
+
+    async def go() -> None:
+        first = m.loop.post(ran.append, 1, at=m.time + us(50))
+        m.restore(saved)
+        with pytest.raises(popcorn.EmulationError, match="superseded"):
+            await first
+        second = m.loop.post(ran.append, 2, at=m.time + us(50))
+        m.reset()
+        with pytest.raises(popcorn.EmulationError, match="superseded"):
+            await second
+
+    asyncio.run(go())
+    run(m, us(100))
+    assert ran == []
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_unawaited_posts_that_fail_at_the_take_leave_a_bounded_table(
+    u575: popcorn.PartDescription,
+) -> None:
+    from popcorn._virtual_loop import _SWEEP_FLOOR  # pyright: ignore[reportPrivateUsage]
+
+    m = asleep(u575)
+    loop = m.loop
+    start = m.time
+    batch = 50
+
+    async def go() -> int:
+        peak = 0
+        async with m.running():
+            await m.read(m.ref.pc)
+            for round_ in range(20):
+                for index in range(batch):
+                    loop.post(len, [], at=start + ps(round_ * batch + index + 1))
+                await m.read(m.ref.pc)
+                peak = max(peak, len(loop._posts))  # pyright: ignore[reportPrivateUsage]
+        return peak
+
+    peak = asyncio.run(go())
+    assert peak <= _SWEEP_FLOOR + batch + 1
+    assert len(loop._posts) <= _SWEEP_FLOOR + batch + 1  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_cancel_inside_the_step_that_took_the_list_keeps_the_callback_from_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    order: list[int] = []
+
+    async def go() -> None:
+        test_loop = asyncio.get_running_loop()
+        tasks: dict[int, asyncio.Future[object]] = {}
+
+        async def cancel_third() -> None:
+            tasks[3].cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tasks[3]
+
+        def second() -> None:
+            order.append(1)
+            asyncio.run_coroutine_threadsafe(cancel_third(), test_loop).result(5)
+
+        posts = [
+            m.loop.post(order.append, 0, at=m.time),
+            m.loop.post(second, at=m.time),
+            m.loop.post(order.append, 2, at=m.time),
+            m.loop.post(order.append, 3, at=m.time),
+            m.loop.post(order.append, 4, at=m.time),
+        ]
+        tasks[3] = asyncio.ensure_future(posts[3])
+        await asyncio.sleep(0)
+        await m.run(for_=us(5))
+        for index in (0, 1, 2, 4):
+            await posts[index]
+
+    asyncio.run(go())
+    assert order == [0, 1, 2, 4]
+
+
+class Stop(BaseException):
+    pass
+
+
+def test_a_base_exception_from_a_post_at_the_clock_leaves_the_later_posts_for_the_next_run(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = asleep(u575)
+    order: list[int] = []
+
+    def stop() -> None:
+        order.append(1)
+        raise Stop
+
+    async def go() -> None:
+        posts = [
+            m.loop.post(order.append, 0, at=m.time),
+            m.loop.post(stop, at=m.time),
+            m.loop.post(order.append, 2, at=m.time),
+            m.loop.post(order.append, 3, at=m.time),
+        ]
+        with pytest.raises(Stop):
+            await m.run(for_=us(5))
+        assert order == [0, 1]
+        with pytest.raises(Stop):
+            await posts[1]
+        await m.run(for_=us(5))
+        await asyncio.wait_for(posts[2], 2)
+        await asyncio.wait_for(posts[3], 2)
+
+    asyncio.run(go())
+    assert order == [0, 1, 2, 3]
+    assert len(m.loop._posts) == 0  # pyright: ignore[reportPrivateUsage]
+    assert len(m.loop._fire_posts) == 0  # pyright: ignore[reportPrivateUsage]

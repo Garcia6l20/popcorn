@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import contextvars
 import heapq
 import itertools
@@ -13,10 +14,12 @@ import sys
 import threading
 import weakref
 from collections.abc import Callable, Coroutine
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, cast, override
 
 from popcorn import _core
-from popcorn._errors import ModelError
+from popcorn._errors import EmulationError, MachineRunning, ModelError
+from popcorn._refs import Pending
+from popcorn.units import VirtualTime
 
 MAX_CALLBACKS_PER_STAMP = 65536
 
@@ -79,6 +82,114 @@ class _Timer(asyncio.TimerHandle):
         loop._timer_cancelled()  # pyright: ignore[reportPrivateUsage]
 
 
+_SWEEP_FLOOR = 64
+
+
+class _Post:
+    """A callback posted from the test thread, run at its stamp on the machine's thread."""
+
+    __slots__ = (
+        "args",
+        "at_fire",
+        "callback",
+        "done",
+        "error",
+        "future",
+        "lock",
+        "number",
+        "result",
+        "waiter",
+    )
+
+    def __init__(self, callback: Callable[..., Any], args: tuple[Any, ...]) -> None:
+        self.callback = callback
+        self.args = args
+        self.number: int | None = None
+        self.future: _core.HostFuture | None = None
+        self.at_fire: Callable[[], None] | None = None
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.done = False
+        self.lock = threading.Lock()
+        self.waiter: tuple[asyncio.AbstractEventLoop, asyncio.Future[None]] | None = None
+
+    def finish(self) -> None:
+        with self.lock:
+            self.done = True
+            waiter = self.waiter
+            self.waiter = None
+        if waiter is not None:
+            loop, future = waiter
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(_wake, future)
+
+    async def wait(self) -> Any:
+        if not self.done:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            with self.lock:
+                waiting = not self.done
+                if waiting:
+                    self.waiter = (loop, future)
+            if waiting:
+                await future
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class _Posted(Pending[Any]):
+    """The result of a post: done once the callback ran or failed."""
+
+    __slots__ = ("_deferred", "_posted", "_withdraw")
+
+    def __init__(
+        self,
+        future: _core.HostFuture,
+        posted: _Post,
+        follow: Callable[..., Coroutine[Any, Any, Any]],
+        withdraw: Callable[[_Post], None],
+        *,
+        deferred: bool,
+    ) -> None:
+        super().__init__(future, _same_value, follow=follow)
+        self._posted = posted
+        self._deferred = deferred
+        self._withdraw = withdraw
+
+    @override
+    def done(self) -> bool:
+        return self._posted.done if self._deferred else super().done()
+
+    @override
+    def _cancelled_unstarted(self) -> None:
+        self._withdraw(self._posted)
+        super()._cancelled_unstarted()
+
+    @override
+    async def _result(self) -> Any:
+        try:
+            return await super()._result()
+        except asyncio.CancelledError, GeneratorExit:
+            self._withdraw(self._posted)
+            raise
+        except Exception as error:
+            self._withdraw(self._posted)
+            superseded = self._posted.error
+            if superseded is not None and superseded is not error:
+                raise superseded from None
+            raise
+
+
+def _same_value(raw: object) -> object:
+    return raw
+
+
+def _wake(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
+
+
 class VirtualLoop(asyncio.AbstractEventLoop):
     """A real `asyncio.AbstractEventLoop` for a stack that lives on the machine's thread, stepped by
     machine events. Get it from `Machine.loop` or `UartDevice.loop`. One per `Machine`, a member of
@@ -124,8 +235,9 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     Threads: callbacks and tasks run on the machine's thread. A parked machine takes `call_soon`,
     `call_later`, `call_at`, `create_task` and a timer's `cancel` from the test thread, and they run
     when it next runs. While it runs those raise `MachineRunning` off its thread, as `Machine.mem`
-    does from a callback. I/O, executors, signals, `call_soon_threadsafe` and the `run_*` methods
-    raise `VirtualLoopUnsupported`.
+    does from a callback. `post` takes a stamped callback from the test thread, parked or running.
+    I/O, executors, signals, `call_soon_threadsafe` and the `run_*` methods raise
+    `VirtualLoopUnsupported`.
 
     Errors: an exception from a callback or a device hook, a task failure nothing retrieved by the
     end of the step, and the callback bound stop the run as a `ModelError` from its goal, naming the
@@ -153,6 +265,11 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         """Make a loop with no port yet, for `_bind`."""
         self._name = name
         self._port: _core.VirtualLoopPort | None = None
+        self._submit: Callable[[Any, int], Any] | None = None
+        self._posts: dict[int, _Post] = {}
+        self._fire_posts: list[_Post] = []
+        self._sweep_limit = _SWEEP_FLOOR
+        self._post_ids = itertools.count()
         self._ready: collections.deque[asyncio.Handle] = collections.deque()
         self._timers: list[tuple[int, int, _Timer]] = []
         self._order = itertools.count()
@@ -183,9 +300,10 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     def __repr__(self) -> str:
         return f"<VirtualLoop of {self._name}>"
 
-    def _bind(self, port: _core.VirtualLoopPort) -> None:
-        """Set what the loop arms its machine event through."""
+    def _bind(self, port: _core.VirtualLoopPort, submit: Callable[[Any, int], Any]) -> None:
+        """Set what the loop arms its machine event through, and what posts a stamped command."""
         self._port = port
+        self._submit = submit
 
     def time(self) -> float:
         """Logical board time in seconds, see the class doc.
@@ -382,6 +500,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         others = [task for task in asyncio.all_tasks(self) if task not in known]
         pending += sorted(others, key=lambda task: task.get_name())
         self._at_fire.clear()
+        self._supersede_posts(RuntimeError("Event loop is closed"))
         self._ready = collections.deque(h for h in self._ready if _steps_a_task(h))
         entered = self._enter()
         try:
@@ -485,7 +604,10 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             port.arm(due)
         self._armed = due
 
-    def _fire(self, stamp: int) -> None:
+    def _fire(self, stamp: int, post: int | None = None) -> None:
+        if post is not None:
+            self._run_post(stamp, post)
+            return
         self._armed = None
         at_fire = self._at_fire
         if at_fire:
@@ -494,9 +616,137 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         else:
             self._step(stamp, None, ())
 
+    def _run_post(self, stamp: int, number: int) -> None:
+        posted = self._posts.pop(number, None)
+        if posted is None:
+            return
+        self._step(stamp, self._call_post, (posted,))
+
+    @staticmethod
+    def _call_post(posted: _Post) -> None:
+        try:
+            posted.result = posted.callback(*posted.args)
+        except Exception as error:
+            posted.error = error
+        except BaseException as error:
+            posted.error = error
+            raise
+        finally:
+            posted.finish()
+
+    def _call_post_at_fire(self, posted: _Post) -> None:
+        try:
+            self._fire_posts.remove(posted)
+        except ValueError:
+            return
+        self._drain()
+        self._call_post(posted)
+
+    def _sweep_posts(self) -> None:
+        """Drop the posts whose command finished without running the callback, which only a
+        command failed at the take does, and nobody awaited to drop them."""
+        for number, posted in list(self._posts.items()):
+            future = posted.future
+            if future is not None and future.done() and not posted.done:
+                self._posts.pop(number, None)
+        self._sweep_limit = max(_SWEEP_FLOOR, 2 * len(self._posts))
+
+    def _withdraw_post(self, posted: _Post) -> None:
+        """Take a post out of the tables when its awaiter is cancelled or its command failed: a
+        stamped post leaves `_posts`, a post at the parked clock leaves the lists that would run
+        it, so its callback never runs."""
+        if posted.number is not None:
+            self._posts.pop(posted.number, None)
+        with contextlib.suppress(ValueError):
+            self._fire_posts.remove(posted)
+        if posted.at_fire is not None:
+            with contextlib.suppress(ValueError):
+                self._at_fire.remove(posted.at_fire)
+
+    def post(self, callback: Callable[..., Any], *args: Any, at: VirtualTime) -> Pending[Any]:
+        """Run `callback(*args)` at the stamp `at` of the machine's time on the machine's thread,
+        from the test thread, parked or running, and return what it returned or raised.
+
+        The callback runs in a step like a timer's, with `time()` the stamp, and an event due at
+        or before the stamp fires first at its own stamp: a timer due at `at` runs ahead of a post
+        at `at` whichever was made first, and two posts at one stamp run in call order. A post at
+        the clock of a parked machine runs in the first step of the next run, behind the timers
+        due at that clock. Await the result on the test's own loop, it resolves once the callback
+        ran.
+
+        `at` is required: a running machine has no deterministic "now", and
+        `call_soon_threadsafe` is refused for the same reason. A parked machine raises
+        `ValueError` at the call for a stamp it passed. A running machine that passed the stamp by
+        the time it takes the command fails the result with `ValueError` when it is awaited. Wall
+        time decides whether a stamp close ahead of a running machine is passed, so a test that
+        wants the same result in every run posts before `running()` starts, from a parked
+        machine, or well ahead of it.
+
+        A restore or a reset that comes before the stamp fails the result with `EmulationError`
+        and the callback never runs. A loop closed before the stamp fails it with `RuntimeError`
+        at once, whether or not the machine ever reaches the stamp. An exception of the callback
+        reaches the result and stops nothing. A post cancelled by cancelling the task that awaits
+        it leaves nothing behind, and its callback never runs. A `close()` from a callback takes
+        effect when its step ends, so the later posts of that step still run. From the machine
+        thread, such as a device hook, use `call_at`: `post` raises `RuntimeError` there.
+
+        Args:
+            callback: A callable, not a coroutine function.
+            at: The stamp, in `Machine.time`'s base.
+
+        Raises:
+            TypeError: `callback` is not callable or `at` no `VirtualTime`.
+            ValueError: The machine is parked and passed `at`.
+            RuntimeError: The loop is closed, or called on the machine's thread.
+        """
+        self._check_callable(callback)
+        if not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"post() takes at as a VirtualTime, not {at!r}")
+        self._check_open()
+        port, submit = self._port, self._submit
+        assert port is not None and submit is not None
+        try:
+            now = port.board_time_ps() - port.board_base_ps()
+        except MachineRunning:
+            now = None
+        if now is not None and at.ps < now:
+            raise ValueError(f"post() at {at!r}, the machine is at {VirtualTime(now)!r}")
+        posted = _Post(callback, args)
+
+        def follow(_: object, __: object) -> Coroutine[Any, Any, Any]:
+            return posted.wait()
+
+        if now is not None and at.ps == now:
+            future = submit(None, at.ps)
+            posted.future = future
+            posted.at_fire = lambda: self._call_post_at_fire(posted)
+            self._fire_posts.append(posted)
+            try:
+                self._call_at_fire(posted.at_fire)
+            except BaseException:
+                self._withdraw_post(posted)
+                raise
+            return _Posted(future, posted, follow, self._withdraw_post, deferred=True)
+        if len(self._posts) > self._sweep_limit:
+            self._sweep_posts()
+        number = next(self._post_ids)
+        posted.number = number
+        self._posts[number] = posted
+        try:
+            future = submit(port.command_post(number, at.ps), at.ps)
+        except BaseException:
+            self._posts.pop(number, None)
+            raise
+        posted.future = future
+        return _Posted(future, posted, follow, self._withdraw_post, deferred=False)
+
     def _run_at_fire(self, callbacks: list[Callable[[], None]]) -> None:
-        for callback in callbacks:
-            self._call_hook(callback, ())
+        for index, callback in enumerate(callbacks):
+            try:
+                self._call_hook(callback, ())
+            except BaseException:
+                self._at_fire[:0] = callbacks[index + 1 :]
+                raise
 
     def _call_at_fire(self, callback: Callable[[], None]) -> None:
         """Run `callback` at the start of the loop's next event, which runs behind every other
@@ -708,6 +958,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         finally:
             self._emptying = False
         self._at_fire.clear()
+        self._supersede_posts(EmulationError("superseded by a restore"))
         self._drop_timers()
         for handle in self._ready:
             asyncio.Handle.cancel(handle)
@@ -767,6 +1018,20 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._base_ps = port.board_base_ps()
         self._stamp_counted = -1
 
+    def _supersede_posts(self, error: BaseException) -> None:
+        posts: list[_Post] = []
+        while self._fire_posts:
+            with contextlib.suppress(IndexError):
+                posts.append(self._fire_posts.pop(0))
+        while self._posts:
+            with contextlib.suppress(KeyError):
+                posts.append(self._posts.popitem()[1])
+        for posted in posts:
+            posted.error = error
+            posted.finish()
+            if posted.number is not None and posted.future is not None:
+                posted.future.cancel()
+
     def _is_emptying(self) -> bool:
         """Whether a restore is emptying the loop."""
         return self._emptying
@@ -810,7 +1075,8 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._refused("stop")
 
     def call_soon_threadsafe(self, callback: Any, *args: Any, context: Any = None) -> Any:
-        """Refused: a post at a wall-clock instant is not deterministic."""
+        """Refused: a post with no stamp lands where the machine thread happens to be. Use `post`
+        with `at`."""
         self._refused("call_soon_threadsafe")
 
 

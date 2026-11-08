@@ -127,6 +127,16 @@ public:
   /** @brief See core::machine::disarm_loop. */
   [[= py::doc{"Withdraw the loop's machine event."}]] void disarm();
 
+  /**
+   * @brief A command of MachineHandle.submit_ops() that calls the loop's relay on the machine's
+   *        thread at the command's stamp with the board stamp and @p id, the GIL taken for the
+   * call.
+   * @param id The post's number.
+   * @param at_ps The stamp in the machine's time since its last reset, in picoseconds.
+   */
+  [[= py::doc{"A command that runs the loop's post id at its stamp."}]] [[nodiscard]] auto
+      command_post(std::uint64_t id, std::uint64_t at_ps) const -> access_op;
+
   /** @brief The machine's clock::board_time() in picoseconds. */
   [[= py::doc{"The machine's board time in picoseconds."}]] [[nodiscard]] auto board_time_ps() const
       -> std::uint64_t;
