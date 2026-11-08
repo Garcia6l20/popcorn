@@ -419,7 +419,7 @@ class Broken(SpiController):
         raise RuntimeError("frame broke")
 
 
-def test_an_on_frame_exception_stops_the_run_and_a_restore_recovers(
+def test_an_on_frame_exception_stops_the_run_with_its_traceback_and_a_restore_replays_the_run(
     u575: popcorn.PartDescription,
 ) -> None:
     device = Broken(sck_hz=1_000_000)

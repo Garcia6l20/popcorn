@@ -1,4 +1,5 @@
 #include "dma_signal.hpp"
+#include "hook_failure.hpp"
 #include "i2c_link_port.hpp"
 #include "i2c_port_queue.hpp"
 #include "i2c_rows.hpp"
@@ -661,6 +662,7 @@ private:
   bool                                         control_protect_logged_{};
   std::optional<std::uint64_t>                 reset_at_;
   std::optional<std::string>                   strict_refused_;
+  hook_failure                                 hooks_;
 };
 
 constexpr std::array<write_entry<i2c>, 11> i2c_writes{
@@ -994,7 +996,7 @@ void i2c::address_done()
     auto const at = target_at();
     for(std::size_t index = 0; index < targets_.size(); ++index)
     {
-      if(targets_[index]->matches(address, at))
+      if(hooks_.guard([&] { return targets_[index]->matches(address, at); }, false))
       {
         auto const slot = static_cast<std::uint32_t>(index);
         auto const place =
@@ -1004,7 +1006,12 @@ void i2c::address_done()
           state_.targets.insert(place, {.index = slot});
         }
         answer(
-            slot, targets_[index]->start_deferred(address, state_.read != 0, at, ticket_of(slot)));
+            slot, hooks_.guard(
+                      [&] {
+                        return targets_[index]->start_deferred(
+                            address, state_.read != 0, at, ticket_of(slot));
+                      },
+                      std::optional{i2c_reply{.ack = false}}));
       }
     }
     for(std::size_t index = 0; index < links_.size(); ++index)
@@ -1035,8 +1042,12 @@ void i2c::byte_done()
       if(answering.acked != 0)
       {
         answer(
-            answering.index, targets_[answering.index]->write_deferred(
-                                 state_.shift, at, ticket_of(answering.index)));
+            answering.index, hooks_.guard(
+                                 [&] {
+                                   return targets_[answering.index]->write_deferred(
+                                       state_.shift, at, ticket_of(answering.index));
+                                 },
+                                 std::optional{i2c_reply{.ack = false}}));
       }
     }
     for(std::size_t index = 0; index < links_.size(); ++index)
@@ -1053,8 +1064,12 @@ void i2c::byte_done()
       if(answering.acked != 0)
       {
         answer(
-            answering.index,
-            targets_[answering.index]->read_deferred(at, ack, ticket_of(answering.index)));
+            answering.index, hooks_.guard(
+                                 [&] {
+                                   return targets_[answering.index]->read_deferred(
+                                       at, ack, ticket_of(answering.index));
+                                 },
+                                 std::optional{i2c_read_reply{.byte = 0xFF}}));
       }
     }
     for(std::size_t index = 0; index < links_.size(); ++index)
@@ -1307,7 +1322,7 @@ void i2c::stop_targets(vtime at)
 {
   for(auto const& answering : std::exchange(state_.targets, {}))
   {
-    targets_[answering.index]->stop(at);
+    hooks_.run([&] { targets_[answering.index]->stop(at); });
   }
   for(auto const& link : links_)
   {
@@ -1542,7 +1557,7 @@ void i2c::restore_reset_values(std::optional<reset_kind> kind)
   {
     for(auto const& target : targets_)
     {
-      target->reset(*kind);
+      hooks_.run([&] { target->reset(*kind); });
     }
     for(auto const& link : links_)
     {
@@ -1550,6 +1565,7 @@ void i2c::restore_reset_values(std::optional<reset_kind> kind)
     }
   }
   flags();
+  hooks_.rethrow();
 }
 
 void i2c::power_cut()
@@ -1919,13 +1935,15 @@ void i2c::run_port(std::uint32_t lane)
         }
         state_.port.entries.erase(state_.port.entries.begin() + static_cast<std::ptrdiff_t>(*pick));
         flags();
-        controller_->answered(entry.unit, phase, *answer, vtime{entry.due_ps});
+        hooks_.run([&] { controller_->answered(entry.unit, phase, *answer, vtime{entry.due_ps}); });
         break;
       }
       case entry_released:
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*pick));
         flags();
-        controller_->answered(entry.unit, phase, {.ack = entry.ack != 0}, vtime{entry.due_ps});
+        hooks_.run([&] {
+          controller_->answered(entry.unit, phase, {.ack = entry.ack != 0}, vtime{entry.due_ps});
+        });
         break;
       case entry_stop:
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*pick));
@@ -1934,7 +1952,7 @@ void i2c::run_port(std::uint32_t lane)
       default:
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*pick));
         flags();
-        controller_->dropped(entry.unit, phase, vtime{entry.due_ps});
+        hooks_.run([&] { controller_->dropped(entry.unit, phase, vtime{entry.due_ps}); });
         break;
     }
   }
@@ -2279,7 +2297,7 @@ void i2c::port_stopped(i2c_port_entry const& entry)
   flags();
   for(auto const& [unit, phase] : reports)
   {
-    controller_->dropped(unit, phase, vtime{entry.due_ps});
+    hooks_.run([&] { controller_->dropped(unit, phase, vtime{entry.due_ps}); });
   }
 }
 
@@ -2802,6 +2820,7 @@ void i2c::unmodelled(std::string_view reg_name, bool& logged, std::string messag
 
 void i2c::rethrow_strict()
 {
+  hooks_.rethrow();
   if(auto const name = std::exchange(strict_refused_, std::nullopt))
   {
     throw model_error(desc_.name, *name, reg(*name).offset);
@@ -3062,9 +3081,10 @@ void i2c::load(std::span<std::byte const> in)
   state_ = std::move(loaded);
   for(std::size_t index = 0; index < targets_.size() and index < state_.devices.size(); ++index)
   {
-    targets_[index]->load(state_.devices[index]);
+    hooks_.run([&] { targets_[index]->load(state_.devices[index]); });
   }
   state_.devices.clear();
+  hooks_.rethrow();
 }
 }
 

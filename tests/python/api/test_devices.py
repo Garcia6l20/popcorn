@@ -194,7 +194,7 @@ class Flaky(Eeprom24):
 
 
 @pytest.mark.parametrize("method", ["on_start", "on_write", "on_read"])
-def test_a_device_exception_reaches_the_run_and_a_restore_recovers(
+def test_a_device_exception_reaches_the_run_with_its_traceback_and_a_restore_replays_the_run(
     u575: popcorn.PartDescription, method: str
 ) -> None:
     fresh, _ = eeprom_machine(u575)
@@ -213,6 +213,224 @@ def test_a_device_exception_reaches_the_run_and_a_restore_recovers(
     flaky.broken = ""
     m.restore(before)
     assert finish(m) == expected
+
+
+class FlakyAt(Eeprom24):
+    """Raises from its `method` on the `nth` call only."""
+
+    def __init__(self, method: str, nth: int) -> None:
+        super().__init__(0x50, 4096)
+        self.method = method
+        self.nth = nth
+        self.calls = {"on_start": 0, "on_write": 0, "on_read": 0}
+
+    def check(self, method: str) -> None:
+        self.calls[method] += 1
+        if self.method == method and self.calls[method] == self.nth:
+            raise RuntimeError(f"{method} broke")
+
+    def on_start(self, read: bool, at: VirtualTime) -> bool:
+        self.check("on_start")
+        return super().on_start(read, at)
+
+    def on_write(self, byte: int, at: VirtualTime) -> bool:
+        self.check("on_write")
+        return super().on_write(byte, at)
+
+    def on_read(self, at: VirtualTime) -> int:
+        self.check("on_read")
+        return super().on_read(at)
+
+
+@pytest.mark.parametrize(("method", "nth"), [("on_start", 3), ("on_read", 3)])
+def test_a_raising_i2c_hook_stops_the_run_and_the_firmware_finishes_when_run_again(
+    u575: popcorn.PartDescription, method: str, nth: int
+) -> None:
+    flaky = FlakyAt(method, nth)
+    m, _ = eeprom_machine(u575, flaky)
+    enter(m, "eeprom_rw")
+    with pytest.raises(RuntimeError, match=f"{method} broke") as raised:
+        asyncio.run(m.run(budget=BUDGET))
+    assert raised.traceback[-2].name == method
+    assert len(finish(m)) == 3
+    assert flaky.calls[method] > nth
+
+
+@pytest.mark.parametrize("nth", [1, 10])
+def test_a_raising_on_write_ends_the_transfer_on_the_bus_as_a_nack(
+    u575: popcorn.PartDescription, nth: int
+) -> None:
+    flaky = FlakyAt("on_write", nth)
+    m, _ = eeprom_machine(u575, flaky)
+    enter(m, "eeprom_rw")
+    with pytest.raises(RuntimeError, match="on_write broke"):
+        asyncio.run(m.run(budget=BUDGET))
+    asyncio.run(m.run(for_=us(200)))
+    isr = m.periph.I2C1.ISR
+    assert (isr.NACKF, isr.STOPF, isr.BUSY) == (1, 1, 0)
+
+
+class OnceJedec(JedecDevice):
+    def __init__(self) -> None:
+        super().__init__("PA4", (0x1F, 0x87, 0x01))
+        self.broken = True
+
+    def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
+        if self.broken:
+            self.broken = False
+            raise RuntimeError("on_exchange broke")
+        return super().on_exchange(out, bits, at)
+
+
+def test_a_raising_on_exchange_stops_the_run_and_the_device_misses_the_command_frame(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = OnceJedec()
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+    with pytest.raises(RuntimeError, match="on_exchange broke"):
+        asyncio.run(m.run(budget=BUDGET))
+    assert finish(m) == [0xFF, 0xFF, 0xFF, 0xFF]
+
+
+class SelectRaiser(JedecDevice):
+    """Raises from `on_select` on the `nth` call only."""
+
+    def __init__(self, cs: str | None, nth: int) -> None:
+        super().__init__(cs, (0x1F, 0x87, 0x01))
+        self.nth = nth
+        self.calls = 0
+
+    def on_select(self, selected: bool, at: VirtualTime) -> None:
+        self.calls += 1
+        if self.calls == self.nth:
+            raise RuntimeError("select broke")
+        super().on_select(selected, at)
+
+
+@pytest.mark.parametrize(("cs", "entry"), [(None, "hw_ss"), ("PA4", "poll")])
+@pytest.mark.parametrize("nth", [1, 2])
+def test_a_raising_on_select_stops_the_run_and_the_transfer_finishes_when_run_again(
+    u575: popcorn.PartDescription, cs: str | None, entry: str, nth: int
+) -> None:
+    fresh = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(SPI_ELF),
+        devices={"SPI1": [JedecDevice(cs, (0x1F, 0x87, 0x01))]},
+    )
+    enter(fresh, entry)
+    expected = finish(fresh)
+    device = SelectRaiser(cs, nth)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, entry)
+    with pytest.raises(RuntimeError, match="select broke"):
+        asyncio.run(m.run(budget=BUDGET))
+    assert finish(m) == expected
+
+
+@pytest.mark.parametrize("nth", [1, 2])
+def test_a_raising_on_select_still_selects_the_other_devices_on_the_same_chip_select(
+    u575: popcorn.PartDescription, nth: int
+) -> None:
+    first = SelectRaiser("PA4", nth)
+    second = JedecDevice("PA4", (0x1F, 0x87, 0x01))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [first, second]})
+    enter(m, "poll")
+    with pytest.raises(RuntimeError, match="select broke"):
+        asyncio.run(m.run(budget=BUDGET))
+    asyncio.run(m.run(budget=BUDGET))
+    assert second.selects == [True, False]
+
+
+def test_a_raising_spi_restore_hook_still_loads_the_later_devices(
+    u575: popcorn.PartDescription,
+) -> None:
+    class First(JedecDevice):
+        raise_on_restore = False
+
+        def restore(self, data: bytes) -> None:
+            if self.raise_on_restore:
+                self.raise_on_restore = False
+                raise RuntimeError("restore broke")
+            super().restore(data)
+
+    first, second = First("PA4", (0x1F, 0x87, 0x01)), JedecDevice("PA3", (0x1F, 0x87, 0x01))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [first, second]})
+    enter(m, "poll")
+    second.position = 3
+    saved = m.snapshot()
+    second.position = 0
+    first.raise_on_restore = True
+    with pytest.raises(RuntimeError, match="restore broke"):
+        m.restore(saved)
+    assert second.position == 3
+
+
+class ResetRaiser(Eeprom24):
+    def __init__(self, address: int) -> None:
+        super().__init__(address, 4096)
+        self.raise_on_reset = True
+        self.raise_on_restore = False
+
+    def reset(self, kind: ResetKind) -> None:
+        super().reset(kind)
+        if self.raise_on_reset and kind is ResetKind.SOFTWARE:
+            raise RuntimeError("reset broke")
+
+    def restore(self, data: bytes) -> None:
+        if self.raise_on_restore:
+            self.raise_on_restore = False
+            raise RuntimeError("restore broke")
+        super().restore(data)
+
+
+def test_a_raising_i2c_reset_hook_still_resets_the_later_targets_and_the_bus_works(
+    u575: popcorn.PartDescription,
+) -> None:
+    first, second = ResetRaiser(0x50), Eeprom24(0x51, 4096)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [first, second]})
+    enter(m, "eeprom_rw")
+    with pytest.raises(RuntimeError, match="reset broke"):
+        m.reset(ResetKind.SOFTWARE)
+    assert second.resets[-1] is ResetKind.SOFTWARE
+    first.raise_on_reset = False
+    enter(m, "eeprom_rw", ResetKind.SOFTWARE)
+    assert len(finish(m)) == 3
+
+
+def test_a_raising_i2c_restore_hook_still_loads_the_later_targets_and_the_bus_works(
+    u575: popcorn.PartDescription,
+) -> None:
+    first, second = ResetRaiser(0x50), Eeprom24(0x51, 4096)
+    first.raise_on_reset = False
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [first, second]})
+    enter(m, "eeprom_rw")
+    second.pointer = 7
+    saved = m.snapshot()
+    second.pointer = 9
+    first.raise_on_restore = True
+    with pytest.raises(RuntimeError, match="restore broke"):
+        m.restore(saved)
+    assert second.pointer == 7
+    m.restore(saved)
+    assert len(finish(m)) == 3
+
+
+def test_a_raising_spi_reset_hook_still_resets_the_later_devices(
+    u575: popcorn.PartDescription,
+) -> None:
+    class First(JedecDevice):
+        def reset(self, kind: ResetKind) -> None:
+            super().reset(kind)
+            if kind is ResetKind.SOFTWARE:
+                raise RuntimeError("reset broke")
+
+    first, second = First("PA4", (0x1F, 0x87, 0x01)), JedecDevice("PA3", (0x1F, 0x87, 0x01))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [first, second]})
+    enter(m, "poll")
+    with pytest.raises(RuntimeError, match="reset broke"):
+        m.reset(ResetKind.SOFTWARE)
+    assert second.resets[-1] is ResetKind.SOFTWARE
 
 
 class Stamped(Eeprom24):

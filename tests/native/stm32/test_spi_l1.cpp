@@ -130,6 +130,8 @@ public:
   std::optional<std::uint8_t> declared;
   std::vector<std::uint64_t>  tickets;
   bool                        defer{};
+  std::size_t                 throw_at{};
+  std::size_t                 throw_at_select{};
   std::optional<std::size_t>  restored;
   int                         attaches{};
   int                         detaches{};
@@ -137,11 +139,19 @@ public:
   void select(bool selected, vtime) override
   {
     selects.push_back(selected);
+    if(selects.size() == throw_at_select)
+    {
+      throw std::runtime_error{"hook"};
+    }
   }
 
   auto exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::uint32_t override
   {
     frames.push_back({out, bits, at.ps});
+    if(frames.size() == throw_at)
+    {
+      throw std::runtime_error{"hook"};
+    }
     return replies.empty() ? out : replies[(frames.size() - 1) % replies.size()];
   }
 
@@ -1179,4 +1189,24 @@ TEST_CASE("spi_controller_port::drop() throws config_error, the L1 SPI takes tra
           port.drop(at, 1, 1);
         }).contains("devices.SPI1, expected transfer() only, the STM32L1 SPI takes no drop()"));
 }
+}
+
+TEST_CASE("a device that throws from exchange answers as an absent one and the transfer goes on")
+{
+  rig r{"master8"};
+  r.device->throw_at = 2;
+  CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+  CHECK(r.finish() == std::vector<std::uint32_t>{0x11, 0xFF, 0x33, 0x44, txe});
+}
+
+TEST_CASE("a device that throws from select with the hardware SS output lets the transfer finish")
+{
+  for(auto const nth : {std::size_t{1}, std::size_t{2}})
+  {
+    CAPTURE(nth);
+    rig r{"master8"};
+    r.device->throw_at_select = nth;
+    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+    CHECK(r.finish() == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44, txe});
+  }
 }

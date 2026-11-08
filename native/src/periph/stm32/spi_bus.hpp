@@ -5,6 +5,8 @@
  * @brief Frame and controller-queue rules shared by the STM32 SPI models.
  */
 
+#include "hook_failure.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/model.hpp>
@@ -271,20 +273,30 @@ public:
             ctx.part.part, 0, std::format("board.spi.{}.cs_port", instance),
             std::format("a GPIO port the chip select of a {} device names", instance));
       }
-      subscriptions_.push_back(port->on_change([this, &ctx, index](std::uint8_t pin, bool level) {
-        auto const& at = attached_[index];
-        if(pin != *at.cs_pin or index >= state_->selected.size())
-        {
-          return;
-        }
-        auto const selected = level ? 0 : 1;
-        if(state_->selected[index] != selected)
-        {
-          state_->selected[index]     = static_cast<std::uint8_t>(selected);
-          state_->mode_checked[index] = 0;
-          at.device->select(selected != 0, ctx.clock.since_power_on());
-        }
-      }));
+      auto const last = std::none_of(
+          attached_.begin() + static_cast<std::ptrdiff_t>(index) + 1, attached_.end(),
+          [&](spi_attachment const& later) {
+            return later.cs_pin == attached.cs_pin and later.cs_port == attached.cs_port;
+          });
+      subscriptions_.push_back(
+          port->on_change([this, &ctx, index, last](std::uint8_t pin, bool level) {
+            auto const& at = attached_[index];
+            if(pin != *at.cs_pin or index >= state_->selected.size())
+            {
+              return;
+            }
+            auto const selected = level ? 0 : 1;
+            if(state_->selected[index] != selected)
+            {
+              state_->selected[index]     = static_cast<std::uint8_t>(selected);
+              state_->mode_checked[index] = 0;
+              hooks_.run([&] { at.device->select(selected != 0, ctx.clock.since_power_on()); });
+            }
+            if(last)
+            {
+              hooks_.rethrow();
+            }
+          }));
     }
   }
 
@@ -326,16 +338,18 @@ public:
   {
     for(std::size_t index = 0; index < attached_.size() and index < state_->devices.size(); ++index)
     {
-      attached_[index].device->load(state_->devices[index]);
+      hooks_.run([&] { attached_[index].device->load(state_->devices[index]); });
     }
     state_->devices.clear();
     state_->selected.resize(attached_.size());
     state_->mode_checked.resize(attached_.size());
     subscribe(ctx, instance);
+    hooks_.rethrow();
   }
 
 private:
   State*                      state_;
+  hook_failure                hooks_;
   std::vector<spi_attachment> attached_;
   std::vector<subscription>   subscriptions_;
   bool                        subscribed_{};

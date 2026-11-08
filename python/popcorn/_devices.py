@@ -592,6 +592,12 @@ class I2CTarget(_core.I2CTargetBase):
 
     Board: `board` is what the target may drive on the board, such as the SAI clock of a codec.
 
+    Raising: an exception from `on_start`, `on_write`, `on_read`, `on_stop`, `reset` or `restore`
+    stops the run with that exception, once the bus phase or the reset has finished for every
+    target. The bus model goes on with the phase answered as by an absent target: a NACK for
+    `on_start` and `on_write`, a byte of all ones for `on_read`. After a raising `on_write` the
+    transfer ends with a NACK and a STOP. The next run continues from there.
+
     Lifetime: a target serves one machine at a time and must not keep a reference to it. It may
     keep its `board`, which holds no machine.
 
@@ -789,6 +795,12 @@ class SpiTarget(_core.SpiTargetBase):
     edge and `on_exchange` for each frame while the device is selected, full duplex. Devices
     sharing a chip select, or several on the hardware SS output, are all selected and see every
     frame, their replies ANDed as on an open-drain MISO.
+
+    Raising: an exception from `on_exchange`, `on_select`, `reset` or `restore` stops the run with
+    that exception, once the frame has landed or the reset has finished for every device. The
+    frame lands as if the device were absent, with the bits it would drive high, and the next run
+    continues the transfer. A device that raised misses that frame, so one that parses a command
+    byte answers the rest of the transfer out of step.
 
     Chip select: `cs` names the GPIO pin, such as "PA4", active low. The SPI model follows the
     pin from the machine's first reset or snapshot load on. None selects the device by the SPI

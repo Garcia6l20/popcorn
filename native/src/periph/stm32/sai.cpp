@@ -1,4 +1,5 @@
 #include "dma_signal.hpp"
+#include "hook_failure.hpp"
 #include "model_base.hpp"
 #include "sai_rows.hpp"
 
@@ -270,13 +271,13 @@ private:
       -> std::uint32_t;
   [[nodiscard]] auto time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t;
 
-  void start(std::size_t source, std::uint64_t from_ps);
-  void follow_clock(std::size_t b);
-  void open(std::size_t source);
-  void run(std::size_t source, std::uint32_t position);
-  void run_frames(std::size_t source, std::uint32_t position, std::exception_ptr& failure);
-  void begin(std::size_t b);
-  void take(std::size_t b, std::size_t slot);
+  void               start(std::size_t source, std::uint64_t from_ps);
+  void               follow_clock(std::size_t b);
+  void               open(std::size_t source);
+  void               run(std::size_t source, std::uint32_t position);
+  void               run_frames(std::size_t source, std::uint32_t position);
+  void               begin(std::size_t b);
+  void               take(std::size_t b, std::size_t slot);
   [[nodiscard]] auto received(std::size_t b, std::size_t slot, std::size_t source)
       -> std::optional<std::uint32_t>;
   void store(std::size_t b, std::size_t slot, std::size_t source);
@@ -292,6 +293,7 @@ private:
   sai_variant                          variant_;
   register_file&                       regs_;
   std::array<audio_attachment, blocks> wired_;
+  hook_failure                         hooks_;
   std::array<block_fields, blocks>     block_;
   field_ref                            pdm_enable_;
   core::clock_domain                   kernel_;
@@ -870,15 +872,11 @@ auto sai::time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t
 
 void sai::run(std::size_t source, std::uint32_t position)
 {
-  std::exception_ptr failure;
-  run_frames(source, position, failure);
-  if(failure)
-  {
-    std::rethrow_exception(failure);
-  }
+  run_frames(source, position);
+  hooks_.rethrow();
 }
 
-void sai::run_frames(std::size_t source, std::uint32_t position, std::exception_ptr& failure)
+void sai::run_frames(std::size_t source, std::uint32_t position)
 {
   auto&                    block = state_.block[source];
   std::array<bool, blocks> members{};
@@ -932,17 +930,7 @@ void sai::run_frames(std::size_t source, std::uint32_t position, std::exception_
     {
       if(members[b] and state_.block[b].active)
       {
-        try
-        {
-          finish(b, bits, start_ps, end_ps);
-        }
-        catch(...)
-        {
-          if(not failure)
-          {
-            failure = std::current_exception();
-          }
-        }
+        hooks_.run([&] { finish(b, bits, start_ps, end_ps); });
       }
     }
     for(std::size_t b = 0; b < blocks; ++b)

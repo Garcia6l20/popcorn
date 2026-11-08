@@ -1,5 +1,6 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
+#include "hook_failure.hpp"
 #include "model_base.hpp"
 #include "spi_bus.hpp"
 #include "spi_rows.hpp"
@@ -388,6 +389,7 @@ private:
   dma_signal                           tx_dma_;
   dma_signal                           rx_dma_;
   std::vector<std::string>             mismatched_;
+  hook_failure                         hooks_;
   std::vector<std::string>             deferred_;
   bool                                 ti_logged_{};
   bool                                 no_clock_logged_{};
@@ -715,6 +717,7 @@ auto spi_classic::read_rx(std::uint32_t offset, std::uint8_t size) -> std::uint3
 
 void spi_classic::rethrow_refused()
 {
+  hooks_.rethrow();
   auto const joined = [](std::vector<std::string> const& names) {
     auto out = std::string{};
     for(auto const& one : names)
@@ -781,7 +784,7 @@ void spi_classic::hardware_select(bool selected, std::optional<std::uint64_t> at
     }
     state_.selected[index]     = selected ? 1 : 0;
     state_.mode_checked[index] = 0;
-    attachments_[index].device->select(selected, at);
+    hooks_.run([&] { attachments_[index].device->select(selected, at); });
   }
 }
 
@@ -814,7 +817,7 @@ void spi_classic::restore_reset_values(std::optional<reset_kind> kind)
   {
     for(auto const& attached : attachments_)
     {
-      attached.device->reset(*kind);
+      hooks_.run([&] { attached.device->reset(*kind); });
     }
   }
   hardware_select(false);
@@ -822,6 +825,7 @@ void spi_classic::restore_reset_values(std::optional<reset_kind> kind)
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
+  hooks_.rethrow();
 }
 
 void spi_classic::power_cut()
@@ -903,8 +907,12 @@ void spi_classic::finish_frame()
     if(state_.selected[index] != 0)
     {
       attachments_.check_device(index, bus_mode(), mismatched_);
-      auto const reply = attachments_[index].device->exchange_deferred(
-          out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
+      auto const reply = hooks_.guard(
+          [&] {
+            return attachments_[index].device->exchange_deferred(
+                out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
+          },
+          std::optional{spi_mask(frame_bits())});
       if(reply)
       {
         in &= *reply;
@@ -1158,6 +1166,7 @@ auto spi_classic::on_read(
     lanes               = read_rx(offset, size);
   }
   flags();
+  hooks_.rethrow();
   return value.transform([lanes](std::uint32_t word_read) { return word_read & lanes; });
 }
 
@@ -1178,6 +1187,7 @@ auto spi_classic::on_write(
     queue_tx(offset, size, value);
     start_frame(ctx_.clock.time().ps);
     flags();
+    hooks_.rethrow();
     return {};
   }
   if((offset & ~3u) == status_.offset
@@ -1188,6 +1198,7 @@ auto spi_classic::on_write(
   }
   auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
   flags();
+  hooks_.rethrow();
   return result;
 }
 
@@ -1445,7 +1456,7 @@ void spi_classic::host_edge_reached()
       flags();
       if(heard and controller_)
       {
-        controller_->frame(heard->sent, heard->received, vtime{heard->at_ps});
+        hooks_.run([&] { controller_->frame(heard->sent, heard->received, vtime{heard->at_ps}); });
       }
       throw;
     }
@@ -1456,7 +1467,7 @@ void spi_classic::host_edge_reached()
   flags();
   if(heard and controller_)
   {
-    controller_->frame(heard->sent, heard->received, vtime{heard->at_ps});
+    hooks_.run([&] { controller_->frame(heard->sent, heard->received, vtime{heard->at_ps}); });
   }
 }
 

@@ -501,3 +501,28 @@ def test_an_on_answer_exception_stops_the_run_and_keeps_nothing_alive(part: Part
     del m, device, raised
     gc.collect()
     assert [w() for w in watched] == [None, None]
+
+
+class BrokenOnce(I2CController):
+    def __init__(self, nth: int) -> None:
+        super().__init__()
+        self.nth = nth
+
+    def on_answer(self, answer: I2CAnswer) -> None:
+        super().on_answer(answer)
+        if len(self.answers) == self.nth:
+            raise RuntimeError("answer broke")
+
+
+@pytest.mark.parametrize("nth", [1, 3])
+def test_a_raising_on_answer_stops_the_run_and_the_later_phases_still_answer(
+    part: Part, nth: int
+) -> None:
+    device = BrokenOnce(nth)
+    m = part.machine(device)
+    pending = transactions(device, m.time + us(10))
+    with pytest.raises(RuntimeError, match="answer broke"):
+        asyncio.run(m.run(for_=ms(2)))
+    asyncio.run(m.run(for_=ms(2)))
+    asyncio.run(gathered(pending))
+    check_answers(device.answers)

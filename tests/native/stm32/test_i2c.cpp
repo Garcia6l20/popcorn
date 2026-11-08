@@ -76,15 +76,33 @@ public:
   std::vector<bus_event>                                                                  events;
   std::shared_ptr<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>> resets;
   std::shared_ptr<std::vector<std::tuple<periph::i2c_target const*, vtime, std::size_t>>> cuts;
-  bool throw_at_cut{};
+  bool          throw_at_cut{};
+  char          throw_on{};
+  std::uint32_t throw_nth{};
+  std::uint32_t seen{};
+
+  void maybe_throw(char kind)
+  {
+    if(kind == throw_on and ++seen == throw_nth)
+    {
+      throw std::runtime_error{"hook"};
+    }
+  }
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
     return inner->address();
   }
 
+  auto matches(std::uint8_t sent, vtime at) -> bool override
+  {
+    maybe_throw('m');
+    return inner->matches(sent, at);
+  }
+
   auto start(bool read, vtime at) -> periph::i2c_reply override
   {
+    maybe_throw('s');
     auto const reply = inner->start(read, at);
     events.push_back({reply.ack ? (read ? 'R' : 'W') : 'N', 0, at.ps});
     return reply;
@@ -92,6 +110,7 @@ public:
 
   auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
+    maybe_throw('w');
     auto const reply = inner->write(byte, at);
     events.push_back({reply.ack ? 'w' : 'n', byte, at.ps});
     return reply;
@@ -99,6 +118,7 @@ public:
 
   auto read(vtime at) -> periph::i2c_read_reply override
   {
+    maybe_throw('r');
     auto const reply = inner->read(at);
     events.push_back({'r', reply.byte, at.ps});
     return reply;
@@ -106,6 +126,7 @@ public:
 
   void stop(vtime at) override
   {
+    maybe_throw('p');
     inner->stop(at);
     events.push_back({'P', 0, at.ps});
   }
@@ -7995,4 +8016,92 @@ TEST_CASE("CR1 keeps NOSTRETCH, ANFOFF and DNF while PE is set, one warning, str
       CHECK(r.warnings("CR1") == 1);
     }
   }
+}
+
+TEST_CASE("a target that throws from start or read leaves the controller going, the firmware ends")
+{
+  for(auto const& [kind, nth] : {
+          std::pair{'s', 3u},
+          std::pair{'r', 3u}
+  })
+  {
+    CAPTURE(kind);
+    rig r{"eeprom_rw"};
+    r.memory->throw_on  = kind;
+    r.memory->throw_nth = nth;
+    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+    CHECK(r.finish().size() == 3);
+    CHECK(r.memory->seen > nth);
+  }
+}
+
+TEST_CASE("a target that throws from read gives a byte of ones")
+{
+  rig r{"eeprom_rw"};
+  r.memory->throw_on  = 'r';
+  r.memory->throw_nth = 3;
+  CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+  CHECK(r.finish().size() == 3);
+  auto const byte = r.f->target->mem().read(sym("i2c_ll", "buffer") + 2, 1);
+  REQUIRE(byte.has_value());
+  CHECK(*byte == 0xFF);
+}
+
+TEST_CASE("a target that throws from stop or matches leaves the controller going")
+{
+  for(auto const kind : {'p', 'm'})
+  {
+    CAPTURE(kind);
+    rig r{"eeprom_rw"};
+    r.memory->throw_on  = kind;
+    r.memory->throw_nth = 2;
+    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+    CHECK(r.finish().size() == 3);
+    CHECK(r.memory->seen > 2);
+  }
+}
+
+TEST_CASE("a target that throws from write ends the transfer on the wire as a NACK")
+{
+  for(auto const nth : {1u, 10u})
+  {
+    CAPTURE(nth);
+    rig r{"eeprom_rw"};
+    r.memory->throw_on  = 'w';
+    r.memory->throw_nth = nth;
+    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+    auto const until = r.f->target->virtual_clock().time().ps + 200 * us;
+    CHECK(
+        r.f->run_to_stop({.max_instructions = icount{100'000'000}, .until_time = vtime{until}})
+            .reason
+        == stop_reason::time);
+    CHECK(r.f->field("I2C1", "ISR", "NACKF") == 1);
+    CHECK(r.f->field("I2C1", "ISR", "STOPF") == 1);
+    CHECK(r.f->field("I2C1", "ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("a target that throws from stop still starts the START queued behind the STOP")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.set("RCC", "RCC_APB1ENR1", "I2C1EN", 1);
+  b.write(b.at("I2C1", "TIMINGR"), 0x0010'0305);
+  b.set("I2C1", "CR1", "PE", 1);
+  b.command(0x50, 1, false, false);
+  b.run_until(b.now() + 100 * us);
+  b.send(0x00);
+  b.run_until(b.now() + 100 * us);
+  CHECK(b.f.field("I2C1", "ISR", "TC") == 1);
+  r.memory->throw_on  = 'p';
+  r.memory->throw_nth = 1;
+  b.set("I2C1", "CR2", "STOP", 1);
+  b.set("I2C1", "CR2", "START", 1);
+  auto const until = b.now() + 300 * us;
+  CHECK_THROWS_AS(
+      std::ignore =
+          r.f->run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{until}}),
+      std::runtime_error);
+  b.run_until(b.now() + 300 * us);
+  CHECK(b.f.field("I2C1", "ISR", "BUSY") == 1);
 }

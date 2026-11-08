@@ -1206,6 +1206,10 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   taken as NACK or as a byte of 0xFF and fails the run with `config_error`, and
   `i2c_target_port::complete()` and `complete_read()` throw `config_error`. The STM32L1 I2C is a
   link end of no linked system and takes no host bus hold.
+- A Python target whose `on_start`, `on_write`, `on_read` or `on_stop` raises, or whose `matches`
+  raises, answers that phase as an absent target: a NACK, a read byte of all ones, no match. The
+  phase and its flags complete, and the exception leaves at the end of the event, inferred:
+  RM0456 65.4.9 and RM0038 26.3.4 describe a NACK, none describes a target that fails.
 
 ## IWDG
 
@@ -1930,6 +1934,9 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   a slave a BSY low of one SPI clock between frames.
 - SPI_DR takes byte accesses as well as the half-word and word accesses RM0038 28.5 requires: a
   byte write merges into the DR value and sends it, a byte read returns its byte.
+- A frame with no device answering it, an unselected device or a Python device whose hook raised,
+  lands as all ones. Each answering device's reply is ANDed in, as on an open-drain MISO, inferred:
+  RM0456 and RM0038 describe no floating MISO.
 - The CR1 write that ends the MODF clear sequence leaves SPE and MSTR clear, inferred: RM0038
   28.3.10 restores them after the sequence.
 - The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, inferred:

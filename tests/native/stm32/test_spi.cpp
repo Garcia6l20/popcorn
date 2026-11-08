@@ -51,6 +51,8 @@ public:
   std::vector<popcorn::reset_kind>              resets;
   std::vector<std::pair<vtime, std::size_t>>    cuts;
   bool                                          throw_at_cut{};
+  std::uint32_t                                 throw_at_frame{};
+  std::uint32_t                                 throw_at_select{};
   std::uint32_t                                 position{};
   std::optional<std::uint8_t>                   declared;
   mutable int                                   mode_calls{};
@@ -65,12 +67,20 @@ public:
   void select(bool selected, vtime at) override
   {
     selects.emplace_back(selected, at);
+    if(selects.size() == throw_at_select)
+    {
+      throw std::runtime_error{"hook"};
+    }
     position = 0;
   }
 
   auto exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::uint32_t override
   {
     frames.emplace_back(out, at);
+    if(frames.size() == throw_at_frame)
+    {
+      throw std::runtime_error{"hook"};
+    }
     sizes.push_back(bits);
     auto const reply = replies[position % replies.size()];
     ++position;
@@ -4857,5 +4867,25 @@ TEST_CASE("SPI_CFG1 and SPI_CFG2 keep their protected bits while SPE is set")
             {.pc = 0, .now = icount{0}}),
         popcorn::model_error);
     CHECK(b.get("SPI_CFG2", "SSOE") == 1);
+  }
+}
+
+TEST_CASE("a device that throws from exchange answers as an absent one and the firmware ends")
+{
+  rig r{"poll"};
+  r.device->throw_at_frame = 2;
+  CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xFF, 0xFF, 0x1F, 0x32});
+}
+
+TEST_CASE("a device that throws from select with the hardware SS output lets the transfer finish")
+{
+  for(auto const nth : {1u, 2u})
+  {
+    CAPTURE(nth);
+    rig r{"hw_ss", true};
+    r.device->throw_at_select = nth;
+    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
+    CHECK(r.finish() == std::vector<std::uint32_t>{0xFF, 0x1F, 0x32, 0x17});
   }
 }

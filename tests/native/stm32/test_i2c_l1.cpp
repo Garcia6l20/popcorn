@@ -131,6 +131,7 @@ public:
   std::optional<std::size_t> error_byte;
   periph::i2c_error          byte_error{};
   bool                       defer{};
+  char                       throw_on{};
   int                        matched{};
   bool                       defer_read{};
   int                        attaches{};
@@ -143,18 +144,29 @@ public:
 
   auto matches(std::uint8_t sent, vtime at) -> bool override
   {
+    maybe_throw('M');
     ++matched;
     return i2c_target::matches(sent, at);
   }
 
+  void maybe_throw(char kind)
+  {
+    if(kind == std::exchange(throw_on, throw_on == kind ? '\0' : throw_on))
+    {
+      throw std::runtime_error{"hook"};
+    }
+  }
+
   auto start(bool read, vtime at) -> periph::i2c_reply override
   {
+    maybe_throw('S');
     log.push_back({'S', static_cast<std::uint8_t>(read ? 1 : 0), at.ps});
     return {.ack = true, .error = error, .stretch_ps = stretch_ps};
   }
 
   auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
+    maybe_throw('W');
     auto const index = bytes().size();
     log.push_back({'W', byte, at.ps});
     return {
@@ -170,6 +182,7 @@ public:
 
   auto read_acked(vtime at, bool acked) -> periph::i2c_read_reply override
   {
+    maybe_throw('R');
     auto const index = static_cast<std::size_t>(std::ranges::count(kinds(), 'R'));
     log.push_back({'R', static_cast<std::uint8_t>(acked ? 1 : 0), at.ps});
     return {
@@ -215,6 +228,7 @@ public:
 
   void stop(vtime at) override
   {
+    maybe_throw('P');
     log.push_back({'P', 0, at.ps});
   }
 
@@ -4076,4 +4090,79 @@ TEST_CASE("an EOT_1 on the I2C's rx channel with DMAEN 0 changes nothing, inferr
   r.idle_to(t0 + phase(27) + latency);
   CHECK(r.cpu_read(i2c1 + dr) == 0xC3);
   CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 1});
+}
+
+namespace
+{
+void run_throws(rig const& r, std::uint64_t until)
+{
+  CHECK_THROWS_AS(
+      std::ignore =
+          r.f->run_to_stop({.max_instructions = icount{1'000'000}, .until_time = vtime{until}}),
+      std::runtime_error);
+}
+}
+
+TEST_CASE("a target that throws from write NACKs the byte and the controller goes on")
+{
+  rig r{"parked"};
+  r.target->throw_on = 'W';
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  run_throws(r, r.now_ps() + phase(9));
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(i2c1 + sr1) & af) != 0);
+}
+
+TEST_CASE("a target that throws from read gives all ones and the controller goes on")
+{
+  rig r{"parked"};
+  r.target->out      = {0xC1, 0xC2};
+  r.target->throw_on = 'R';
+  static_cast<void>(r.addressed(device, true, pe | ack_bit));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  run_throws(r, r.now_ps() + phase(9));
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(i2c1 + sr1) & rxne) != 0);
+  CHECK(r.read(i2c1 + dr) == 0xFF);
+}
+
+TEST_CASE("a target that throws from start answers as absent and AF rises")
+{
+  rig r{"parked"};
+  r.target->throw_on = 'S';
+  static_cast<void>(r.started(pe));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, static_cast<std::uint32_t>(device << 1));
+  run_throws(r, t1 + phase(9));
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(i2c1 + sr1) & af) != 0);
+}
+
+TEST_CASE("a target that throws from matches answers as absent and AF rises")
+{
+  rig r{"parked"};
+  r.target->throw_on = 'M';
+  static_cast<void>(r.started(pe));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, static_cast<std::uint32_t>(device << 1));
+  run_throws(r, t1 + phase(9));
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(i2c1 + sr1) & af) != 0);
+}
+
+TEST_CASE("a target that throws from stop still starts the START queued behind the STOP")
+{
+  rig r{"parked"};
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  r.target->throw_on = 'P';
+  r.write(i2c1 + cr1, pe | stop | start);
+  run_throws(r, r.now_ps() + phase(4));
+  r.idle_to(r.now_ps() + phase(2));
+  CHECK((r.read(i2c1 + sr1) & 1u) != 0);
 }
