@@ -47,6 +47,7 @@ from popcorn._devices import (
     Unwatch,
     attach,
     cs_of,
+    refuse_shadowed,
     serving,
 )
 from popcorn._dwarf_views import Var
@@ -3900,6 +3901,7 @@ def _checked_devices(
             seen.add(id(target))
             if serving(target) is not None:
                 raise refuse(name, f"{target!r} not serving another live machine")
+            refuse_shadowed(target)
             cs = cs_of(target) if isinstance(target, _core.SpiTargetBase) else None
             if cs is not None:
                 port = f"GPIO{cs[1]}"

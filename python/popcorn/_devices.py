@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import annotationlib
 import re
 import typing
 import weakref
@@ -310,7 +311,7 @@ class DeviceBoard:
 
             def call() -> None:
                 if stack is not None:
-                    stack._traffic = True  # pyright: ignore[reportPrivateUsage]
+                    stack._note_traffic()  # pyright: ignore[reportPrivateUsage]
                 self._called("on_frame", on_frame, frame)
 
             loop._run_hook(end_ps, call)  # pyright: ignore[reportPrivateUsage]
@@ -568,6 +569,41 @@ def check_address(address: int) -> None:
         raise ValueError(f"an I2C target address is 0x08 to 0x77, not {address!r}")
 
 
+def _own_names(cls: type) -> set[str]:
+    annotations = annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
+    return set(vars(cls)) | set(annotations)
+
+
+def _private_names(cls: type) -> frozenset[str]:
+    return frozenset(n for n in _own_names(cls) if n.startswith("_") and not n.endswith("__"))
+
+
+def _reserved_message(owner: str, verb: str, taken: list[str], base: type) -> str:
+    names = ", ".join(repr(name) for name in taken)
+    many = len(taken) > 1
+    return (
+        f"{owner} {verb} {names}, private name{'s' if many else ''} of {base.__qualname__} "
+        f"that popcorn reserves: rename {'them' if many else 'it'}"
+    )
+
+
+def _refuse_reserved(cls: type, base: type, attributes: frozenset[str] = frozenset()) -> None:
+    """Refuse a subclass `cls` of the device base `base` that defines a name the base reserves.
+
+    The reserved names are the private names the base class defines, which the native bus model
+    calls by name, and `attributes`, the private instance attributes native code reads by name.
+
+    Raises:
+        TypeError: `cls` defines a reserved name in its own body.
+    """
+    taken = sorted((_private_names(base) | attributes) & _own_names(cls))
+    if taken:
+        raise TypeError(_reserved_message(cls.__qualname__, "defines", taken, base))
+
+
+_SPI_TARGET_ATTRIBUTES = frozenset({"_cs_pin", "_cs_port"})
+
+
 class I2CTarget(_core.I2CTargetBase):
     """A target on an I2C bus, answering one 7-bit address, written in Python.
 
@@ -608,7 +644,16 @@ class I2CTarget(_core.I2CTargetBase):
     controller: CR2.START cleared, no NACKF, TC or STOPF, BUSY 1 for one STOP length, then
     `on_stop`, which a PE clear inside that window delivers at the time of the write. Raising from
     a hook is not an injection: it stops the run as a handler error.
+
+    Names: a name starting with `_` that this class defines is reserved. A subclass defining one
+    raises TypeError at class definition, and an instance attribute with one raises TypeError when
+    the machine takes the device. Other `_` names are free for the subclass, and an attribute a
+    subclass sets never replaces the class's own state, which is name-mangled.
     """
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _refuse_reserved(cls, I2CTarget)
 
     def __init__(self, address: int) -> None:
         """Answer `address`.
@@ -618,13 +663,13 @@ class I2CTarget(_core.I2CTargetBase):
         """
         check_address(address)
         super().__init__()
-        self._bus_address = address
-        self._stretch_ps: int | None = None
+        self.__bus_address = address
+        self.__stretch_ps: int | None = None
 
     @property
     def address(self) -> int:
         """The 7-bit address the target answers."""
-        return self._bus_address
+        return self.__bus_address
 
     @property
     def board(self) -> DeviceBoard:
@@ -688,11 +733,11 @@ class I2CTarget(_core.I2CTargetBase):
             raise TypeError(f"stretch() takes a VirtualDuration, not {type(for_).__name__}")
         if not 0 <= for_.ps <= _MAX_STRETCH_PS:
             raise ValueError(f"a stretch is 0 to 1 s, not {for_}")
-        if self._stretch_ps is None:
+        if self.__stretch_ps is None:
             raise RuntimeError(
                 f"{self!r}: stretch() is called from on_start, on_write or on_read only"
             )
-        self._stretch_ps = for_.ps
+        self.__stretch_ps = for_.ps
 
     def hold_bus(
         self, *, for_: VirtualDuration, at: VirtualTime | None = None
@@ -750,31 +795,31 @@ class I2CTarget(_core.I2CTargetBase):
         _restore(self, I2CTarget, data)
 
     def _address(self) -> int:
-        return self._bus_address
+        return self.__bus_address
 
     def _start(self, read: bool, at: int) -> tuple[bool, int, int]:
-        self._stretch_ps = 0
+        self.__stretch_ps = 0
         try:
             return _reply(self, "on_start", self.on_start(read, VirtualTime(at)), self._stretched())
         finally:
-            self._stretch_ps = None
+            self.__stretch_ps = None
 
     def _write(self, byte: int, at: int) -> tuple[bool, int, int]:
-        self._stretch_ps = 0
+        self.__stretch_ps = 0
         try:
             return _reply(self, "on_write", self.on_write(byte, VirtualTime(at)), self._stretched())
         finally:
-            self._stretch_ps = None
+            self.__stretch_ps = None
 
     def _read(self, at: int) -> tuple[int, int, int]:
-        self._stretch_ps = 0
+        self.__stretch_ps = 0
         try:
             return _read_reply(self, "on_read", self.on_read(VirtualTime(at)), self._stretched())
         finally:
-            self._stretch_ps = None
+            self.__stretch_ps = None
 
     def _stretched(self) -> int:
-        return self._stretch_ps or 0
+        return self.__stretch_ps or 0
 
     def _stop(self, at: int) -> None:
         self.on_stop(VirtualTime(at))
@@ -784,7 +829,7 @@ class I2CTarget(_core.I2CTargetBase):
     _load = _load_trampoline
 
     def __repr__(self) -> str:
-        return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"
+        return f"<{type(self).__qualname__} at {self.__bus_address:#04x}>"
 
 
 class SpiTarget(_core.SpiTargetBase):
@@ -824,7 +869,18 @@ class SpiTarget(_core.SpiTargetBase):
     it to `super().__init__`, and `mode` the same way when it declares one.
 
     Time, state, reset, board and lifetime: as `I2CTarget`.
+
+    Names: a name starting with `_` that this class defines is reserved, as are `_cs_pin` and
+    `_cs_port`, which the SPI model reads. A subclass defining one raises TypeError at class
+    definition. An instance attribute named like one of the class's methods raises TypeError when
+    the machine takes the device, while `_cs_pin` and `_cs_port` may be set on the instance.
+    Other `_` names are free for the subclass, and an attribute a subclass sets never replaces the
+    class's own state, which is name-mangled.
     """
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _refuse_reserved(cls, SpiTarget, _SPI_TARGET_ATTRIBUTES)
 
     def __init__(self, cs: str | None = None, *, mode: int | None = None) -> None:
         """Select the device through GPIO pin `cs`, or the hardware SS output when None, and
@@ -838,14 +894,14 @@ class SpiTarget(_core.SpiTargetBase):
         port, pin = chip_select(cs)
         checked = spi_mode("SpiTarget", mode)
         super().__init__(checked)
-        self._cs = cs
+        self.__cs = cs
         self._cs_port = port
         self._cs_pin = pin
 
     @property
     def cs(self) -> str | None:
         """The chip select pin, None for the hardware SS output."""
-        return self._cs
+        return self.__cs
 
     @property
     def board(self) -> DeviceBoard:
@@ -883,7 +939,7 @@ class SpiTarget(_core.SpiTargetBase):
     _load = _load_trampoline
 
     def __repr__(self) -> str:
-        return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
+        return f"<{type(self).__qualname__} on {self.__cs or 'SS'}>"
 
 
 class SpiController(_core.SpiControllerBase):
@@ -923,11 +979,20 @@ class SpiController(_core.SpiControllerBase):
     belongs to the test: a snapshot does not save it and a restore does not change it.
 
     Lifetime: as `I2CTarget`.
+
+    Names: a name starting with `_` that this class defines is reserved. A subclass defining one
+    raises TypeError at class definition, and an instance attribute with one raises TypeError when
+    the machine takes the device. Other `_` names are free for the subclass, and an attribute a
+    subclass sets never replaces the class's own state, which is name-mangled.
     """
 
     received: list[int]
     """The frames the firmware sent, in order, as the default `on_frame` appends them. Frames a
     reset dropped are missing."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _refuse_reserved(cls, SpiController)
 
     def __init__(self, *, sck_hz: int, bits: int = 8, mode: int | None = None) -> None:
         """Clock frames of `bits` bits at `sck_hz`, checking the firmware's SPI mode against
@@ -947,19 +1012,19 @@ class SpiController(_core.SpiControllerBase):
             raise ValueError(f"an SPI frame is 4 to 32 bits, not {bits}")
         checked = spi_mode("SpiController", mode)
         super().__init__(checked)
-        self._sck_hz = sck_hz
-        self._bits = bits
+        self.__sck_hz = sck_hz
+        self.__bits = bits
         self.received = []
 
     @property
     def sck_hz(self) -> int:
         """The SCK frequency in Hz the controller clocks frames at, 1 to 100 MHz. Read-only."""
-        return self._sck_hz
+        return self.__sck_hz
 
     @property
     def bits(self) -> int:
         """The size in bits of each frame the controller shifts, 4 to 32. Read-only."""
-        return self._bits
+        return self.__bits
 
     def transfer(
         self, frames: Sequence[int], *, at: VirtualTime | None = None
@@ -994,8 +1059,8 @@ class SpiController(_core.SpiControllerBase):
         for frame in frames:
             if isinstance(frame, bool) or not isinstance(cast(object, frame), int):
                 raise TypeError(f"an SPI frame is an int, not {frame!r}")
-            if not 0 <= frame < 1 << self._bits:
-                raise ValueError(f"a {self._bits}-bit SPI frame is 0 to {(1 << self._bits) - 1}")
+            if not 0 <= frame < 1 << self.__bits:
+                raise ValueError(f"a {self.__bits}-bit SPI frame is 0 to {(1 << self.__bits) - 1}")
             checked.append(frame)
         if at is not None and not 0 <= at.ps <= MAX_PS:
             raise ValueError(f"an SPI transfer at {at} leaves the 64-bit picosecond range")
@@ -1007,7 +1072,7 @@ class SpiController(_core.SpiControllerBase):
                 key="devices",
                 expected="a controller serving a live machine",
             )
-        return post(held[5], at, self._bits * 10**12 // self._sck_hz, self._bits, checked)
+        return post(held[5], at, self.__bits * 10**12 // self.__sck_hz, self.__bits, checked)
 
     def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
         """One frame ended at `at`, machine time since reset: `sent` the controller's frame,
@@ -1021,7 +1086,7 @@ class SpiController(_core.SpiControllerBase):
         self.on_frame(sent, received, VirtualTime(at))
 
     def __repr__(self) -> str:
-        return f"<{type(self).__qualname__} at {self._sck_hz} Hz, {self._bits} bits>"
+        return f"<{type(self).__qualname__} at {self.__sck_hz} Hz, {self.__bits} bits>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1081,10 +1146,19 @@ class I2CController(_core.I2CControllerBase):
     belongs to the test: a snapshot does not save it and a restore does not change it.
 
     Lifetime: as `I2CTarget`.
+
+    Names: a name starting with `_` that this class defines is reserved. A subclass defining one
+    raises TypeError at class definition, and an instance attribute with one raises TypeError when
+    the machine takes the device. Other `_` names are free for the subclass, and an attribute a
+    subclass sets never replaces the class's own state, which is name-mangled.
     """
 
     answers: list[I2CAnswer]
     """The answers heard, in order, as the default `on_answer` appends them."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _refuse_reserved(cls, I2CController)
 
     def __init__(self, *, scl_hz: int = 100_000) -> None:
         """Clock phases at `scl_hz`.
@@ -1098,13 +1172,13 @@ class I2CController(_core.I2CControllerBase):
         if not _MIN_SCL_HZ <= scl_hz <= _MAX_SCL_HZ:
             raise ValueError(f"an I2C clock is 1 kHz to 5 MHz, not {scl_hz} Hz")
         super().__init__()
-        self._scl_hz = scl_hz
+        self.__scl_hz = scl_hz
         self.answers = []
 
     @property
     def scl_hz(self) -> int:
         """The SCL frequency in Hz the controller clocks phases at, 1 kHz to 5 MHz. Read-only."""
-        return self._scl_hz
+        return self.__scl_hz
 
     @property
     def phase_time(self) -> VirtualDuration:
@@ -1113,7 +1187,7 @@ class I2CController(_core.I2CControllerBase):
 
     @property
     def _phase_ps(self) -> int:
-        return 9 * 10**12 // self._scl_hz
+        return 9 * 10**12 // self.__scl_hz
 
     def start(
         self, address: int, *, read: bool = False, at: VirtualTime | None = None
@@ -1237,7 +1311,7 @@ class I2CController(_core.I2CControllerBase):
         )
 
     def __repr__(self) -> str:
-        return f"<{type(self).__qualname__} at {self._scl_hz} Hz>"
+        return f"<{type(self).__qualname__} at {self.__scl_hz} Hz>"
 
 
 _MAX_BAUD = 100_000_000
@@ -1377,7 +1451,16 @@ class UartDevice(_core.UartDeviceBase):
 
     Lifetime: a device serves one machine at a time and must not keep a reference to it. It may
     keep its `board`, which holds no machine.
+
+    Names: a name starting with `_` that this class defines is reserved. A subclass defining one
+    raises TypeError at class definition, and an instance attribute with one raises TypeError when
+    the machine takes the device. Other `_` names are free for the subclass, and an attribute a
+    subclass sets never replaces the class's own state, which is name-mangled.
     """
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _refuse_reserved(cls, UartDevice)
 
     def __init__(self, *, line: LineFormat | None = None) -> None:
         """Make a device serving no machine yet.
@@ -1389,22 +1472,22 @@ class UartDevice(_core.UartDeviceBase):
             TypeError: `line` is neither a `LineFormat` nor None.
         """
         super().__init__(type(self).on_rts is not UartDevice.on_rts)
-        self._line: LineFormat | None = None
+        self.__line: LineFormat | None = None
         self.line = line
-        self._link: _core.UartDeviceLink | None = None
-        self._loop: VirtualLoop | None = None
-        self._refusing = ""
-        self._peripheral = ""
-        self._traffic = False
-        self._held: tuple[bool, bytes] | None = None
-        self._reattach = False
-        self._rerun_stamp: int | None = None
-        self._attach_stamp: int | None = None
-        self._watches: list[Unwatch] = []
-        self._tapping = False
-        self._tapped = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
-        self._tap_index = [0, 0]
-        self._tap_lost = 0
+        self.__link: _core.UartDeviceLink | None = None
+        self.__loop: VirtualLoop | None = None
+        self.__refusing = ""
+        self.__peripheral = ""
+        self.__traffic = False
+        self.__held: tuple[bool, bytes] | None = None
+        self.__reattach = False
+        self.__rerun_stamp: int | None = None
+        self.__attach_stamp: int | None = None
+        self.__watches: list[Unwatch] = []
+        self.__tapping = False
+        self.__tapped = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
+        self.__tap_index = [0, 0]
+        self.__tap_lost = 0
 
     @property
     def line(self) -> LineFormat | None:
@@ -1420,7 +1503,7 @@ class UartDevice(_core.UartDeviceBase):
             MachineRunning: The machine is running and the caller is neither a hook nor a loop
                 callback.
         """
-        return self._line
+        return self.__line
 
     @line.setter
     def line(self, line: LineFormat | None) -> None:
@@ -1430,7 +1513,7 @@ class UartDevice(_core.UartDeviceBase):
 
         def store() -> None:
             self.set_line(*args)
-            self._line = line
+            self.__line = line
 
         try:
             parked(self, store)
@@ -1450,19 +1533,19 @@ class UartDevice(_core.UartDeviceBase):
     def tapping(self) -> bool:
         """Whether the port records its frames, see the class doc. Off by default, settable from
         any thread."""
-        return self._tapping
+        return self.__tapping
 
     @tapping.setter
     def tapping(self, on: bool) -> None:
         if not isinstance(cast(object, on), bool):
             raise TypeError(f"tapping takes a bool, not {on!r}")
         self.set_tapping(on)
-        self._tapping = on
+        self.__tapping = on
 
     @property
     def tap_dropped(self) -> int:
         """Frames the tap dropped because it held its limit, since the last restore."""
-        return self._tap_lost
+        return self.__tap_lost
 
     def tap_frames(self, towards: str | None = None) -> list[TapFrame]:
         """Take the frames the tap holds, oldest first, and forget them.
@@ -1484,12 +1567,12 @@ class UartDevice(_core.UartDeviceBase):
             return taken
         if towards == "device":
             return self._take_tapped(0)
-        if self._peripheral and towards == self._peripheral:
+        if self.__peripheral and towards == self.__peripheral:
             return self._take_tapped(1)
-        raise ValueError(f"towards {towards!r} is neither 'device' nor {self._peripheral!r}")
+        raise ValueError(f"towards {towards!r} is neither 'device' nor {self.__peripheral!r}")
 
     def _take_tapped(self, direction: int) -> list[TapFrame]:
-        held = self._tapped[direction]
+        held = self.__tapped[direction]
         taken: list[TapFrame] = []
         while held:
             taken.append(held.popleft())
@@ -1498,13 +1581,13 @@ class UartDevice(_core.UartDeviceBase):
     def _record(
         self, direction: int, data: int, start: int, end: int, *, brk: bool, lost: bool
     ) -> None:
-        if not self._tapping:
+        if not self.__tapping:
             return
-        held = self._tapped[direction]
+        held = self.__tapped[direction]
         if len(held) == _TAP_KEEP:
-            self._tap_lost += 1
-        index = self._tap_index[direction]
-        self._tap_index[direction] = index + 1
+            self.__tap_lost += 1
+        index = self.__tap_index[direction]
+        self.__tap_index[direction] = index + 1
         held.append(
             TapFrame(
                 data=data,
@@ -1512,7 +1595,7 @@ class UartDevice(_core.UartDeviceBase):
                 start=VirtualTime(start),
                 end=VirtualTime(end),
                 arrival=VirtualTime(end),
-                towards="device" if direction == 0 else self._peripheral,
+                towards="device" if direction == 0 else self.__peripheral,
                 injected=False,
                 brk=brk,
                 lost=lost,
@@ -1534,7 +1617,7 @@ class UartDevice(_core.UartDeviceBase):
             ConfigError: The device serves no live machine.
         """
         self._link_of()
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
         return loop
 
@@ -1547,7 +1630,7 @@ class UartDevice(_core.UartDeviceBase):
             ConfigError: The device serves no live machine.
             MachineRunning: Read off the machine's thread while it runs.
         """
-        loop = self._loop
+        loop = self.__loop
         if loop is not None and loop._stepping_here():  # pyright: ignore[reportPrivateUsage]
             return VirtualTime(loop._stamp_since_reset())  # pyright: ignore[reportPrivateUsage]
         machine = serving(self)
@@ -1600,9 +1683,9 @@ class UartDevice(_core.UartDeviceBase):
         restored clock reaches the old stack's watches ahead of the rerun and what it arms stays, so
         a stack that arms from the edge and from the level in `on_attach` checks it armed once. An
         exception raises from the machine's `restore` as a `ModelError`, once that has finished."""
-        loop = self._loop
+        loop = self.__loop
         if (
-            self._reattach
+            self.__reattach
             and type(self).on_attach is not UartDevice.on_attach
             and loop is not None
             and not loop.is_closed()
@@ -1668,8 +1751,8 @@ class UartDevice(_core.UartDeviceBase):
         if not isinstance(cast(object, obey_rts), bool):
             raise TypeError(f"send() takes obey_rts as a bool, not {obey_rts!r}")
         link, start = self._acting("send", at)
-        link.send(bytes(data), start, not obey_rts, *self._line_args(self._line))
-        self._traffic = True
+        link.send(bytes(data), start, not obey_rts, *self._line_args(self.__line))
+        self.__traffic = True
 
     def send_break(self, *, at: VirtualTime | None = None) -> None:
         """Queue one break towards the firmware's receiver after the frames queued, at `at` or
@@ -1684,7 +1767,7 @@ class UartDevice(_core.UartDeviceBase):
         """
         link, start = self._acting("send_break", at)
         link.send_break(start)
-        self._traffic = True
+        self.__traffic = True
 
     def drive_cts(self, ready: bool, *, at: VirtualTime | None = None) -> None:
         """Drive the firmware's nCTS input to `ready` at `at`, or at `now` when None. With CR3.CTSE,
@@ -1703,14 +1786,14 @@ class UartDevice(_core.UartDeviceBase):
         if not link.has_flow_control():
             raise ConfigError(
                 f"{self!r}: this UART has no CTS",
-                key=f"devices.{self._peripheral}",
+                key=f"devices.{self.__peripheral}",
                 expected="a UART with hardware flow control",
             )
         link.set_cts(ready, start)
-        self._traffic = True
+        self.__traffic = True
 
     def _link_of(self) -> _core.UartDeviceLink:
-        link = self._link
+        link = self.__link
         if link is None or serving(self) is None:
             raise self._serves_none()
         return link
@@ -1720,9 +1803,9 @@ class UartDevice(_core.UartDeviceBase):
         if at is not None and not isinstance(cast(object, at), VirtualTime):
             raise TypeError(f"{what}() takes at as a VirtualTime or None, not {at!r}")
         link = self._link_of()
-        if self._refusing:
-            raise RuntimeError(f"{self!r}: {what}() is refused inside {self._refusing}()")
-        loop = self._loop
+        if self.__refusing:
+            raise RuntimeError(f"{self!r}: {what}() is refused inside {self.__refusing}()")
+        loop = self.__loop
         stepping = loop is not None and loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
         if stepping:
             assert loop is not None
@@ -1730,7 +1813,7 @@ class UartDevice(_core.UartDeviceBase):
                 raise RuntimeError(
                     f"{self!r}: {what}() is refused while a restore empties the loop"
                 )
-            if self._rerun_stamp == loop._now_ps:  # pyright: ignore[reportPrivateUsage]
+            if self.__rerun_stamp == loop._now_ps:  # pyright: ignore[reportPrivateUsage]
                 raise RuntimeError(f"{self!r}: {what}() is refused while on_attach runs again")
         if not stepping and not _core.on_host_thread():
             raise RuntimeError(f"{self!r}: {what}() runs on the machine's thread")
@@ -1743,9 +1826,12 @@ class UartDevice(_core.UartDeviceBase):
         return link, start
 
     def _bind(self, link: _core.UartDeviceLink, peripheral: str, loop: VirtualLoop) -> None:
-        self._link = link
-        self._peripheral = peripheral
-        self._loop = loop
+        self.__link = link
+        self.__peripheral = peripheral
+        self.__loop = loop
+
+    def _note_traffic(self) -> None:
+        self.__traffic = True
 
     def _serves_none(self) -> ConfigError:
         return ConfigError(
@@ -1755,28 +1841,28 @@ class UartDevice(_core.UartDeviceBase):
         )
 
     def _attached(self, at: int) -> None:
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
         loop._run_hook(at, self._first_attach)  # pyright: ignore[reportPrivateUsage]
 
     def _first_attach(self) -> None:
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
-        self._attach_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
+        self.__attach_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
         self._called(self.on_attach)
 
     def _frame(self, data: int, at: int, start: int, wire: int) -> None:
-        self._traffic = True
+        self.__traffic = True
         self._record(0, wire, start, at, brk=False, lost=False)
         self._stamped(at, self.on_frame, data)
 
     def _error(self, kind: int, at: int, start: int, wire: int) -> None:
-        self._traffic = True
+        self.__traffic = True
         self._record(0, wire, start, at, brk=False, lost=False)
         self._stamped(at, self.on_error, UartError(kind))
 
     def _break(self, at: int, start: int) -> None:
-        self._traffic = True
+        self.__traffic = True
         self._record(0, 0, start, at, brk=True, lost=False)
         self._stamped(at, self.on_break)
 
@@ -1784,16 +1870,16 @@ class UartDevice(_core.UartDeviceBase):
         self._record(1, data, start, end, brk=brk, lost=False)
 
     def _rts(self, ready: bool, at: int) -> None:
-        self._traffic = True
+        self.__traffic = True
         self._stamped(at, self.on_rts, ready)
 
     def _aborted(self, at: int, start: int, data: int) -> None:
-        self._traffic = True
+        self.__traffic = True
         self._record(0, data, start, at, brk=False, lost=True)
         self._stamped(at, self.on_error, UartError.ABORTED)
 
     def _stamped(self, at: int, hook: Callable[..., None], *args: object) -> None:
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
 
         def held_at_the_stamp() -> None:
@@ -1803,10 +1889,10 @@ class UartDevice(_core.UartDeviceBase):
         loop._run_hook(at, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
 
     def _reset(self, kind: _core.ResetKind) -> None:
-        refusing = self._refusing
-        self._refusing = "reset"
+        refusing = self.__refusing
+        self.__refusing = "reset"
         try:
-            loop = self._loop
+            loop = self.__loop
             if loop is None:
                 self._called(self.reset, ResetKind(kind.value))
             else:
@@ -1814,17 +1900,17 @@ class UartDevice(_core.UartDeviceBase):
                     0, self._called, self.reset, ResetKind(kind.value)
                 )
         finally:
-            self._refusing = refusing
+            self.__refusing = refusing
 
     def _save(self) -> bytes:
         data = _saved(self, typing.cast(object, self.snapshot()))
-        return (b"\x01" if self._traffic else b"\x00") + data
+        return (b"\x01" if self.__traffic else b"\x00") + data
 
     def _load(self, attached: bool, data: bytes) -> None:
-        self._held = (attached, data)
+        self.__held = (attached, data)
 
     def _check_quiet(self) -> None:
-        if self._traffic:
+        if self.__traffic:
             raise SnapshotRefused(
                 f"{self!r}: traffic crossed the wire since its last attach, so running on_attach"
                 " again cannot rebuild its stack: override snapshot() and restore()",
@@ -1834,58 +1920,58 @@ class UartDevice(_core.UartDeviceBase):
     def _note_pin(self, later: bool = False) -> None:
         """A pin crossed for this device: traffic once its stack has attached, past that stamp, or
         at it for a drive due `later`. A drive from `restore` repeats at every restore."""
-        loop = self._loop
-        if self._attach_stamp is None or loop is None:
+        loop = self.__loop
+        if self.__attach_stamp is None or loop is None:
             return
-        if self._refusing == "restore" and not later:
+        if self.__refusing == "restore" and not later:
             return
         stepping = loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
         now = loop._now_ps  # pyright: ignore[reportPrivateUsage]
-        if stepping and now == self._attach_stamp and not later:
+        if stepping and now == self.__attach_stamp and not later:
             return
-        self._traffic = True
+        self.__traffic = True
 
     def _end_watches(self) -> None:
-        for watch in self._watches:
+        for watch in self.__watches:
             watch.remove()
-        self._watches.clear()
+        self.__watches.clear()
 
     def _rebuild(self) -> None:
         """Call `restore` with the bytes the machine's restore loaded."""
-        for taken in self._tapped:
+        for taken in self.__tapped:
             taken.clear()
-        self._tap_index = [0, 0]
-        self._tap_lost = 0
-        held = self._held
+        self.__tap_index = [0, 0]
+        self.__tap_lost = 0
+        held = self.__held
         if held is None:
             return
-        self._held = None
+        self.__held = None
         attached, data = held
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
-        self._traffic = data[0] != 0
-        self._reattach = attached
-        self._rerun_stamp = None
-        self._attach_stamp = -1 if attached else None
+        self.__traffic = data[0] != 0
+        self.__reattach = attached
+        self.__rerun_stamp = None
+        self.__attach_stamp = -1 if attached else None
         if not attached:
             self._end_watches()
-        self._refusing = "restore"
+        self.__refusing = "restore"
         try:
             loop._run_alone(  # pyright: ignore[reportPrivateUsage]
                 0, self._called, self.restore, data[1:]
             )
         finally:
-            self._refusing = ""
+            self.__refusing = ""
 
     def _note_watch(self, watch: Unwatch) -> None:
-        self._watches = [standing for standing in self._watches if standing.active]
-        self._watches.append(watch)
+        self.__watches = [standing for standing in self.__watches if standing.active]
+        self.__watches.append(watch)
 
     def _attach_again(self) -> None:
-        loop = self._loop
+        loop = self.__loop
         assert loop is not None
-        self._rerun_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
-        self._attach_stamp = self._rerun_stamp
+        self.__rerun_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
+        self.__attach_stamp = self.__rerun_stamp
         self._end_watches()
         self._called(self.on_attach)
 
@@ -1895,11 +1981,11 @@ class UartDevice(_core.UartDeviceBase):
         except Exception as error:
             raise ModelError(
                 f"{self!r}: {getattr(hook, '__name__', 'a hook')} raised {error!r}",
-                peripheral=self._peripheral,
+                peripheral=self.__peripheral,
             ) from error
 
     def __repr__(self) -> str:
-        where = f" on {self._peripheral}" if self._peripheral else ""
+        where = f" on {self.__peripheral}" if self.__peripheral else ""
         return f"<{type(self).__qualname__}{where}>"
 
 
@@ -1919,6 +2005,21 @@ def parked[T](device: BusDevice, read: Callable[[], T]) -> T:
     if handle is None:
         return read()
     return cast(T, handle.parked(read))
+
+
+def refuse_shadowed(device: object) -> None:
+    """Refuse a device of a Python device base that holds an instance attribute named like a
+    private method of its base, since native code looks these up on the instance.
+
+    Raises:
+        TypeError: `device` sets such an attribute.
+    """
+    for base in (I2CTarget, SpiTarget, SpiController, I2CController, UartDevice):
+        if not isinstance(device, base):
+            continue
+        taken = sorted(set(vars(device)) & _private_names(base))
+        if taken:
+            raise TypeError(_reserved_message(type(device).__qualname__, "sets", taken, base))
 
 
 def attach(

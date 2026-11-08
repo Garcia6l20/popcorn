@@ -171,6 +171,21 @@ def test_the_default_reset_keeps_the_device_state(u575: popcorn.PartDescription)
     assert counter.snapshot() == Counter().snapshot().replace(b"\x07", b"\x09")
 
 
+def test_a_subclass_setting_the_names_of_the_bases_state_leaves_the_target_working(
+    u575: popcorn.PartDescription,
+) -> None:
+    class Clobbering(Eeprom24):
+        def __init__(self) -> None:
+            super().__init__(0x50, 4096)
+            self._bus_address = object()
+            self._stretch_ps = object()
+
+    m, eeprom = eeprom_machine(u575, Clobbering())
+    enter(m, "eeprom_rw")
+    assert finish(m)[0] == 20
+    assert bytes(eeprom.array[0x10:0x24]) == bytes(pattern(i) for i in range(20))
+
+
 class Flaky(Eeprom24):
     def __init__(self) -> None:
         super().__init__(0x50, 4096)

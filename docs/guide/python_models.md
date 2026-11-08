@@ -96,6 +96,15 @@ A device is a class that gets bus events from a built-in I2C, SPI or UART model:
 - `popcorn.board.UartDevice` is the far end of a UART in virtual time, with timers, flow control,
   pins and SAI blocks. See [UART devices](uart_devices.md).
 
+Names starting with `_` that popcorn's device bases define are reserved: a subclass of `I2CTarget`,
+`SpiTarget`, `I2CController`, `SpiController` or `UartDevice` that defines one, such as `_reset` or
+`_save`, raises `TypeError` at class definition. Other `_` names are free, and an attribute a
+subclass sets never replaces the base's own state. An instance attribute named like a reserved
+method, such as `self._read`, raises `TypeError` when the machine takes the device. `SpiTarget` also
+reserves `_cs_pin` and `_cs_port` as class-level names, and an instance may set them. In device
+code, pyright's `reportImplicitOverride` with `@typing.override` on the hook methods, when enabled,
+flags an accidental override of any base method at check time.
+
 `Periph(devices=[Device(TempSensor, address=0x48, readings=[21.0, 22.5])])` attaches one to a
 peripheral, and `machine.board.devices("I2C1")` returns the objects. As with models, annotated
 attributes are state that snapshots save.

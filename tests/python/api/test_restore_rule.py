@@ -1692,10 +1692,10 @@ def test_an_on_rts_delivery_counts_only_for_a_class_that_overrides_it(
         m = asleep(u575, {"USART1": [device]}, rtse=True)
         device.loop.call_soon(device.send, b"A")
         run(m, us(1))
-        device._traffic = False  # pyright: ignore[reportPrivateUsage]
+        vars(device)["_UartDevice__traffic"] = False
         run(m, ms(1))
         assert m.periph.USART1.ISR_enabled.RXFNE == 1
-        return device._traffic  # pyright: ignore[reportPrivateUsage]
+        return bool(vars(device)["_UartDevice__traffic"])
 
     assert traffic_after_an_edge(Hearing())
     assert not traffic_after_an_edge(Stack())

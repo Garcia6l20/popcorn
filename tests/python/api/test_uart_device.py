@@ -1978,13 +1978,18 @@ class SeesTraffic(Starter):
         super().__init__(data)
         self.flags: list[bool] = []
 
-    def _received(self, data: int, start: int, end: int, brk: bool) -> None:
-        self.flags.append(self._traffic)
-        super()._received(data, start, end, brk)
-        self.flags.append(self._traffic)
 
+def test_a_received_frame_finds_the_traffic_flag_already_set(
+    row: Row, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received = vars(UartDevice)["_received"]
 
-def test_a_received_frame_finds_the_traffic_flag_already_set(row: Row) -> None:
+    def watched(self: SeesTraffic, data: int, start: int, end: int, brk: bool) -> None:
+        self.flags.append(vars(self)["_UartDevice__traffic"])
+        received(self, data, start, end, brk)
+        self.flags.append(vars(self)["_UartDevice__traffic"])
+
+    monkeypatch.setattr(UartDevice, "_received", watched)
     device = SeesTraffic(b"ab")
     device.tapping = True
     m = asleep(row, {"USART1": [device]})
@@ -2076,7 +2081,7 @@ def test_a_restore_from_a_deviceless_snapshot_drops_the_tap_and_restarts_its_ind
     m.restore(m.load_snapshot(path))
     assert tapped(device) == []
     assert device.tap_dropped == 0
-    assert device._tap_index == [0, 0]  # pyright: ignore[reportPrivateUsage]
+    assert vars(device)["_UartDevice__tap_index"] == [0, 0]
 
 
 def test_a_parity_and_two_stop_bits_tap_both_directions_at_the_longer_frame(
@@ -2867,3 +2872,39 @@ def test_the_device_hears_a_frame_or_its_error_at_the_firmwares_stop_bit_end(
     else:
         assert device.frames == []
         assert device.errors == [(kind, end)]
+
+
+CLOBBERED = [
+    name.removeprefix("_UartDevice_")
+    for name in vars(UartDevice())
+    if name.startswith("_UartDevice__")
+]
+
+
+class Clobbering(Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        for name in CLOBBERED:
+            setattr(self, name, object())
+
+
+def test_a_subclass_setting_the_names_of_the_bases_state_leaves_the_device_working(
+    row: Row,
+) -> None:
+    device = Clobbering()
+    m = asleep(row, {"USART1": [device]})
+    asyncio.run(m.run(for_=ms(1)))
+    saved = m.snapshot()
+    transmit(m, row, 0x41)
+    asyncio.run(m.run(for_=ms(5)))
+    assert [byte for byte, _ in device.frames] == [0x41]
+    m.reset()
+    assert device.resets
+    m.restore(saved)
+    asyncio.run(m.run(for_=ms(1)))
+    device.loop.call_soon(device.send, b"A")
+    asyncio.run(m.run(for_=ms(5)))
+    assert received(m, row)
+    assert len(device.attaches) >= 2
+    for name in CLOBBERED:
+        assert type(getattr(device, name)) is object
