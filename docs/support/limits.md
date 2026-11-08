@@ -2241,6 +2241,16 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   truncated frame and FE.
 - A frame from another machine still being sampled when a link holds the line low becomes the
   break character, data 0. Silicon keeps the bits before the hold.
+- A `UartDevice` with its own `line` format reads in both directions through the model's sampler:
+  three samples per bit at 7, 8 and 9 sixteenths of the reader's bit time with a majority vote, the
+  start bit of a frame that follows reading low from its start, a framing error when the stop sample
+  reads low. The device's frames arrive at the later of their stop-bit end and the UART's last stop
+  sample. The firmware's frames reach the device with the stamp of the firmware's stop-bit end, a
+  slower device sampling later than that stamp. Frames of a device faster than the UART overlap
+  the frame the UART still samples: the next frame is sampled on a grid anchored at its own start,
+  as a linked frame is, where a receiver busy until its stop sample might resynchronise on a later
+  edge. The outcome of a baud, parity or stop-length mismatch is inferred: the manuals do not state
+  it, and the model's sampler may differ from the chip's.
 - STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
   way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
 - The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,

@@ -11,5 +11,7 @@ Start here:
 - plugin/plugin.hpp, the plugin entry point `POPCORN_PLUGIN`.
 - plugin/bindings.hpp, the nanobind helpers for bus devices.
 - @ref popcorn::periph::spi_target, the interface of an SPI device.
+- @ref popcorn::periph::uart_endpoint, the far end of a UART.
+- @ref popcorn::periph::stm32::gpio_port, the GPIO port with its pin watchers.
 
 The class list has every class and the file list every header of the reference.

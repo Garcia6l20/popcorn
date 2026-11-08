@@ -84,6 +84,7 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
   whose default stack heard traffic cannot restore even a quiet snapshot, where a lone machine can.
   On the fixtures' boot path a refusal is a failed boot: every test of that machine description
   errors with the refusal, which names the device.
+  The [UART devices](uart_devices.md#snapshots-and-restores) guide has a stack that overrides both.
 - A `UartDevice` with `tapping = True` records the frames of its port as `TapFrame`, both
   directions, and `tap_frames()` takes them. A restore drops the frames the tap holds and restarts
   `index` and `tap_dropped` at 0, a machine reset keeps them. The tap is no traffic: it never makes

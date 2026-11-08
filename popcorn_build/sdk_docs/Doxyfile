@@ -15,6 +15,8 @@ INPUT                  = popcorn_build/sdk_docs/mainpage.md \
                          native/include/popcorn/periph/register_file.hpp \
                          native/include/popcorn/periph/lines.hpp \
                          native/include/popcorn/periph/spi.hpp \
+                         native/include/popcorn/periph/uart.hpp \
+                         native/include/popcorn/periph/stm32/gpio.hpp \
                          native/include/popcorn/periph/reset_listener.hpp \
                          native/include/popcorn/periph/snapshot_listener.hpp
 FILE_PATTERNS          = *.hpp *.md

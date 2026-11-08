@@ -6,8 +6,10 @@ sends `AT`, `AT+CSQ` and `AT+SEND=hello`. Before each command it starts
 timeout of HAL ticks. `modem_result` records how each command was answered, the signal
 quality `AT+CSQ` returned and the latency of the `AT` reply.
 
-The modem is not a popcorn device. UARTs have no device class: the far end of a USART is its
-port, `machine.periph.USART2.port`, a byte stream in virtual time. `atmodem.AtModem` is a
+The modem is not a popcorn device. It uses the host end of the USART, its port
+`machine.periph.USART2.port`, a byte stream in virtual time. A peer with timers of its own,
+or one that must answer at an exact stamp, is a `popcorn.board.UartDevice` instead, see
+[UART devices](../../../docs/guide/uart_devices.md). `atmodem.AtModem` is a
 plain Python class written next to the test that reads command lines from the port, waits a
 reply delay by running the machine, and writes the scripted reply. It all runs in the test's
 coroutine, without a host thread.

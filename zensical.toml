@@ -18,6 +18,7 @@ nav = [
     "guide/snapshots.md",
     "guide/hooks.md",
     "guide/python_models.md",
+    "guide/uart_devices.md",
     "guide/native_plugins.md",
     "guide/usb.md",
     "guide/trustzone.md",

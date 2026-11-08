@@ -1,7 +1,8 @@
 """An AT modem on the host end of a UART, written in Python on `popcorn.board.UartStream`.
 
-No device class exists for a UART: the far end of a USART is its `port`, a byte stream in
-virtual time. The modem reads one command line at a time from it, looks its reply up in a
+The modem drives the USART's `port`, a byte stream in virtual time, from the test. A peer with
+timers of its own, or one that must answer at an exact stamp, is a `popcorn.board.UartDevice`
+instead. The modem reads one command line at a time from it, looks its reply up in a
 script, waits its answer delay in virtual time by running the machine, and writes the reply.
 The modem runs in the test's coroutine, no thread of its own. A read of a stream is a
 `Machine.wait_for` on a non-address event, which stops at the first event boundary or slice

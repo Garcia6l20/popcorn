@@ -93,6 +93,8 @@ A device is a class that gets bus events from a built-in I2C, SPI or UART model:
   at)` sees the chip select edges and `on_exchange(out, bits, at)` each frame, full duplex.
 - The host end of a UART is `m.periph.USART1.port`, used from the test as in
   [First machine](first_machine.md).
+- `popcorn.board.UartDevice` is the far end of a UART in virtual time, with timers, flow control,
+  pins and SAI blocks. See [UART devices](uart_devices.md).
 
 `Periph(devices=[Device(TempSensor, address=0x48, readings=[21.0, 22.5])])` attaches one to a
 peripheral, and `machine.board.devices("I2C1")` returns the objects. As with models, annotated
