@@ -61,9 +61,20 @@ public:
    * @param data Frames, one per byte.
    * @param at_ps Virtual time since the last reset of the first start bit, 0 for the time of the
    *        call.
+   * @param ignores_rts Whether the frames start whatever the firmware's RTS says.
+   * @param baud Baud of the frames' own format, 0 for the receiver's.
+   * @param parity The own format's parity, a periph::line_parity value.
+   * @param half_stops The own format's stop length in half bits.
    */
-  [[= py::doc{"Queue bytes towards the firmware, the first start bit at at_ps."}]] void
-      send(reflex::py::nb::bytes const& data, std::uint64_t at_ps, bool ignores_rts);
+  [[= py::doc{"Queue bytes towards the firmware, the first start bit at at_ps, in the format "
+              "(baud, parity, half_stops) or the receiver's with baud 0."}]] void
+      send(
+          reflex::py::nb::bytes const& data,
+          std::uint64_t                at_ps,
+          bool                         ignores_rts,
+          std::uint32_t                baud,
+          std::uint32_t                parity,
+          std::uint32_t                half_stops);
 
   /**
    * @brief Queues one break towards the firmware.

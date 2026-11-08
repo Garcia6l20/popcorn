@@ -103,6 +103,36 @@ enum class[[= reflex::derive{reflex::Format}]] uart_error : std::uint8_t
   parity,
 };
 
+/**
+ * @brief The line format of a device on a UART: its own baud, parity and stop length, with 8 data
+ *        bits. A baud of 0 means the format of the UART the device is on.
+ */
+struct line_format
+{
+  /** @brief Baud, 0 for the format of the UART it is on. */
+  std::uint32_t baud{};
+  /** @brief Parity, the parity bit follows the 8 data bits. */
+  line_parity parity{};
+  /** @brief Stop length in half bits: 2 or 4. */
+  std::uint32_t half_stops{2};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(line_format const&, line_format const&) -> bool = default;
+};
+
+/**
+ * @brief Frame time of a frame of @p format, start bit to stop-bit end, in picoseconds.
+ * @param format The format, a non-zero baud.
+ * @return The time of 8 data bits, the parity bit if any, the start bit and the stop bits, rounded
+ *         down to a picosecond.
+ */
+constexpr auto frame_ps_of(line_format const& format) -> std::uint64_t
+{
+  auto const word = std::uint64_t{8} + (format.parity == line_parity::none ? 0u : 1u);
+  auto const half = 2 * (1 + word) + format.half_stops;
+  return half * 1'000'000'000'000ull / (2 * std::uint64_t{format.baud});
+}
+
 /** @brief One frame the host queues towards a receiver. */
 struct host_frame
 {
@@ -118,6 +148,11 @@ struct host_frame
   /** @brief The frame starts whatever the firmware's RTS says. A frame finding the receiver full
    * overruns. Frames still start in queue order, so it waits behind a frame that RTS holds. */
   bool ignores_rts{};
+  /** @brief The format the frame is shaped in, kept with the frame when it is queued. With a baud
+   * the frame takes frame_ps_of() on the line and the receiver reads it by sampling the waveform
+   * at its own bit times, as for a linked frame, and `error` is ignored. A baud of 0 gives the
+   * receiver's format, delivered as queued. Ignored for a break. */
+  line_format line{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(host_frame const&, host_frame const&) -> bool = default;
@@ -204,9 +239,34 @@ public:
    *        does nothing.
    * @param frame The frame: data, kind and word shape as the receiver reads it, `end` the
    *        stop-bit end, `start` that end less one frame time at the receiver's settings then, in
-   *        the machine's virtual time since its last reset.
+   *        the machine's virtual time since its last reset. A frame queued with a line format
+   *        keeps that format's word shape and frame time on the line, and is called at the later
+   *        of its stop-bit end and the receiver's last stop sample.
    */
   virtual void received([[maybe_unused]] line_frame const& frame)
+  {}
+
+  /**
+   * @brief The format this end reads the firmware's frames in. Asked as each frame ends. A baud of
+   *        0, the default, hears the frame as the firmware sent it. Otherwise the UART samples the
+   *        frame's waveform at this format's bit times, with the model's sampler, and calls
+   *        transmitted() with the data bits of a frame read without a framing or parity error, or
+   *        line_error() for one with. A noise error alone still calls transmitted(). A break is
+   *        heard as a break whatever the format. Called on the machine's host thread.
+   * @return The format.
+   */
+  [[nodiscard]] virtual auto heard_format() const -> line_format
+  {
+    return {};
+  }
+
+  /**
+   * @brief A frame the firmware sent was read with a framing or parity error at heard_format(),
+   *        called just after ending() in place of transmitted(). The default does nothing.
+   * @param kind uart_error::framing, a stop bit sampled low, or uart_error::parity.
+   * @param at Virtual time the firmware's stop bit ended.
+   */
+  virtual void line_error([[maybe_unused]] uart_error kind, [[maybe_unused]] vtime at)
   {}
 
   /**

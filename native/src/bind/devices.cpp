@@ -378,14 +378,14 @@ public:
 /**
  * @brief nanobind trampoline letting a Python class implement periph::uart_endpoint through the
  *        private methods of `popcorn.board.UartDevice`: `_attached`, `_frame`, `_break`,
- *        `_aborted`, `_received`, `_reset`, `_rts`, `_save` and `_load`, nine names, the
+ *        `_aborted`, `_received`, `_reset`, `_rts`, `_error`, `_save` and `_load`, ten names, the
  *        trampoline's slot count. Times cross as picoseconds since the last reset. The engine
  *        calls it only through an attachment.
  */
 class python_uart_device final : public periph::uart_endpoint
 {
 public:
-  NB_TRAMPOLINE(periph::uart_endpoint, 9);
+  NB_TRAMPOLINE(periph::uart_endpoint, 10);
 
   /**
    * @brief A device hearing RTS edges or not, fixed for its life.
@@ -414,9 +414,30 @@ public:
     tapping_.store(on, std::memory_order_relaxed);
   }
 
+  /** @brief The format the device reads the firmware's frames in, see set_line(). */
+  [[nodiscard]] auto line() const -> periph::line_format
+  {
+    auto const packed = line_.load(std::memory_order_relaxed);
+    return {
+        .baud       = static_cast<std::uint32_t>(packed),
+        .parity     = static_cast<periph::line_parity>((packed >> 32) & 0xffu),
+        .half_stops = static_cast<std::uint32_t>(packed >> 40)};
+  }
+
+  /** @brief Sets the format the device reads the next frame in, from any thread. */
+  void set_line(periph::line_format format)
+  {
+    line_.store(
+        std::uint64_t{format.baud}
+            | std::uint64_t{static_cast<std::uint8_t>(format.parity)} << 32
+            | std::uint64_t{format.half_stops} << 40,
+        std::memory_order_relaxed);
+  }
+
 private:
-  bool              rts_;
-  std::atomic<bool> tapping_{false};
+  bool                       rts_;
+  std::atomic<bool>          tapping_{false};
+  std::atomic<std::uint64_t> line_{};
 };
 
 /**
@@ -521,7 +542,18 @@ public:
       invoke("_break", at.ps, ending_.start.ps);
       return;
     }
-    invoke("_frame", data, at.ps, ending_.start.ps);
+    invoke("_frame", data, at.ps, ending_.start.ps, wire_data());
+  }
+
+  [[nodiscard]] auto heard_format() const -> periph::line_format override
+  {
+    return device_->line();
+  }
+
+  void line_error(periph::uart_error kind, vtime at) override
+  {
+    gil_entry const gil;
+    invoke("_error", static_cast<std::uint32_t>(kind), at.ps, ending_.start.ps, wire_data());
   }
 
   void received(periph::line_frame const& frame) override
@@ -594,6 +626,11 @@ public:
   }
 
 private:
+  [[nodiscard]] auto wire_data() const -> std::uint16_t
+  {
+    return periph::data_of(ending_.data, ending_.word_bits, ending_.parity);
+  }
+
   bool               attach_done_{};
   periph::line_frame ending_{};
 };
@@ -692,7 +729,17 @@ void bind_device_bases(nb::module_ scope)
           [](periph::uart_endpoint& device, bool on) {
             dynamic_cast<python_uart_device&>(device).set_tapping(on);
           },
-          nb::arg("on"));
+          nb::arg("on"))
+      .def(
+          "set_line",
+          [](periph::uart_endpoint& device, std::uint32_t baud, std::uint32_t parity,
+             std::uint32_t half_stops) {
+            dynamic_cast<python_uart_device&>(device).set_line(
+                {.baud       = baud,
+                 .parity     = static_cast<periph::line_parity>(parity),
+                 .half_stops = half_stops});
+          },
+          nb::arg("baud"), nb::arg("parity"), nb::arg("half_stops"));
   nb::class_<periph::i2c_controller_sink, python_i2c_controller>(
       scope, "I2CControllerBase",
       "Native side of popcorn.board.I2CController: an I2C controller implemented in Python.")

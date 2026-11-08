@@ -16,7 +16,7 @@ import popcorn
 import pytest
 from popcorn import System, UartLink, _core
 from popcorn.arm import Reg
-from popcorn.board import UartDevice, UartError
+from popcorn.board import LineFormat, Parity, UartDevice, UartError
 from popcorn.units import VirtualDuration, VirtualTime, ms, ps, us
 
 from .conftest import BOARD_ELF, collected
@@ -1891,6 +1891,7 @@ class Everything(Recorder):
 
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.heard.add("error")
+        self.heard.add(kind.name)
 
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.heard.add("reset")
@@ -1914,6 +1915,10 @@ def test_one_tapped_device_runs_every_native_hook_in_one_life(
     asyncio.run(m.run(for_=ms(2)))
     m.periph.USART1.RQR.SBKRQ = 1
     asyncio.run(m.run(for_=ms(2)))
+    device.line = LineFormat(baud=460_800)
+    transmit(m, row, 0x00)
+    asyncio.run(m.run(for_=ms(2)))
+    device.line = None
     transmit(m, row, 0x42)
     asyncio.run(m.run(for_=us(5)))
     m.periph.RCC.APB2RSTR.USART1RST = 1
@@ -1935,6 +1940,8 @@ def test_one_tapped_device_runs_every_native_hook_in_one_life(
         "break",
         "rts",
         "error",
+        "ABORTED",
+        "FRAMING",
         "reset",
         "save",
         "load",
@@ -2205,3 +2212,658 @@ def test_a_raising_on_frame_stops_the_run_and_the_uart_goes_on(
             assert byte == 0x42
     assert [frame for frame, _ in device.frames] == [0x41, 0x42, 0x43]
     assert m.periph.USART1.ISR_enabled.TC == 1
+
+
+def u575_row(u575: popcorn.PartDescription) -> Row:
+    return Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
+
+
+def guest_frame_ps(brr: int) -> int:
+    return 10 * brr * 10**12 // 4_000_000
+
+
+def wire_ps(line: LineFormat) -> int:
+    bits = 8 + (line.parity is not Parity.NONE)
+    return (2 * (1 + bits) + 2 * line.stop_bits) * 10**12 // (2 * line.baud)
+
+
+def reference_sample(
+    sent: tuple[int, int, int, int, int],
+    next_start: int | None,
+    rx: tuple[int, int, int],
+) -> tuple[int, bool, bool]:
+    """The model's sampler, written out: three samples per bit at 7, 8 and 9 sixteenths of the
+    receiver's bit time over the sender's ideal waveform, a following frame's start bit low."""
+    start, ps_sent, word, bits_sent, stops_sent = sent
+    ps_rx, bits_rx, stops_rx = rx
+
+    def halves(bits: int, stops: int) -> int:
+        return 2 * (1 + bits) + stops
+
+    def level(at: int) -> int:
+        if at < start:
+            return 1
+        if next_start is not None and at >= next_start:
+            return 0
+        since = at - start
+        if since >= ps_sent:
+            return 1
+        bit = since * halves(bits_sent, stops_sent) // (2 * ps_sent)
+        if bit == 0:
+            return 0
+        return (word >> (bit - 1)) & 1 if bit <= bits_sent else 1
+
+    data, framing, noise = 0, False, False
+    for bit in range(1, bits_rx + 2):
+        ones = sum(
+            level(start + 2 * ps_rx * (16 * bit + offset) // (16 * halves(bits_rx, stops_rx)))
+            for offset in (7, 8, 9)
+        )
+        noise = noise or ones in (1, 2)
+        if bit <= bits_rx:
+            data |= (ones >= 2) << (bit - 1)
+        else:
+            framing = ones < 2
+    return data, framing, noise
+
+
+class Lined(Recorder):
+    """A device with a `line`, sending `payload` from `after` its attach."""
+
+    def __init__(self, line: LineFormat | None, payload: bytes = b"", after_us: int = 10) -> None:
+        super().__init__()
+        self.line = line
+        self.payload = payload
+        self.after = us(after_us)
+        self.edges: list[tuple[bool, int]] = []
+        self.began = 0
+
+    def on_attach(self) -> None:
+        super().on_attach()
+        self.began = (self.now + self.after).ps
+        if self.payload:
+            self.send(self.payload, at=self.now + self.after)
+
+    def on_rts(self, ready: bool, at: VirtualTime) -> None:
+        self.edges.append((ready, at.ps))
+
+
+def test_a_line_format_checks_its_fields_and_a_device_checks_its_line() -> None:
+    assert LineFormat(115_200) == LineFormat(115_200, Parity.NONE, 1)
+    assert [Parity.NONE.value, Parity.EVEN.value, Parity.ODD.value] == [0, 1, 2]
+    for bad_baud in (0, -1, 100_000_001):
+        with pytest.raises(ValueError, match="baud"):
+            LineFormat(bad_baud)
+    with pytest.raises(TypeError, match="baud"):
+        LineFormat(True)
+    with pytest.raises(TypeError, match="baud"):
+        LineFormat(9600.0)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="parity"):
+        LineFormat(9600, "even")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="stop_bits"):
+        LineFormat(9600, Parity.NONE, 3)  # type: ignore[arg-type]
+    for bad_stops in (True, 1.0, 2.0):
+        with pytest.raises(ValueError, match="stop_bits"):
+            LineFormat(9600, Parity.NONE, bad_stops)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="LineFormat"):
+        Recorder().line = 115_200  # type: ignore[assignment]
+    assert Recorder().line is None
+    device = Recorder()
+    device.line = LineFormat(9600, Parity.ODD, 2)
+    assert device.line == LineFormat(9600, Parity.ODD, 2)
+    device.line = None
+    assert device.line is None
+
+
+def test_a_device_frame_keeps_the_format_it_was_sent_in_and_the_tap_shows_the_wire(
+    u575: popcorn.PartDescription,
+) -> None:
+    first = LineFormat(230_400)
+    second = LineFormat(57_600, Parity.EVEN, 2)
+
+    class Switching(Lined):
+        def on_attach(self) -> None:
+            Recorder.on_attach(self)
+            self.send(b"\x01\x02\x03", at=self.now + us(10))
+            self.line = second
+            self.send(b"\x04\x05", at=self.now + us(10))
+            self.line = None
+            self.send(b"\x06", at=self.now + us(10))
+
+    device = Switching(first)
+    device.tapping = True
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=35)
+    start = m.time.ps + us(10).ps
+    asyncio.run(m.run(for_=ms(4)))
+    frames = tapped(device, "USART1")
+    assert [frame.data for frame in frames] == [1, 2, 3, 4, 5, 6]
+    widths = [frame.end.ps - frame.start.ps for frame in frames]
+    assert widths == [wire_ps(first)] * 3 + [wire_ps(second)] * 2 + [guest_frame_ps(35)]
+    assert frames[0].start.ps == start
+    assert all(later.start.ps == earlier.end.ps for earlier, later in itertools.pairwise(frames))
+
+
+@pytest.mark.parametrize(
+    ("brr", "baud"), [(9, 115_200), (35, 460_800), (35, 115_200), (9, 460_800)]
+)
+def test_a_frame_in_another_baud_reads_at_the_guest_as_the_model_samples(
+    u575: popcorn.PartDescription, brr: int, baud: int
+) -> None:
+    line = LineFormat(baud)
+    for byte in (0x55, 0xA5, 0x00, 0xFF, 0xF0):
+        device = Lined(line, bytes([byte]))
+        m = asleep(u575_row(u575), {"USART1": [device]}, brr=brr)
+        asyncio.run(m.run(for_=ms(2)))
+        data, framing, noise = reference_sample(
+            (device.began, wire_ps(line), byte, 8, 2), None, (guest_frame_ps(brr), 8, 2)
+        )
+        isr = m.periph.USART1.ISR_enabled
+        assert (m.periph.USART1.RDR.value & 0xFF, isr.FE == 1, isr.NE == 1) == (
+            data,
+            framing,
+            noise,
+        )
+        assert isr.PE == 0 and isr.ORE == 0
+
+
+@pytest.mark.parametrize(("brr", "baud"), [(9, 115_200), (35, 460_800)])
+def test_a_frame_in_another_baud_reaches_rdr_at_the_later_of_its_end_and_the_last_sample(
+    u575: popcorn.PartDescription, brr: int, baud: int
+) -> None:
+    line = LineFormat(baud)
+    device = Lined(line, b"\xff")
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=brr)
+    step = instruction_ps(m)
+    guest = guest_frame_ps(brr)
+    last_sample = device.began + 2 * guest * (16 * 9 + 9) // (16 * 20)
+    due = max(last_sample, device.began + wire_ps(line))
+    assert (last_sample > device.began + wire_ps(line)) == (baud > 115_200)
+    run_to(m, due - 2 * step)
+    assert not received(m, row)
+    run_to(m, due + 2 * step)
+    assert received(m, row)
+
+
+def test_a_device_frame_in_flight_keeps_its_rate_and_the_guest_reads_it_at_its_new_one(
+    u575: popcorn.PartDescription,
+) -> None:
+    line = LineFormat(115_200)
+    device = Lined(line, b"\x55")
+    device.tapping = True
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=35)
+    step = instruction_ps(m)
+    run_to(m, device.began + 30_000_000)
+    device.line = LineFormat(460_800)
+    uart = m.periph.USART1
+    uart.CR1_enabled.UE = 0
+    uart.BRR.value = 9
+    uart[row.enable].UE = 1
+    restart = m.time.ps
+    asyncio.run(m.run(for_=ms(2)))
+    (frame,) = tapped(device, "USART1")
+    assert frame.end.ps - frame.start.ps == wire_ps(line)
+    assert abs(frame.start.ps - restart) <= 2 * step
+    data, framing, noise = reference_sample(
+        (frame.start.ps, wire_ps(line), 0x55, 8, 2), None, (guest_frame_ps(9), 8, 2)
+    )
+    isr = uart.ISR_enabled
+    assert (uart.RDR.value & 0xFF, isr.FE == 1, isr.NE == 1) == (data, framing, noise)
+
+
+def gated(u575: popcorn.PartDescription, *, obey: bool) -> tuple[Lined, popcorn.Machine, int]:
+    class Three(Lined):
+        def on_attach(self) -> None:
+            Recorder.on_attach(self)
+            self.send(b"\x01\x02\x03", at=self.now + us(10), obey_rts=obey)
+
+    device = Three(LineFormat(115_200))
+    device.tapping = True
+    m = asleep(u575_row(u575), {"USART1": [device]}, brr=9, rtse=True)
+    return device, m, instruction_ps(m)
+
+
+def test_rts_holds_the_next_device_frame_in_another_baud_until_the_receiver_is_read(
+    u575: popcorn.PartDescription,
+) -> None:
+    device, m, step = gated(u575, obey=True)
+    asyncio.run(m.run(for_=ms(1)))
+    (first,) = tapped(device, "USART1")
+    assert device.edges[-1][0] is False
+    m.periph.USART1.RQR.RXFRQ = 1
+    flushed = m.time.ps
+    asyncio.run(m.run(for_=ms(1)))
+    ready_at = next(at for ready, at in device.edges if ready and at >= flushed - 2 * step)
+    second = tapped(device, "USART1")[0]
+    assert second.data == 2
+    assert second.start.ps >= first.end.ps
+    assert second.start.ps >= flushed
+    assert abs(second.start.ps - ready_at) <= 2 * step
+    assert second.end.ps - second.start.ps == wire_ps(LineFormat(115_200))
+
+
+def test_a_device_frame_that_ignores_rts_overruns_a_full_receiver(
+    u575: popcorn.PartDescription,
+) -> None:
+    device, m, _ = gated(u575, obey=False)
+    asyncio.run(m.run(for_=ms(1)))
+    frames = tapped(device, "USART1")
+    assert [frame.data for frame in frames] == [1, 2, 3]
+    assert all(later.start.ps == earlier.end.ps for earlier, later in itertools.pairwise(frames))
+    assert m.periph.USART1.ISR_enabled.ORE == 1
+
+
+@pytest.mark.parametrize(
+    ("brr", "line"),
+    [
+        (35, LineFormat(460_800)),
+        (9, LineFormat(57_600)),
+        (35, LineFormat(115_200, Parity.EVEN, 1)),
+        (35, LineFormat(115_200, Parity.ODD, 2)),
+        (9, LineFormat(115_200)),
+    ],
+)
+def test_the_device_reads_the_firmwares_frames_as_the_model_samples_them(
+    u575: popcorn.PartDescription, brr: int, line: LineFormat
+) -> None:
+    from popcorn.board import UartError
+
+    bits = 8 + (line.parity is not Parity.NONE)
+    for first, second in ((0x55, 0x00), (0xA5, 0xFF), (0x01, 0x03)):
+        device = Lined(line)
+        device.tapping = True
+        row = u575_row(u575)
+        m = asleep(row, {"USART1": [device]}, brr=brr)
+        transmit(m, row, first)
+        transmit(m, row, second)
+        asyncio.run(m.run(for_=ms(3)))
+        sent = tapped(device, "device")
+        assert [frame.data for frame in sent] == [first, second]
+        heard = sorted(
+            [(at, byte, None) for byte, at in device.frames]
+            + [(at, None, kind) for kind, at in device.errors]
+        )
+        assert [at for at, _, _ in heard] == [frame.end.ps for frame in sent]
+        for index, (frame, (_, byte, kind)) in enumerate(zip(sent, heard, strict=True)):
+            word = frame.data
+            guest = (frame.start.ps, frame.end.ps - frame.start.ps, word, 8, 2)
+            follows = frame.end.ps if index == 0 else None
+            data, framing, _ = reference_sample(
+                guest, follows, (wire_ps(line), bits, 2 * line.stop_bits)
+            )
+            ones = data.bit_count()
+            bad_parity = line.parity is not Parity.NONE and (
+                ones % 2 != (1 if line.parity is Parity.ODD else 0)
+            )
+            if framing:
+                assert (byte, kind) == (None, UartError.FRAMING)
+            elif bad_parity:
+                assert (byte, kind) == (None, UartError.PARITY)
+            else:
+                assert (byte, kind) == (data & 0xFF, None)
+
+
+def test_a_frame_the_firmware_sent_is_read_in_the_line_set_when_its_stop_bit_ends(
+    u575: popcorn.PartDescription,
+) -> None:
+    from popcorn.board import UartError
+
+    device = Lined(None)
+    device.tapping = True
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=35)
+    start = m.time.ps
+    transmit(m, row, 0x00)
+    run_to(m, start + guest_frame_ps(35) // 2)
+    device.line = LineFormat(460_800)
+    asyncio.run(m.run(for_=ms(2)))
+    assert device.frames == []
+    assert [kind for kind, _ in device.errors] == [UartError.FRAMING]
+    transmit(m, row, 0x00)
+    device.line = None
+    asyncio.run(m.run(for_=ms(2)))
+    assert len(device.frames) == 1 and device.frames[0][0] == 0
+
+
+def test_a_break_reaches_the_device_as_a_break_in_any_line(u575: popcorn.PartDescription) -> None:
+    class Breaks(Lined):
+        def __init__(self, line: LineFormat | None) -> None:
+            super().__init__(line)
+            self.breaks: list[int] = []
+
+        def on_break(self, at: VirtualTime) -> None:
+            self.breaks.append(at.ps)
+
+    device = Breaks(LineFormat(460_800))
+    m = asleep(u575_row(u575), {"USART1": [device]}, brr=35)
+    m.periph.USART1.RQR.SBKRQ = 1
+    asyncio.run(m.run(for_=ms(2)))
+    assert len(device.breaks) == 1
+    assert device.errors == []
+
+
+class Keeping(Lined):
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_snapshot_with_frames_queued_in_their_format_restores_the_same_reads(
+    u575: popcorn.PartDescription,
+) -> None:
+    import dataclasses
+
+    device = Keeping(LineFormat(115_200), b"\x55\xa5\x00")
+    device.tapping = True
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=9)
+
+    def finish() -> tuple[list[popcorn.TapFrame], tuple[int, int, int, int]]:
+        asyncio.run(m.run(for_=ms(2)))
+        isr = m.periph.USART1.ISR_enabled
+        return (
+            [dataclasses.replace(frame, index=0) for frame in tapped(device, "USART1")],
+            (m.periph.USART1.RDR.value, isr.FE, isr.NE, isr.ORE),
+        )
+
+    asyncio.run(m.run(for_=us(100)))
+    tapped(device)
+    saved = m.snapshot()
+    first = finish()
+    assert len(first[0]) >= 1
+    m.restore(saved)
+    assert finish() == first
+
+
+def test_a_device_in_another_line_keeps_its_stamps_on_a_member_at_any_quantum(
+    u575: popcorn.PartDescription,
+) -> None:
+    def run(third: int | None) -> tuple[object, ...]:
+        device = Lined(LineFormat(230_400), b"\x5a\xa5\x00\xff")
+        device.tapping = True
+        a = popcorn.Machine(
+            u575, image=popcorn.Image.elf(BOARD_ELF), name="a", devices={"USART1": [device]}
+        )
+        b = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF), name="b")
+        a.reset()
+        b.reset()
+        links = [UartLink("a.USART2", "b.USART2", latency=us(third or 20), baud=115_200)]
+        with System({"a": a, "b": b}, links) as system:
+            asyncio.run(system.run(for_=ms(5)))
+            return (
+                device.frames,
+                device.errors,
+                [
+                    (frame.data, frame.start.ps, frame.end.ps, frame.towards)
+                    for frame in tapped(device)
+                ],
+            )
+
+    reference = run(None)
+    assert len(reference[2]) >= 4  # type: ignore[arg-type]
+    assert run(5) == reference
+    assert run(1) == reference
+
+
+def test_a_device_frame_in_flight_across_a_kernel_clock_change_is_read_at_the_baud_it_started_with(
+    u575: popcorn.PartDescription,
+) -> None:
+    line = LineFormat(115_200)
+    device = Lined(line, b"\x55")
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=9)
+    run_to(m, device.began + 20_000_000)
+    icscr1 = m.periph.RCC.ICSCR1
+    icscr1.value = (int(icscr1.value) & ~(0xF << 28)) | (1 << 28) | (1 << 23)
+    asyncio.run(m.run(for_=ms(2)))
+    data, framing, noise = reference_sample(
+        (device.began, wire_ps(line), 0x55, 8, 2), None, (guest_frame_ps(9), 8, 2)
+    )
+    isr = m.periph.USART1.ISR_enabled
+    assert (m.periph.USART1.RDR.value & 0xFF, isr.FE == 1, isr.NE == 1) == (data, framing, noise)
+
+
+def test_a_line_equal_to_the_guests_arrives_with_the_stamps_and_bytes_of_no_line(
+    u575: popcorn.PartDescription,
+) -> None:
+    def seen(line: LineFormat | None) -> tuple[object, ...]:
+        device = Lined(line, b"\x55\xa5\x00\xff")
+        device.tapping = True
+        m = asleep(u575_row(u575), {"USART1": [device]}, brr=40)
+        words: list[tuple[int, int, int, int]] = []
+        for _ in range(4):
+            run_to(m, m.time.ps + 100_000_000)
+            isr = m.periph.USART1.ISR_enabled
+            words.append((m.periph.USART1.RDR.value, isr.FE, isr.NE, isr.ORE))
+            m.periph.USART1.RQR.RXFRQ = 1
+        frames = [(f.data, f.start.ps, f.end.ps) for f in tapped(device, "USART1")]
+        return device.began, words, frames, m.time.ps
+
+    assert seen(LineFormat(100_000)) == seen(None)
+
+
+def test_the_firmwares_frames_reach_a_device_with_a_line_equal_to_the_uarts_as_with_no_line(
+    u575: popcorn.PartDescription,
+) -> None:
+    def heard(line: LineFormat | None) -> tuple[object, ...]:
+        device = Lined(line)
+        row = u575_row(u575)
+        m = asleep(row, {"USART1": [device]}, brr=40)
+        for byte in (0x55, 0xA5, 0x00, 0xFF):
+            transmit(m, row, byte)
+            asyncio.run(m.run(for_=us(300)))
+        return device.frames, device.errors
+
+    assert heard(LineFormat(100_000)) == heard(None)
+
+
+class Blocking(Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+
+    def on_frame(self, byte: int, at: VirtualTime) -> None:
+        super().on_frame(byte, at)
+        if len(self.frames) == 1:
+            self.entered.set()
+            self.gate.wait(5)
+
+
+@pytest.mark.parametrize("release_first", [False, True])
+def test_a_line_set_from_the_test_thread_while_the_machine_runs_is_refused_naming_post(
+    u575: popcorn.PartDescription, release_first: bool
+) -> None:
+    async def go() -> Blocking:
+        device = Blocking()
+        row = u575_row(u575)
+        m = asleep(row, {"USART1": [device]}, brr=35)
+        transmit(m, row, 0x55)
+        transmit(m, row, 0xA5)
+        task = asyncio.create_task(m.run(for_=ms(5)))
+        await asyncio.to_thread(device.entered.wait, 5)
+        try:
+            if release_first:
+                device.gate.set()
+            with pytest.raises(popcorn.MachineRunning, match=r"loop\.post"):
+                device.line = LineFormat(460_800)
+        finally:
+            device.gate.set()
+        await task
+        assert device.line is None
+        return device
+
+    device = asyncio.run(go())
+    assert [byte for byte, _ in device.frames] == [0x55, 0xA5]
+    assert device.errors == []
+
+
+def test_a_posted_line_change_gives_the_same_frames_parked_running_and_at_any_quantum(
+    u575: popcorn.PartDescription,
+) -> None:
+    def run(quantum_us: int | None, running: bool) -> tuple[object, ...]:
+        device = Lined(
+            LineFormat(230_400), b"\x5a\xa5\x00\xff\x11\x22\x33\x44\x55\x66\x77\x88", after_us=10
+        )
+        device.tapping = True
+        row = u575_row(u575)
+        a = popcorn.Machine(u575, name="a", devices={"USART1": [device]})
+        b = popcorn.Machine(u575, name="b")
+        a.reset()
+        b.reset()
+        arm(a, row, brr=35)
+        arm(b, row, brr=35)
+        t0 = a.time.ps
+        for index, byte in enumerate((0x55, 0xA5, 0x00, 0xFF, 0x0F, 0xF0)):
+            a.loop.post(
+                partial(transmit, a, row, byte),
+                at=VirtualTime(t0 + 20_000_000 + index * 300_000_000),
+            )
+
+        def change() -> None:
+            device.line = LineFormat(57_600, Parity.EVEN, 2)
+            device.send(b"\xaa\xbb\xcc")
+
+        a.loop.post(change, at=VirtualTime(t0 + 900_000_000))
+        if quantum_us is None:
+            if running:
+
+                end = a.loop.post(len, [], at=VirtualTime(t0 + ms(8).ps))
+
+                async def go() -> None:
+                    async with a.running():
+                        await end
+
+                asyncio.run(go())
+            else:
+                asyncio.run(a.run(for_=ms(8)))
+        else:
+            links = [UartLink("a.USART2", "b.USART2", latency=us(quantum_us), baud=115_200)]
+            with System({"a": a, "b": b}, links) as system:
+                asyncio.run(system.run(for_=ms(8)))
+        isr = a.periph.USART1.ISR_enabled
+        return (
+            device.frames,
+            device.errors,
+            [(f.data, f.start.ps, f.end.ps, f.towards) for f in tapped(device)],
+            a.periph.USART1.RDR.value,
+            isr.FE,
+            isr.NE,
+            isr.ORE,
+            isr.PE,
+        )
+
+    reference = run(None, False)
+    assert len(reference[2]) >= 9  # type: ignore[arg-type]
+    assert run(None, False) == reference
+    assert run(None, True) == reference
+    for quantum_us in (20, 5, 1):
+        assert run(quantum_us, False) == run(20, False)
+
+
+@pytest.mark.parametrize(
+    "gap_ps", [0, 1, 1_000, 5_000_000, 20_000_000, 45_000_000, 70_000_000], ids=str
+)
+def test_a_device_frame_behind_a_gap_reads_as_the_sampler_does_whatever_the_gap(
+    u575: popcorn.PartDescription, gap_ps: int
+) -> None:
+    line = LineFormat(460_800)
+
+    class Gapped(Lined):
+        def on_attach(self) -> None:
+            Recorder.on_attach(self)
+            first = self.now + us(10)
+            self.began = first.ps
+            self.send(b"\xff", at=first)
+            self.send(b"\x00", at=VirtualTime(first.ps + wire_ps(line) + gap_ps))
+
+    device = Gapped(line)
+    m = asleep(u575_row(u575), {"USART1": [device]}, brr=35)
+    run_to(m, device.began + 94_000_000)
+    second_start = device.began + wire_ps(line) + gap_ps
+    data, framing, noise = reference_sample(
+        (device.began, wire_ps(line), 0xFF, 8, 2),
+        second_start,
+        (guest_frame_ps(35), 8, 2),
+    )
+    isr = m.periph.USART1.ISR_enabled
+    assert (m.periph.USART1.RDR.value & 0xFF, isr.FE == 1, isr.NE == 1) == (data, framing, noise)
+
+
+class Busy(Lined):
+    def on_attach(self) -> None:
+        Recorder.on_attach(self)
+        self.began = (self.now + us(10)).ps
+        self.send(b"\x11\x22\x33\x44\x55", at=self.now + us(10), obey_rts=True)
+
+
+def busy_firmware_run(
+    u575: popcorn.PartDescription, line: LineFormat | None, brr: int
+) -> tuple[Busy, tuple[object, ...]]:
+    device = Busy(line)
+    device.tapping = True
+    row = u575_row(u575)
+    m = popcorn.Machine(u575, devices={"USART1": [device]})
+    m.reset()
+    arm(m, row, brr=brr, rtse=True)
+    m.mem.write(RAM, NOP * 40 + BRANCH_BACK_40_NOPS)
+    m.reg[Reg.PC] = RAM
+    start = m.time.ps
+    for index in range(1, 12):
+        m.loop.post(
+            partial(setattr, m.periph.USART1.RQR, "RXFRQ", 1),
+            at=VirtualTime(start + index * 130_000_000),
+        )
+    asyncio.run(m.run(for_=ms(2)))
+    isr = m.periph.USART1.ISR_enabled
+    frames = [(f.data, f.start.ps, f.end.ps) for f in tapped(device, "USART1")]
+    return device, (device.edges, frames, isr.ORE)
+
+
+def test_a_line_equal_to_the_guests_gives_the_edges_and_frames_of_no_line_under_a_busy_firmware(
+    u575: popcorn.PartDescription,
+) -> None:
+    _, plain = busy_firmware_run(u575, None, 40)
+    _, equal = busy_firmware_run(u575, LineFormat(100_000), 40)
+    assert plain == equal
+    assert len(plain[0]) >= 4  # type: ignore[arg-type]
+
+
+def test_the_rts_edge_of_a_late_sampled_frame_falls_at_the_planned_last_sample(
+    u575: popcorn.PartDescription,
+) -> None:
+    device, _ = busy_firmware_run(u575, LineFormat(460_800), 35)
+    planned = device.began + 2 * guest_frame_ps(35) * (16 * 9 + 9) // (16 * 20)
+    assert device.edges[0] == (False, planned)
+
+
+@pytest.mark.parametrize(
+    ("line", "byte", "kind"),
+    [
+        (None, 0x41, None),
+        (LineFormat(114_286), 0x41, None),
+        (LineFormat(460_800), 0x00, UartError.FRAMING),
+        (LineFormat(114_286, Parity.EVEN), 0x00, UartError.PARITY),
+    ],
+    ids=["clean", "line", "framing", "parity"],
+)
+def test_the_device_hears_a_frame_or_its_error_at_the_firmwares_stop_bit_end(
+    u575: popcorn.PartDescription, line: LineFormat | None, byte: int, kind: UartError | None
+) -> None:
+    device = Lined(line)
+    row = u575_row(u575)
+    m = asleep(row, {"USART1": [device]}, brr=35)
+    start = m.time.ps
+    transmit(m, row, byte)
+    asyncio.run(m.run(for_=ms(2)))
+    end = start + guest_frame_ps(35)
+    if kind is None:
+        assert device.errors == []
+        assert [at for _, at in device.frames] == [end]
+    else:
+        assert device.frames == []
+        assert device.errors == [(kind, end)]

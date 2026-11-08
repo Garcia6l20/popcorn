@@ -100,10 +100,22 @@ class I2CPhase(enum.Enum):
     """A byte the controller reads."""
 
 
+class Parity(enum.Enum):
+    """The parity bit of a `LineFormat`, placed after the 8 data bits."""
+
+    NONE = 0
+    """No parity bit."""
+    EVEN = 1
+    """The data bits and the parity bit hold an even number of ones."""
+    ODD = 2
+    """The data bits and the parity bit hold an odd number of ones."""
+
+
 class UartError(enum.Enum):
     """A line error. `UartStream.write` tags its bytes with FRAMING, NOISE or PARITY, RM0456 66.8
     USART_ISR: the flag rises when the byte reaches RDR, behind the bytes ahead of it in the RX
-    FIFO. `UartDevice.on_error` hears ABORTED."""
+    FIFO. `UartDevice.on_error` hears ABORTED, and FRAMING or PARITY for a frame read in its own
+    `LineFormat`."""
 
     FRAMING = 1
     """ISR.FE: the stop bit sampled 0. The byte arrives with its data."""

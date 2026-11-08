@@ -129,7 +129,7 @@ TEST_CASE("a saved form of format 16 is a config_error naming the format")
   data.format = 16;
   CHECK_THROWS_WITH_AS(
       std::ignore = core::decode_snapshot(core::encode_snapshot(data)),
-      doctest::Contains("format, expected snapshot_format_version 17, bytes have 16"),
+      doctest::Contains("format, expected snapshot_format_version 18, bytes have 16"),
       popcorn::config_error);
 }
 

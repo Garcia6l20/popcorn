@@ -70,12 +70,17 @@ uart_device_link::uart_device_link(
 void uart_device_link::send(
     reflex::py::nb::bytes const& data,
     std::uint64_t                at_ps,
-    bool                         ignores_rts)
+    bool                         ignores_rts,
+    std::uint32_t                baud,
+    std::uint32_t                parity,
+    std::uint32_t                half_stops)
 {
   detail::require_alive(alive_, "uart", "a UART whose machine still exists");
+  periph::line_format const line{
+      .baud = baud, .parity = static_cast<periph::line_parity>(parity), .half_stops = half_stops};
   auto frames = frames_of(data)
-              | std::views::transform([ignores_rts](std::uint16_t word) {
-                  return periph::host_frame{.data = word, .ignores_rts = ignores_rts};
+              | std::views::transform([ignores_rts, line](std::uint16_t word) {
+                  return periph::host_frame{.data = word, .ignores_rts = ignores_rts, .line = line};
                 })
               | std::ranges::to<std::vector>();
   if(frames.empty())

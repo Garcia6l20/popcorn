@@ -10,11 +10,11 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 from popcorn import _core
-from popcorn._enums import I2CError, I2CPhase, PinMode, ResetKind, UartError
-from popcorn._errors import ConfigError, ModelError, SnapshotRefused
+from popcorn._enums import I2CError, I2CPhase, Parity, PinMode, ResetKind, UartError
+from popcorn._errors import ConfigError, MachineRunning, ModelError, SnapshotRefused
 from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn._tap import TapFrame
@@ -1240,6 +1240,36 @@ class I2CController(_core.I2CControllerBase):
         return f"<{type(self).__qualname__} at {self._scl_hz} Hz>"
 
 
+_MAX_BAUD = 100_000_000
+
+
+@dataclass(frozen=True)
+class LineFormat:
+    """The line format of a `UartDevice`: 8 data bits, a parity bit if any, then the stop bits.
+
+    Attributes:
+        baud: Bits per second, 1 to 100 000 000.
+        parity: The parity bit after the data bits.
+        stop_bits: Stop bits, 1 or 2.
+    """
+
+    baud: int
+    parity: Parity = Parity.NONE
+    stop_bits: Literal[1, 2] = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(cast(object, self.baud), int) or isinstance(
+            cast(object, self.baud), bool
+        ):
+            raise TypeError(f"baud is an int, not {self.baud!r}")
+        if not 1 <= self.baud <= _MAX_BAUD:
+            raise ValueError(f"baud is 1 to {_MAX_BAUD}, not {self.baud}")
+        if not isinstance(cast(object, self.parity), Parity):
+            raise TypeError(f"parity is a Parity, not {self.parity!r}")
+        if type(cast(object, self.stop_bits)) is not int or self.stop_bits not in (1, 2):
+            raise ValueError(f"stop_bits is 1 or 2, not {self.stop_bits!r}")
+
+
 class UartDevice(_core.UartDeviceBase):
     """The far end of a USART, UART or LPUART, written in Python: it hears what the firmware
     transmits on the machine's thread at each frame's virtual time, and sends at the baud the
@@ -1272,9 +1302,29 @@ class UartDevice(_core.UartDeviceBase):
     stamp runs in that hook's step, at that stamp, under one instruction period past its own.
 
     Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
-    the time `Frame.at` gives on a `UartStream`. The firmware's transmitter always sends a
-    well-formed frame at its own settings, so the one line error a device hears is
-    `UartError.ABORTED`.
+    the time `Frame.at` gives on a `UartStream`. With no `line` the device is in the firmware's
+    format: the transmitter always sends a well-formed frame at its own settings, so the one line
+    error it hears is `UartError.ABORTED`.
+
+    Line: `line` gives the device a format of its own, `LineFormat(baud, parity, stop_bits)` with 8
+    data bits. `send` shapes each frame in it, taking the format at the call. The firmware's UART
+    reads the frame by sampling its waveform at the UART's bit times, three samples per bit at 7,
+    8 and 9 sixteenths with a majority vote, the model's sampler, so a frame in the same format
+    reads back as sent and a frame in another baud, parity or stop length reads as the sampler
+    gives, as for a frame from a linked machine: its bytes and flags are the model's sampler's
+    and inferred, no manual states the outcome of a baud mismatch.
+    A `line` with the UART's word shape and frame time, to a picosecond, is no mismatch: it reads
+    and arrives as no `line` does, the same bytes at the same stamps. The device hears
+    the firmware's frames through the same sampler at its own bit times, the format read when the
+    frame's stop bit ends. That is the model's sampler applied to the other end, and inferred
+    too: a real chip may sample differently. A frame read without a framing or parity error
+    reaches `on_frame` with the sampled byte, also when only noise was sampled. A framing or
+    parity error reaches `on_error` only, as `UartError.FRAMING`, or `PARITY` when the stop bit
+    read 1. Both carry the stamp of the firmware's stop-bit end, whatever the device's
+    sampling window. A sampling window that reaches past the end of the frame reads the next
+    start bit of a frame following it as low. A break reaches `on_break` in every
+    format. A tap shows each frame as it was on the wire, the device's frames at its format's
+    frame time.
 
     Restore: a device's Python attributes are never rewound, so a stack keeps its state in what
     `on_attach` builds, or in the bytes of `snapshot` that `restore` reads. State set in `__init__`
@@ -1329,9 +1379,18 @@ class UartDevice(_core.UartDeviceBase):
     keep its `board`, which holds no machine.
     """
 
-    def __init__(self) -> None:
-        """Make a device serving no machine yet."""
+    def __init__(self, *, line: LineFormat | None = None) -> None:
+        """Make a device serving no machine yet.
+
+        Args:
+            line: The device's own format, None for the firmware's UART format.
+
+        Raises:
+            TypeError: `line` is neither a `LineFormat` nor None.
+        """
         super().__init__(type(self).on_rts is not UartDevice.on_rts)
+        self._line: LineFormat | None = None
+        self.line = line
         self._link: _core.UartDeviceLink | None = None
         self._loop: VirtualLoop | None = None
         self._refusing = ""
@@ -1346,6 +1405,46 @@ class UartDevice(_core.UartDeviceBase):
         self._tapped = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
         self._tap_index = [0, 0]
         self._tap_lost = 0
+
+    @property
+    def line(self) -> LineFormat | None:
+        """The device's own format, None for the firmware's UART format. Set it with the machine
+        parked, or from a hook or a loop callback. A running machine refuses a set from the test
+        thread with `MachineRunning`, since the format decides which frame reads in which format:
+        `loop.post(setattr, device, "line", line, at=)` sets it at a stamp. A frame `send` queued
+        keeps the format it was queued in, and the next frame the firmware sends is read in the
+        format set when its stop bit ends. The attribute is Python state and survives a restore.
+
+        Raises:
+            TypeError: `line` is neither a `LineFormat` nor None.
+            MachineRunning: The machine is running and the caller is neither a hook nor a loop
+                callback.
+        """
+        return self._line
+
+    @line.setter
+    def line(self, line: LineFormat | None) -> None:
+        if line is not None and not isinstance(cast(object, line), LineFormat):
+            raise TypeError(f"line takes a LineFormat or None, not {line!r}")
+        args = self._line_args(line)
+
+        def store() -> None:
+            self.set_line(*args)
+            self._line = line
+
+        try:
+            parked(self, store)
+        except MachineRunning as error:
+            raise MachineRunning(
+                f"{self!r}.line is set on a machine that is running: use"
+                ' loop.post(setattr, device, "line", line, at=) to set it at a stamp'
+            ) from error
+
+    @staticmethod
+    def _line_args(line: LineFormat | None) -> tuple[int, int, int]:
+        if line is None:
+            return 0, 0, 2
+        return line.baud, line.parity.value, 2 * line.stop_bits
 
     @property
     def tapping(self) -> bool:
@@ -1463,14 +1562,15 @@ class UartDevice(_core.UartDeviceBase):
 
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         """The firmware transmitted a frame holding `byte`, 0 to 0x1FF, its stop bit ending at
-        `at`."""
+        `at`. With a `line`, the byte is what the device's sampler read, 0 to 0xFF."""
 
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
-        """A line error, `UartError.ABORTED` at the time the firmware cut the frame, the end of the
-        block holding the write, or `Machine.time` for a parked write. It is a machine event at
-        that stamp, so it runs on the machine's thread at the next dispatch, a timer due earlier
-        firing ahead of it, and an exception from it stops that run rather than the write. A machine
-        reset before that dispatch drops it, and `reset` tells the device."""
+        """A line error: `UartError.ABORTED` at the time the firmware cut the frame, the end of the
+        block holding the write, or `Machine.time` for a parked write. With a `line`, also
+        `UartError.FRAMING` or `PARITY` for a frame read with that error, at its stop-bit end. It
+        is a machine event at that stamp, so it runs on the machine's thread at the next dispatch, a
+        timer due earlier firing ahead of it, and an exception from it stops that run rather than
+        the write. A machine reset before that dispatch drops it, and `reset` tells the device."""
 
     def reset(self, kind: ResetKind) -> None:
         """The machine was reset. Does nothing by default. The machine's first reset comes before
@@ -1539,13 +1639,21 @@ class UartDevice(_core.UartDeviceBase):
     def send(self, data: bytes, *, at: VirtualTime | None = None, obey_rts: bool = True) -> None:
         """Queue frames of 8 data bits towards the firmware's receiver, the first start bit at
         `at`, or at `now` when None, the others back to back. `at` behind frames still queued
-        starts when they end. Each frame lasts the frame time of the UART's settings at its start,
-        so a baud change between frames applies from the next one.
+        starts when they end. With no `line`, each frame lasts the frame time of the UART's
+        settings at its start, so a baud change between frames applies from the next one. With a
+        `line`, each frame lasts that format's frame time and keeps it, whatever happens to `line`
+        or to the UART's settings before it is read, and the UART reads it by sampling. It reaches
+        the receiver at the later of its stop-bit end and the UART's last stop sample.
 
         RTS: with `obey_rts`, a frame waits before its start bit while `rts` is False, and starts
         no earlier than the edge that sets it True, whatever its `at`. Without it the frame starts
         at its time and overruns a full receiver, setting ORE as on silicon. Frames start in the
         order they were queued, so it still waits behind a frame that RTS holds.
+        A frame with a `line` starts at the end of the one before it on the line when RTS reads
+        ready before that one is delivered, and otherwise waits for RTS. A device slower than the
+        UART is delivered at its wire end, so a full receiver holds the next frame. A device
+        faster than the UART is delivered after its wire end, RTS has not fallen when the next
+        frame starts, and a receiver that is full then overruns.
 
         Raises:
             TypeError: `data` is no bytes, `at` no `VirtualTime`, or `obey_rts` no bool.
@@ -1560,7 +1668,7 @@ class UartDevice(_core.UartDeviceBase):
         if not isinstance(cast(object, obey_rts), bool):
             raise TypeError(f"send() takes obey_rts as a bool, not {obey_rts!r}")
         link, start = self._acting("send", at)
-        link.send(bytes(data), start, not obey_rts)
+        link.send(bytes(data), start, not obey_rts, *self._line_args(self._line))
         self._traffic = True
 
     def send_break(self, *, at: VirtualTime | None = None) -> None:
@@ -1657,10 +1765,15 @@ class UartDevice(_core.UartDeviceBase):
         self._attach_stamp = loop._now_ps  # pyright: ignore[reportPrivateUsage]
         self._called(self.on_attach)
 
-    def _frame(self, data: int, at: int, start: int) -> None:
+    def _frame(self, data: int, at: int, start: int, wire: int) -> None:
         self._traffic = True
-        self._record(0, data, start, at, brk=False, lost=False)
+        self._record(0, wire, start, at, brk=False, lost=False)
         self._stamped(at, self.on_frame, data)
+
+    def _error(self, kind: int, at: int, start: int, wire: int) -> None:
+        self._traffic = True
+        self._record(0, wire, start, at, brk=False, lost=False)
+        self._stamped(at, self.on_error, UartError(kind))
 
     def _break(self, at: int, start: int) -> None:
         self._traffic = True

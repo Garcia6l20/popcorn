@@ -10,12 +10,13 @@ from popcorn._devices import (
     I2CAnswer,
     I2CController,
     I2CTarget,
+    LineFormat,
     SpiController,
     SpiTarget,
     UartDevice,
     Unwatch,
 )
-from popcorn._enums import I2CError, I2CPhase, PinMode, UartError
+from popcorn._enums import I2CError, I2CPhase, Parity, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
 from popcorn._pdm import FilterSample, FilterTap, PdmMic
 from popcorn._rcc import RccOptions
@@ -70,7 +71,9 @@ __all__ = [
     "I2CPhase",
     "I2CTarget",
     "Irqs",
+    "LineFormat",
     "Nvic",
+    "Parity",
     "PdmMic",
     "Pin",
     "PinMode",

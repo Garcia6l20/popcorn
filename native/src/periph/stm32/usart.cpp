@@ -177,6 +177,44 @@ auto sample(line_frame const& sent, std::optional<std::uint64_t> next_start, rx_
   return out;
 }
 
+auto hear(
+    uart_endpoint&     far_end,
+    line_format const& format,
+    line_frame const&  sent,
+    bool               next_follows)
+{
+  rx_shape const rx{
+      .frame_ps   = frame_ps_of(format),
+      .word_bits  = 8u + (format.parity == line_parity::none ? 0u : 1u),
+      .half_stops = format.half_stops,
+      .offsets    = {7, 8, 9},
+      .samples    = 3
+  };
+  auto const seen = sample(sent, next_follows ? std::optional{sent.end.ps} : std::nullopt, rx);
+  if(seen.framing)
+  {
+    far_end.line_error(uart_error::framing, sent.end);
+  }
+  else if(not parity_ok(seen.data, rx.word_bits, format.parity))
+  {
+    far_end.line_error(uart_error::parity, sent.end);
+  }
+  else
+  {
+    far_end.transmitted(data_of(seen.data, rx.word_bits, format.parity), sent.end, false);
+  }
+}
+
+auto same_format(line_format const& format, line_frame const& sent) -> bool
+{
+  auto const ps  = frame_ps_of(format);
+  auto const gap = ps > sent.frame_ps ? ps - sent.frame_ps : sent.frame_ps - ps;
+  return 8u + (format.parity == line_parity::none ? 0u : 1u) == sent.word_bits
+     and format.parity == sent.parity
+     and format.half_stops == sent.half_stops
+     and gap <= 1;
+}
+
 struct linked_frame
 {
   line_frame    frame{};
@@ -238,6 +276,7 @@ struct usart_state
   std::uint32_t                                                      abort_parity{};
   bool                                                               abort_brk{};
   std::uint64_t                                                      rx_due_ps{};
+  std::uint64_t                                                      rx_guest_ps{};
   std::uint64_t                                                      host_start_ps{};
   bool                                                               rx_held{};
   bool                                                               rts_level{true};
@@ -494,12 +533,17 @@ private:
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
   [[nodiscard]] auto shape() -> rx_shape;
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
-  auto schedule_receive(std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
-  void start_frame(std::uint64_t from_ps);
-  void deliver(rx_entry entry);
-  void expose();
+  auto schedule_receive(std::uint64_t from_ps, host_frame const& frame, std::uint64_t ps)
+      -> std::uint64_t;
+  [[nodiscard]] auto can_start(std::uint64_t from_ps) -> bool;
+  void               start_frame(std::uint64_t from_ps);
+  void               deliver(rx_entry entry);
+  void               expose();
   [[nodiscard]] auto next_host_frame() -> std::optional<host_frame>;
   [[nodiscard]] auto entry_of(host_frame const& frame) -> rx_entry;
+  [[nodiscard]] auto sampled_entry(host_frame const& frame, std::optional<std::uint64_t> next_start)
+      -> rx_entry;
+  [[nodiscard]] auto own_format(host_frame const& frame) -> bool;
   [[nodiscard]] auto rx_space() const -> bool;
   [[nodiscard]] auto clear_to_send(std::uint64_t start_ps) const -> bool;
   [[nodiscard]] auto board_base() const -> std::uint64_t;
@@ -1066,6 +1110,7 @@ void usart::restore_reset_values(bool keep_host)
   state_.receiving      = false;
   state_.rx_due_ps      = 0;
   state_.rx_start_ps    = 0;
+  state_.rx_guest_ps    = 0;
   state_.tx_start_ps    = 0;
   state_.host_start_ps  = 0;
   state_.rx_held        = keep_host and not state_.host.empty();
@@ -1179,11 +1224,21 @@ auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps
   return due;
 }
 
-auto usart::schedule_receive(std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t
+auto usart::schedule_receive(std::uint64_t from_ps, host_frame const& frame, std::uint64_t ps)
+    -> std::uint64_t
 {
-  schedule(receive_due, from_ps, ps);
   state_.rx_start_ps = from_ps;
-  return from_ps + ps;
+  state_.rx_guest_ps = ps;
+  if(not own_format(frame))
+  {
+    schedule(receive_due, from_ps, ps);
+    return from_ps + ps;
+  }
+  auto rx         = shape();
+  rx.frame_ps     = ps;
+  auto const wire = from_ps + frame_ps_of(frame.line);
+  schedule(receive_due, std::max(stop_sample(rx, from_ps), wire), 0);
+  return wire;
 }
 
 auto usart::shape() -> rx_shape
@@ -1229,22 +1284,24 @@ void usart::warn_unsupported()
   }
 }
 
-void usart::start_frame(std::uint64_t from_ps)
+auto usart::can_start(std::uint64_t from_ps) -> bool
 {
   auto const queued = state_.break_pending or not state_.tx_fifo.empty();
-  if(state_.shifting
-     or not queued
-     or not enabled()
-     or get(regs_, transmit_) == 0
-     or not(clear_to_send(from_ps) or (state_.break_pending and break_ignores_cts_)))
+  return not state_.shifting
+     and queued
+     and enabled()
+     and get(regs_, transmit_) != 0
+     and (clear_to_send(from_ps) or (state_.break_pending and break_ignores_cts_))
+     and frame_ps() != 0;
+}
+
+void usart::start_frame(std::uint64_t from_ps)
+{
+  if(not can_start(from_ps))
   {
     return;
   }
-  auto const ps = frame_ps();
-  if(ps == 0)
-  {
-    return;
-  }
+  auto const ps  = frame_ps();
   auto const brk = state_.break_pending;
   if(brk)
   {
@@ -1376,6 +1433,7 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     state_.break_pending = false;
     state_.rx_due_ps     = 0;
     state_.rx_start_ps   = 0;
+    state_.rx_guest_ps   = 0;
     state_.rx_held       = not state_.host.empty();
     if(not finishing)
     {
@@ -1722,12 +1780,20 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     auto const data   = state_.shift;
     auto const ending = far_end_ ? tx_frame(state_.tx_end_ps) : line_frame{};
     auto const brk    = std::exchange(state_.break_shifting, false);
+    auto const heard  = far_end_ ? far_end_->heard_format() : line_format{};
     hook_guard guard;
     if(far_end_)
     {
       guard.run([&] {
         far_end_->ending(ending);
-        far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
+        if(brk or heard.baud == 0 or same_format(heard, ending))
+        {
+          far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
+        }
+        else
+        {
+          hear(*far_end_, heard, ending, can_start(state_.tx_end_ps));
+        }
       });
     }
     auto next = state_.tx_end_ps;
@@ -1770,32 +1836,51 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     flags();
     return;
   }
+  auto const own      = own_format(*frame);
+  auto const now      = ctx_.clock.time().ps;
+  auto       guest_rx = shape();
+  guest_rx.frame_ps   = state_.rx_guest_ps;
+  auto const planned  = own ? std::max(state_.rx_due_ps, stop_sample(guest_rx, state_.rx_start_ps))
+                            : state_.rx_due_ps;
+  auto const sampled_late = planned > state_.rx_due_ps;
+  auto const follows      = own
+                   and not state_.host.empty()
+                   and state_.host.front().start_ps <= planned
+                   and (state_.host.front().ignores_rts or ready_to_receive());
   if(far_end_)
   {
     far_end_->received(
-        {.data       = frame->data,
-         .word_bits  = static_cast<std::uint8_t>(word_bits()),
-         .half_stops = half_stop_codes[get(regs_, stop_)],
-         .parity     = parity(),
-         .kind       = frame->kind,
-         .frame_ps   = state_.rx_due_ps - state_.rx_start_ps,
-         .start      = vtime{state_.rx_start_ps},
-         .end        = vtime{state_.rx_due_ps}});
+        {.data      = frame->data,
+         .word_bits = static_cast<std::uint8_t>(
+             own ? 8u + (frame->line.parity == line_parity::none ? 0u : 1u) : word_bits()),
+         .half_stops = static_cast<std::uint8_t>(
+             own ? frame->line.half_stops : half_stop_codes[get(regs_, stop_)]),
+         .parity   = own ? frame->line.parity : parity(),
+         .kind     = frame->kind,
+         .frame_ps = state_.rx_due_ps - state_.rx_start_ps,
+         .start    = vtime{state_.rx_start_ps},
+         .end      = vtime{state_.rx_due_ps}});
   }
-  deliver(entry_of(*frame));
-  note_rts(state_.rx_due_ps);
+  deliver(
+      own ? sampled_entry(
+                *frame,
+                follows ? std::optional{std::max(state_.host.front().start_ps, state_.rx_due_ps)}
+                        : std::nullopt)
+          : entry_of(*frame));
+  note_rts(planned);
   auto const ps   = frame_ps();
   auto const hold = frame->kind == frame_kind::brk
                       ? 4 * ps / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)])
                       : 0;
-  if(ps != 0
-     and not state_.host.empty()
-     and head_ready()
-     and state_.host.front().start_ps <= ctx_.clock.time().ps)
+  auto const chained =
+      sampled_late
+          ? follows
+          : not state_.host.empty() and head_ready() and state_.host.front().start_ps <= now;
+  if(ps != 0 and chained)
   {
     state_.receiving = true;
-    state_.rx_due_ps =
-        schedule_receive(std::max(state_.rx_due_ps + hold, state_.host.front().start_ps), ps);
+    state_.rx_due_ps = schedule_receive(
+        std::max(state_.rx_due_ps + hold, state_.host.front().start_ps), state_.host.front(), ps);
   }
   else if(ps != 0 and not state_.idle_pending and not linked_before(state_.rx_due_ps + ps))
   {
@@ -1992,6 +2077,46 @@ auto usart::next_host_frame() -> std::optional<host_frame>
   return frame;
 }
 
+auto usart::own_format(host_frame const& frame) -> bool
+{
+  if(frame.kind != frame_kind::data or frame.line.baud == 0)
+  {
+    return false;
+  }
+  auto const own_ps = frame_ps_of(frame.line);
+  auto const gap =
+      own_ps > state_.rx_guest_ps ? own_ps - state_.rx_guest_ps : state_.rx_guest_ps - own_ps;
+  auto const same = 8u + (frame.line.parity == line_parity::none ? 0u : 1u) == word_bits()
+                and frame.line.parity == parity()
+                and frame.line.half_stops == half_stop_codes[get(regs_, stop_)]
+                and gap <= 1;
+  return not same;
+}
+
+auto usart::sampled_entry(host_frame const& frame, std::optional<std::uint64_t> next_start)
+    -> rx_entry
+{
+  auto const       bits = 8u + (frame.line.parity == line_parity::none ? 0u : 1u);
+  line_frame const sent{
+      .data       = with_parity(frame.data, bits, frame.line.parity),
+      .word_bits  = static_cast<std::uint8_t>(bits),
+      .half_stops = static_cast<std::uint8_t>(frame.line.half_stops),
+      .parity     = frame.line.parity,
+      .kind       = frame_kind::data,
+      .frame_ps   = frame_ps_of(frame.line),
+      .start      = vtime{state_.rx_start_ps},
+      .end        = vtime{state_.rx_due_ps}};
+  auto rx         = shape();
+  rx.frame_ps     = state_.rx_guest_ps;
+  auto const seen = sample(sent, next_start, rx);
+  auto const word = static_cast<std::uint16_t>(seen.data & word_mask());
+  return {
+      .data    = word,
+      .framing = seen.framing,
+      .noise   = seen.noise,
+      .parity  = not parity_ok(word, rx.word_bits, parity())};
+}
+
 auto usart::entry_of(host_frame const& frame) -> rx_entry
 {
   if(frame.kind == frame_kind::brk)
@@ -2167,7 +2292,7 @@ void usart::resume_host()
   state_.idle_pending = false;
   auto const from     = start != 0 and not state_.rx_held ? start : now;
   state_.rx_held      = false;
-  state_.rx_due_ps    = schedule_receive(std::max(from, state_.rx_due_ps), ps);
+  state_.rx_due_ps    = schedule_receive(std::max(from, state_.rx_due_ps), state_.host.front(), ps);
 }
 
 auto usart::rx_space() const -> bool

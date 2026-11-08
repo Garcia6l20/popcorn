@@ -21,6 +21,7 @@
 #include <ctime>
 #include <expected>
 #include <format>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <random>
@@ -752,10 +753,32 @@ struct line_post
 class mailbox final : public periph::uart_endpoint
 {
 public:
-  std::vector<line_post>              posts;
-  std::vector<periph::line_frame>     endings;
-  std::vector<periph::captured_frame> sent;
-  int                                 transmissions = 0;
+  std::vector<line_post>                         posts;
+  std::vector<periph::line_frame>                endings;
+  std::vector<periph::captured_frame>            sent;
+  std::vector<periph::line_frame>                receipts;
+  std::vector<std::uint64_t>                     receipt_times;
+  std::move_only_function<std::uint64_t() const> clock;
+  int                                            transmissions = 0;
+
+  periph::line_format                               format;
+  std::vector<std::pair<periph::uart_error, vtime>> line_errors;
+
+  [[nodiscard]] auto heard_format() const -> periph::line_format override
+  {
+    return format;
+  }
+
+  void line_error(periph::uart_error kind, vtime at) override
+  {
+    line_errors.emplace_back(kind, at);
+  }
+
+  void received(periph::line_frame const& frame) override
+  {
+    receipts.push_back(frame);
+    receipt_times.push_back(clock ? clock() : 0);
+  }
 
   void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
@@ -3697,4 +3720,516 @@ TEST_CASE(
   p.advance(100 * us_ps);
   CHECK(port.queued() < 5);
   CHECK(p.t.r.f->field("USART1", "ISR_enabled", "RXFNE") == 1);
+}
+
+namespace
+{
+struct heard_word
+{
+  std::uint32_t word{};
+  std::uint32_t flags{};
+
+  friend auto operator==(heard_word const&, heard_word const&) -> bool = default;
+};
+
+constexpr std::array<std::uint32_t, 5> own_values{0x55, 0xa5, 0x00, 0xff, 0xf0};
+
+auto own_word_bits(periph::line_format const& line) -> std::uint32_t
+{
+  return 8u + (line.parity == periph::line_parity::none ? 0u : 1u);
+}
+
+auto own_linked(std::uint32_t value, periph::line_format const& line, std::uint64_t start)
+    -> periph::line_frame
+{
+  auto const bits = own_word_bits(line);
+  auto const ps   = periph::frame_ps_of(line);
+  return {
+      .data       = periph::with_parity(static_cast<std::uint16_t>(value), bits, line.parity),
+      .word_bits  = static_cast<std::uint8_t>(bits),
+      .half_stops = static_cast<std::uint8_t>(line.half_stops),
+      .parity     = line.parity,
+      .frame_ps   = ps,
+      .start      = vtime{start},
+      .end        = vtime{start + ps}};
+}
+
+auto drain(parity_rig const& p, std::size_t count) -> std::vector<heard_word>
+{
+  std::vector<heard_word> out;
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    CAPTURE(index);
+    REQUIRE((p.isr() & isr_rxfne) != 0);
+    out.push_back({.word = p.rdr(), .flags = p.isr() & (isr_errors | isr_ore)});
+    p.t.cpu("USART1", "ICR", icr_errors | 1u << 3);
+    std::ignore = p.pop();
+  }
+  CHECK((p.isr() & isr_rxfne) == 0);
+  return out;
+}
+
+auto heard_as_host(
+    line_config                    guest,
+    std::uint32_t                  brr,
+    periph::line_format const&     line,
+    std::span<std::uint32_t const> values) -> std::vector<heard_word>
+{
+  parity_rig                      p{guest, brr, cr1_fifoen};
+  auto const                      base = p.now() + 10 * us_ps;
+  std::vector<periph::host_frame> frames;
+  for(auto const value : values)
+  {
+    frames.push_back({.data = static_cast<std::uint16_t>(value), .line = line});
+  }
+  frames.front().start_ps = base;
+  p.tagged(frames);
+  p.advance(10 * us_ps + (values.size() + 2) * periph::frame_ps_of(line) + 400 * us_ps);
+  return drain(p, values.size());
+}
+
+auto heard_as_linked(
+    line_config                    guest,
+    std::uint32_t                  brr,
+    periph::line_format const&     line,
+    std::span<std::uint32_t const> values) -> std::vector<heard_word>
+{
+  parity_rig p{guest, brr, cr1_fifoen};
+  auto const base = p.now() + 10 * us_ps;
+  auto const ps   = periph::frame_ps_of(line);
+  for(std::size_t index = 0; index < values.size(); ++index)
+  {
+    p.t.r.port("USART1").receive_at(own_linked(values[index], line, base + index * ps), 1);
+  }
+  p.advance(10 * us_ps + (values.size() + 2) * ps + 400 * us_ps);
+  return drain(p, values.size());
+}
+}
+
+TEST_CASE("host frames in their own format read as the linked frames of the same waveform")
+{
+  struct guest_row
+  {
+    line_config   config;
+    std::uint32_t brr;
+  };
+  std::size_t clean   = 0;
+  std::size_t garbled = 0;
+  std::size_t flagged = 0;
+  for(auto const [config, brr] : std::array<guest_row, 3>{
+          {{{.bits = 8}, 35},
+           {{.bits = 8}, 9},
+           {{.bits = 8, .parity = periph::line_parity::even}, 35}}
+  })
+  {
+    for(auto const baud : {115'200u, 230'400u, 460'800u})
+    {
+      for(auto const parity : {periph::line_parity::none, periph::line_parity::odd})
+      {
+        for(auto const half_stops : {2u, 4u})
+        {
+          periph::line_format const line{.baud = baud, .parity = parity, .half_stops = half_stops};
+          CAPTURE(config.bits);
+          CAPTURE(config.parity);
+          CAPTURE(brr);
+          CAPTURE(baud);
+          CAPTURE(parity);
+          CAPTURE(half_stops);
+          auto const host   = heard_as_host(config, brr, line, own_values);
+          auto const linked = heard_as_linked(config, brr, line, own_values);
+          CHECK(host == linked);
+          for(std::size_t index = 0; index < host.size(); ++index)
+          {
+            auto const clean_word = expected_word(own_values[index], config);
+            if(host[index] == heard_word{.word = clean_word, .flags = 0})
+            {
+              ++clean;
+            }
+            else
+            {
+              ++garbled;
+            }
+            flagged += host[index].flags != 0 ? 1 : 0;
+          }
+        }
+      }
+    }
+  }
+  CHECK(clean > 0);
+  CHECK(garbled > 0);
+  CHECK(flagged > 0);
+  MESSAGE("clean " << clean << " garbled " << garbled << " flagged " << flagged);
+}
+
+TEST_CASE("an own-format host frame behind a gap reads as the linked frame of the same waveform")
+{
+  periph::line_format const line{.baud = 460'800};
+  auto const                wire  = periph::frame_ps_of(line);
+  std::size_t               cut   = 0;
+  std::size_t               clean = 0;
+  for(auto const gap :
+      {0ull, 1ull, 1'000ull, 5'000'000ull, 20'000'000ull, 45'000'000ull, 70'000'000ull})
+  {
+    CAPTURE(gap);
+    constexpr std::array<std::uint32_t, 2>  values{0xff, 0x00};
+    parity_rig                              host{{}, 35, cr1_fifoen};
+    auto const                              base = host.now() + 10 * us_ps;
+    std::array<periph::host_frame, 2> const frames{
+        {{.data = 0xff, .start_ps = base, .line = line},
+         {.data = 0x00, .start_ps = base + wire + gap, .line = line}}
+    };
+    host.tagged(frames);
+    host.advance(2000 * us_ps);
+    auto const as_host = drain(host, 2);
+
+    parity_rig linked{{}, 35, cr1_fifoen};
+    auto const lbase = linked.now() + 10 * us_ps;
+    linked.t.r.port("USART1").receive_at(own_linked(values[0], line, lbase), 1);
+    linked.t.r.port("USART1").receive_at(own_linked(values[1], line, lbase + wire + gap), 1);
+    linked.advance(2000 * us_ps);
+    auto const as_linked = drain(linked, 2);
+    CHECK(as_host == as_linked);
+    cut += as_host.front().flags != 0 ? 1 : 0;
+    clean += as_host.front().flags == 0 ? 1 : 0;
+  }
+  CHECK(cut > 0);
+  CHECK(clean > 0);
+}
+
+TEST_CASE(
+    "a 115200 device into a 444 kBd guest and a 460800 device into a 114 kBd guest read as the "
+    "model samples")
+{
+  using heard = std::vector<heard_word>;
+  periph::line_format const slow{.baud = 115'200};
+  periph::line_format const fast{.baud = 460'800};
+  CHECK(
+      heard_as_host(
+          {
+  },
+          9, slow, own_values)
+      == heard{{0x78, isr_fe}, {0x78, isr_fe}, {0x00, isr_fe}, {0xf8, 0}, {0x00, isr_fe}});
+  CHECK(
+      heard_as_host(
+          {
+  },
+          35, fast, own_values)
+      == heard{
+          {0x00, isr_fe | isr_ne},
+          {0x01, isr_fe | isr_ne},
+          {0x00, isr_fe | isr_ne},
+          {0x01, isr_fe | isr_ne},
+          {0xff, 0}});
+  CHECK(
+      heard_as_host(
+          {
+  },
+          35, slow, own_values)
+      == heard{{0x55, 0}, {0xa5, 0}, {0x00, 0}, {0xff, 0}, {0xf0, 0}});
+}
+
+TEST_CASE(
+    "an own-format host frame reaches RDR at the later of its stop-bit end and the last sample")
+{
+  struct timing_row
+  {
+    std::uint32_t brr;
+    std::uint32_t baud;
+    std::uint64_t guest_ps;
+    bool          sample_last;
+  };
+  for(auto const [brr, baud, guest_ps, sample_last] : std::array<timing_row, 2>{
+          {{9, 115'200, 22'500'000, false}, {35, 460'800, 87'500'000, true}}
+  })
+  {
+    CAPTURE(baud);
+    periph::line_format const line{.baud = baud};
+    parity_rig                p{{}, brr};
+    p.box->clock = [&p] { return p.now(); };
+    REQUIRE(usart1_frame(p) == guest_ps);
+    auto const                              start = p.now() + 10 * us_ps;
+    std::array<periph::host_frame, 1> const one{{{.data = 0xff, .start_ps = start, .line = line}}};
+    p.tagged(one);
+    p.advance(2000 * us_ps);
+    auto const last_sample = start + 2 * guest_ps * (16 * 9 + 9) / (16 * 20);
+    auto const wire_end    = start + periph::frame_ps_of(line);
+    REQUIRE((last_sample > wire_end) == sample_last);
+    REQUIRE(p.box->receipts.size() == 1);
+    auto const due = std::max(last_sample, wire_end);
+    CHECK(p.box->receipt_times[0] >= due);
+    CHECK(p.box->receipt_times[0] < due + us_ps);
+    CHECK(p.box->receipts[0].start.ps == start);
+    CHECK(p.box->receipts[0].end.ps == wire_end);
+    CHECK(p.box->receipts[0].frame_ps == periph::frame_ps_of(line));
+  }
+}
+
+TEST_CASE("own-format host frames queued and in flight survive a snapshot and 1000 restores")
+{
+  parity_rig                      p{{}, 9, cr1_fifoen};
+  std::array<host_frame, 4> const frames{
+      {{.data = 0x55, .line = {.baud = 115'200}},
+       {.data = 'a'},
+       {.data = 0xa5, .line = {.baud = 460'800, .parity = periph::line_parity::odd}},
+       {.data = 0x0f, .line = {.baud = 115'200, .half_stops = 4}}}
+  };
+  p.tagged(frames);
+  auto&      port = p.t.r.port("USART1");
+  auto const full = [&] {
+    p.advance(800 * us_ps);
+    return drain_rx(p);
+  };
+  p.advance(30 * us_ps);
+  REQUIRE(port.queued() == 4);
+  auto const early = p.t.r.f->target->snapshot();
+  p.advance(110 * us_ps);
+  REQUIRE(port.queued() == 1);
+  auto const late  = p.t.r.f->target->snapshot();
+  auto const first = full();
+  REQUIRE(first.size() == 4);
+  for(int index = 0; index < 1000; ++index)
+  {
+    p.t.r.f->target->restore(early);
+    REQUIRE(port.queued() == 4);
+  }
+  CHECK(full() == first);
+  p.t.r.f->target->restore(late);
+  REQUIRE(port.queued() == 1);
+  CHECK(full() == first);
+}
+
+namespace
+{
+struct heard_event
+{
+  bool          error{};
+  std::uint32_t value{};
+  std::uint64_t at{};
+
+  friend auto operator==(heard_event const&, heard_event const&) -> bool = default;
+};
+
+constexpr std::uint32_t framing      = static_cast<std::uint32_t>(periph::uart_error::framing);
+constexpr std::uint32_t parity_error = static_cast<std::uint32_t>(periph::uart_error::parity);
+
+auto heard_by_device(parity_rig const& p) -> std::vector<heard_event>
+{
+  std::vector<heard_event> out;
+  for(auto const& frame : p.box->sent)
+  {
+    out.push_back({.error = false, .value = frame.data, .at = frame.at.ps});
+  }
+  for(auto const& [kind, at] : p.box->line_errors)
+  {
+    out.push_back({.error = true, .value = static_cast<std::uint32_t>(kind), .at = at.ps});
+  }
+  std::ranges::sort(out, {}, &heard_event::at);
+  return out;
+}
+
+auto values_of(std::vector<heard_event> const& events)
+    -> std::vector<std::pair<bool, std::uint32_t>>
+{
+  std::vector<std::pair<bool, std::uint32_t>> out;
+  for(auto const& event : events)
+  {
+    out.emplace_back(event.error, event.value);
+  }
+  return out;
+}
+
+auto back_to_back(
+    std::uint32_t                  brr,
+    periph::line_format const&     format,
+    std::span<std::uint32_t const> values) -> std::vector<heard_event>
+{
+  parity_rig p{{}, brr, cr1_fifoen};
+  p.box->format = format;
+  for(auto const value : values)
+  {
+    p.t.cpu("USART1", "TDR", value);
+  }
+  p.advance(2000 * us_ps);
+  auto const heard = heard_by_device(p);
+  REQUIRE(p.box->endings.size() == values.size());
+  REQUIRE(heard.size() == values.size());
+  for(std::size_t index = 0; index < values.size(); ++index)
+  {
+    CHECK(heard[index].at == p.box->endings[index].end.ps);
+  }
+  return heard;
+}
+}
+
+TEST_CASE("a device in another baud samples the firmware's frames at its own bit times")
+{
+  using pairs = std::vector<std::pair<bool, std::uint32_t>>;
+  CHECK(
+      values_of(back_to_back(
+          35,
+          {
+              .baud = 460'800
+  },
+          own_values))
+      == pairs{{true, framing}, {true, framing}, {true, framing}, {false, 0xf8}, {true, framing}});
+  CHECK(
+      values_of(back_to_back(
+          9,
+          {
+              .baud = 115'200
+  },
+          own_values))
+      == pairs{{true, framing}, {true, framing}, {true, framing}, {true, framing}, {false, 0xff}});
+  CHECK(
+      values_of(back_to_back(
+          35,
+          {
+              .baud = 115'200
+  },
+          own_values))
+      == pairs{{false, 0x55}, {false, 0xa5}, {false, 0x00}, {false, 0xff}, {false, 0xf0}});
+}
+
+TEST_CASE("a noise-only frame at the device reaches transmitted with the sampled byte")
+{
+  parity_rig p{{}, 35};
+  p.box->format = {.baud = 64'000};
+  p.send(0x55);
+  CHECK(p.box->line_errors.empty());
+  REQUIRE(p.box->sent.size() == 1);
+  CHECK(p.box->sent[0].data == 0xf0);
+  CHECK(p.box->sent[0].at.ps == p.box->endings[0].end.ps);
+}
+
+TEST_CASE("a device parity the firmware does not send reads the stop bit as the parity bit")
+{
+  parity_rig p{{}, 35};
+  p.box->format = {.baud = 115'200, .parity = periph::line_parity::even};
+  for(auto const value : {0x01u, 0x03u, 0x00u, 0x80u})
+  {
+    p.send(value);
+  }
+  using pairs = std::vector<std::pair<bool, std::uint32_t>>;
+  CHECK(
+      values_of(heard_by_device(p))
+      == pairs{
+          {false, 0x01        },
+          {true,  parity_error},
+          {true,  parity_error},
+          {false, 0x80        }
+  });
+}
+
+TEST_CASE("a break reaches the device as a break in any device format")
+{
+  parity_rig p{{}, 35};
+  p.box->format = {.baud = 460'800};
+  p.t.cpu("USART1", "RQR", 1u << 1);
+  p.advance(1000 * us_ps);
+  REQUIRE(p.box->sent.size() == 1);
+  CHECK(p.box->sent[0].brk);
+  CHECK(p.box->line_errors.empty());
+}
+
+TEST_CASE("RTS holds the next own-format host frame while RDR is full and releases it at a read")
+{
+  auto const                              p = flow_rig(cr3_rtse);
+  std::array<periph::host_frame, 2> const frames{
+      {{.data = 1, .line = {.baud = 115'200}}, {.data = 2, .line = {.baud = 115'200}}}
+  };
+  p->tagged(frames);
+  p->advance(600 * us_ps);
+  CHECK(p->t.r.port("USART1").queued() == 1);
+  CHECK(p->box->receipts.size() == 1);
+  CHECK(p->rdr() == 1);
+  CHECK(not p->t.r.port("USART1").ready_to_receive());
+  std::ignore = p->pop();
+  p->advance(300 * us_ps);
+  CHECK(p->t.r.port("USART1").queued() == 0);
+  CHECK(p->box->receipts.size() == 2);
+  CHECK(p->rdr() == 2);
+}
+
+TEST_CASE(
+    "a fast own-format host frame already on the line when RDR fills overruns, the next waits")
+{
+  auto const                              p = flow_rig(cr3_rtse);
+  std::array<periph::host_frame, 3> const frames{
+      {{.data = 1, .line = {.baud = 460'800}},
+       {.data = 2, .line = {.baud = 460'800}},
+       {.data = 3, .line = {.baud = 460'800}}}
+  };
+  p->tagged(frames);
+  p->advance(900 * us_ps);
+  CHECK(p->box->receipts.size() == 2);
+  CHECK(p->t.r.port("USART1").queued() == 1);
+  CHECK((p->isr() & isr_ore) != 0);
+  CHECK(not p->t.r.port("USART1").ready_to_receive());
+  std::ignore = p->pop();
+  p->advance(900 * us_ps);
+  CHECK(p->box->receipts.size() == 3);
+  CHECK(p->t.r.port("USART1").queued() == 0);
+}
+
+TEST_CASE("the received hook gives an own-format frame the word shape and frame time of its format")
+{
+  parity_rig p{{}, 35};
+  p.box->clock = [&p] { return p.now(); };
+  periph::line_format const line{
+      .baud = 230'400, .parity = periph::line_parity::odd, .half_stops = 4};
+  std::array<periph::host_frame, 1> const one{{{.data = 0x5a, .line = line}}};
+  p.tagged(one);
+  p.advance(1000 * us_ps);
+  REQUIRE(p.box->receipts.size() == 1);
+  auto const& frame = p.box->receipts[0];
+  CHECK(frame.word_bits == 9);
+  CHECK(frame.half_stops == 4);
+  CHECK(frame.parity == periph::line_parity::odd);
+  CHECK(frame.frame_ps == periph::frame_ps_of(line));
+  CHECK(frame.data == 0x5a);
+}
+
+TEST_CASE("a line format equal to the guest's reads and arrives as the guest's own format does")
+{
+  struct arrival
+  {
+    std::uint64_t           at{};
+    periph::line_frame      frame;
+    std::vector<heard_word> words;
+  };
+  auto const run = [](periph::line_format const& line) {
+    parity_rig p{{}, 40, cr1_fifoen};
+    REQUIRE(usart1_frame(p) == 100'000'000);
+    p.box->clock                         = [&p] { return p.now(); };
+    auto const                      base = p.now() + 10 * us_ps;
+    std::vector<periph::host_frame> frames;
+    for(auto const value : own_values)
+    {
+      frames.push_back({.data = static_cast<std::uint16_t>(value), .line = line});
+    }
+    frames.front().start_ps = base;
+    p.tagged(frames);
+    p.advance(10 * us_ps + 8 * 100 * us_ps);
+    REQUIRE(p.box->receipts.size() == own_values.size());
+    return arrival{
+        .at    = p.box->receipt_times.front(),
+        .frame = p.box->receipts.front(),
+        .words = drain(p, own_values.size())};
+  };
+  auto const guest = run({});
+  auto const same  = run({.baud = 100'000});
+  CHECK(same.at == guest.at);
+  CHECK(same.frame == guest.frame);
+  CHECK(same.words == guest.words);
+  auto const off = run({.baud = 100'001});
+  CHECK(off.frame.frame_ps == periph::frame_ps_of({.baud = 100'001}));
+  CHECK(off.frame.frame_ps != guest.frame.frame_ps);
+}
+
+TEST_CASE("the firmware's frames reach a device whose line equals the guest's as with no line")
+{
+  auto const none = back_to_back(40, {}, own_values);
+  auto const same = back_to_back(40, {.baud = 100'000}, own_values);
+  CHECK(same == none);
+  CHECK(std::ranges::none_of(same, [](heard_event const& event) { return event.error; }));
 }
