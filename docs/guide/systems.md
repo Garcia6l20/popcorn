@@ -175,6 +175,10 @@ Inside `system.running()` the members run whether the test awaits or not. A memb
 `wait_for` and stream reads wait on the free run. A line edit such as `tap.replace` may be made
 inside it.
 
+Leaving the free run, with `halt()` or the exit of `running()`, moves the TIME target to the
+latest member system time at the halt point. A later `run(for_=)` or `wait_for(for_=)` counts
+from there, and `run(until=)` before it raises ValueError.
+
 Each member runs on its own native host thread, and the Python callbacks of different members
 run at the same wall time. Keep callback state per member and couple members through links.
 Shared Python state sees an order that depends on thread timing.

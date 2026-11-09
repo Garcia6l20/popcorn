@@ -1195,9 +1195,11 @@ class System:
 
         `for_` counts from the target of the previous TIME stop, else from the largest offset,
         the latest member's system time at construction, so ten `run(for_=ms(10))` equal one
-        `run(for_=ms(100))`. Never from where a member stop left the members: that position
-        depends on the quantum. Each member stops
-        at the first block boundary at or after the target, an idle or halted one exactly at it.
+        `run(for_=ms(100))`. Leaving a free run, `halt()` or the exit of `running()`, moves the
+        target to the latest member system time at the halt point, and `for_` counts from
+        there. A member stop never moves the target: where it leaves the members depends on the
+        quantum. Each member stops at the first block boundary at or after the target, an idle
+        or halted one exactly at it.
         A member stop on the way, FAULT, a breakpoint or a reset under `on_member_reset="stop"`,
         ends the run there: the member waits at its stop, the others where the run left them.
         The next `run` releases it halted: its core executes nothing in system runs until its
@@ -1217,7 +1219,8 @@ class System:
 
         Raises:
             TypeError: Neither or both of `for_` and `until`, or a value of another type.
-            ValueError: `for_` negative, or `until` before the last target.
+            ValueError: `for_` negative, or `until` before the target, the last TIME stop or
+                free run halt.
             MachineBusy: The system runs.
             EmulationError: The system was closed, or stopped on an error before.
             BaseException: The error that stopped the system, a link error or a member's
@@ -1259,12 +1262,12 @@ class System:
         check point.
 
         The check points are system times `base + k * every`, k from 1, where `base` is the
-        target of the previous TIME stop, else the largest offset, as for `run(for_=)`. At each
-        one the system makes a TIME stop, every member parked at it, and `predicate` runs on
-        the caller's thread with sync access to every member. The stop is the first check point
-        where it holds, whatever the quantum, the slicing or the wall timing: the predicate is
-        never asked between check points. Each check point is a TIME target, so a later
-        `run(for_=)` or `wait_for` counts from the stop.
+        target of the previous TIME stop or of the last free run's halt, else the largest offset,
+        as for `run(for_=)`. At each one the system makes a TIME stop, every member parked at
+        it, and `predicate` runs on the caller's thread with sync access to every member. The
+        stop is the first check point where it holds, whatever the quantum, the slicing or the
+        wall timing: the predicate is never asked between check points. Each check point is a
+        TIME target, so a later `run(for_=)` or `wait_for` counts from the stop.
 
         With `for_`, the wait ends at `base + for_` with a TIME stop if `predicate` held at no
         check point before it, and is not asked there. A member stop or an IDLE pause on the way
@@ -1312,8 +1315,9 @@ class System:
         `on_member_reset="stop"`, ends that member's run: it is halted from its stop on, the
         others go on, and `halt()` raises it, and that stop becomes its `last_stop`. Every
         member's `last_stop` is None from the start on, until a member stop or one of its waits
-        gives it one. When every member sleeps with nothing due the
-        system sleeps until a command, a stamp, an injection, a cut or a pty byte wakes a
+        gives it one. `halt()` moves the TIME target to the latest member system time, the base
+        of the next `run(for_=)` or `wait_for(for_=)`. When every member sleeps with nothing due
+        the system sleeps until a command, a stamp, an injection, a cut or a pty byte wakes a
         member. A `line="break"` cut ahead counts as due until its release and the receiver's
         IDLE after it, `UartTap.cut`.
         Inside, a member's `wait_for`, stream reads and `elapse` wait on the free run as inside
@@ -1364,11 +1368,12 @@ class System:
     def halt(self) -> None:
         """End the free run `start()` started. The system pauses at its next barrier, every
         member is halted where it stands, and this returns once every member parked, waiting
-        with the GIL released. Where the members stand depends on wall timing and the quantum,
-        as a lone machine's `halt()` lands at a wall-dependent boundary, and so do the member
-        stops it reports: a stop at or before that pause is raised, a later one never happens. A
-        wait of a member still pending raises EmulationError. A no-op when no free run is
-        active.
+        with the GIL released. The TIME target becomes the latest member system time there, the
+        base of the next `run(for_=)` or `wait_for(for_=)`. Where the members stand depends on
+        wall timing and the quantum, as a lone machine's `halt()` lands at a wall-dependent
+        boundary, and so do the member stops it reports: a stop at or before that pause is
+        raised, a later one never happens. A wait of a member still pending raises
+        EmulationError. A no-op when no free run is active.
 
         From a thread other than the one running the event loop that started the free run, the
         halt runs on that loop, `call_soon_threadsafe`, and this waits for it with the GIL
@@ -1446,7 +1451,8 @@ class System:
         The system sleeps as in `start()`: a `line="break"` cut ahead, `UartTap.cut`, keeps it
         awake until its release and the receiver's IDLE after it.
 
-        Leaving the body raises what `halt()` raises. When the body itself raises, a
+        Leaving the body halts as `halt()` does, moving the TIME target to the latest member
+        system time. It raises what `halt()` raises. When the body itself raises, a
         cancellation included, the body's exception wins, with a note naming what leaving the
         free run raised.
 
@@ -1490,7 +1496,8 @@ class System:
             self._halt_task = None
 
     def _end_free(self) -> None:
-        """Withdraw the free run's open goals and release the members its waiters left parked."""
+        """Withdraw the free run's open goals, release the members its waiters left parked and
+        move the target to the latest member system time."""
         self._free = False
         opens, self._opens = self._opens, {}
         self._run_ends.clear()
@@ -1505,6 +1512,8 @@ class System:
                     self._handle.withdraw(index)
         if self._closed or self._failed is not None:
             return
+        latest = max(self._handle.time_of_ps(index) for index in range(len(self._names)))
+        self._target = latest if self._target is None else max(self._target, latest)
         for index in self._handle.undecided():
             if index not in self._undecided:
                 self._handle.release(index, False)
@@ -1738,7 +1747,7 @@ class System:
             return base + for_.ps
         assert until is not None
         if self._target is not None and until.ps < self._target:
-            raise ValueError(f"until {until} is before the last target {VirtualTime(self._target)}")
+            raise ValueError(f"until {until} is before the target {VirtualTime(self._target)}")
         return until.ps
 
     async def _settled(self) -> None:

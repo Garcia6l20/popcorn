@@ -16,7 +16,7 @@ from popcorn import Stop, StopReason, System, UartLink
 from popcorn._errors import MachineBusy
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .linked import member
+from .linked import Ticker, member, ticker
 
 L = us(20)
 VARIANTS: list[tuple[int, VirtualDuration | None]] = [
@@ -172,6 +172,162 @@ def test_a_sync_halt_parks_every_member_and_a_run_follows(ping: Build) -> None:
     asyncio.run(body())
     stop = asyncio.run(system.run(for_=ms(1)))
     assert stop.reason is StopReason.TIME
+
+
+def latest(system: System) -> int:
+    return max(system.time_of(name).ps for name in system.members)
+
+
+def freed(system: System, elapse: VirtualDuration | None = None) -> int:
+    async def body() -> None:
+        system.start()
+        await system.members["b"].elapse(us(200) if elapse is None else elapse)
+        system.halt()
+
+    asyncio.run(body())
+    return latest(system)
+
+
+def test_a_timed_run_counts_from_the_latest_member_time_at_the_halt(ping: Build) -> None:
+    system = ping()
+    halted = freed(system)
+    assert halted > us(200).ps
+    stop = asyncio.run(system.run(for_=us(500)))
+    assert stop.reason is StopReason.TIME
+    assert stop.time == VirtualTime(halted + us(500).ps)
+    assert all(system.time_of(name).ps >= halted + us(500).ps for name in system.members)
+
+
+def test_a_timed_wait_counts_from_the_latest_member_time_at_the_halt(ping: Build) -> None:
+    system = ping()
+    halted = freed(system)
+    stop = asyncio.run(system.wait_for(lambda s: False, every=us(150), for_=us(500)))
+    assert stop.reason is StopReason.TIME
+    assert stop.time == VirtualTime(halted + us(500).ps)
+    assert all(system.time_of(name).ps >= halted + us(500).ps for name in system.members)
+
+
+def test_a_wait_without_for_checks_from_the_halt_point(ping: Build) -> None:
+    system = ping()
+    halted = freed(system)
+    asked: list[int] = []
+
+    def seen(s: System) -> bool:
+        asked.append(s.time_of("b").ps)
+        return len(asked) == 2
+
+    stop = asyncio.run(system.wait_for(seen, every=us(100)))
+    assert stop.reason is StopReason.USER
+    assert stop.time == VirtualTime(halted + us(200).ps)
+
+
+def test_two_free_runs_then_a_timed_run_count_from_the_second_halt(ping: Build) -> None:
+    system = ping()
+    first = freed(system)
+    second = freed(system, us(300))
+    assert second > first
+    stop = asyncio.run(system.run(for_=us(500)))
+    assert stop.time == VirtualTime(second + us(500).ps)
+
+
+def test_a_run_until_behind_the_halt_point_raises(ping: Build) -> None:
+    system = ping()
+    halted = freed(system)
+    with pytest.raises(ValueError, match="before the target"):
+        asyncio.run(system.run(until=VirtualTime(halted - 1)))
+    stop = asyncio.run(system.run(until=VirtualTime(halted + us(100).ps)))
+    assert stop.time == VirtualTime(halted + us(100).ps)
+
+
+def test_a_running_scope_moves_the_target_also_when_a_member_stop_ends_it(ping: Build) -> None:
+    system = ping()
+
+    async def body() -> None:
+        with pytest.raises(popcorn.EmulationError, match="USER"):
+            async with system.running():
+                await system.members["b"].elapse(ms(3))
+
+    asyncio.run(body())
+    halted = latest(system)
+    assert halted >= ms(3).ps
+    stop = asyncio.run(system.run(for_=us(500)))
+    assert stop.time == VirtualTime(halted + us(500).ps)
+
+
+def test_a_running_scope_raising_in_its_body_moves_the_target(ping: Build) -> None:
+    system = ping()
+
+    async def body() -> None:
+        with pytest.raises(KeyError):
+            async with system.running():
+                await system.members["b"].elapse(us(200))
+                raise KeyError("body")
+
+    asyncio.run(body())
+    halted = latest(system)
+    stop = asyncio.run(system.run(for_=us(500)))
+    assert stop.time == VirtualTime(halted + us(500).ps)
+
+
+def test_the_snapshot_after_a_free_run_carries_the_halt_target(ping: Build) -> None:
+    system = ping()
+    halted = freed(system)
+    taken = system.snapshot()
+    assert taken.target == VirtualTime(halted)
+    stop = asyncio.run(system.run(for_=us(100)))
+    assert stop.time == VirtualTime(halted + us(100).ps)
+    system.restore(taken)
+    stop = asyncio.run(system.run(for_=us(100)))
+    assert stop.time == VirtualTime(halted + us(100).ps)
+
+
+def test_the_target_is_the_latest_member_time_when_a_member_stands_ahead(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_ping", "a")
+    b = member(u575, "link_echo", "b")
+    links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+    with System({"a": a, "b": b}, links, offsets={"a": us(500)}) as system:
+        halted = freed(system)
+        assert system.time_of("a").ps == us(500).ps
+        assert system.time_of("b").ps < us(500).ps
+        assert halted == us(500).ps
+        stop = asyncio.run(system.run(for_=us(100)))
+        assert stop.time == VirtualTime(us(600).ps)
+
+
+def test_a_free_run_ended_by_a_handler_error_leaves_the_target(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_ping", "a", models={"TIM6": Ticker})
+    b = member(u575, "link_echo", "b")
+    links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+
+    async def body() -> None:
+        with pytest.raises(popcorn.EmulationError) as raised:
+            async with system.running():
+                await b.elapse(us(200))
+        assert any("TIM6 tick" in note for note in raised.value.__notes__)
+
+    with System({"a": a, "b": b}, links) as system:
+        asyncio.run(system.run(for_=us(100)))
+        target = system._target  # pyright: ignore[reportPrivateUsage]
+        assert target is not None
+        ticker(a).raise_at = ticker(a).ticks + 5
+        asyncio.run(body())
+        assert system._target == target  # pyright: ignore[reportPrivateUsage]
+
+
+def test_closing_in_a_free_run_sets_no_target(ping: Build) -> None:
+    system = ping()
+
+    async def body() -> None:
+        system.start()
+        await system.members["b"].elapse(us(200))
+        system.close()
+
+    asyncio.run(body())
+    assert system._target is None  # pyright: ignore[reportPrivateUsage]
 
 
 def test_a_wait_pending_when_the_free_run_halts_raises(ping: Build) -> None:

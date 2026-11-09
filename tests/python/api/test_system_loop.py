@@ -698,7 +698,7 @@ def ops_keep_the_loop(
         device.log.clear()
         operation(system, a)
         asyncio.run(system.run(for_=us(300)))
-    return device.log
+    return [one for one in device.log if one[1] <= us(450).ps]
 
 
 def member_running(system: System, _: popcorn.Machine) -> None:

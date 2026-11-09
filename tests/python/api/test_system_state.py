@@ -227,6 +227,7 @@ def test_snapshot_and_restore_refusals(pair: Build) -> None:
                 system.restore(taken)
 
     asyncio.run(body())
+    asyncio.run(system.run(for_=us(1)))
     with pytest.raises(popcorn.MachineRunning, match="wait_for"):
         asyncio.run(system.wait_for(lambda one: one.restore(taken) is None, every=us(100)))
     with pytest.raises(KeyError):
