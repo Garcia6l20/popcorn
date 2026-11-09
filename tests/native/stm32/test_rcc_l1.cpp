@@ -8,6 +8,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 
 #include <doctest/doctest.h>
 
@@ -326,7 +327,24 @@ TEST_CASE("RM0038 6.3.4: a ready flag sets under its enable and xxxRDYC clears i
   CHECK(f.field("RCC", "CIR", "HSIRDYF") == 0);
 }
 
-TEST_CASE("RccOptions lsi_hz sets the L1 LSI rate, DS8928 Table 32 bounds it")
+TEST_CASE("RM0038 6.3: the STM32L1 RCC drives no clock output pin")
+{
+  auto        f   = idle_fixture();
+  auto* const out = dynamic_cast<stm32::clock_output_port*>(f.target->model("RCC"));
+  REQUIRE(out != nullptr);
+  set(f, "CSR", "LSION", 1);
+  idle_for(f, delay);
+  for(char const* port : {"GPIOA", "GPIOB"})
+  {
+    for(std::uint8_t pin = 0; pin < 16; ++pin)
+    {
+      CHECK(out->clock_hz(port, pin) == 0);
+    }
+  }
+  CHECK_FALSE(out->watch_clock("GPIOA", 2, [](std::uint64_t, popcorn::vtime) {}).active());
+}
+
+TEST_CASE("RccOptions lsi_hz sets the L1 LSI rate, the L162 datasheet DS8928 Table 32 bounds it")
 {
   stm32_fixture f{l152re(), firmware, with_listener(38'000)};
   f.set("pc", popcorn::testing::sym(firmware, "idle"));

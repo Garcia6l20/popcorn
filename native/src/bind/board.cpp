@@ -8,6 +8,7 @@
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/spi.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
 #include <algorithm>
@@ -779,6 +780,46 @@ auto machine_handle::gpio_level(std::string const& peripheral, std::uint8_t pin)
 {
   return access(
       [&](core::machine& target) { return gpio_level_body(gpio(peripheral, pin), pin)(target); });
+}
+
+auto machine_handle::gpio_clock(std::string const& peripheral, std::uint8_t pin) const
+    -> std::uint64_t
+{
+  return access([&](core::machine&) {
+    static_cast<void>(gpio(peripheral, pin));
+    return clock_outputs().clock_hz(peripheral, pin);
+  });
+}
+
+auto machine_handle::gpio_clock_watch(
+    std::string const&     peripheral,
+    std::uint8_t           pin,
+    reflex::py::nb::object relay) -> pin_watch
+{
+  auto fire = std::make_shared<pin_watch::fire_state>();
+  fire->cell.run_in(models_cell_, alive_, collected_);
+  fire->relay = detail::held_bare(std::move(relay));
+  return access([&](core::machine&) {
+    static_cast<void>(gpio(peripheral, pin));
+    return pin_watch{
+        clock_outputs().watch_clock(
+            peripheral, pin,
+            [fire](std::uint64_t hz, vtime at) {
+              detail::gil_entry const gil;
+              fire->cell.call([&] { return fire->relay->fn(hz, at.ps); });
+            }),
+        slot_, fire};
+  });
+}
+
+auto machine_handle::clock_outputs() const -> periph::stm32::clock_output_port&
+{
+  auto* const port = dynamic_cast<periph::stm32::clock_output_port*>(engine().model("RCC"));
+  if(port == nullptr)
+  {
+    throw model_error("RCC", "", 0);
+  }
+  return *port;
 }
 
 auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) const

@@ -1,5 +1,6 @@
 #include "../support/inert_model.hpp"
 #include "kernel_gate.hpp"
+#include "lsi_source.hpp"
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
@@ -11,6 +12,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 
 #include <doctest/doctest.h>
 
@@ -520,7 +522,7 @@ TEST_CASE("a snapshot taken while PLL1 locks restores to the same run, in place 
 TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured before the template")
 {
   constexpr auto expected = std::to_array<unsigned char>(
-      {0x30, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+      {0x4f, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
        0x00, 0x8b, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x12, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00,
        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -540,7 +542,9 @@ TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured bef
        0x00, 0x00, 0x10, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x63, 0x6c, 0x65, 0x61,
        0x72, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x69, 0x76, 0x69, 0x64,
        0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x00});
+       0x00, 0x00, 0x00, 0x04, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
+       0x12, 0x6e, 0x65, 0x78, 0x74, 0x5f, 0x6e, 0x6f, 0x74, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00});
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   REQUIRE(probe(f).hz("sysclk") == 160 * mhz);
@@ -1158,6 +1162,226 @@ TEST_CASE("RccOptions lsi_hz sets the U5 LSI rate before LSIPREDIV, DS13086 Tabl
   {
     CHECK_THROWS_AS(stm32_fixture(u575(), "rcc_ll", lsi_board(refused)), popcorn::config_error);
   }
+}
+
+auto lsco(stm32_fixture const& f) -> stm32::clock_output_port&
+{
+  auto* const port = dynamic_cast<stm32::clock_output_port*>(f.target->model("RCC"));
+  REQUIRE(port != nullptr);
+  return *port;
+}
+
+TEST_CASE("RM0456 11.4.22 LSCO: LSCOEN drives LSI or LSE onto PA2, the LSE only with LSESYSRDY")
+{
+  auto       f   = idle_fixture(lsi_board(31'550));
+  auto const en  = bit_of("RCC_BDCR", "LSCOEN");
+  auto const sel = bit_of("RCC_BDCR", "LSCOSEL");
+  auto const on  = bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSION");
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  write(f, "RCC_BDCR", en);
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  write(f, "RCC_BDCR", en | on);
+  idle_until(f, microseconds{300});
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 31'550);
+  CHECK(lsco(f).clock_hz("GPIOA", 3) == 0);
+  CHECK(lsco(f).clock_hz("GPIOB", 2) == 0);
+  write(f, "RCC_BDCR", en | on | sel);
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  write(f, "RCC_BDCR", en | on | sel | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{70});
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 32'768);
+  write(f, "RCC_BDCR", on | sel | bit_of("RCC_BDCR", "LSESYSEN"));
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  write(f, "RCC_BDCR", en | sel | bit_of("RCC_BDCR", "LSESYSEN"));
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+}
+
+TEST_CASE("a clock output watcher is called once per rate change at the change time, then removed")
+{
+  auto f = idle_fixture();
+  struct call
+  {
+    std::uint64_t hz;
+    std::uint64_t at;
+  };
+  std::vector<call> calls;
+  auto              sub = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime at) { calls.push_back({hz, at.ps}); });
+  auto other = lsco(f).watch_clock(
+      "GPIOA", 3, [&](std::uint64_t, popcorn::vtime) { calls.push_back({1, 1}); });
+  auto const en = bit_of("RCC_BDCR", "LSCOEN");
+  auto const on = bit_of("RCC_BDCR", "LSION");
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{300});
+  CHECK(calls.empty());
+  auto const first = f.target->virtual_clock().time().ps;
+  write(f, "RCC_BDCR", on | en);
+  CHECK(calls.empty());
+  write(f, "RCC_BDCR", on | en);
+  idle_until(f, microseconds{10});
+  REQUIRE(calls.size() == 1);
+  CHECK(calls[0].hz == 32'000);
+  CHECK(calls[0].at == first);
+  auto const second = f.target->virtual_clock().time().ps;
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{10});
+  REQUIRE(calls.size() == 2);
+  CHECK(calls[1].hz == 0);
+  CHECK(calls[1].at == second);
+  sub.reset();
+  write(f, "RCC_BDCR", on | en);
+  idle_until(f, microseconds{10});
+  CHECK(calls.size() == 2);
+  CHECK(other.active() == false);
+}
+
+TEST_CASE("a clock output watcher added after a change is posted does not get that change")
+{
+  auto       f  = idle_fixture();
+  auto const on = bit_of("RCC_BDCR", "LSION");
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{300});
+  std::vector<std::uint64_t> early;
+  std::vector<std::uint64_t> late;
+  auto                       first = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime) { early.push_back(hz); });
+  write(f, "RCC_BDCR", on | bit_of("RCC_BDCR", "LSCOEN"));
+  auto second = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime) { late.push_back(hz); });
+  idle_until(f, microseconds{10});
+  CHECK(early == std::vector<std::uint64_t>{32'000});
+  CHECK(late.empty());
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{10});
+  CHECK(late == std::vector<std::uint64_t>{0});
+}
+
+TEST_CASE("a power-on reset drops a pending clock output call and calls with the new rate")
+{
+  auto       f  = idle_fixture();
+  auto const en = bit_of("RCC_BDCR", "LSCOEN");
+  auto const on = bit_of("RCC_BDCR", "LSION");
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{300});
+  struct call
+  {
+    std::uint64_t hz;
+    std::uint64_t at;
+  };
+  std::vector<call> calls;
+  auto              sub = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime at) { calls.push_back({hz, at.ps}); });
+  write(f, "RCC_BDCR", on | en);
+  f.target->reset(reset_kind::power_on);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  auto const reset_at = f.target->virtual_clock().time().ps;
+  idle_until(f, microseconds{10});
+  REQUIRE(calls.size() == 1);
+  CHECK(calls[0].hz == 0);
+  CHECK(calls[0].at == reset_at);
+}
+
+TEST_CASE("a reset leaves no pending clock output note in the RCC state")
+{
+  auto const en    = bit_of("RCC_BDCR", "LSCOEN");
+  auto const on    = bit_of("RCC_BDCR", "LSION");
+  auto       saved = [&](bool pending) {
+    auto f = idle_fixture();
+    write(f, "RCC_BDCR", on);
+    idle_until(f, microseconds{300});
+    auto sub = lsco(f).watch_clock("GPIOA", 2, [](std::uint64_t, popcorn::vtime) {});
+    write(f, "RCC_BDCR", pending ? on | en : on);
+    f.target->reset(reset_kind::software);
+    std::vector<std::byte> bytes;
+    f.target->model("RCC")->save(bytes);
+    return bytes.size();
+  };
+  CHECK(saved(true) == saved(false));
+}
+
+TEST_CASE("a system reset calls the clock output watcher only when it changes the rate")
+{
+  auto                       f  = idle_fixture();
+  auto const                 en = bit_of("RCC_BDCR", "LSCOEN");
+  auto const                 on = bit_of("RCC_BDCR", "LSION");
+  std::vector<std::uint64_t> calls;
+  auto                       sub = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime) { calls.push_back(hz); });
+  write(f, "RCC_BDCR", on | en);
+  idle_until(f, microseconds{300});
+  REQUIRE(calls == std::vector<std::uint64_t>{32'000});
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  idle_until(f, microseconds{10});
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 32'000);
+  CHECK(calls == std::vector<std::uint64_t>{32'000});
+  write(f, "RCC_BDCR", en);
+  auto* const forced = dynamic_cast<stm32::lsi_source*>(f.target->model("RCC"));
+  REQUIRE(forced != nullptr);
+  forced->force_lsi();
+  idle_until(f, microseconds{300});
+  REQUIRE(calls == std::vector<std::uint64_t>{32'000, 0, 32'000});
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  idle_until(f, microseconds{10});
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 0);
+  CHECK(calls == std::vector<std::uint64_t>{32'000, 0, 32'000, 0});
+}
+
+TEST_CASE("the U5 LSCO rate from the LSE changes at LSESYSRDY, one call at the ready instant")
+{
+  auto       f = idle_fixture();
+  auto const base =
+      bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSCOEN") | bit_of("RCC_BDCR", "LSCOSEL");
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, microseconds{300});
+  struct call
+  {
+    std::uint64_t hz;
+    std::uint64_t at;
+  };
+  std::vector<call> calls;
+  auto              sub = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime at) { calls.push_back({hz, at.ps}); });
+  auto const written = f.target->virtual_clock().time().ps;
+  write(f, "RCC_BDCR", base | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{100});
+  REQUIRE(calls.size() == 1);
+  CHECK(calls[0].hz == 32'768);
+  CHECK(calls[0].at >= written + two_lse_periods_ps);
+  CHECK(calls[0].at < written + two_lse_periods_ps + 250'000);
+}
+
+TEST_CASE("a snapshot restores the clock output rate and a pending change call")
+{
+  auto       f  = idle_fixture();
+  auto const en = bit_of("RCC_BDCR", "LSCOEN");
+  auto const on = bit_of("RCC_BDCR", "LSION");
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{300});
+  std::vector<std::uint64_t> early;
+  auto                       first = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime) { early.push_back(hz); });
+  write(f, "RCC_BDCR", on | en);
+  auto const saved = f.target->snapshot();
+  idle_until(f, microseconds{10});
+  REQUIRE(early == std::vector<std::uint64_t>{32'000});
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{10});
+  REQUIRE(lsco(f).clock_hz("GPIOA", 2) == 0);
+  early.clear();
+  f.target->restore(saved);
+  CHECK(lsco(f).clock_hz("GPIOA", 2) == 32'000);
+  std::vector<std::uint64_t> calls;
+  auto                       sub = lsco(f).watch_clock(
+      "GPIOA", 2, [&](std::uint64_t hz, popcorn::vtime) { calls.push_back(hz); });
+  idle_until(f, microseconds{10});
+  CHECK(calls.empty());
+  CHECK(early == std::vector<std::uint64_t>{32'000});
+  write(f, "RCC_BDCR", on);
+  idle_until(f, microseconds{10});
+  CHECK(calls == std::vector<std::uint64_t>{0});
 }
 
 TEST_CASE("a ready delay pending across a core clock change ends at its virtual time")

@@ -187,6 +187,12 @@ constexpr auto names = std::to_array<named_field<rcc_role>>({
 
 static_assert(names_every_role(names));
 
+constexpr std::array<clock_output<signal>, 1> clock_outputs{
+    {
+     {"GPIOA", 2, "BDCR", "LSCOEN", "LSCOSEL", {lsi, lse}},
+     }
+};
+
 constexpr std::array<signal_mux<signal>, 0> signal_muxes{};
 
 constexpr std::array<divided_signal<signal>, 0> divided{};
@@ -332,6 +338,7 @@ struct l4_rcc
   static constexpr auto const& muxes             = l4::muxes;
   static constexpr auto const& signal_muxes      = l4::signal_muxes;
   static constexpr auto const& divided           = l4::divided;
+  static constexpr auto const& clock_outputs     = l4::clock_outputs;
   static constexpr auto const& internal_signals  = l4::internal_signals;
   static constexpr auto const& rtc_sources       = l4::rtc_sources;
   static constexpr auto const& timers            = l4::timers;

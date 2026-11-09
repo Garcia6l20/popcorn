@@ -114,6 +114,27 @@ template <typename Signal, typename Source> struct dependent_clock
   std::uint8_t cycles;
 };
 
+/**
+ * @brief A clock the RCC drives onto a pin: its GPIO pin, its enable bit and the select bit that
+ *        picks one of two sources.
+ * @tparam Signal Signal enumeration of the family.
+ */
+template <typename Signal> struct clock_output
+{
+  /** @brief GPIO port instance name. */
+  std::string_view port;
+  /** @brief Pin number. */
+  std::uint8_t pin;
+  /** @brief Register of the enable and select bits. */
+  std::string_view reg;
+  /** @brief Enable bit name. */
+  std::string_view enable;
+  /** @brief Select bit name, 0 picks the first source. */
+  std::string_view select;
+  /** @brief Sources, by select value. */
+  std::array<Signal, 2> inputs;
+};
+
 struct consumer
 {
   std::string_view instance;

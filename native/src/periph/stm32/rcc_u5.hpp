@@ -211,6 +211,12 @@ constexpr std::array<dependent_clock<signal, source>, 1> dependent_clocks{
      }
 };
 
+constexpr std::array<clock_output<signal>, 1> clock_outputs{
+    {
+     {"GPIOA", 2, "RCC_BDCR", "LSCOEN", "LSCOSEL", {lsi, lse_system}},
+     }
+};
+
 constexpr std::array<signal_mux<signal>, 1> signal_muxes{
     {
      {"RCC_CCIPR1", "ICLKSEL", {hsi48, pll2_q, pll1_q, msik}, iclk},
@@ -425,6 +431,7 @@ struct u5_rcc
   static constexpr auto const& signal_muxes     = u5::signal_muxes;
   static constexpr auto const& divided          = u5::divided;
   static constexpr auto const& dependent_clocks = u5::dependent_clocks;
+  static constexpr auto const& clock_outputs    = u5::clock_outputs;
   static constexpr auto const& internal_signals = u5::internal_signals;
   static constexpr auto const& rtc_sources      = u5::rtc_sources;
   static constexpr auto const& timers           = u5::timers;

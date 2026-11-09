@@ -200,6 +200,12 @@ constexpr auto names = std::to_array<named_field<rcc_role>>({
 
 static_assert(names_every_role(names));
 
+constexpr std::array<clock_output<signal>, 1> clock_outputs{
+    {
+     {"GPIOB", 2, "RCC_BDCR", "LSCOEN", "LSCOSEL", {lsi, lse}},
+     }
+};
+
 constexpr std::array<signal_mux<signal>, 1> signal_muxes{
     {
      {"RCC_CCIPR5", "CKPERSEL", {hsi, csi, hse, none}, per},
@@ -431,6 +437,7 @@ struct h5_rcc
   static constexpr auto const& muxes            = h5::muxes;
   static constexpr auto const& signal_muxes     = h5::signal_muxes;
   static constexpr auto const& divided          = h5::divided;
+  static constexpr auto const& clock_outputs    = h5::clock_outputs;
   static constexpr auto const& internal_signals = h5::internal_signals;
   static constexpr auto const& rtc_sources      = h5::rtc_sources;
   static constexpr auto const& timers           = h5::timers;

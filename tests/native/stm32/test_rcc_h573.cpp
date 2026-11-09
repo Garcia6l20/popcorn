@@ -12,6 +12,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 
 #include <doctest/doctest.h>
 
@@ -627,6 +628,25 @@ TEST_CASE("RM0481 11.8.40 to 11.8.44: UART9, SPI4, SPI5, SAI1 and USB kernel clo
   CHECK(clocks.hz("usb") == 0);
   idle_until(f, delay);
   CHECK(clocks.hz("usb") == 48 * mhz);
+}
+
+TEST_CASE("RM0481 11.4.11 LSCO: LSCOEN drives LSI or LSE onto PB2, DS14121 and DS14258 pin tables")
+{
+  auto        f   = idle_fixture();
+  auto* const out = dynamic_cast<stm32::clock_output_port*>(f.target->model("RCC"));
+  REQUIRE(out != nullptr);
+  set(f, "RCC_BDCR", "LSCOEN", 1);
+  CHECK(out->clock_hz("GPIOB", 2) == 0);
+  set(f, "RCC_BDCR", "LSION", 1);
+  set(f, "RCC_BDCR", "LSEON", 1);
+  idle_until(f, delay);
+  CHECK(out->clock_hz("GPIOB", 2) == 32'000);
+  CHECK(out->clock_hz("GPIOA", 2) == 0);
+  CHECK(out->clock_hz("GPIOB", 3) == 0);
+  set(f, "RCC_BDCR", "LSCOSEL", 1);
+  CHECK(out->clock_hz("GPIOB", 2) == 32'768);
+  set(f, "RCC_BDCR", "LSCOEN", 0);
+  CHECK(out->clock_hz("GPIOB", 2) == 0);
 }
 
 TEST_CASE("RccOptions lsi_hz sets the H5 LSI rate, DS14121 Table 48 bounds it")

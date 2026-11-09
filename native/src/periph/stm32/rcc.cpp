@@ -17,6 +17,7 @@
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -26,6 +27,7 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <functional>
 #include <memory>
 #include <meta>
 #include <optional>
@@ -51,6 +53,18 @@ inline constexpr std::size_t dependent_count = [] {
   if constexpr(requires { Traits::dependent_clocks; })
   {
     return Traits::dependent_clocks.size();
+  }
+  else
+  {
+    return std::size_t{};
+  }
+}();
+
+template <typename Traits>
+inline constexpr std::size_t output_count = [] {
+  if constexpr(requires { Traits::clock_outputs; })
+  {
+    return Traits::clock_outputs.size();
   }
   else
   {
@@ -155,6 +169,30 @@ template <typename Traits> consteval auto source_maps_agree() -> bool
   return true;
 }
 
+struct output_note
+{
+  std::uint64_t id{};
+  std::uint64_t upto{};
+  std::uint64_t at_ps{};
+  std::uint64_t hz{};
+  std::uint8_t  output{};
+
+  friend auto operator==(output_note const&, output_note const&) -> bool = default;
+};
+
+struct output_watch
+{
+  std::uint64_t                                                        id{};
+  std::size_t                                                          output{};
+  std::shared_ptr<std::move_only_function<void(std::uint64_t, vtime)>> call;
+};
+
+struct output_table
+{
+  std::uint64_t             next{};
+  std::vector<output_watch> entries;
+};
+
 template <typename Traits> struct rcc_state
 {
   std::array<std::uint32_t, event_count<Traits>>      generation{};
@@ -164,6 +202,8 @@ template <typename Traits> struct rcc_state
   std::uint32_t                                       hsi_divider{};
   std::uint8_t                                        divider_clearing{};
   std::uint64_t                                       divider_set_ps{};
+  std::vector<output_note>                            notes;
+  std::uint64_t                                       next_note{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -184,6 +224,12 @@ struct dependent_fields
 
 template <typename Traits>
 using dependent_array = std::array<dependent_fields, dependent_count<Traits>>;
+
+struct output_fields
+{
+  field_ref enable;
+  field_ref select;
+};
 
 struct pll_fields
 {
@@ -306,6 +352,14 @@ template <typename Signal> struct timer
  *        clock: its enable and ready bits, its source oscillator and its delay in source periods.
  *        The STM32U5 `MSIPLLEN` reads 0 while `LSERDY` is 0 and clears with the LSE, RM0456 11.8.1.
  *
+ *        The low-speed clock output, RM0456 11.4.22, RM0351 6.2.17 and RM0481 11.4.11: `LSCOEN`
+ *        drives LSI, or LSE with `LSCOSEL`, onto PA2 on the STM32U5 and STM32L4 and PB2 on the
+ *        STM32H5, DS13086, DS10198, DS10199 and DS14121 pin tables. The STM32U5 LSE source is the
+ *        `lse_system` signal, so it needs `LSESYSRDY`. The rate is 0 while the source is off or
+ *        `LSCOEN` is clear, and does not depend on the pin's GPIO mode, since the manuals leave
+ *        the pin in its reset state. `clock_output_port::clock_hz()` reads the rate and
+ *        `watch_clock()` calls a watcher once per rate change at the change time.
+ *
  *        STM32L1, RM0038 section 6, through `l1_rcc`: one PLL in RCC_CFGR, whose PLLSRC, PLLMUL
  *        and PLLDIV hold while it is on or ready, RM0038 6.3.3, the ready flags and enables in
  *        RCC_CIR, the LSI, the LSE, the RTC clock and the reset flags in RCC_CSR. CSSON is set and
@@ -329,6 +383,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
                         public lsi_source,
                         public hsi16_source,
                         public kernel_gate,
+                        public clock_output_port,
                         public trustzone_aware
 {
   using base   = dispatch_model<rcc_model<Traits>, rcc_state<Traits>>;
@@ -391,6 +446,12 @@ public:
   void               force_lsi() override;
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
+  [[nodiscard]] auto clock_hz(std::string_view port, std::uint8_t pin) const
+      -> std::uint64_t override;
+  [[nodiscard]] auto watch_clock(
+      std::string_view                                          port,
+      std::uint8_t                                              pin,
+      std::move_only_function<void(std::uint64_t hz, vtime at)> watcher) -> subscription override;
 
   void               cr_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto divider_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t;
@@ -444,17 +505,23 @@ private:
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void follow_dependents();
-  void publish(bool notify);
-  void load(std::span<std::byte const> in) override;
-  void refuse_stopped_clock();
-  void enables_written(std::uint32_t word, std::uint32_t old, std::uint32_t now);
-  void drive_enables(bool from_reset_values);
+  void follow_outputs(std::array<std::uint64_t, signal_count> const& hz, bool notify);
+  void post_output(std::size_t index, std::uint64_t rate);
+  [[nodiscard]] auto output_index(std::string_view port, std::uint8_t pin) const -> std::size_t;
+  void               publish(bool notify);
+  void               load(std::span<std::byte const> in) override;
+  void               refuse_stopped_clock();
+  void               enables_written(std::uint32_t word, std::uint32_t old, std::uint32_t now);
+  void               drive_enables(bool from_reset_values);
 
-  bool                                                 core_stop_logged_{};
-  rcc_options                                          options_;
-  register_file&                                       regs_;
-  std::array<oscillator, source_count>                 osc_{};
-  dependent_array<Traits>                              dependents_{};
+  bool                                            core_stop_logged_{};
+  rcc_options                                     options_;
+  register_file&                                  regs_;
+  std::array<oscillator, source_count>            osc_{};
+  dependent_array<Traits>                         dependents_{};
+  std::array<output_fields, output_count<Traits>> outputs_{};
+  std::array<std::uint64_t, output_count<Traits>> output_hz_{};
+  std::shared_ptr<output_table> output_watchers_ = std::make_shared<output_table>();
   std::array<pll_fields, Traits::pll_nodes.size()>     pll_{};
   field_table<rcc_role>                                names_;
   std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
@@ -813,6 +880,14 @@ rcc_model<Traits>::rcc_model(
     {
       dependents_[index] = {
           .enable = field(names.reg, names.enable), .ready = field(names.reg, names.ready)};
+    }
+  }
+  if constexpr(requires { Traits::clock_outputs; })
+  {
+    for(auto const& [index, names] : std::views::enumerate(Traits::clock_outputs))
+    {
+      outputs_[index] = {
+          .enable = field(names.reg, names.enable), .select = field(names.reg, names.select)};
     }
   }
   if constexpr(requires { Traits::lse_locked_controls; })
@@ -1336,6 +1411,34 @@ auto rcc_model<Traits>::flags_written(std::uint32_t old, std::uint32_t now) cons
 template <typename Traits>
 void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == event_count<Traits>)
+  {
+    auto const found = std::ranges::find(state_.notes, payload, &output_note::id);
+    if(found == state_.notes.end())
+    {
+      return;
+    }
+    auto const note = *found;
+    state_.notes.erase(found);
+    std::vector<std::uint64_t> ids;
+    for(auto const& entry : output_watchers_->entries)
+    {
+      if(entry.output == note.output and entry.id < note.upto)
+      {
+        ids.push_back(entry.id);
+      }
+    }
+    for(auto const id : ids)
+    {
+      auto const entry = std::ranges::find(output_watchers_->entries, id, &output_watch::id);
+      if(entry != output_watchers_->entries.end())
+      {
+        auto const call = entry->call;
+        (*call)(note.hz, vtime{note.at_ps});
+      }
+    }
+    return;
+  }
   if(kind >= event_count<Traits>
      or payload != state_.generation[kind]
      or (state_.pending >> kind & 1u) == 0)
@@ -1498,6 +1601,96 @@ auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
   return hz;
 }
 
+template <typename Traits>
+void rcc_model<Traits>::follow_outputs(
+    std::array<std::uint64_t, signal_count> const& hz,
+    bool                                           notify)
+{
+  if constexpr(output_count<Traits> != 0)
+  {
+    for(auto const& [index, names] : std::views::enumerate(Traits::clock_outputs))
+    {
+      auto const& fields = outputs_[index];
+      auto const  from   = names.inputs[get(regs_, fields.select) & 1u];
+      auto const  rate   = get(regs_, fields.enable) != 0 ? hz[std::to_underlying(from)] : 0;
+      if(std::exchange(output_hz_[index], rate) == rate or not notify)
+      {
+        continue;
+      }
+      post_output(static_cast<std::size_t>(index), rate);
+    }
+  }
+}
+
+template <typename Traits>
+void rcc_model<Traits>::post_output(std::size_t index, std::uint64_t rate)
+{
+  if(std::ranges::none_of(output_watchers_->entries, [&](output_watch const& entry) {
+       return entry.output == index;
+     }))
+  {
+    return;
+  }
+  auto const at = ctx_.clock.time().ps;
+  auto const id = state_.next_note++;
+  state_.notes.push_back(
+      {.id     = id,
+       .upto   = output_watchers_->next,
+       .at_ps  = at,
+       .hz     = rate,
+       .output = static_cast<std::uint8_t>(index)});
+  ctx_.events.schedule_at(vtime{at}, event_count<Traits>, id, core::host_lane, ctx_.clock);
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::output_index(std::string_view port, std::uint8_t pin) const -> std::size_t
+{
+  if constexpr(output_count<Traits> != 0)
+  {
+    for(auto const& [index, names] : std::views::enumerate(Traits::clock_outputs))
+    {
+      if(names.port == port and names.pin == pin)
+      {
+        return static_cast<std::size_t>(index);
+      }
+    }
+  }
+  return output_count<Traits>;
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::clock_hz(std::string_view port, std::uint8_t pin) const -> std::uint64_t
+{
+  auto const index = output_index(port, pin);
+  return index < output_count<Traits> ? output_hz_[index] : 0;
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::watch_clock(
+    std::string_view                                          port,
+    std::uint8_t                                              pin,
+    std::move_only_function<void(std::uint64_t hz, vtime at)> watcher) -> subscription
+{
+  auto const index = output_index(port, pin);
+  if(index >= output_count<Traits>)
+  {
+    return subscription{};
+  }
+  auto const id = output_watchers_->next++;
+  output_watchers_->entries.push_back(
+      output_watch{
+          .id     = id,
+          .output = index,
+          .call   = std::make_shared<std::move_only_function<void(std::uint64_t, vtime)>>(
+              std::move(watcher))});
+  return subscription{[table = std::weak_ptr<output_table>{output_watchers_}, id] {
+    if(auto const live = table.lock())
+    {
+      std::erase_if(live->entries, [id](auto const& entry) { return entry.id == id; });
+    }
+  }};
+}
+
 template <typename Traits> void rcc_model<Traits>::publish(bool notify)
 {
   auto const hz      = rates();
@@ -1533,6 +1726,7 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
     auto const multiple = Traits::timer_multiplier(inputs, entry.prescaler);
     set(entry.domain, get(regs_, entry.enable) != 0 ? bus * multiple : 0);
   }
+  follow_outputs(hz, notify);
   auto const core = hz[std::to_underlying(signal::hclk)];
   if(not options_.fixed_core_clock and core == 0)
   {
@@ -1556,6 +1750,7 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
 
 template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, reset_kind kind)
 {
+  auto const before_hz  = output_hz_;
   auto const power      = std::ranges::contains(Traits::power_resets, kind);
   auto const kept_bdcr  = regs.peek(bdcr_.offset) & backup_mask_;
   auto       kept_words = kept_
@@ -1601,7 +1796,8 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
   {
     ++generation;
   }
-  state_.pending    = 0;
+  state_.pending = 0;
+  state_.notes.clear();
   state_.lsi_forced = 0;
   state_.fraction   = {};
   if constexpr(Traits::hsi_divider)
@@ -1623,6 +1819,13 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
   }
   follow_dependents();
   publish(false);
+  for(std::size_t index = 0; index < output_count<Traits>; ++index)
+  {
+    if(output_hz_[index] != before_hz[index])
+    {
+      post_output(index, output_hz_[index]);
+    }
+  }
   drive_enables(false);
 }
 
@@ -1808,6 +2011,11 @@ template <typename Traits> void rcc_model<Traits>::force_lsi()
 template <typename Traits> void rcc_model<Traits>::load(std::span<std::byte const> in)
 {
   base::load(in);
+  for(auto& note : state_.notes)
+  {
+    note.upto = std::min(note.upto, output_watchers_->next);
+  }
+  follow_outputs(rates(), false);
   kernel_enables_.clear();
   for(auto const& entry : kernels_)
   {

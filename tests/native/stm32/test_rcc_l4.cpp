@@ -7,6 +7,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 
 #include <doctest/doctest.h>
 
@@ -326,6 +327,25 @@ TEST_CASE("RM0351 6.4.1: CSSON is set only and reads back on the bus")
   CHECK((r.read("CR") & 1u << 19) != 0);
   r.set("CR", "CSSON", 0);
   CHECK(r.field("CR", "CSSON") == 1);
+}
+
+TEST_CASE("RM0351 6.2.17 LSCO: LSCOEN drives LSI or LSE onto PA2, DS10198 and DS10199 pin tables")
+{
+  rig const   r{31'550};
+  auto* const out = dynamic_cast<stm32::clock_output_port*>(r.f.target->model("RCC"));
+  REQUIRE(out != nullptr);
+  r.set("BDCR", "LSCOEN", 1);
+  CHECK(out->clock_hz("GPIOA", 2) == 0);
+  r.set("CSR", "LSION", 1);
+  r.set("BDCR", "LSEON", 1);
+  r.idle();
+  CHECK(out->clock_hz("GPIOA", 2) == 31'550);
+  CHECK(out->clock_hz("GPIOB", 2) == 0);
+  CHECK(out->clock_hz("GPIOA", 3) == 0);
+  r.set("BDCR", "LSCOSEL", 1);
+  CHECK(out->clock_hz("GPIOA", 2) == 32'768);
+  r.set("BDCR", "LSCOEN", 0);
+  CHECK(out->clock_hz("GPIOA", 2) == 0);
 }
 
 TEST_CASE("RccOptions lsi_hz sets the L4 LSI rate, DS10198 Table 61 bounds it")

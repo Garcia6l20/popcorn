@@ -8,6 +8,7 @@
 
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
+#include <popcorn/periph/stm32/clock_output.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/rng.hpp>
 #include <popcorn/periph/uart.hpp>

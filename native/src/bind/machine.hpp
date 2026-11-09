@@ -1400,6 +1400,35 @@ public:
           std::uint64_t      at_ps);
 
   /**
+   * @brief Frequency the RCC drives onto a GPIO pin, see periph::stm32::clock_output_port.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @return The frequency in Hz, 0 when no clock output is enabled on the pin.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded.
+   * @throws model_error when the peripheral's model is not a GPIO port or the machine has no RCC
+   *         with clock outputs.
+   */
+  [[= py::doc{"Frequency in Hz the RCC drives onto a GPIO pin, 0 when none."}]] [[nodiscard]] auto
+      gpio_clock(std::string const& peripheral, std::uint8_t pin) const -> std::uint64_t;
+
+  /**
+   * @brief Watches the frequency the RCC drives onto a GPIO pin, see
+   *        periph::stm32::clock_output_port::watch_clock.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, a bonded pin of the port.
+   * @param relay Called with the new frequency in Hz and the change time in picoseconds on the
+   *        machine's thread with the GIL, the callable a `Relay`.
+   * @throws config_error when the port is unknown or the pin out of range or not bonded.
+   * @throws model_error when the peripheral's model is not a GPIO port or the machine has no RCC
+   *         with clock outputs.
+   */
+  [[= py::doc{"Watch the frequency the RCC drives onto a GPIO pin."}]] [[nodiscard]] auto
+      gpio_clock_watch(
+          std::string const&     peripheral,
+          std::uint8_t           pin,
+          reflex::py::nb::object relay) -> pin_watch;
+
+  /**
    * @brief Level of a GPIO pin as its input data register reads it.
    * @param peripheral GPIO port name.
    * @param pin Pin number, 0 to 15.
@@ -1854,6 +1883,7 @@ private:
 
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
+  [[nodiscard]] auto clock_outputs() const -> periph::stm32::clock_output_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
   [[nodiscard]] auto
       analog(std::string const& peripheral, periph::stm32::analog_channel channel) const
