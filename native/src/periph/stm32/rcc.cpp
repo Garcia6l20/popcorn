@@ -273,6 +273,13 @@ template <typename Signal> struct timer
   field_ref          enable;
 };
 
+template <typename Signal> struct bus_gate
+{
+  core::clock_domain domain;
+  Signal             bus;
+  field_ref          enable;
+};
+
 /**
  * @brief RCC of the STM32U5, RM0456 section 11, and of the STM32H5, RM0481 section 11. Ready flags
  *        follow their enables after the board's ready delay. SWS follows SW in the write that
@@ -541,6 +548,7 @@ private:
   std::vector<std::string>                             reset_registers_;
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer<signal>>                           timers_;
+  std::vector<bus_gate<signal>>                        bus_gates_;
   std::optional<reg_ref>                               secure_;
   reg_ref                                              privilege_;
   field_ref                                            secure_privileged_;
@@ -989,6 +997,16 @@ rcc_model<Traits>::rcc_model(
            .bus    = entry.bus,
            .prescaler =
                std::ranges::find(Traits::buses, entry.bus, &bus_node<signal>::out)->prescaler,
+           .enable = enable_field(entry.enable)});
+    }
+  }
+  for(auto const& entry : Traits::bus_gated)
+  {
+    if(present(entry.instance))
+    {
+      bus_gates_.push_back(
+          {.domain = clock.domain(lower(entry.instance)),
+           .bus    = entry.bus,
            .enable = enable_field(entry.enable)});
     }
   }
@@ -1725,6 +1743,10 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
     auto const bus      = hz[std::to_underlying(entry.bus)];
     auto const multiple = Traits::timer_multiplier(inputs, entry.prescaler);
     set(entry.domain, get(regs_, entry.enable) != 0 ? bus * multiple : 0);
+  }
+  for(auto const& entry : bus_gates_)
+  {
+    set(entry.domain, get(regs_, entry.enable) != 0 ? hz[std::to_underlying(entry.bus)] : 0);
   }
   follow_outputs(hz, notify);
   auto const core = hz[std::to_underlying(signal::hclk)];

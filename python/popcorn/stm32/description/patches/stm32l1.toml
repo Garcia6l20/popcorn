@@ -243,6 +243,33 @@ rename = { WWDRST = "WWDGRST" }
 source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: bit 11 is WWDGRST. The four SVDs spell it WWDRST"
 
 [[fields]]
+instances = ["WWDG"]
+registers = ["CFR"]
+fields = ["WDGTB0", "WDGTB1"]
+drop = true
+source = "RM0038 Rev 18, 22.6.2 WWDG_CFR: WDGTB[1:0] is one two-bit field in bits 8:7. The four SVDs split it into WDGTB0 and WDGTB1"
+
+[[fields]]
+instances = ["WWDG"]
+registers = ["CFR"]
+add = { name = "WDGTB", lsb = 7, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 22.6.2 WWDG_CFR: WDGTB[1:0] in bits 8:7, reset 0. The four SVDs split it into WDGTB0 and WDGTB1"
+
+[[fields]]
+instances = ["WWDG"]
+registers = ["CR"]
+fields = ["WDGA"]
+acc = "read_write"
+source = "RM0038 Rev 18, 22.6.1 WWDG_CR: WDGA is rs, set by software and read back. The four SVDs give it write-only"
+
+[[fields]]
+instances = ["WWDG"]
+registers = ["CFR"]
+fields = ["EWI"]
+acc = "read_write"
+source = "RM0038 Rev 18, 22.6.2 WWDG_CFR: EWI is rs, set by software and read back. The four SVDs give it write-only"
+
+[[fields]]
 instances = ["RCC"]
 registers = ["AHBENR"]
 rename = { GPIOPAEN = "GPIOAEN", GPIOPBEN = "GPIOBEN", GPIOPCEN = "GPIOCEN", GPIOPDEN = "GPIODEN", GPIOPEEN = "GPIOEEN", GPIOPFEN = "GPIOFEN", GPIOPGEN = "GPIOGEN", GPIOPHEN = "GPIOHEN" }

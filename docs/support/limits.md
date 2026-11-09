@@ -108,7 +108,7 @@ the STM32L486, and no STM32L485 board has been read back.
 
 ## STM32L4 instances without a model
 
-QUADSPI, DFSDM1, LCD, CAN1, COMP, OPAMP, TSC, SWPMI1, SDMMC1, FMC, FIREWALL, VREFBUF and WWDG
+QUADSPI, DFSDM1, LCD, CAN1, COMP, OPAMP, TSC, SWPMI1, SDMMC1, FMC, FIREWALL and VREFBUF
 keep plain register storage, as does the AES of the STM32L485 and STM32L486. The generic rules
 of "Peripherals without a model" apply to them. The ES0250 items of these blocks, 2.3, 2.5, 2.6,
 2.7, 2.10 to 2.14, 2.16, 2.25 and 2.26, describe silicon behaviour a storage block does not
@@ -2323,3 +2323,27 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   corrupted when ABREN is cleared, are analog and auto-baud effects the frame engine leaves out.
   ES0250 2.21.7, NF with ONEBIT: the model samples once with ONEBIT and sets NF only for a host
   frame tagged with noise.
+
+## WWDG
+
+Source: [wwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/wwdg.cpp)
+
+- The STM32L1, RM0038 22, and the STM32L4, RM0351 37, share one model. The counter derives from
+  the `wwdg` clock domain of the RCC, PCLK1 while WWDGEN is set. A gated clock freezes the counter
+  and the divider.
+- The divider by 4096 and 2^WDGTB runs free also with WDGA 0, RM0351 37.3.3. A `CR` write
+  reloads T and leaves the divider phase alone. A PCLK1 rate change keeps the partial division,
+  less than one PCLK1 cycle of phase is dropped.
+- A `CR` write resets when the counter before the write is above W, RM0351 37.3 and Figure 387.
+  The written T plays no part. T6 clear in a write with WDGA 1 resets at once.
+- WDGA and EWI are set-only until a reset, RM0351 37.5.1 and 37.5.2. `CR` reads return the counter.
+- EWIF sets when the counter reaches 0x40 with WDGA 1, also with EWI clear, RM0351 37.5.3, and
+  clears when written 0.
+- Inferred, no manual states them: the divider starts at 0 at a reset and at a clock enable, a
+  WDGTB change keeps the divider count and the counter value, a `CR` write with T 0x40 sets no
+  EWIF, EWIF sets only with WDGA 1 (RM0351 37.2 conditions the interrupt on WDGA, 37.5.3 says
+  nothing), and the window compare applies to the write that sets WDGA.
+- The counter runs while the core is halted in a debug session on the STM32L1 and STM32L4.
+- The STM32L1 `APB1RSTR.WWDGRST` returns the registers to their reset values and restarts the
+  divider. On the STM32L4 only a system reset resets the WWDG.
+- ES0125, ES0224, ES0240, ES0241, ES0242, ES0578 and ES0250 name no WWDG item.

@@ -140,6 +140,8 @@ constexpr std::array<timer_names<signal>, 14> timers{
      }
 };
 
+constexpr std::array<timer_names<signal>, 1> bus_gated{{{"WWDG", "WWDGEN", pclk1}}};
+
 constexpr std::array<std::string_view, 7> enable_registers{
     "RCC_AHB1ENR",  "RCC_AHB2ENR", "RCC_AHB4ENR", "RCC_APB1LENR",
     "RCC_APB1HENR", "RCC_APB2ENR", "RCC_APB3ENR"};
@@ -441,6 +443,7 @@ struct h5_rcc
   static constexpr auto const& internal_signals = h5::internal_signals;
   static constexpr auto const& rtc_sources      = h5::rtc_sources;
   static constexpr auto const& timers           = h5::timers;
+  static constexpr auto const& bus_gated        = h5::bus_gated;
   static constexpr auto const& enable_registers = h5::enable_registers;
   static constexpr auto const& pll_inputs       = h5::pll_inputs;
   static constexpr auto const& pll_sources      = h5::pll_sources;

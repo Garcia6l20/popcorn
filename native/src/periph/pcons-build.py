@@ -23,6 +23,7 @@ stm32 = [
         "uart_wire.cpp",
         "tim.cpp",
         "iwdg.cpp",
+        "wwdg.cpp",
         "lptim.cpp",
         "rtc.cpp",
         "rtc_classic.cpp",

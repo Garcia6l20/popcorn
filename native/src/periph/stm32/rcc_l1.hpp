@@ -97,6 +97,8 @@ constexpr std::array<timer_names<signal>, 9> timers{
      }
 };
 
+constexpr std::array<timer_names<signal>, 1> bus_gated{{{"WWDG", "WWDGEN", pclk1}}};
+
 constexpr std::array<std::string_view, 3> enable_registers{"AHBENR", "APB2ENR", "APB1ENR"};
 
 constexpr std::array<oscillator_names<signal>, 6> oscillators{
@@ -234,6 +236,7 @@ struct l1_rcc
   static constexpr auto const& internal_signals  = l1::internal_signals;
   static constexpr auto const& rtc_sources       = l1::rtc_sources;
   static constexpr auto const& timers            = l1::timers;
+  static constexpr auto const& bus_gated         = l1::bus_gated;
   static constexpr auto const& enable_registers  = l1::enable_registers;
   static constexpr auto const& pll_inputs        = l1::pll_inputs;
   static constexpr auto const& pll_sources       = l1::pll_sources;

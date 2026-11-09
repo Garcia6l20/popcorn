@@ -513,6 +513,19 @@ TEST_CASE("RM0038 6.3.4: LSECSSC clears LSECSSF")
   CHECK(f.field("RCC", "CIR", "LSECSSF") == 0);
 }
 
+TEST_CASE("RM0038 6.3.8: the wwdg domain is PCLK1 while WWDGEN is set and 0 otherwise")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  CHECK(clocks.hz("wwdg") == 0);
+  set(f, "APB1ENR", "WWDGEN", 1);
+  CHECK(clocks.hz("wwdg") == 2'097'152);
+  set(f, "CFGR", "PPRE1", 5);
+  CHECK(clocks.hz("wwdg") == 2'097'152 / 4);
+  set(f, "APB1ENR", "WWDGEN", 0);
+  CHECK(clocks.hz("wwdg") == 0);
+}
+
 TEST_CASE("RM0038 6.2: a timer runs at twice its APB clock when the APB divides")
 {
   auto        f      = idle_fixture();

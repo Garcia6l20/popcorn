@@ -63,14 +63,15 @@ what each model leaves out.
 | DAC | DAC1 | two channels, waves, sample and hold, the pad and the on-chip ADC input |
 | RTC | RTC | calendar, wakeup timer, alarms, timestamps, tampers, backup registers |
 | IWDG, CRC | IWDG, CRC | window and hardware start, fixed polynomial CRC |
+| WWDG | WWDG | window, early wake-up interrupt |
 | SAI | SAI1, SAI2 | frames to the board's audio endpoints |
 | RNG | RNG | one word per phase from a seed or a queue, clock and seed errors |
 | USB | OTG_FS | full-speed device with its packet memory |
 | DBGMCU | DBGMCU | `DBGMCU_IDCODE` reads DIE415 |
 
 The model column of a part page marks the instances without a model as `none`. On the STM32L4
-these are CAN, COMP, DFSDM, FIREWALL, FMC, LCD, OPAMP, QUADSPI, SDMMC, SWPMI, TSC, VREFBUF,
-WWDG and the AES. They keep plain register storage. A firmware access logs one `model_warning`
+these are CAN, COMP, DFSDM, FIREWALL, FMC, LCD, OPAMP, QUADSPI, SDMMC, SWPMI, TSC, VREFBUF and
+the AES. They keep plain register storage. A firmware access logs one `model_warning`
 per register and raises `ModelError` under `strict`.
 
 A timer whose description has no `TIMx_SMCR`, TIM6, TIM7, TIM16 and TIM17, serves the reserved

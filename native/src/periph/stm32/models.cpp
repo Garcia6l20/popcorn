@@ -27,6 +27,7 @@
 #include "tim_rows.hpp"
 #include "usart_rows.hpp"
 #include "usb_rows.hpp"
+#include "wwdg_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
@@ -61,7 +62,7 @@ auto builtins() -> std::span<builtin const>
          exti_rows(),  syscfg_rows(), dma_classic_rows(), gpdma_rows(),  lptim_rows(),  tim_rows(),
          usart_rows(), i2c_rows(),    spi_rows(),         usb_rows(),    adc_rows(),    dac_rows(),
          iwdg_rows(),  rtc_rows(),    sai_rows(),         mdf_rows(),    dbgmcu_rows(), crc_rows(),
-         hash_rows(),  rng_rows(),    gtzc_rows(),        sbs_rows()})
+         hash_rows(),  rng_rows(),    gtzc_rows(),        sbs_rows(),    wwdg_rows()})
     {
       all.insert(all.end(), rows.begin(), rows.end());
     }

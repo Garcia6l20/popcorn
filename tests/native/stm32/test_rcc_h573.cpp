@@ -538,6 +538,19 @@ TEST_CASE("a snapshot taken while HSIDIVF is clear restores the pending divider 
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
 }
 
+TEST_CASE("RM0481 11.8.4: the wwdg domain is PCLK1 while WWDGEN is set and 0 otherwise")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  CHECK(clocks.hz("wwdg") == 0);
+  set(f, "RCC_APB1LENR", "WWDGEN", 1);
+  CHECK(clocks.hz("wwdg") == 32 * mhz);
+  set(f, "RCC_CFGR2", "PPRE1", 6);
+  CHECK(clocks.hz("wwdg") == 4 * mhz);
+  set(f, "RCC_APB1LENR", "WWDGEN", 0);
+  CHECK(clocks.hz("wwdg") == 0);
+}
+
 TEST_CASE("RM0481 11.8.5 TIMPRE: timer clocks at 1, 2 or 4 times the APB clock")
 {
   struct row

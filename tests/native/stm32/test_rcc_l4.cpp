@@ -405,6 +405,18 @@ TEST_CASE("RM0351 6.4.3: HPRE divides SYSCLK into HCLK and the core clock, PPRE1
   CHECK(r.hz("pclk2") == mhz / 8);
 }
 
+TEST_CASE("RM0351 6.4.19: the wwdg domain is PCLK1 while WWDGEN is set and 0 otherwise")
+{
+  rig const r;
+  CHECK(r.hz("wwdg") == 0);
+  r.set("APB1ENR1", "WWDGEN", 1);
+  CHECK(r.hz("wwdg") == 4 * mhz);
+  r.set("CFGR", "PPRE1", 5);
+  CHECK(r.hz("wwdg") == mhz);
+  r.set("APB1ENR1", "WWDGEN", 0);
+  CHECK(r.hz("wwdg") == 0);
+}
+
 TEST_CASE("RM0351 6.2.15: a timer runs at its APB clock, twice it when the APB divides")
 {
   rig const r;

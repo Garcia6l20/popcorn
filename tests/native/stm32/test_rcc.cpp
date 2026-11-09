@@ -570,6 +570,19 @@ TEST_CASE("timer domains run at twice their APB clock when the APB prescaler div
   CHECK(clocks.hz("tim2") == 2 * mhz);
 }
 
+TEST_CASE("the wwdg domain is PCLK1 while WWDGEN is set and 0 otherwise")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  CHECK(clocks.hz("wwdg") == 0);
+  write(f, "RCC_APB1ENR1", bit_of("RCC_APB1ENR1", "WWDGEN"));
+  CHECK(clocks.hz("wwdg") == 4 * mhz);
+  write(f, "RCC_CFGR2", peek(f, "RCC_CFGR2") | (4u << 4));
+  CHECK(clocks.hz("wwdg") == 2 * mhz);
+  write(f, "RCC_APB1ENR1", 0);
+  CHECK(clocks.hz("wwdg") == 0);
+}
+
 TEST_CASE("PLL1 P, Q and R each divide the VCO by their own divider and follow their own enable")
 {
   auto  f      = idle_fixture();
