@@ -1611,10 +1611,11 @@ class System:
 
         Each member's `VirtualLoop` is emptied ahead of every member's state, and each
         `UartDevice.restore` runs once the whole system is restored, so its stamps count from the
-        restored clock. A `DeviceBoard.watch_pin` watch stays. An error from those raises once the
-        restore has finished, with nothing rolled back. The snapshot of each member taken ahead of
-        any change holds each device's `snapshot`, so a device that refuses raises here, nothing
-        changed: such a system's restore needs that device's override, a quiet snapshot's too.
+        restored clock. A `DeviceBoard.watch_pin` or `watch_pin_clock` watch stays. An error from
+        those raises once the restore has finished, with nothing rolled back. The snapshot of each
+        member taken ahead of any change holds each device's `snapshot`, so a device that refuses
+        raises here, nothing changed: such a system's restore needs that device's override, a
+        quiet snapshot's too.
 
         Raises:
             TypeError: `snapshot` is no SystemSnapshot.

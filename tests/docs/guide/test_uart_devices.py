@@ -10,6 +10,7 @@ from popcorn.board import (
     AudioFrame,
     DeviceAudio,
     LineFormat,
+    RccOptions,
     UartDevice,
     UartError,
 )
@@ -324,6 +325,35 @@ async def test_a_device_watches_and_drives_pins() -> None:
     assert [level for level, _ in presser.led] == [True]
     assert machine.var("presses").value == 1
     # --8<-- [end:pins]
+
+
+async def test_a_device_reads_the_clock_the_mcu_drives_on_a_pin() -> None:
+    # --8<-- [start:pin-clock]
+    class LpoChip(UartDevice):
+        @override
+        def on_attach(self) -> None:
+            self.lpo: list[tuple[int, VirtualTime]] = []
+            self.board.watch_pin_clock("PA2", self.on_lpo)
+
+        def on_lpo(self, hz: int, at: VirtualTime) -> None:
+            self.lpo.append((hz, at))
+
+    chip = LpoChip()
+    machine = popcorn.Machine(
+        mcu("STM32U575QGIx"),
+        image=popcorn.Image.elf(BUTTON),
+        devices={"USART1": [chip]},
+        rcc=RccOptions(lsi_hz=31_550),
+    )
+    machine.reset()
+    await machine.run(until="main", budget=1_000_000)
+    machine.periph.RCC.RCC_BDCR.LSION = 1
+    machine.periph.RCC.RCC_BDCR.LSCOEN = 1
+    await machine.run(for_=ms(1))
+
+    assert chip.board.pin_clock("PA2") == 31_550
+    assert [hz for hz, _ in chip.lpo] == [31_550]
+    # --8<-- [end:pin-clock]
 
 
 # --8<-- [start:codec]

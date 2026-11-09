@@ -41,12 +41,14 @@ public:
 
   /**
    * @brief Adds a watcher called once for every change of the frequency on a pin, with the new
-   *        frequency and the time of the change. The call is a model event on core::host_lane at
-   *        that time, so it runs on the machine's thread at the next event dispatch, never inside
-   *        the write that changed the clock. A machine reset drops the calls still pending, then
-   *        calls once with the new frequency at the reset time when it changed the frequency. A
-   *        restore changes the frequency with no call and brings back the calls its snapshot
-   *        holds. A pin that no clock output uses never calls.
+   *        frequency and the time of the change, the first instruction boundary at or after it: a
+   *        register write stamps at the end of its block, a source still starting at the boundary
+   *        after its ready instant. The call is a model event on core::host_lane at that time, so
+   *        it runs on the machine's thread at the next event dispatch, never inside the write that
+   *        changed the clock. A machine reset drops the calls still pending, then calls once with
+   *        the new frequency at the reset time when it changed the frequency. A restore changes
+   *        the frequency with no call and brings back the calls its snapshot holds. A pin that no
+   *        clock output uses never calls.
    * @param port GPIO port instance name.
    * @param pin Pin number.
    * @param watcher Called with the new frequency in Hz and the change time, machine time since

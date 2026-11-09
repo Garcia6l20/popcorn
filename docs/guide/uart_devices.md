@@ -183,6 +183,30 @@ outside the MCU, `pin_level` and `pin_mode` read it:
 - A watch stays across resets and restores, which change levels with no edge, so read `pin_level`
   after one.
 
+## A clock the MCU drives on a pin
+
+`self.board.pin_clock(pin)` reads the frequency in Hz the MCU drives onto a pin, 0 when none, and
+`watch_pin_clock(pin, on_change)` calls `on_change(hz, at)` at every change of it. The pin is the
+low-speed clock output LSCO of `RCC_BDCR`: PA2 on the STM32U5 and the STM32L4, PB2 on the STM32H5.
+`LSCOEN` enables it and `LSCOSEL` picks the LSI or the LSE:
+
+```python
+--8<-- "guide/test_uart_devices.py:pin-clock"
+```
+
+- The LSI runs at the family nominal, 32 kHz on the STM32U5, STM32H5 and STM32L4, or at
+  `RccOptions(lsi_hz=)`, set within the datasheet limits of the family.
+- The STM32U5 LSE reaches the output only after `LSESYSEN` is set and `LSESYSRDY` follows.
+- The rate does not depend on `pin_mode`, inferred: the manuals only say the LSCO pin is left in
+  its reset state.
+- A write that leaves the rate as it was calls nothing. The call comes at the first event boundary
+  at or after the change, with `at` the stamp of the model event that carries the change: a register
+  write stamps at the end of its block, a source that was still starting stamps at the first
+  instruction boundary at or after its ready instant, 100 us after the write for the LSI.
+- A reset drops the calls pending and calls once with the new rate, at the reset time, when it
+  changed the rate. A restore changes the rate with no call and brings back the calls its snapshot
+  holds pending, so read `pin_clock` after one.
+
 ## An SAI block
 
 `self.board.audio_port(sai, block, on_frame)` makes the device the far end of an SAI block when the

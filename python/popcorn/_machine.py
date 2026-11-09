@@ -2547,10 +2547,11 @@ class Machine:
         samples not read yet and `dropped` restarts at 0.
 
         The machine's `VirtualLoop` is emptied ahead of the machine's state, and each `UartDevice`
-        then rebuilds its stack through `UartDevice.restore`. A `DeviceBoard.watch_pin` watch stays,
-        and pin levels change with no edge. A refused restore has changed none of it. Every hook
-        of the machine, a Python model's and a bus device's too, then runs in a new copy of the
-        context current at `Machine()`, so a contextvar a hook set ends at the restore.
+        then rebuilds its stack through `UartDevice.restore`. A `DeviceBoard.watch_pin` or
+        `watch_pin_clock` watch stays, and pin levels change with no edge. A refused restore has
+        changed none of it. Every hook of the machine, a Python model's and a bus device's too,
+        then runs in a new copy of the context current at `Machine()`, so a contextvar a hook set
+        ends at the restore.
         """
         self._restore_done = False
         self._refuse_member("restore")
@@ -3535,6 +3536,23 @@ class Machine:
             raise
         self._pin_watches[key] = native
         return Unwatch(self._pin_watches, self._callback_table, key)
+
+    def _device_pin_clock_watch(
+        self, port: str, pin: int, handler: Callable[[int, int], None]
+    ) -> Unwatch:
+        key = self._callback_table.add(handler, in_caller=True)
+        try:
+            native = self._handle.gpio_clock_watch(
+                port, pin, Relay(self._callback_table, key, quiet=True)
+            )
+        except BaseException:
+            self._callback_table.drop(key)
+            raise
+        self._pin_watches[key] = native
+        return Unwatch(self._pin_watches, self._callback_table, key)
+
+    def _device_pin_clock(self, port: str, pin: int) -> int:
+        return self._handle.gpio_clock(port, pin)
 
     def _device_pin_read(self, port: str, pin: int) -> tuple[bool, PinMode]:
         return (

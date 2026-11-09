@@ -1570,7 +1570,7 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## RCC
 
-Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp), [rcc_l1.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_l1.hpp)
+Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp), [rcc_l1.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_l1.hpp), [rcc_u5.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_u5.hpp), [clock_output.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/include/popcorn/periph/stm32/clock_output.hpp)
 
 - A peripheral's bus clock enable, `<instance>EN` or its RM spelling in an `RCC_xxxENR` register,
   gates its register access: while the bit is 0 a CPU or DMA read gives 0 and a write is lost, no
@@ -1704,8 +1704,28 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   kernel clocks `RCC_CCIPR` selects. `MCOSEL` and `MCOPRE` are storage, no clock reaches the MCO
   pin. The sleep and stop enables of `RCC_xxxSMENR` are storage.
 - STM32L47x/L48x: `SAIxSEL` 11 selects `SAIx_EXTCLK`, which runs the SAI kernel clock at 0 Hz.
-  `LSCOSEL` and `LSCOEN` are storage, no clock reaches the LSCO pin, and keep their value
-  through `BDRST`, RM0351 6.4.29. `FWRSTF` stays 0, the firewall raises no reset.
+  `LSCOSEL` and `LSCOEN` keep their value through `BDRST`, RM0351 6.4.29. `FWRSTF` stays 0, the
+  firewall raises no reset.
+- STM32U5 LSE system clock, RM0456 11.4.7 and 11.8.49: the LSE reaches the RTC and TAMP at
+  `LSERDY`. It reaches the USART, UART, LPUART and LPTIM kernel clock muxes and the LSCO output
+  only after `LSESYSEN` is set and `LSESYSRDY` follows, two LSE periods after `LSESYSEN` with
+  `LSERDY` set. A kernel clock that selects the LSE before `LSESYSRDY` runs at 0 Hz. `LSESYSRDY`
+  clears with `LSESYSEN`, `LSEON` and `LSERDY`, and `BDRST` keeps `LSESYSEN`. `LSERDY` clears at
+  once when `LSEON` clears, where RM0456 gives six LSE cycles.
+- STM32U5 `MSIPLLEN` reads 0 while `LSERDY` is 0 and clears when the LSE stops, RM0456 11.8.1. The
+  clear on a CSS-on-LSE failure is not modelled, `LSECSSON` is storage.
+- LSCO: `LSCOEN` drives the LSI, or the LSE with `LSCOSEL`, onto PA2 on the STM32U5 and STM32L4
+  and onto PB2 on the STM32H5, RM0456 11.4.22, RM0351 6.2.17 and RM0481 11.4.11. A board device
+  reads the rate with `DeviceBoard.pin_clock` and follows its changes with
+  `DeviceBoard.watch_pin_clock`. The rate is 0 while the source is off. The rate does not depend
+  on the GPIO mode of the pin, inferred: RM0351 6.2.17 and RM0481 11.4.11 only say the LSCO pin is
+  left in its reset state, and RM0456 is silent. A low-power mode entry does not change the rate,
+  where RM0456 11.4.22 and RM0351 6.2.17 keep the LSCO running in Standby and RM0481 11.4.11 does
+  not. The STM32L1 has no LSCO.
+- `RccOptions.lsi_hz` sets the LSI rate in Hz before the STM32U5 `LSIPREDIV` division, the family
+  nominal when unset: 32 kHz on the STM32U5, STM32H5 and STM32L4, 37 kHz on the STM32L1. The
+  datasheet full-range limits bound it, 30.4 to 33.6 kHz on the STM32U5, 29.4 to 33.6 kHz on the
+  STM32H5, 29.5 to 34 kHz on the STM32L4 and 26 to 56 kHz on the STM32L1.
 - STM32L47x/L48x clock errata, ES0250 2.2: `MSIRDY` clears whenever the MSI stops, 2.2.1. The MSI
   runs at its range rate from the first cycle after a wakeup, 2.2.3 and 2.2.24. The LSI runs at
   32 kHz with a 50 % duty, 2.2.8. The HSE is ready after the board's `ready_delay` at any VDD,

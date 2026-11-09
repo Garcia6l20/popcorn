@@ -78,10 +78,11 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
 - The default `snapshot()` raises `SnapshotRefused` once traffic crossed since the last attach:
   `send`, `send_break`, `drive_cts`, `on_frame`, `on_break`, `on_error`, an `on_rts` delivered to a
   class that overrides it, and past the attach stamp a `drive_pin` or an edge delivered to a
-  `watch_pin` watch made from the loop. A watch made from the test thread counts nothing, and a
-  drive at the attach stamp or from `restore` still snapshots. A device with such traffic overrides
-  `snapshot()` and `restore()`. `System.restore` takes a snapshot of each member first, so a member
-  whose default stack heard traffic cannot restore even a quiet snapshot, where a lone machine can.
+  `watch_pin` watch or a rate delivered to a `watch_pin_clock` watch made from the loop. A watch
+  made from the test thread counts nothing, and a drive at the attach stamp or from `restore` still
+  snapshots. A device with such traffic overrides `snapshot()` and `restore()`. `System.restore`
+  takes a snapshot of each member first, so a member whose default stack heard traffic cannot
+  restore even a quiet snapshot, where a lone machine can.
   On the fixtures' boot path a refusal is a failed boot: every test of that machine description
   errors with the refusal, which names the device.
   The [UART devices](uart_devices.md#snapshots-and-restores) guide has a stack that overrides both.
@@ -98,6 +99,12 @@ Host side state that the machine cannot rewind is dropped or kept as follows:
   from the edge and from the level in `on_attach` checks it armed once. A snapshot holds no watch,
   so a new machine has none until a stack makes it. A default `restore` that runs `on_attach` again
   ends the watches the device made from the loop just before it.
+- A `watch_pin_clock` watch stays across a reset and a restore. A reset drops the calls pending and
+  calls once with the new rate, at the reset time, when it changed the rate. A restore changes the
+  rate with no call and brings back the calls its snapshot holds pending, which the standing
+  watches hear, so read `pin_clock` after one. A rate delivered from the loop past the attach
+  stamp refuses the next default `snapshot()` as an edge does, and a default `restore` that runs
+  `on_attach` again ends the watch the device made from the loop just before it.
 - A frame's `on_error` pending in a snapshot, a cut the firmware made just before it, replays in the
   run after the restore. A machine reset drops it.
 

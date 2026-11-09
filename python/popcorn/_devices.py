@@ -174,9 +174,9 @@ class PinWatches(dict[int, _core.PinWatch]):
 
 
 class Unwatch:
-    """A pin watch of `DeviceBoard.watch_pin`: call it, or `remove()`, to end the watch. The watch
-    lasts until then or until the machine is gone, whether or not this handle is kept. It holds
-    no machine."""
+    """A pin watch of `DeviceBoard.watch_pin` or `watch_pin_clock`: call it, or `remove()`, to end
+    the watch. The watch lasts until then or until the machine is gone, whether or not this handle
+    is kept. It holds no machine."""
 
     __slots__ = ("_key", "_table", "_watches")
 
@@ -218,6 +218,14 @@ class _PinMachine(typing.Protocol):
     def _device_pin_watch(  # pyright: ignore[reportPrivateUsage]
         self, port: str, pin: int, handler: Callable[[bool, int], None]
     ) -> Unwatch: ...
+
+    def _device_pin_clock_watch(  # pyright: ignore[reportPrivateUsage]
+        self, port: str, pin: int, handler: Callable[[int, int], None]
+    ) -> Unwatch: ...
+
+    def _device_pin_clock(  # pyright: ignore[reportPrivateUsage]
+        self, port: str, pin: int
+    ) -> int: ...
 
     def _device_audio(  # pyright: ignore[reportPrivateUsage]
         self,
@@ -452,6 +460,71 @@ class DeviceBoard:
         """
         port, number = _pin_of(pin)
         return self._pin_state(port, number)[0]
+
+    def pin_clock(self, pin: str) -> int:
+        """Frequency in Hz the MCU drives onto `pin` as a clock output, 0 when none: the low-speed
+        clock output LSCO of `RCC_BDCR` on PA2 of the STM32U5 and the STM32L4 and on PB2 of the
+        STM32H5, LSI or LSE as `LSCOSEL` picks it, when `LSCOEN` is set. The STM32U5 LSE needs
+        `LSESYSEN` and `LSESYSRDY`. The LSI rate is the family nominal or `RccOptions.lsi_hz`.
+        The answer does not depend on `pin_mode` or `pin_level`: the pin carries the clock as an
+        additional function. That the pin needs no GPIO mode is inferred, RM0351 6.2.17 and
+        RM0481 11.4.11 only say the LSCO pin is left in its reset state.
+
+        Raises:
+            TypeError: `pin` is no str.
+            ValueError: `pin` is no pin name.
+            ConfigError: As `watch_pin`.
+            ModelError: As `watch_pin`.
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        port, number = _pin_of(pin)
+        read = self._machine()._device_pin_clock  # pyright: ignore[reportPrivateUsage]
+        return read(port, number)
+
+    def watch_pin_clock(self, pin: str, on_change: Callable[[int, VirtualTime], None]) -> Unwatch:
+        """Call `on_change(hz, at)` at every change of `pin_clock(pin)`, with the new rate. `at` is
+        the time of the model event that carries the change, the first instruction boundary at or
+        after it, as the `at` of `watch_pin`: a register write stamps at the end of its block, a
+        source that was still starting stamps at the first boundary at or after its ready instant,
+        100 us after the write for the LSI. With no instruction between, a parked write stamps at
+        the write time. The call runs in the loop step that follows, never inside the write, and a
+        write that leaves the rate as it was calls nothing. A pin that carries no clock output
+        never calls. A watch stays across resets and restores. A reset drops the calls still
+        pending, then calls once with the new rate, at the reset time, when it changed the rate. A
+        restore changes the rate with no call, and brings back the calls its snapshot holds
+        pending, which the standing watches hear, so read `pin_clock` after one. Delivery,
+        threading and the `UartDevice` stack rules are those of `watch_pin`.
+
+        Raises:
+            TypeError: `pin` is no str or `on_change` not callable.
+            ValueError: `pin` is no pin name such as "PA5", pin 0 to 15.
+            ConfigError: As `watch_pin`.
+            ModelError: As `watch_pin`.
+            MachineRunning: The machine is busy, outside its callbacks.
+        """
+        port, number = _pin_of(pin)
+        if not callable(cast(object, on_change)):
+            raise TypeError(f"watch_pin_clock() takes a callable, not {on_change!r}")
+        machine = self._machine()
+        loop = machine.loop
+        stamp_of = loop._stamp_since_reset  # pyright: ignore[reportPrivateUsage]
+        stepping = loop._stepping_here()  # pyright: ignore[reportPrivateUsage]
+        stack = self._device if stepping and isinstance(self._device, UartDevice) else None
+
+        def change(hz: int, at_ps: int) -> None:
+            def held_at_the_stamp() -> None:
+                if stack is not None:
+                    stack._note_pin()  # pyright: ignore[reportPrivateUsage]
+                self._called("on_change", on_change, hz, VirtualTime(stamp_of()))
+
+            loop._run_hook(at_ps, held_at_the_stamp)  # pyright: ignore[reportPrivateUsage]
+
+        watch = machine._device_pin_clock_watch(  # pyright: ignore[reportPrivateUsage]
+            port, number, change
+        )
+        if stack is not None:
+            stack._note_watch(watch)  # pyright: ignore[reportPrivateUsage]
+        return watch
 
     def pin_mode(self, pin: str) -> PinMode:
         """Mode the firmware configured for `pin`. An input is released, a push-pull output driven,
@@ -1418,15 +1491,16 @@ class UartDevice(_core.UartDeviceBase):
     The default `snapshot` raises `SnapshotRefused` once traffic crossed since the last attach, what
     a rerun cannot rebuild: a `send`, a `send_break`, a `drive_cts`, an `on_frame`, an `on_break`,
     an `on_error`, an `on_rts` delivered to a class that overrides it, and past the attach stamp a
-    `drive_pin` or an edge delivered to a `watch_pin` watch made from the loop. During the rerun
-    `send`, `send_break` and `drive_cts` raise `RuntimeError`, from `on_attach` and from what runs
-    at its stamp. A timer it arms for later is the device's own, and acts when it fires. The rerun
-    ends the `watch_pin` watches the device made from the loop first, as `on_attach` makes them
-    again. A device whose stack talks at boot, or whose `on_attach` builds no whole stack, overrides
-    `snapshot` and `restore`. `System.restore` takes a snapshot of each member ahead of any change,
-    so a device that refuses raises there too, naming the device, with nothing changed: a member
-    whose default stack heard traffic, an edge included, cannot restore even a quiet snapshot, where
-    a lone machine can.
+    `drive_pin`, an edge delivered to a `watch_pin` watch or a rate delivered to a `watch_pin_clock`
+    watch made from the loop. During the rerun `send`, `send_break` and `drive_cts` raise
+    `RuntimeError`, from `on_attach` and from what runs at its stamp. A timer it arms for later is
+    the device's own, and acts when it fires. The rerun ends the `watch_pin` and `watch_pin_clock`
+    watches the device made from the loop first, as `on_attach` makes them again. A device whose
+    stack talks at boot, or whose `on_attach` builds no whole stack, overrides `snapshot` and
+    `restore`. `System.restore` takes a snapshot of each member ahead of any change, so a device
+    that refuses raises there too, naming the device, with nothing changed: a member whose default
+    stack heard traffic, an edge included, cannot restore even a quiet snapshot, where a lone
+    machine can.
 
     Tap: `tapping = True` records every frame of the port in both directions as a `TapFrame`, off
     by default. The frames the firmware sent are `towards` `"device"`, with the start-bit and
