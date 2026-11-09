@@ -33,7 +33,7 @@ import weakref
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, override
 
 from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
@@ -156,6 +156,7 @@ class RegisterStore:
         reg = self._register(name)
         return (self._context.peek(reg.word) >> reg.shift) & reg.mask
 
+    @override
     def __setattr__(self, name: str, value: int) -> None:
         reg = self._register(name)
         if not 0 <= value <= reg.mask:
@@ -163,6 +164,7 @@ class RegisterStore:
         word = self._context.peek(reg.word)
         self._context.poke(reg.word, (word & ~(reg.mask << reg.shift)) | (value << reg.shift))
 
+    @override
     def __dir__(self) -> list[str]:
         return _names(self._registers)
 
@@ -188,6 +190,7 @@ class FieldMasks:
             raise AttributeError(f"the peripheral has no register {name}")
         return RegisterFields(name, reg.fields)
 
+    @override
     def __dir__(self) -> list[str]:
         return _names(self._registers)
 
@@ -208,6 +211,7 @@ class RegisterFields:
             raise AttributeError(f"register {self._register} has no field {name}")
         return mask
 
+    @override
     def __dir__(self) -> list[str]:
         return [*self._fields]
 
@@ -571,6 +575,7 @@ class Model(_core.ModelBase):
     def _load(self, data: bytes) -> None:
         self.restore(data)
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} of {self.peripheral}>"
 

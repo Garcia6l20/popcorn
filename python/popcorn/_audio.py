@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, override
 
 from popcorn import _core
 from popcorn._errors import ConfigError, MachineRunning, ModelError
@@ -256,6 +256,7 @@ class AudioStream:
         link = self._link
         return written(self._post(link.command_write(values), at))
 
+    @override
     def __repr__(self) -> str:
         return f"AudioStream({self.name}.{self.block})"
 
@@ -377,6 +378,7 @@ class DeviceAudio:
         if isinstance(owner, UartDevice):
             owner._note_pin()  # pyright: ignore[reportPrivateUsage]
 
+    @override
     def __repr__(self) -> str:
         return f"DeviceAudio({self.name}.{self.block})"
 

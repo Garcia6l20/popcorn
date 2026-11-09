@@ -14,7 +14,7 @@ import types
 from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import Literal, Self, cast, override
 
 from popcorn import _core
 from popcorn._audio import AudioOptions, Block
@@ -76,18 +76,23 @@ class _FrozenMap[K, V](Mapping[K, V]):
     def __init__(self, items: Mapping[K, V] | None = None) -> None:
         self._items: dict[K, V] = dict(items or {})
 
+    @override
     def __getitem__(self, key: K) -> V:
         return self._items[key]
 
+    @override
     def __iter__(self) -> Iterator[K]:
         return iter(self._items)
 
+    @override
     def __len__(self) -> int:
         return len(self._items)
 
+    @override
     def __hash__(self) -> int:
         return hash(frozenset(self._items.items()))
 
+    @override
     def __repr__(self) -> str:
         return repr(self._items)
 
@@ -252,6 +257,7 @@ class Device(Use):
         object.__setattr__(self, "address", address)
         object.__setattr__(self, "cs", cs)
 
+    @override
     def replace(self, **params: Param) -> Self:
         """A copy with `params` merged over these parameters, `address` and `cs` replacing the
         bus address and chip select when given.
@@ -272,6 +278,7 @@ class Device(Use):
         object.__setattr__(changed, "cs", cs)
         return changed
 
+    @override
     def __replace__(self, **params: Param) -> Self:
         """`replace`, for `copy.replace`."""
         return self.replace(**params)

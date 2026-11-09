@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import override
 
 from popcorn import _core
 from popcorn._enums import FaultKind
@@ -113,6 +114,7 @@ class StackFrame:
         """Whether the frame is certain, not found by the stack scan."""
         return self.via.exact
 
+    @override
     def __str__(self) -> str:
         where = self.location
         text = f"{self.pc:#010x}"

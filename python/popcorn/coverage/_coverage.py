@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, override
 
 from popcorn import _obs
 
@@ -290,9 +290,11 @@ class Coverage:
         Path(path).write_bytes(data)
         return dropped
 
+    @override
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Coverage) and self._data == other._data
 
+    @override
     def __hash__(self) -> int:
         return hash(self._data)
 

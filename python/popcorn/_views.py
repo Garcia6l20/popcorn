@@ -7,7 +7,7 @@ import math
 import numbers
 import struct
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 from popcorn import _core
 from popcorn._enums import PinMode
@@ -402,6 +402,7 @@ class RegisterView:
         field = self._field(name)
         return (self.value & field.mask) >> field.lsb
 
+    @override
     def __setattr__(self, name: str, value: int) -> None:
         if name == "value":
             object.__setattr__(self, name, value)
@@ -413,6 +414,7 @@ class RegisterView:
             self._peripheral, self._offset, self._width, field.mask, value << field.lsb
         )
 
+    @override
     def __repr__(self) -> str:
         return f"<{self._peripheral}.{self._name} @ {self._offset:#x}>"
 
@@ -598,6 +600,7 @@ class PeripheralView:
     def __getitem__(self, name: str) -> RegisterView:
         return self.__getattr__(name)
 
+    @override
     def __dir__(self) -> list[str]:
         return [*self._names]
 
@@ -749,6 +752,7 @@ class Pin:
         """Alternate function number."""
         return self._access.handle.gpio_alternate(self.port, self.number)
 
+    @override
     def __repr__(self) -> str:
         return f"Pin({self.port}, {self.number})"
 
@@ -796,6 +800,7 @@ class AnalogInput:
             self.adc, self.channel, native_bank(self.bank), microvolts_of(value)
         )
 
+    @override
     def __repr__(self) -> str:
         suffix = "b" if self.bank == "B" else ""
         return f"AnalogInput({self.adc}, {self.channel}{suffix})"
@@ -949,6 +954,7 @@ class RngEntropy:
             self.rng, _checked_count("clock_fault_after", words)
         )
 
+    @override
     def __repr__(self) -> str:
         return f"RngEntropy({self.rng})"
 
@@ -1010,5 +1016,6 @@ class Peripherals:
     def __iter__(self) -> Iterator[str]:
         return iter(self._peripherals)
 
+    @override
     def __dir__(self) -> list[str]:
         return [*self._peripherals]

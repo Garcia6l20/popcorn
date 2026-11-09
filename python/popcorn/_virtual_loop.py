@@ -73,6 +73,7 @@ class _Timer(asyncio.TimerHandle):
 
     __slots__ = ()
 
+    @override
     def cancel(self) -> None:
         if self.cancelled():
             return
@@ -297,6 +298,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._task_factory: Any = None
         self._exception_handler: Any = None
 
+    @override
     def __repr__(self) -> str:
         return f"<VirtualLoop of {self._name}>"
 
@@ -305,6 +307,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._port = port
         self._submit = submit
 
+    @override
     def time(self) -> float:
         """Logical board time in seconds, see the class doc.
 
@@ -313,26 +316,32 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         """
         return self._time_ps() / 1e12
 
+    @override
     def is_running(self) -> bool:
         """Whether a step runs on the calling thread."""
         return self._stepping == _get_ident()
 
+    @override
     def is_closed(self) -> bool:
         """Whether the loop was closed."""
         return self._closed
 
+    @override
     def get_debug(self) -> bool:
         """The debug flag of `set_debug`."""
         return self._debug
 
+    @override
     def set_debug(self, enabled: bool) -> None:
         """Set asyncio's debug flag, which adds source tracebacks to handles and tasks."""
         self._debug = enabled
 
+    @override
     def create_future(self) -> asyncio.Future[Any]:
         """A future of this loop."""
         return asyncio.Future(loop=self)
 
+    @override
     def create_task(self, coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
         """Schedule `coro` as a task of this loop, through the task factory if one is set. The loop
         holds the task until it ends.
@@ -353,6 +362,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         task.add_done_callback(self._task_done)
         return task
 
+    @override
     def set_task_factory(self, factory: Any) -> None:
         """Set what `create_task` calls, or None for a plain `asyncio.Task`.
 
@@ -363,10 +373,12 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             raise TypeError(f"a task factory must be callable or None, not {factory!r}")
         self._task_factory = factory
 
+    @override
     def get_task_factory(self) -> Any:
         """What `set_task_factory` set."""
         return self._task_factory
 
+    @override
     def call_soon(
         self, callback: Any, *args: Any, context: contextvars.Context | None = None
     ) -> asyncio.Handle:
@@ -386,6 +398,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             return handle
         return self._timer(self._time_ps(), callback, args, context)
 
+    @override
     def call_later(
         self,
         delay: float,
@@ -408,6 +421,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             ticks = 1 if delay > 0 else 0
         return self._timer(self._time_ps() + ticks, callback, args, context)
 
+    @override
     def call_at(
         self,
         when: float,
@@ -427,10 +441,12 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         self._check_open()
         return self._timer(max(due, self._time_ps()), callback, args, context)
 
+    @override
     def get_exception_handler(self) -> Any:
         """What `set_exception_handler` set."""
         return self._exception_handler
 
+    @override
     def set_exception_handler(self, handler: Any) -> None:
         """Set what hears a callback's exception, a device hook's and an unretrieved task failure,
         called as `handler(loop, context)` at the end of the step or at the callback's return.
@@ -443,10 +459,12 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             raise TypeError(f"an exception handler must be callable or None, not {handler!r}")
         self._exception_handler = handler
 
+    @override
     def default_exception_handler(self, context: dict[str, Any]) -> None:
         """Keep `context` to raise as a `ModelError` at the end of the step."""
         self._errors.append(context)
 
+    @override
     def call_exception_handler(self, context: dict[str, Any]) -> None:
         """Tell the exception handler, or the default one, what `context` holds. A report from a
         future or task finalizer comes at a time a collection picks, so it goes to the `asyncio`
@@ -469,6 +487,7 @@ class VirtualLoop(asyncio.AbstractEventLoop):
                 {"message": f"the exception handler raised {error!r}", "exception": error}
             )
 
+    @override
     def close(self) -> None:
         """Cancel every task and run it to its `finally`, close the async generators left
         unfinished, and drop the rest. Later calls do nothing. A task still pending after its
@@ -1044,12 +1063,14 @@ class VirtualLoop(asyncio.AbstractEventLoop):
         """The stamp of the running step in `Machine.time`'s base."""
         return self._now_ps - self._base_ps
 
+    @override
     async def shutdown_asyncgens(self) -> None:
         """Close the async generators left unfinished."""
         for agen in list(self._asyncgens):
             await agen.aclose()
         self._asyncgens.clear()
 
+    @override
     async def shutdown_default_executor(self, timeout: float | None = None) -> None:
         """Refused: the loop has no executor."""
         self._refused("shutdown_default_executor")
@@ -1060,20 +1081,24 @@ class VirtualLoop(asyncio.AbstractEventLoop):
             " or wall clock, and it runs only when its machine runs"
         )
 
+    @override
     def run_forever(self) -> None:
         """Refused: the machine's run drives the loop."""
         self._refused("run_forever")
 
+    @override
     def run_until_complete(self, future: Any) -> Any:
         """Refused: the machine's run drives the loop."""
         if isinstance(future, Coroutine):
             cast(Coroutine[Any, Any, Any], future).close()
         self._refused("run_until_complete")
 
+    @override
     def stop(self) -> None:
         """Refused: the machine's run drives the loop."""
         self._refused("stop")
 
+    @override
     def call_soon_threadsafe(self, callback: Any, *args: Any, context: Any = None) -> Any:
         """Refused: a post with no stamp lands where the machine thread happens to be. Use `post`
         with `at`."""

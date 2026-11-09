@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, override
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
@@ -157,6 +157,7 @@ class PdmMic:
             raise ValueError(f"bits is 0 to {8 * len(packed)} for {len(packed)} bytes, not {count}")
         return written(self._post(self._link.command_write_pdm(packed, count), at))
 
+    @override
     def __repr__(self) -> str:
         return f"PdmMic({self.name}.SITF{self.sitf}.{self.edge})"
 
@@ -246,6 +247,7 @@ class FilterTap:
         link = self._link
         return _samples(link.drain(link.available()))
 
+    @override
     def __repr__(self) -> str:
         return f"FilterTap({self.name}.DFLT{self.filter})"
 

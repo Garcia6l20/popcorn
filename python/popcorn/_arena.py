@@ -5,7 +5,7 @@ from __future__ import annotations
 import ctypes
 import struct
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from popcorn._errors import ConfigError
 from popcorn._views import Memory
@@ -102,6 +102,7 @@ class ArenaBlock:
             raise TypeError("the block is not an array, write bytes")
         return struct.pack(f"<{len(values)}{self._format}", *values)
 
+    @override
     def __repr__(self) -> str:
         return f"<ArenaBlock {self.address:#010x} {self.size} bytes>"
 

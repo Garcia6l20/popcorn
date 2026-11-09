@@ -16,7 +16,16 @@ import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Protocol,
+    cast,
+    overload,
+    override,
+    runtime_checkable,
+)
 
 from popcorn import _core
 from popcorn._arena import Arena
@@ -3579,6 +3588,7 @@ class Machine:
 
         return call
 
+    @override
     def __repr__(self) -> str:
         part = self._description.part
         if self._name == part:

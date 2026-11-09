@@ -26,7 +26,7 @@ from collections.abc import Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import cast, override
 
 from elftools.common.exceptions import DWARFError, ELFError
 from elftools.construct import ConstructError
@@ -1061,6 +1061,7 @@ class _LocalsSource:
         self._units: dict[int, _Unit] = {}
         self._collected: dict[int, tuple[Local, ...]] = {}
 
+    @override
     def __reduce__(self) -> tuple[type[_LocalsSource], tuple[Path, _FileIdentity]]:
         return (_LocalsSource, (self._path, self._identity))
 
@@ -1106,6 +1107,7 @@ class _LazyLocals:
         self._source = source
         self._offset = offset
 
+    @override
     def __reduce__(self) -> tuple[type[_LazyLocals], tuple[_LocalsSource, int]]:
         return (_LazyLocals, (self._source, self._offset))
 

@@ -27,6 +27,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from operator import attrgetter
+from typing import override
 
 from popcorn import _core
 from popcorn._devices import BusDevice, check_address, parked
@@ -267,6 +268,7 @@ class At25sf(_native.At25sfBase):
         """
         _restore(self, data)
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
 
@@ -351,6 +353,7 @@ class Eeprom24xx(_native.Eeprom24xxBase):
         """
         _restore(self, data)
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"
 
@@ -441,5 +444,6 @@ class TableTarget(_native.TableTargetBase):
         """
         _restore(self, data)
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"

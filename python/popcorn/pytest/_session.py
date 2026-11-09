@@ -11,7 +11,7 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import pytest
 
@@ -66,6 +66,7 @@ class Key:
         base = f"digest={self.digest} strict={self.strict}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
+    @override
     def __str__(self) -> str:
         base = f"config={self.config or '-'} digest={self.digest[:12]} strict={self.strict}"
         if self.name:

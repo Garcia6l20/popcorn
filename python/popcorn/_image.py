@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import override
 
 from popcorn import _core
 from popcorn._enums import FloatAbi
@@ -20,6 +21,7 @@ class Location:
     file: str = ""
     line: int = 0
 
+    @override
     def __str__(self) -> str:
         where = f"{self.pc:#010x}"
         if self.symbol:
@@ -183,6 +185,7 @@ class Image:
         """Symbol, offset, file and line of an address in this image alone."""
         return location_of(self._native.locate(address))
 
+    @override
     def __repr__(self) -> str:
         named = "" if self._name is None else f", name={self._name!r}"
         symbols_only = "" if self._loaded else ", load=False"

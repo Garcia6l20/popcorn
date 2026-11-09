@@ -11,7 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 
 from popcorn import _core
 from popcorn._c_expr import BOOL, INT, LLONG, UINT, ULLONG, CType, CValue, Parsed, parse
@@ -432,6 +432,7 @@ class Constants:
             close_matches=close,
         )
 
+    @override
     def __repr__(self) -> str:
         return f"Constants({', '.join(str(path) for _, path in self._files)})"
 

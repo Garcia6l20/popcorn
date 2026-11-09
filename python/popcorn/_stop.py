@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from popcorn import _core
 from popcorn._enums import FaultKind, StopReason
@@ -69,6 +69,7 @@ class Stop:
     fired: tuple[Condition, ...] = field(default=(), hash=False, compare=False, repr=False)
     resets: int = field(default=0, hash=False, compare=False, repr=False)
 
+    @override
     def __str__(self) -> str:
         text = f"{self.reason.name} at {self.location}"
         if self.detail:

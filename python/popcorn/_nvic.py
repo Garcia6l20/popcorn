@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+from typing import override
 
 from popcorn._part_description import PartDescription
 from popcorn._views import Memory
@@ -107,5 +108,6 @@ class Irqs:
         """Interrupt names, in description order."""
         return tuple(self._numbers)
 
+    @override
     def __dir__(self) -> list[str]:
         return [*self._numbers]

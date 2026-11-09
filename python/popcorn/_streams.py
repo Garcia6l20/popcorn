@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, override
 
 from popcorn import _core
 from popcorn._devices import BusDevice
@@ -598,6 +598,7 @@ class UartStream:
         if bridge is not None:
             raise RuntimeError(f"{self.name} is bridged to {bridge.path}")
 
+    @override
     def __repr__(self) -> str:
         return f"UartStream({self.name})"
 
@@ -642,6 +643,7 @@ class PtyBridge:
         """Stop pumping and close the pty."""
         self._native.close()
 
+    @override
     def __repr__(self) -> str:
         return f"PtyBridge({self.name}, {self.path})"
 

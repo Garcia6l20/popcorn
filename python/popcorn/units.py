@@ -7,7 +7,7 @@ time. `asyncio.timeout()` is the wall-clock bound.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import overload
+from typing import overload, override
 
 _PS_PER_SECOND = 10**12
 
@@ -44,6 +44,7 @@ class VirtualDuration:
     def __floordiv__(self, divisor: int) -> VirtualDuration:
         return VirtualDuration(self.ps // divisor)
 
+    @override
     def __str__(self) -> str:
         return f"{self.ps} ps"
 
@@ -71,6 +72,7 @@ class VirtualTime:
             return VirtualDuration(self.ps - other.ps)
         return VirtualTime(self.ps - other.ps)
 
+    @override
     def __str__(self) -> str:
         return f"t={self.ps} ps"
 

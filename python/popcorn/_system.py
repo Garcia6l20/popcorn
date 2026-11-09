@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload, override
 
 from popcorn import _core
 from popcorn._devices import chip_select
@@ -2399,6 +2399,7 @@ class System:
         if self._flight is not None:
             raise MachineRunning("the linked system runs")
 
+    @override
     def __repr__(self) -> str:
         return f"System({', '.join(self._names)})"
 
@@ -2847,6 +2848,7 @@ class UartTap:
                 for record in records
             )
 
+    @override
     def __repr__(self) -> str:
         return f"UartTap({self._ends[0]} <-> {self._ends[1]})"
 
@@ -2984,6 +2986,7 @@ class SpiTap:
     def _order(self, frame: SpiTapFrame) -> tuple[int, int]:
         return frame.at.ps, self._ends.index(frame.slave)
 
+    @override
     def __repr__(self) -> str:
         return f"SpiTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
 
@@ -3119,6 +3122,7 @@ class I2CTap:
     def _order(self, phase: I2CTapPhase) -> tuple[int, int]:
         return phase.at.ps, self._ends.index(phase.target)
 
+    @override
     def __repr__(self) -> str:
         return f"I2CTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
 

@@ -6,6 +6,7 @@ import contextlib
 import os
 import tempfile
 from pathlib import Path
+from typing import override
 
 from popcorn import _core
 from popcorn._errors import ConfigError
@@ -134,5 +135,6 @@ class Snapshot:
                 expected=error.expected,
             ) from error
 
+    @override
     def __repr__(self) -> str:
         return f"Snapshot(machine={self.machine_id}, images={len(self.image_digests)})"

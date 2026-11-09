@@ -11,7 +11,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal, cast, override
 
 from popcorn import _core
 from popcorn._enums import I2CError, I2CPhase, Parity, PinMode, ResetKind, UartError
@@ -497,6 +497,7 @@ class DeviceBoard:
                 peripheral="" if held is None else held[5],
             ) from error
 
+    @override
     def __repr__(self) -> str:
         return f"DeviceBoard({self._device!r})"
 
@@ -828,6 +829,7 @@ class I2CTarget(_core.I2CTargetBase):
     _save = _save_trampoline
     _load = _load_trampoline
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self.__bus_address:#04x}>"
 
@@ -938,6 +940,7 @@ class SpiTarget(_core.SpiTargetBase):
     _save = _save_trampoline
     _load = _load_trampoline
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} on {self.__cs or 'SS'}>"
 
@@ -1085,6 +1088,7 @@ class SpiController(_core.SpiControllerBase):
     def _frame(self, sent: int, received: int, at: int) -> None:
         self.on_frame(sent, received, VirtualTime(at))
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self.__sck_hz} Hz, {self.__bits} bits>"
 
@@ -1310,6 +1314,7 @@ class I2CController(_core.I2CControllerBase):
             )
         )
 
+    @override
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self.__scl_hz} Hz>"
 
@@ -1984,6 +1989,7 @@ class UartDevice(_core.UartDeviceBase):
                 peripheral=self.__peripheral,
             ) from error
 
+    @override
     def __repr__(self) -> str:
         where = f" on {self.__peripheral}" if self.__peripheral else ""
         return f"<{type(self).__qualname__}{where}>"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, override
 
 if TYPE_CHECKING:
     from popcorn.image.dwarf import DebugInfo, DebugType, Member, TypeId
@@ -318,6 +318,7 @@ class Var:
         else:
             self._memory.write_masked(self.address, mask, data)
 
+    @override
     def __repr__(self) -> str:
         return f"<Var {self._name} @ {self.address:#010x}>"
 

@@ -7,7 +7,7 @@ import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from popcorn._constants import Constants
 from popcorn._dwarf_views import Var
@@ -187,5 +187,6 @@ class ImageView:
             ]
         )
 
+    @override
     def __repr__(self) -> str:
         return f"ImageView(images={len(self._images)})"

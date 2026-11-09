@@ -48,7 +48,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 from popcorn import _core
 from popcorn._errors import ConfigError, EmulationError, ModelError, UsbError, UsbStall, UsbTimeout
@@ -655,6 +655,7 @@ class CdcStream:
             raise UsbTimeout(message, status=status.name)
         raise UsbError(message, status=status.name)
 
+    @override
     def __repr__(self) -> str:
         return f"CdcStream({self.name}, {self.function})"
 
@@ -1003,6 +1004,7 @@ class HidStream:
         _raise_for(result.status, f"{self._where}: {label}")
         return result, done_at
 
+    @override
     def __repr__(self) -> str:
         return f"HidStream({self.name}, {self.function})"
 
@@ -1329,6 +1331,7 @@ class UacSpeaker(UacStream):
     def _unsent(self) -> bool:
         return self._link.queued() != 0 or self._link.sending()
 
+    @override
     def __repr__(self) -> str:
         return f"UacSpeaker({self.name}, {self.function})"
 
@@ -1405,6 +1408,7 @@ class UacMic(UacStream):
         link = self._link
         return _uac_frames(link.drain(link.available()))
 
+    @override
     def __repr__(self) -> str:
         return f"UacMic({self.name}, {self.function})"
 
@@ -1603,6 +1607,7 @@ class UacFunction:
         _raise_for(result, where)
         return done_at
 
+    @override
     def __repr__(self) -> str:
         return f"UacFunction({self.name}, {self.function})"
 
@@ -2010,6 +2015,7 @@ class UsbHost:
         for audio in self._audio.values():
             audio.discard()
 
+    @override
     def __repr__(self) -> str:
         return f"UsbHost({self.name})"
 
