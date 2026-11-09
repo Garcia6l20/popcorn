@@ -411,6 +411,12 @@ content = [
 packages = { "LQFP64" = 0x00, "WLCSP72 SMPS" = 0x01, "LQFP100" = 0x02, "UFBGA132" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x07, "TFBGA169" = 0x07, "LQFP64 SMPS" = 0x08, "WLCSP90 SMPS" = 0x09, "LQFP100 SMPS" = 0x0A, "UFBGA132 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP48 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0F, "TFBGA169 SMPS" = 0x0F, "UFBGA64" = 0x12, "UFBGA100" = 0x13, "LQFP100 DSI SMPS" = 0x14, "LQFP144 DSI SMPS" = 0x15, "UFBGA144 DSI SMPS" = 0x19, "WLCSP208 DSI SMPS" = 0x1B, "TFBGA216 DSI SMPS" = 0x1C, "UFBGA100 SMPS" = 0x1D, "WLCSP56 SMPS" = 0x1E, "WLCSP150 SMPS" = 0x1F, "WLCSP150 DSI SMPS" = 0x1F }
 
 [[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTR"
+reset = 0x1FEFF8AA
+source = "RM0456 Rev 7, 7.9.13 FLASH option register (FLASH_OPTR): ST production value 0x1FEF F8AA, WWDG_SW 1 and IWDG_SW 1. ST's STM32U575 SVD gives 0, which reads as the hardware window watchdog"
+
+[[resets]]
 peripheral = "RNG"
 register = "CR"
 reset = 0x00800D00

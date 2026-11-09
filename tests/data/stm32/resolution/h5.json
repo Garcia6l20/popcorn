@@ -31,6 +31,7 @@
     "UART/sci2_*/u5,h5/*": ["h5"],
     "USART/sci3_v2*/u5,h5/*": ["h5"],
     "USB/usbfs_v1*/h5/*": ["h5"],
+    "WWDG/wwdg1_v2*/h5/*": ["h5"],
     "flash/v1.0.0_H5_Cube/h5/*": ["h5"]
   },
   "groups": [
@@ -131,7 +132,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H562RGTx", "STM32H562RGVx", "STM32H562RITx", "STM32H562RIVx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -226,7 +227,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H562VGTx", "STM32H562VITx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -324,7 +325,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563AGIx", "STM32H563AIIx", "STM32H563AIIxQ", "STM32H563IGKx", "STM32H563IGTx", "STM32H563IIKx", "STM32H563IIKxQ", "STM32H563IITx", "STM32H563IITxQ", "STM32H563LIHxQ", "STM32H563ZGTx", "STM32H563ZITx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -427,7 +428,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563MIYxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -524,7 +525,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563RGTx", "STM32H563RGVx", "STM32H563RITx", "STM32H563RIVx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -621,7 +622,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563VGTx", "STM32H563VITx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -723,7 +724,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563VITxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -824,7 +825,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H563ZITxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -926,7 +927,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573AIIx", "STM32H573AIIxQ", "STM32H573IIKx", "STM32H573IIKxQ", "STM32H573IITx", "STM32H573IITxQ", "STM32H573LIHxQ", "STM32H573ZITx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1033,7 +1034,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573MIYxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1134,7 +1135,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573RITx", "STM32H573RIVx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1235,7 +1236,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573VITx"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1341,7 +1342,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573VITxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1446,7 +1447,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     {"parts": ["STM32H573ZITxQ"], "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1552,7 +1553,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }}
   ],
   "probes": {
@@ -1661,7 +1662,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     "h503-hash-sha2": {"part": "STM32H503RBTx", "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1768,7 +1769,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     "h5e4-hash-sha3": {"part": "STM32H5E4VJTx", "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1875,7 +1876,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }},
     "h5f5-hash-sha3": {"part": "STM32H5F5LJHxQ", "instances": {
       "ADC1": ["ADC/aditf5_v3_0_H5*/h5/*", "row", "adc_h5_factory", "", "supply"],
@@ -1982,7 +1983,7 @@
       "RCC": ["RCC/STM32H5_rcc_*/h5/*", "row", "rcc_h5_factory", "", "rcc"],
       "RNG": ["RNG/rng1_v4_1/u5,h5/*", "row", "rng_factory", "u5_rng", "rng"],
       "VREFBUF": ["", "none_no_row", "", "", ""],
-      "WWDG": ["", "none_no_row", "", "", ""]
+      "WWDG": ["WWDG/wwdg1_v2*/h5/*", "row", "wwdg_factory", "h5_wwdg", ""]
     }}
   }
 }

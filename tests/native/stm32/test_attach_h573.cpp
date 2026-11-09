@@ -29,7 +29,7 @@ constexpr auto attached = std::to_array<std::string_view>({
     "SPI2",    "SPI3",    "SPI4",   "SPI5",   "SPI6",   "TAMP",   "TIM1",   "TIM12",  "TIM13",
     "TIM14",   "TIM15",   "TIM16",  "TIM17",  "TIM2",   "TIM3",   "TIM4",   "TIM5",   "TIM6",
     "TIM7",    "TIM8",    "UART12", "UART4",  "UART5",  "UART7",  "UART8",  "UART9",  "USART1",
-    "USART10", "USART11", "USART2", "USART3", "USART6", "USB",
+    "USART10", "USART11", "USART2", "USART3", "USART6", "USB",    "WWDG",
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(

@@ -444,6 +444,8 @@ struct h5_rcc
   static constexpr auto const& rtc_sources      = h5::rtc_sources;
   static constexpr auto const& timers           = h5::timers;
   static constexpr auto const& bus_gated        = h5::bus_gated;
+  static constexpr field_name  wwdg_option      = {"OPTSR_CUR", "WWDG_SW"};
+  static constexpr field_name  wwdg_sleep       = {};
   static constexpr auto const& enable_registers = h5::enable_registers;
   static constexpr auto const& pll_inputs       = h5::pll_inputs;
   static constexpr auto const& pll_sources      = h5::pll_sources;

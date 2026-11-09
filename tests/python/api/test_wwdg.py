@@ -65,3 +65,10 @@ def test_every_l1_category_reads_wdgtb_and_wdga_back(part: str) -> None:
     assert m.periph.WWDG.CR.WDGA == 1
     m.periph.WWDG.CR.write(0x7F)
     assert m.periph.WWDG.CR.WDGA == 1
+
+
+@pytest.mark.parametrize("part", ("STM32U575QGIx", "STM32U585AIIx"))
+def test_every_u5_line_reads_the_production_option_register(part: str) -> None:
+    m = popcorn.MachineDescription(part=part, images=[]).machine()
+    m.reset()
+    assert m.periph.FLASH.FLASH_OPTR.read() == 0x1FEF_F8AA

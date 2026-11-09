@@ -68,7 +68,7 @@ def test_a_host_read_at_address_0_raises(stops: popcorn.Machine) -> None:
 
 async def test_unmodelled_data_is_reachable_through_the_storage(stops: popcorn.Machine) -> None:
     # --8<-- [start:unmodelled]
-    cr = stops.periph.WWDG.CR
+    cr = stops.periph.TSC.CR
     with pytest.raises(popcorn.ModelError):
         cr.read()
     cr.poke(0x3F)

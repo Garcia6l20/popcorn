@@ -1,4 +1,5 @@
 #include "debug_freeze.hpp"
+#include "flash_option.hpp"
 #include "iwdg_rows.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
@@ -134,23 +135,22 @@ private:
   void bite();
   void interrupt();
 
-  iwdg_variant             variant_;
-  register_file&           regs_;
-  field_ref                key_;
-  field_ref                prescaler_;
-  field_ref                reload_;
-  field_ref                window_;
-  field_ref                early_time_;
-  field_ref                early_clear_;
-  field_ref                early_enable_;
-  field_ref                early_flag_;
-  std::array<field_ref, 4> busy_{};
-  reg_ref                  early_register_;
-  core::clock_domain       lsi_;
-  irq_line*                line_          = nullptr;
-  bool                     freeze_logged_ = false;
-  std::optional<address>   option_address_;
-  std::uint32_t            option_mask_{};
+  iwdg_variant               variant_;
+  register_file&             regs_;
+  field_ref                  key_;
+  field_ref                  prescaler_;
+  field_ref                  reload_;
+  field_ref                  window_;
+  field_ref                  early_time_;
+  field_ref                  early_clear_;
+  field_ref                  early_enable_;
+  field_ref                  early_flag_;
+  std::array<field_ref, 4>   busy_{};
+  reg_ref                    early_register_;
+  core::clock_domain         lsi_;
+  irq_line*                  line_          = nullptr;
+  bool                       freeze_logged_ = false;
+  std::optional<option_bits> option_;
 };
 
 constexpr std::array<write_entry<iwdg>, 4> iwdg_writes{
@@ -196,26 +196,8 @@ iwdg::iwdg(model_context& ctx, peripheral_desc const& desc, iwdg_variant const& 
   }
   if(not variant.hardware_option.reg.empty())
   {
-    auto const& option = variant.hardware_option;
-    auto const  flash =
-        std::ranges::find(ctx.part.peripherals, std::string_view{"FLASH"}, &peripheral_desc::name);
-    register_desc const* found = nullptr;
-    if(flash != ctx.part.peripherals.end())
-    {
-      found = find_register(*flash, option.reg);
-    }
-    auto const bits = found == nullptr
-                        ? std::vector<field_desc>::const_iterator{}
-                        : std::ranges::find(found->fields, option.field, &field_desc::name);
-    if(found == nullptr or bits == found->fields.end())
-    {
-      throw config_error(
-          ctx.part.part, 0,
-          std::format("peripherals.FLASH.registers.{}.{}", option.reg, option.field),
-          "the hardware watchdog option the IWDG reads at reset");
-    }
-    option_address_ = flash->base + found->offset;
-    option_mask_ = static_cast<std::uint32_t>(((std::uint64_t{1} << bits->width) - 1) << bits->lsb);
+    option_ = option_bits_of(
+        ctx, variant.hardware_option, "the hardware watchdog option the IWDG reads at reset");
   }
 }
 
@@ -438,7 +420,7 @@ void iwdg::reset(register_file& regs, reset_kind)
   {
     line_->lower();
   }
-  if(option_address_)
+  if(option_)
   {
     ctx_.events.schedule_at(ctx_.clock.time(), option_start, 0, ctx_.clock);
   }
@@ -521,8 +503,8 @@ void iwdg::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind == option_start)
   {
-    auto const word = ctx_.services.read(*option_address_, 4, initiator::debugger);
-    if(word and (*word & option_mask_) == 0 and state_.running == 0)
+    auto const word = ctx_.services.read(option_->at, 4, initiator::debugger);
+    if(word and (*word & option_->mask) == 0 and state_.running == 0)
     {
       start();
     }

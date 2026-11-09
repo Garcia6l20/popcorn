@@ -28,7 +28,7 @@
     "UART/sci2_v2*/l4/*": ["l4"],
     "USART/sci3_v1*/l4/*": ["l4"],
     "USB_OTG_FS/otgfs1_v2_0_Cube/l4/*": ["l4"],
-    "WWDG/wwdg1_v1*/l1,l4/*": ["l4"]
+    "WWDG/wwdg1_v1*/l4/*": ["l4"]
   },
   "groups": [
     {"parts": ["STM32L471QEIx", "STM32L471QGIx", "STM32L471RETx", "STM32L471RGTx", "STM32L471VETx", "STM32L471VGTx", "STM32L471ZEJx", "STM32L471ZETx", "STM32L471ZGJx", "STM32L471ZGTx"], "instances": {
@@ -38,7 +38,7 @@
       "CRC": ["CRC/integtest1_v2_0/l4/*", "row", "crc_factory", "l4_crc", ""],
       "TSC": ["", "none_no_row", "", "", ""],
       "IWDG": ["IWDG/iwdg1_v2*/l4/*", "row", "iwdg_factory", "l4_iwdg", ""],
-      "WWDG": ["WWDG/wwdg1_v1*/l1,l4/*", "row", "wwdg_factory", "", ""],
+      "WWDG": ["WWDG/wwdg1_v1*/l4/*", "row", "wwdg_factory", "l4_wwdg", ""],
       "COMP": ["", "none_no_row", "", "", ""],
       "FIREWALL": ["", "none_no_row", "", "", ""],
       "I2C1": ["I2C/i2c2_v1_1_Cube/l4/*", "row", "i2c_factory", "l4_i2c", "i2c,i2c_controllers"],
@@ -104,7 +104,7 @@
       "CRC": ["CRC/integtest1_v2_0/l4/*", "row", "crc_factory", "l4_crc", ""],
       "TSC": ["", "none_no_row", "", "", ""],
       "IWDG": ["IWDG/iwdg1_v2*/l4/*", "row", "iwdg_factory", "l4_iwdg", ""],
-      "WWDG": ["WWDG/wwdg1_v1*/l1,l4/*", "row", "wwdg_factory", "", ""],
+      "WWDG": ["WWDG/wwdg1_v1*/l4/*", "row", "wwdg_factory", "l4_wwdg", ""],
       "COMP": ["", "none_no_row", "", "", ""],
       "FIREWALL": ["", "none_no_row", "", "", ""],
       "I2C1": ["I2C/i2c2_v1_1_Cube/l4/*", "row", "i2c_factory", "l4_i2c", "i2c,i2c_controllers"],
@@ -172,7 +172,7 @@
       "LCD": ["", "none_no_row", "", "", ""],
       "TSC": ["", "none_no_row", "", "", ""],
       "IWDG": ["IWDG/iwdg1_v2*/l4/*", "row", "iwdg_factory", "l4_iwdg", ""],
-      "WWDG": ["WWDG/wwdg1_v1*/l1,l4/*", "row", "wwdg_factory", "", ""],
+      "WWDG": ["WWDG/wwdg1_v1*/l4/*", "row", "wwdg_factory", "l4_wwdg", ""],
       "COMP": ["", "none_no_row", "", "", ""],
       "FIREWALL": ["", "none_no_row", "", "", ""],
       "I2C1": ["I2C/i2c2_v1_1_Cube/l4/*", "row", "i2c_factory", "l4_i2c", "i2c,i2c_controllers"],
@@ -239,7 +239,7 @@
       "CRC": ["CRC/integtest1_v2_0/l4/*", "row", "crc_factory", "l4_crc", ""],
       "TSC": ["", "none_no_row", "", "", ""],
       "IWDG": ["IWDG/iwdg1_v2*/l4/*", "row", "iwdg_factory", "l4_iwdg", ""],
-      "WWDG": ["WWDG/wwdg1_v1*/l1,l4/*", "row", "wwdg_factory", "", ""],
+      "WWDG": ["WWDG/wwdg1_v1*/l4/*", "row", "wwdg_factory", "l4_wwdg", ""],
       "COMP": ["", "none_no_row", "", "", ""],
       "FIREWALL": ["", "none_no_row", "", "", ""],
       "I2C1": ["I2C/i2c2_v1_1_Cube/l4/*", "row", "i2c_factory", "l4_i2c", "i2c,i2c_controllers"],
@@ -308,7 +308,7 @@
       "LCD": ["", "none_no_row", "", "", ""],
       "TSC": ["", "none_no_row", "", "", ""],
       "IWDG": ["IWDG/iwdg1_v2*/l4/*", "row", "iwdg_factory", "l4_iwdg", ""],
-      "WWDG": ["WWDG/wwdg1_v1*/l1,l4/*", "row", "wwdg_factory", "", ""],
+      "WWDG": ["WWDG/wwdg1_v1*/l4/*", "row", "wwdg_factory", "l4_wwdg", ""],
       "COMP": ["", "none_no_row", "", "", ""],
       "FIREWALL": ["", "none_no_row", "", "", ""],
       "I2C1": ["I2C/i2c2_v1_1_Cube/l4/*", "row", "i2c_factory", "l4_i2c", "i2c,i2c_controllers"],

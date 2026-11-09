@@ -237,6 +237,8 @@ struct l1_rcc
   static constexpr auto const& rtc_sources       = l1::rtc_sources;
   static constexpr auto const& timers            = l1::timers;
   static constexpr auto const& bus_gated         = l1::bus_gated;
+  static constexpr field_name  wwdg_option       = {};
+  static constexpr field_name  wwdg_sleep        = {};
   static constexpr auto const& enable_registers  = l1::enable_registers;
   static constexpr auto const& pll_inputs        = l1::pll_inputs;
   static constexpr auto const& pll_sources       = l1::pll_sources;

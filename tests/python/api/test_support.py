@@ -38,6 +38,7 @@ U575_BUILTIN = [
     "ICache",
     "DCACHE",
     "IWDG",
+    "WWDG",
     "PWR",
     "RCC",
     "RNG",
@@ -122,12 +123,12 @@ def supported() -> dict[bool, dict[str, PeripheralSupport]]:
 
 
 @pytest.fixture
-def registered_wwdg() -> Iterator[None]:
-    popcorn.model.register("WWDG")(Stub)
+def registered_comp() -> Iterator[None]:
+    popcorn.model.register("COMP")(Stub)
     try:
         yield
     finally:
-        popcorn.model.unregister("WWDG")
+        popcorn.model.unregister("COMP")
 
 
 def test_the_u575_ships() -> None:
@@ -167,11 +168,11 @@ def test_support_agrees_with_a_machine(
     assert (found.model is not None) == modelled(machines[trustzone], name)
 
 
-@pytest.mark.usefixtures("registered_wwdg")
+@pytest.mark.usefixtures("registered_comp")
 def test_a_registered_python_model_shows_as_python() -> None:
     found = {s.name: s.model for s in support(U575)}
-    assert found["WWDG"] == "python"
-    assert isinstance(popcorn.Machine(U575).model("WWDG"), Stub)
+    assert found["COMP"] == "python"
+    assert isinstance(popcorn.Machine(U575).model("COMP"), Stub)
 
 
 def test_a_python_model_over_a_builtin_ip_wins_until_unregistered() -> None:
@@ -186,8 +187,8 @@ def test_a_python_model_over_a_builtin_ip_wins_until_unregistered() -> None:
     assert modelled(popcorn.Machine(U575), "CRC")
 
 
-def test_without_a_registration_wwdg_has_no_model() -> None:
-    assert {s.name: s.model for s in support(U575)}["WWDG"] is None
+def test_without_a_registration_comp_has_no_model() -> None:
+    assert {s.name: s.model for s in support(U575)}["COMP"] is None
 
 
 def test_trustzone_on_a_part_without_it_is_refused(m33: popcorn.PartDescription) -> None:
@@ -265,8 +266,8 @@ def test_a_row_names_the_instance_it_serves() -> None:
 
 def test_an_instance_no_row_lists_has_no_row() -> None:
     found = {s.name: s for s in support(U575)}
-    assert found["WWDG"].row is None
-    assert found["WWDG"].source == "none_no_row"
+    assert found["COMP"].row is None
+    assert found["COMP"].source == "none_no_row"
     assert found["LPGPIO1"].row is None
     assert found["LPGPIO1"].source == "none_no_row"
 

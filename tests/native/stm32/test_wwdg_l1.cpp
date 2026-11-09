@@ -1,4 +1,4 @@
-#include "wwdg_cases.hpp"
+#include "wwdg_ll_cases.hpp"
 
 namespace
 {
@@ -8,11 +8,14 @@ auto desc() -> popcorn::part_description const&
 }
 
 constexpr wwdg_test::rig l1{
-    .firmware   = "l152xe_l1_wwdg_ll",
-    .enable_reg = "APB1ENR",
-    .pclk1_hz   = 2'097'152,
-    .irq        = 0,
-    .desc       = &desc};
+    .firmware    = "l152xe_l1_wwdg_ll",
+    .enable_reg  = "APB1ENR",
+    .pclk1_hz    = 2'097'152,
+    .irq         = 0,
+    .cfg_reg     = "CFGR",
+    .wdgtb_lsb   = 7,
+    .wdgtb_count = 4,
+    .desc        = &desc};
 }
 
 namespace wwdg_test

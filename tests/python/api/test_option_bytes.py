@@ -279,7 +279,7 @@ def test_without_option_bytes_the_registers_read_as_at_main(
 ) -> None:
     m = booted(u575, None)
     assert readback(m) == [
-        0x0000_0000,
+        0x1FEF_F8AA,
         0x0000_000F,
         0x0000_000F,
         0x0000_0000,
@@ -289,13 +289,13 @@ def test_without_option_bytes_the_registers_read_as_at_main(
         0x0000_0000,
     ]
     m.mem.u32[OPTR] = 0x1234_5678
-    assert m.mem.u32[OPTR] == 0
+    assert m.mem.u32[OPTR] == 0x1FEF_F8AA
     m.mem.u32[FLASH + 0x08] = 0x4567_0123
     m.mem.u32[FLASH + 0x08] = 0xCDEF_89AB
     m.mem.u32[FLASH + 0x10] = 0x0819_2A3B
     m.mem.u32[FLASH + 0x10] = 0x4C5D_6E7F
     m.mem.u32[OPTR] = 0x1234_5678
-    assert m.mem.u32[OPTR] == 0x1234_5678
+    assert m.mem.u32[OPTR] == 0x1234_5E78
 
 
 def test_tzen_0_reads_the_secure_option_registers_as_zero(

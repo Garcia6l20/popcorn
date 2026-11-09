@@ -19,6 +19,6 @@
     "irqs": "dd7dadcefc8962285e9defab79d899d232aad31ecf7ee22e7eaf550ce2a1277b",
     "peripherals": "1a59c20a39f55d72b9206bb1bca108398d9fe703a9c701616d5c62a69f2d2fe2",
     "regions": "541d93bf60d41f3a8d69b9df217609aa85384b70ab4806a40ae1cf129450f50a",
-    "registers": "e377462dccae4534e2d23dd69891548233f80367bb7e4afa6873fead10de6cf3"
+    "registers": "db6fa97210eec6d97cd0b1ff4a12adc4d471c8ba7a5f2cfd85ff85fd4f348a14"
   }
 }

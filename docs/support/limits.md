@@ -2328,22 +2328,40 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 
 Source: [wwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/wwdg.cpp)
 
-- The STM32L1, RM0038 22, and the STM32L4, RM0351 37, share one model. The counter derives from
-  the `wwdg` clock domain of the RCC, PCLK1 while WWDGEN is set. A gated clock freezes the counter
-  and the divider.
-- The divider by 4096 and 2^WDGTB runs free also with WDGA 0, RM0351 37.3.3. A `CR` write
-  reloads T and leaves the divider phase alone. A PCLK1 rate change keeps the partial division,
-  less than one PCLK1 cycle of phase is dropped.
-- A `CR` write resets when the counter before the write is above W, RM0351 37.3 and Figure 387.
-  The written T plays no part. T6 clear in a write with WDGA 1 resets at once.
+- The STM32L1, RM0038 22, the STM32L4, RM0351 37, the STM32U5, RM0456 62, and the STM32H5, RM0481 50,
+  share one model. WDGTB is 2 bits at 8:7 on the L1 and L4 and 3 bits at 13:11 on the U5 and H5. The
+  counter derives from the `wwdg` clock domain of the RCC, PCLK1 while WWDGEN is set. A gated clock
+  freezes the counter and the divider.
+- The divider by 4096 and 2^WDGTB runs free also with WDGA 0, RM0351 37.3.3. A `CR` write reloads T
+  and leaves the divider phase alone. A PCLK1 rate change keeps the partial division, less than one
+  PCLK1 cycle of phase is dropped.
+- A `CR` write resets when the counter before the write is above W, RM0351 37.3 and Figure 387. The
+  written T plays no part. T6 clear in a write with WDGA 1 resets at once.
 - WDGA and EWI are set-only until a reset, RM0351 37.5.1 and 37.5.2. `CR` reads return the counter.
 - EWIF sets when the counter reaches 0x40 with WDGA 1, also with EWI clear, RM0351 37.5.3, and
   clears when written 0.
-- Inferred, no manual states them: the divider starts at 0 at a reset and at a clock enable, a
-  WDGTB change keeps the divider count and the counter value, a `CR` write with T 0x40 sets no
-  EWIF, EWIF sets only with WDGA 1 (RM0351 37.2 conditions the interrupt on WDGA, 37.5.3 says
-  nothing), and the window compare applies to the write that sets WDGA.
-- The counter runs while the core is halted in a debug session on the STM32L1 and STM32L4.
+- With `FLASH_OPTR.WWDG_SW` 0 (STM32L4 and STM32U5) or `FLASH_OPTSR_CUR.WWDG_SW` 0 (STM32H5) the WWDG
+  is activated at every reset and WDGA cannot clear, read once every model has reset. The RCC sets
+  WWDGEN at the same instant, RCC_APB1ENR1 WWDGEN "can also be set by hardware if the WWDG_SW option
+  bit is reset" (RM0351, RM0456), and keeps WWDGSMEN at 1, "forced to 1 by hardware when the hardware
+  WWDG option is activated". On the STM32H5 RM0481 50.3 Table 551 footnote 4 says "When WWDG_SW is
+  set in HW mode the WWDG is running as soon as the CPU is in Run or Sleep modes", and the H5 RCC sets
+  WWDGEN like the L4 and U5, inferred: RM0481 RCC_APB1LENR WWDGEN reads "Set and reset by software"
+  and no manual gives the hardware set. The counter then runs from the reset with T 0x7F, W 0x7F and
+  WDGTB 0. The STM32U5 description gives FLASH_OPTR the production value 0x1FEFF8AA, WWDG_SW 1.
+- The counter stops while the machine holds its core with `DBG_WWDG_STOP` set in DBGMCU, and resumes at
+  the release with its phase kept. The bit is read at the hold. A reset during the hold takes the hold
+  again at the reset instant while `DBG_WWDG_STOP` is set. A system reset keeps `DBG_WWDG_STOP`, so
+  the counter stays frozen from the reset instant, and a power-on reset clears it, so the counter
+  runs. DBGMCU is reset by a power-on reset only: RM0351 48.16.4 (POR, system reset not affected),
+  RM0456 75.12.4, RM0481 66.12.4 and RM0038 30.16.4.
+- Inferred, no manual states them: the divider starts at 0 at a reset and at a clock enable, a WDGTB
+  change keeps the divider count and the counter value, a `CR` write with T 0x40 sets no EWIF, EWIF sets
+  only with WDGA 1 (RM0351 37.2 conditions the interrupt on WDGA, 37.5.3 says nothing), the window
+  compare applies to the write that sets WDGA, the hardware mode starts the counter at the reset
+  instant, and on the STM32H5 the RCC sets WWDGEN in hardware mode.
 - The STM32L1 `APB1RSTR.WWDGRST` returns the registers to their reset values and restarts the
   divider. On the STM32L4 only a system reset resets the WWDG.
-- ES0125, ES0224, ES0240, ES0241, ES0242, ES0578 and ES0250 name no WWDG item.
+- ES0565 2.2.16, clearing WWDG_SW breaks debug authentication or STiRoT, is a firmware-side hazard with no
+  counterpart in the model. ES0125, ES0224, ES0240, ES0241, ES0242, ES0578, ES0250 and ES0499 name no
+  WWDG item.

@@ -2134,7 +2134,7 @@ TEST_CASE("with TZEN = 0 the secure option registers read as zero, RM0456 7.5.1"
 TEST_CASE("without option bytes the option registers are the description's storage")
 {
   flash_rig const rig;
-  CHECK(rig.read("FLASH_OPTR") == 0);
+  CHECK(rig.read("FLASH_OPTR") == 0x1fef'f8aa);
   auto const before = rig.read("FLASH_NSBOOTADD0R");
   rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
   CHECK(rig.read("FLASH_NSBOOTADD0R") == before);

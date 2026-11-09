@@ -345,6 +345,8 @@ struct l4_rcc
   static constexpr auto const& rtc_sources       = l4::rtc_sources;
   static constexpr auto const& timers            = l4::timers;
   static constexpr auto const& bus_gated         = l4::bus_gated;
+  static constexpr field_name  wwdg_option       = {"OPTR", "WWDG_SW"};
+  static constexpr field_name  wwdg_sleep        = {"APB1SMENR1", "WWDGSMEN"};
   static constexpr auto const& enable_registers  = l4::enable_registers;
   static constexpr auto const& pll_inputs        = l4::pll_inputs;
   static constexpr auto const& pll_sources       = l4::pll_sources;

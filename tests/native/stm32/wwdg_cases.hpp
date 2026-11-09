@@ -35,7 +35,6 @@ constexpr std::uint64_t ps_per_s = 1'000'000'000'000;
 constexpr std::uint32_t wdga     = 0x80;
 constexpr std::uint32_t ewi      = 0x200;
 constexpr std::uint32_t t_mask   = 0x7F;
-constexpr std::uint32_t shift_at = 7;
 
 struct rig
 {
@@ -43,7 +42,13 @@ struct rig
   std::string_view enable_reg;
   std::uint64_t    pclk1_hz;
   std::uint32_t    irq;
+  std::string_view cfg_reg;
+  std::uint32_t    wdgtb_lsb;
+  std::uint32_t    wdgtb_count;
   auto (*desc)() -> part_description const&;
+  std::string_view option_reg{};
+  bool             hardware_enables = false;
+  std::string_view sleep_reg{};
 };
 
 auto the_rig() -> rig const&;
@@ -68,6 +73,7 @@ struct bench
   rig const&    r;
   stm32_fixture f;
   std::uint64_t t0 = 0;
+  icount        cap{10'000'000};
 
   explicit bench(
       rig const&            which,
@@ -76,6 +82,21 @@ struct bench
   {
     f.set("pc", sym(r.firmware, "idle"));
     enable_clock();
+  }
+
+  bench(rig const& which, part_description desc, core::machine_options options, bool enable)
+      : r{which}, f{std::move(desc), which.firmware, std::move(options)}
+  {
+    f.set("pc", sym(r.firmware, "idle"));
+    if(enable)
+    {
+      enable_clock();
+    }
+  }
+
+  [[nodiscard]] auto rcc_get(std::string_view reg, std::string_view name) const -> std::uint32_t
+  {
+    return f.field("RCC", reg, name);
   }
 
   void enable_clock()
@@ -118,6 +139,11 @@ struct bench
     write("RCC", reg, (read("RCC", reg) & ~mask) | (value << bits->lsb));
   }
 
+  void cap_for(std::uint64_t ps)
+  {
+    cap = icount{4 * cycles_in(ps, r.pclk1_hz) + 10'000'000};
+  }
+
   [[nodiscard]] auto count() const -> std::uint32_t
   {
     return read("WWDG", "CR") & t_mask;
@@ -154,19 +180,19 @@ struct bench
 
   void run_for(std::uint64_t ps) const
   {
-    f.run_for(ps, icount{10'000'000});
+    f.run_for(ps, cap);
   }
 
   void run_until(std::uint64_t ps) const
   {
     REQUIRE(
-        f.run_to_stop({.max_instructions = icount{10'000'000}, .until_time = vtime{ps}}).reason
+        f.run_to_stop({.max_instructions = cap, .until_time = vtime{ps}}).reason
         == stop_reason::time);
   }
 
   [[nodiscard]] auto reset_requested(std::uint64_t ps) const -> bool
   {
-    return f.run_to_stop({.max_instructions = icount{10'000'000}, .until_time = vtime{ps}}).reason
+    return f.run_to_stop({.max_instructions = cap, .until_time = vtime{ps}}).reason
         == stop_reason::reset_request;
   }
 
@@ -228,11 +254,13 @@ TEST_CASE("WWDG reset values: CR and CFR 0x7F, SR 0, the counter reads T")
 
 TEST_CASE("the WWDG expiry is the 64th tick after the reload, to the picosecond, per WDGTB")
 {
-  for(std::uint32_t shift = 0; shift < 4; ++shift)
+  for(std::uint32_t shift = 0; shift < wwdg_test::the_rig().wdgtb_count; ++shift)
   {
     CAPTURE(shift);
     wwdg_test::bench b{wwdg_test::the_rig()};
-    b.write("WWDG", "CFR", 0x7F | shift << wwdg_test::shift_at | wwdg_test::ewi);
+    b.cap_for(
+        wwdg_test::ps_of(70 * wwdg_test::period_cycles(shift), wwdg_test::the_rig().pclk1_hz));
+    b.write("WWDG", "CFR", 0x7F | shift << wwdg_test::the_rig().wdgtb_lsb | wwdg_test::ewi);
     b.run_for(3 * wwdg_test::ms);
     b.write("WWDG", "CR", 0xFF);
     auto const at  = b.f.now().ps;
@@ -459,7 +487,7 @@ TEST_CASE("a PCLK1 rate change keeps the partial division and moves the expiry")
   b.write("WWDG", "CR", 0xFF);
   auto const written = b.f.now().ps;
   b.run_for(5 * wwdg_test::ms);
-  b.rcc_field("CFGR", "PPRE1", 4);
+  b.rcc_field(wwdg_test::the_rig().cfg_reg, "PPRE1", 4);
   auto const changed = b.f.now().ps;
   auto const done    = wwdg_test::cycles_in(changed - b.t0, hz);
   auto const target  = (wwdg_test::cycles_in(written - b.t0, hz) / 4096 + 0x7F - 0x3F) * 4096;
@@ -476,7 +504,7 @@ TEST_CASE("a WDGTB change keeps the counter and the divider count, the tap moves
   b.run_until(b.tick_time(10, hz, 0) + 5 * wwdg_test::ms);
   auto const before = b.count();
   auto const at     = b.f.now().ps;
-  b.write("WWDG", "CFR", 0x7F | 2u << wwdg_test::shift_at);
+  b.write("WWDG", "CFR", 0x7F | 2u << wwdg_test::the_rig().wdgtb_lsb);
   CHECK(b.count() == before);
   auto const base = wwdg_test::cycles_in(at - b.t0, hz) / wwdg_test::period_cycles(2);
   CHECK(*b.expiry_due() == b.tick_time(base + before - 0x3F, hz, 2));
@@ -492,6 +520,7 @@ TEST_CASE("RCC WWDGEN clear freezes the counter, the enable restarts the divider
   b.rcc_field(wwdg_test::the_rig().enable_reg, "WWDGEN", 0);
   CHECK_FALSE(b.expiry_due().has_value());
   CHECK_FALSE(b.early_due().has_value());
+  b.cap_for(2'000 * wwdg_test::ms);
   b.run_for(2'000 * wwdg_test::ms);
   auto const resumed = b.f.now().ps;
   b.enable_clock();
@@ -516,7 +545,7 @@ TEST_CASE("a snapshot mid-count restores to the same WWDG expiry")
   wwdg_test::bench b{wwdg_test::the_rig()};
   b.write("WWDG", "CFR", 0x27F);
   b.write("WWDG", "CR", 0xFF);
-  b.run_for(30 * wwdg_test::ms);
+  b.run_for(3 * wwdg_test::ms);
   auto const saved = b.f.target->snapshot();
   auto const due   = *b.expiry_due();
   REQUIRE(b.reset_requested(due + wwdg_test::ms));
@@ -546,33 +575,64 @@ TEST_CASE("checklist 39: the WWDG row needs CFR and the WDGTB field")
       popcorn::config_error);
 }
 
-TEST_CASE("under reset_and_continue the LL firmware restarts and reads RCC_CSR.WWDGRSTF")
+TEST_CASE("DBG_WWDG_STOP freezes the counter while the core is held, the phase kept")
 {
-  auto options             = popcorn::testing::stm32_options();
-  options.on_reset_request = core::reset_request_policy::reset_and_continue;
-  popcorn::testing::stm32_fixture f{
-      wwdg_test::the_rig().desc(), wwdg_test::the_rig().firmware, std::move(options)};
-  auto const stopped = f.run_to_stop();
-  CAPTURE(stopped.detail);
-  REQUIRE(stopped.reason == stop_reason::user);
-  CHECK(f.log() == std::vector<std::uint32_t>{1});
-  CHECK(f.field("RCC", "CSR", "WWDGRSTF") == 1);
+  for(auto const frozen : {true, false})
+  {
+    CAPTURE(frozen);
+    wwdg_test::bench b{wwdg_test::the_rig()};
+    popcorn::testing::set_debug_freeze(b.f, "DBG_WWDG_STOP", frozen);
+    b.write("WWDG", "CFR", 0x27F);
+    b.write("WWDG", "CR", 0xFF);
+    b.run_for(5 * wwdg_test::ms);
+    auto const expiry  = *b.expiry_due();
+    auto const early   = *b.early_due();
+    auto const held    = b.f.now().ps;
+    auto const at_hold = b.count();
+    b.f.target->hold_core(true);
+    CHECK(b.expiry_due().has_value() == not frozen);
+    b.run_for(wwdg_test::ms);
+    CHECK(b.count() == (frozen ? at_hold : b.count()));
+    if(not frozen)
+    {
+      CHECK(b.count() != at_hold);
+    }
+    b.f.target->hold_core(false);
+    auto const span = b.f.now().ps - held;
+    CHECK(*b.expiry_due() == (frozen ? expiry + span : expiry));
+    CHECK(*b.early_due() == (frozen ? early + span : early));
+    auto const due = *b.expiry_due();
+    CHECK(b.reset_requested(due + wwdg_test::ms));
+    CHECK(b.f.now().ps >= due);
+  }
 }
 
-TEST_CASE("the LL firmware arms WWDG with WDGTB 3, the last refresh plus 64 ticks resets")
+TEST_CASE(
+    "a system reset during a debug hold keeps DBG_WWDG_STOP and freezes the counter again at the "
+    "reset instant, a power-on reset clears it and the counter runs")
 {
-  popcorn::testing::stm32_fixture f{wwdg_test::the_rig().desc(), wwdg_test::the_rig().firmware};
-  std::vector<std::uint64_t>      refreshes;
-  auto const                      hook = f.target->add_intercept(
-      sym(wwdg_test::the_rig().firmware, "refresh"), [&](core::intercept_call const& c) {
-        refreshes.push_back(c.target().virtual_clock().time().ps);
-        return core::intercept_result::proceed();
-      });
-  auto const stopped = f.run_to_stop();
-  REQUIRE(stopped.reason == stop_reason::reset_request);
-  REQUIRE(refreshes.size() == 50);
-  auto const tick = wwdg_test::ps_of(wwdg_test::period_cycles(3), wwdg_test::the_rig().pclk1_hz);
-  CHECK(f.log() == std::vector<std::uint32_t>{0, 0xFF, 0x1FF});
-  CHECK(f.now().ps > refreshes.back() + 63 * tick);
-  CHECK(f.now().ps <= refreshes.back() + 64 * tick + 10 * wwdg_test::ms / 1000);
+  for(auto const kind : {popcorn::reset_kind::software, popcorn::reset_kind::power_on})
+  {
+    auto const frozen = kind == popcorn::reset_kind::software;
+    CAPTURE(frozen);
+    wwdg_test::bench b{wwdg_test::the_rig()};
+    popcorn::testing::set_debug_freeze(b.f, "DBG_WWDG_STOP", true);
+    b.write("WWDG", "CR", 0xFF);
+    b.run_for(5 * wwdg_test::ms);
+    b.f.target->hold_core(true);
+    b.run_for(wwdg_test::ms);
+    b.f.target->reset(kind);
+    b.f.set("pc", wwdg_test::sym(wwdg_test::the_rig().firmware, "idle"));
+    b.enable_clock();
+    auto const hz = wwdg_test::the_rig().pclk1_hz;
+    b.write("WWDG", "CR", 0xFF);
+    CHECK(b.expiry_due().has_value() == not frozen);
+    b.run_for(3 * wwdg_test::ms);
+    CHECK((b.count() == 0x7F) == frozen);
+    auto const held = b.t0;
+    b.f.target->hold_core(false);
+    auto const span = frozen ? b.f.now().ps - held : 0;
+    REQUIRE(b.expiry_due().has_value());
+    CHECK(*b.expiry_due() == b.tick_time(64, hz, 0) + span);
+  }
 }

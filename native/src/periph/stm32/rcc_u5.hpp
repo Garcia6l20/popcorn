@@ -438,6 +438,8 @@ struct u5_rcc
   static constexpr auto const& rtc_sources      = u5::rtc_sources;
   static constexpr auto const& timers           = u5::timers;
   static constexpr auto const& bus_gated        = u5::bus_gated;
+  static constexpr field_name  wwdg_option      = {"OPTR", "WWDG_SW"};
+  static constexpr field_name  wwdg_sleep       = {"RCC_APB1SMENR1", "WWDGSMEN"};
   static constexpr auto const& enable_registers = u5::enable_registers;
   static constexpr auto const& pll_inputs       = u5::pll_inputs;
   static constexpr auto const& pll_sources      = u5::pll_sources;

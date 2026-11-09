@@ -33,7 +33,7 @@ def test_the_query_runs() -> None:
 
     unmodelled = [p.name for p in support(mcu("STM32U575QGIx")) if p.model is None]
     # --8<-- [end:query]
-    assert "WWDG" in unmodelled
+    assert "TSC" in unmodelled
     assert "RNG" not in unmodelled
 
 

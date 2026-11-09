@@ -1,5 +1,6 @@
 #include "backup_domain.hpp"
 #include "family_names.hpp"
+#include "flash_option.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "kernel_gate.hpp"
@@ -520,6 +521,8 @@ private:
   void               refuse_stopped_clock();
   void               enables_written(std::uint32_t word, std::uint32_t old, std::uint32_t now);
   void               drive_enables(bool from_reset_values);
+  void               sleep_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto wwdg_hardware() const -> bool;
 
   bool                                            core_stop_logged_{};
   rcc_options                                     options_;
@@ -549,6 +552,9 @@ private:
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer<signal>>                           timers_;
   std::vector<bus_gate<signal>>                        bus_gates_;
+  std::optional<option_bits>                           wwdg_option_;
+  field_ref                                            wwdg_enable_;
+  field_ref                                            wwdg_sleep_;
   std::optional<reg_ref>                               secure_;
   reg_ref                                              privilege_;
   field_ref                                            secure_privileged_;
@@ -1010,7 +1016,41 @@ rcc_model<Traits>::rcc_model(
            .enable = enable_field(entry.enable)});
     }
   }
+  if(not Traits::wwdg_option.reg.empty() and present("WWDG"))
+  {
+    wwdg_option_ = option_bits_of(
+        ctx, Traits::wwdg_option, "the hardware watchdog option the RCC enables the WWDG for");
+    wwdg_enable_ = enable_field("WWDGEN");
+    if(not Traits::wwdg_sleep.reg.empty())
+    {
+      wwdg_sleep_ = field(Traits::wwdg_sleep.reg, Traits::wwdg_sleep.field);
+      if(not std::ranges::contains(this->claims(), this->describe(Traits::wwdg_sleep.reg).name))
+      {
+        this->bind(
+            std::array<write_entry<rcc_model>, 1>{
+                {{Traits::wwdg_sleep.reg, &rcc_model::sleep_written}}});
+      }
+    }
+  }
   drive_enables(true);
+}
+
+template <typename Traits> void rcc_model<Traits>::sleep_written(std::uint32_t, std::uint32_t)
+{
+  if(wwdg_hardware())
+  {
+    update(regs_, wwdg_sleep_, 1);
+  }
+}
+
+template <typename Traits> auto rcc_model<Traits>::wwdg_hardware() const -> bool
+{
+  if(not wwdg_option_)
+  {
+    return false;
+  }
+  auto const word = ctx_.services.read(wwdg_option_->at, 4, initiator::debugger);
+  return word and (*word & wwdg_option_->mask) == 0;
 }
 
 template <typename Traits>
@@ -1429,6 +1469,22 @@ auto rcc_model<Traits>::flags_written(std::uint32_t old, std::uint32_t now) cons
 template <typename Traits>
 void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == event_count<Traits> + 1)
+  {
+    auto const word = ctx_.services.read(wwdg_option_->at, 4, initiator::debugger);
+    if(word and (*word & wwdg_option_->mask) == 0)
+    {
+      auto const before = regs_.peek(wwdg_enable_.offset);
+      update(regs_, wwdg_enable_, 1);
+      if(not Traits::wwdg_sleep.reg.empty())
+      {
+        update(regs_, wwdg_sleep_, 1);
+      }
+      settle(true);
+      enables_written(wwdg_enable_.offset, before, regs_.peek(wwdg_enable_.offset));
+    }
+    return;
+  }
   if(kind == event_count<Traits>)
   {
     auto const found = std::ranges::find(state_.notes, payload, &output_note::id);
@@ -1849,6 +1905,10 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     }
   }
   drive_enables(false);
+  if(wwdg_option_)
+  {
+    ctx_.events.schedule_at(ctx_.clock.time(), event_count<Traits> + 1, 0, ctx_.clock);
+  }
 }
 
 template <typename Traits> void rcc_model<Traits>::cicr_written(std::uint32_t, std::uint32_t now)

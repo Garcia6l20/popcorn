@@ -81,7 +81,7 @@ whatever `strict` says, with or without TrustZone. The register storage stays re
 --8<-- "guide/test_faults.py:unmodelled"
 ```
 
-The WWDG of the STM32U575 has no model, and neither has the CTI at 0xE0042000. `read()` raises,
+The TSC of the STM32U575 has no model, and neither has the CTI at 0xE0042000. `read()` raises,
 `poke()` stores without any model involved, and the `value` getter reads the storage.
 
 Host accesses over the bus are `m.mem` with its `secure` and `nonsecure` views, `m.ref.mem`,
