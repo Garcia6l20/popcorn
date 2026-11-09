@@ -285,6 +285,10 @@ void lpuart_poll(void)
   while(!LL_RCC_LSE_IsReady())
   {
   }
+  LL_RCC_LSE_EnablePropagation();
+  while(!LL_RCC_LSESYS_IsReady())
+  {
+  }
   LL_APB3_GRP1_EnableClock(LL_APB3_GRP1_PERIPH_LPUART1);
   LL_RCC_SetLPUARTClockSource(LL_RCC_LPUART1_CLKSOURCE_LSE);
   LL_LPUART_InitTypeDef config = {

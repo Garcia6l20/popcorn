@@ -518,8 +518,8 @@ TEST_CASE("a snapshot taken while PLL1 locks restores to the same run, in place 
 TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured before the template")
 {
   constexpr auto expected = std::to_array<unsigned char>(
-      {0x24, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
-       0x00, 0x7f, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      {0x30, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+       0x00, 0x8b, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x12, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00,
        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -527,17 +527,18 @@ TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured bef
        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x37, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x12, 0x38, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
        0x39, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x30, 0x00, 0x02,
-       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x65, 0x6e, 0x64, 0x69, 0x6e,
-       0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x6c, 0x73, 0x69, 0x5f,
-       0x66, 0x6f, 0x72, 0x63, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x66, 0x72, 0x61,
-       0x63, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x26, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x12, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
-       0x68, 0x73, 0x69, 0x5f, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x63,
-       0x6c, 0x65, 0x61, 0x72, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x69,
-       0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x31, 0x00, 0x01, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x65, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x6c, 0x73, 0x69, 0x5f, 0x66, 0x6f, 0x72,
+       0x63, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x66, 0x72, 0x61, 0x63, 0x74, 0x69,
+       0x6f, 0x6e, 0x00, 0x26, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x68, 0x73, 0x69,
+       0x5f, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x10, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x63, 0x6c, 0x65, 0x61,
+       0x72, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x69, 0x76, 0x69, 0x64,
+       0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00});
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   REQUIRE(probe(f).hz("sysclk") == 160 * mhz);
@@ -847,6 +848,256 @@ TEST_CASE("RM0456 11.8.49: BDRST resets RCC_BDCR but LSCOSEL and LSCOEN, a power
   CHECK(peek(f, "RCC_BDCR") == lsco);
   f.target->reset(reset_kind::power_on);
   CHECK((peek(f, "RCC_BDCR") & lsco) == 0);
+}
+
+using std::chrono::microseconds;
+
+void enable_lpuart_on_lse(stm32_fixture const& f)
+{
+  write(f, "RCC_APB3ENR", bit_of("RCC_APB3ENR", "LPUART1EN"));
+  write(f, "RCC_CCIPR3", 3u * bit_of("RCC_CCIPR3", "LPUART1SEL"));
+}
+
+auto lsesys_ready(stm32_fixture const& f) -> std::uint32_t
+{
+  return f.field("RCC", "RCC_BDCR", "LSESYSRDY");
+}
+
+auto event_due_at(stm32_fixture const& f, std::uint64_t due_ps) -> bool
+{
+  auto const snap = f.target->snapshot();
+  return std::ranges::any_of(
+      snap.data().events.pending, [due_ps](core::event const& e) { return e.due_ps == due_ps; });
+}
+
+constexpr std::uint64_t two_lse_periods_ps = 61'035'156;
+
+TEST_CASE("RM0456 11.8.49: LSESYSRDY sets two LSE periods after LSESYSEN once LSERDY is set")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, microseconds{110});
+  REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  enable_lpuart_on_lse(f);
+  CHECK(probe(f).hz("lpuart1") == 0);
+  auto const written = f.target->virtual_clock().time().ps;
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  CHECK(lsesys_ready(f) == 0);
+  CHECK(event_due_at(f, written + two_lse_periods_ps));
+  idle_until(f, microseconds{60});
+  CHECK(lsesys_ready(f) == 0);
+  CHECK(probe(f).hz("lpuart1") == 0);
+  idle_until(f, microseconds{2});
+  CHECK(lsesys_ready(f) == 1);
+  CHECK(probe(f).hz("lpuart1") == 32'768);
+}
+
+TEST_CASE("RM0456 11.4.7: the RTC runs on the LSE without LSESYSEN, LPUART1 does not")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "RTCSEL"));
+  write(
+      f, "RCC_BDCR",
+      bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "RTCSEL") | bit_of("RCC_BDCR", "RTCEN"));
+  enable_lpuart_on_lse(f);
+  idle_until(f, microseconds{300});
+  REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  CHECK(probe(f).hz("lse") == 32'768);
+  CHECK(probe(f).hz("rtc") == 32'768);
+  CHECK(probe(f).hz("lpuart1") == 0);
+  CHECK(lsesys_ready(f) == 0);
+}
+
+TEST_CASE("RM0456 11.4.7: every kernel clock mux that lists the LSE sees it only with LSESYSRDY")
+{
+  struct consumer
+  {
+    std::string_view instance;
+    std::string_view enable_reg;
+    std::string_view enable;
+    std::string_view select_reg;
+    std::string_view select;
+    std::string_view domain;
+  };
+  constexpr std::array<consumer, 5> consumers{
+      {
+       {"USART1", "RCC_APB2ENR", "USART1EN", "RCC_CCIPR1", "USART1SEL", "usart1"},
+       {"USART2", "RCC_APB1ENR1", "USART2EN", "RCC_CCIPR1", "USART2SEL", "usart2"},
+       {"LPTIM2", "RCC_APB1ENR2", "LPTIM2EN", "RCC_CCIPR1", "LPTIM2SEL", "lptim2"},
+       {"LPTIM1", "RCC_APB3ENR", "LPTIM1EN", "RCC_CCIPR3", "LPTIM1SEL", "lptim1"},
+       {"LPUART1", "RCC_APB3ENR", "LPUART1EN", "RCC_CCIPR3", "LPUART1SEL", "lpuart1"},
+       }
+  };
+  for(auto const& user : consumers)
+  {
+    CAPTURE(user.instance);
+    auto f = idle_fixture();
+    write(f, user.enable_reg, peek(f, user.enable_reg) | bit_of(user.enable_reg, user.enable));
+    write(f, user.select_reg, peek(f, user.select_reg) | 3u * bit_of(user.select_reg, user.select));
+    write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+    idle_until(f, microseconds{300});
+    REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+    CHECK(probe(f).hz(user.domain) == 0);
+    write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+    idle_until(f, microseconds{70});
+    CHECK(probe(f).hz(user.domain) == 32'768);
+  }
+}
+
+TEST_CASE("RM0456 11.8.49: LSESYSRDY is hardware set, a CPU write to it changes nothing")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSESYSRDY"));
+  CHECK(lsesys_ready(f) == 0);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{200});
+  REQUIRE(lsesys_ready(f) == 1);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  CHECK(lsesys_ready(f) == 1);
+}
+
+TEST_CASE("RM0456 11.8.49: LSESYSEN before LSERDY sets LSESYSRDY two periods after LSERDY")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{101});
+  CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{59});
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{3});
+  CHECK(lsesys_ready(f) == 1);
+}
+
+TEST_CASE("RM0456 11.8.49: clearing LSESYSEN clears LSESYSRDY and the LSE kernel clocks at once")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  enable_lpuart_on_lse(f);
+  idle_until(f, microseconds{300});
+  REQUIRE(lsesys_ready(f) == 1);
+  REQUIRE(probe(f).hz("lpuart1") == 32'768);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  CHECK(lsesys_ready(f) == 0);
+  CHECK(probe(f).hz("lpuart1") == 0);
+  CHECK(probe(f).hz("lse") == 32'768);
+}
+
+TEST_CASE("RM0456 11.8.49: clearing LSEON clears LSERDY and LSESYSRDY, LSESYSEN stays")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{300});
+  REQUIRE(lsesys_ready(f) == 1);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSESYSEN"));
+  CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 0);
+  CHECK(lsesys_ready(f) == 0);
+  CHECK(f.field("RCC", "RCC_BDCR", "LSESYSEN") == 1);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{101});
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{70});
+  CHECK(lsesys_ready(f) == 1);
+}
+
+TEST_CASE("an LSESYSEN cleared and set again during the delay restarts the two periods")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, microseconds{110});
+  REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{30});
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{32});
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{30});
+  CHECK(lsesys_ready(f) == 1);
+}
+
+TEST_CASE("RM0456 11.8.49: BDRST keeps LSESYSEN, LSESYSRDY follows the LSE it stops")
+{
+  auto       f   = idle_fixture();
+  auto const sys = bit_of("RCC_BDCR", "LSESYSEN");
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | sys);
+  idle_until(f, microseconds{300});
+  REQUIRE(lsesys_ready(f) == 1);
+  write(f, "RCC_BDCR", peek(f, "RCC_BDCR") | bit_of("RCC_BDCR", "BDRST"));
+  CHECK(peek(f, "RCC_BDCR") == (bit_of("RCC_BDCR", "BDRST") | sys));
+  idle_until(f, microseconds{300});
+  CHECK(peek(f, "RCC_BDCR") == (bit_of("RCC_BDCR", "BDRST") | sys));
+  f.target->reset(reset_kind::power_on);
+  CHECK(peek(f, "RCC_BDCR") == 0);
+}
+
+TEST_CASE(
+    "RM0456 11.8.49: after BDRST is released LSEON brings LSESYSRDY back with the kept LSESYSEN")
+{
+  auto const sys = bit_of("RCC_BDCR", "LSESYSEN");
+  auto const on  = bit_of("RCC_BDCR", "LSEON");
+  for(bool const kept : {true, false})
+  {
+    CAPTURE(kept);
+    auto f = idle_fixture();
+    write(f, "RCC_BDCR", on | (kept ? sys : 0));
+    idle_until(f, microseconds{300});
+    write(f, "RCC_BDCR", peek(f, "RCC_BDCR") | bit_of("RCC_BDCR", "BDRST"));
+    write(f, "RCC_BDCR", peek(f, "RCC_BDCR") & ~bit_of("RCC_BDCR", "BDRST"));
+    CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 0);
+    CHECK(f.field("RCC", "RCC_BDCR", "LSESYSEN") == (kept ? 1u : 0u));
+    write(f, "RCC_BDCR", peek(f, "RCC_BDCR") | on);
+    idle_until(f, microseconds{101});
+    CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+    CHECK(lsesys_ready(f) == 0);
+    idle_until(f, microseconds{59});
+    CHECK(lsesys_ready(f) == 0);
+    idle_until(f, microseconds{3});
+    CHECK(lsesys_ready(f) == (kept ? 1u : 0u));
+  }
+}
+
+TEST_CASE("a system reset keeps LSESYSEN and LSESYSRDY, one in the delay starts again")
+{
+  auto       f    = idle_fixture();
+  auto const both = bit_of("RCC_BDCR", "LSESYSEN") | bit_of("RCC_BDCR", "LSEON");
+  write(f, "RCC_BDCR", both);
+  idle_until(f, microseconds{300});
+  REQUIRE(lsesys_ready(f) == 1);
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  CHECK(lsesys_ready(f) == 1);
+  write(f, "RCC_BDCR", 0);
+  write(f, "RCC_BDCR", both);
+  idle_until(f, microseconds{200});
+  REQUIRE(lsesys_ready(f) == 1);
+  write(f, "RCC_BDCR", both & ~bit_of("RCC_BDCR", "LSESYSEN"));
+  write(f, "RCC_BDCR", both);
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{60});
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{2});
+  CHECK(lsesys_ready(f) == 1);
+}
+
+TEST_CASE("a snapshot taken in the LSESYS delay restores to the same ready instant")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, microseconds{110});
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | bit_of("RCC_BDCR", "LSESYSEN"));
+  idle_until(f, microseconds{30});
+  auto const saved = f.target->snapshot();
+  idle_until(f, microseconds{100});
+  REQUIRE(lsesys_ready(f) == 1);
+  f.target->restore(saved);
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{30});
+  CHECK(lsesys_ready(f) == 0);
+  idle_until(f, microseconds{2});
+  CHECK(lsesys_ready(f) == 1);
 }
 
 TEST_CASE("a ready delay pending across a core clock change ends at its virtual time")

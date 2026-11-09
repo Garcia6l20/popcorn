@@ -78,6 +78,31 @@ template <typename Signal> struct oscillator_names
   rate_rule        rate{};
 };
 
+/**
+ * @brief A clock that follows an enable bit once its source oscillator is ready: the STM32U5
+ *        `LSESYSEN` / `LSESYSRDY`, RM0456 11.4.7. The ready bit sets after @p cycles periods of the
+ *        source and clears with the enable bit or the source.
+ * @tparam Signal Signal enumeration of the family.
+ * @tparam Source Oscillator enumeration of the family.
+ */
+template <typename Signal, typename Source> struct dependent_clock
+{
+  /** @brief Signal the clock publishes: the rate of @p in while ready, else 0. */
+  Signal out;
+  /** @brief Signal of the source oscillator. */
+  Signal in;
+  /** @brief Oscillator that has to be ready. */
+  Source from;
+  /** @brief Register holding the enable and ready bits. */
+  std::string_view reg;
+  /** @brief Enable bit name. */
+  std::string_view enable;
+  /** @brief Ready bit name. */
+  std::string_view ready;
+  /** @brief Source periods from the enable, or from the source becoming ready, to the ready. */
+  std::uint8_t cycles;
+};
+
 struct consumer
 {
   std::string_view instance;

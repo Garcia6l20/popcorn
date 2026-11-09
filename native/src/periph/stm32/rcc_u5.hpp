@@ -41,6 +41,7 @@ enum class signal : std::uint8_t
   hse,
   lsi,
   lse,
+  lse_system,
   sysclk,
   hclk,
   pclk1,
@@ -61,16 +62,16 @@ enum class signal : std::uint8_t
 
 using enum signal;
 
-constexpr std::array<signal, 8> uart_inputs_1{pclk1, sysclk, hsi16, lse};
+constexpr std::array<signal, 8> uart_inputs_1{pclk1, sysclk, hsi16, lse_system};
 constexpr std::array<signal, 8> i2c_inputs_1{pclk1, sysclk, hsi16, msik};
-constexpr std::array<signal, 8> low_power_inputs{msik, lsi, hsi16, lse};
+constexpr std::array<signal, 8> low_power_inputs{msik, lsi, hsi16, lse_system};
 constexpr std::array<signal, 8> audio_inputs{hclk, pll1_p, pll3_q, none, msik};
 constexpr std::array<signal, 8> sai_inputs{pll2_p, pll3_p, pll1_p, none, hsi16};
 constexpr std::array<signal, 8> pclk3_inputs{pclk3, sysclk, hsi16, msik};
 
 constexpr std::array<mux<signal>, 28> muxes{
     {
-     {"RCC_CCIPR1", "USART1SEL", {pclk2, sysclk, hsi16, lse}, {{{"USART1", "USART1EN"}}}},
+     {"RCC_CCIPR1", "USART1SEL", {pclk2, sysclk, hsi16, lse_system}, {{{"USART1", "USART1EN"}}}},
      {"RCC_CCIPR1", "USART2SEL", uart_inputs_1, {{{"USART2", "USART2EN"}}}},
      {"RCC_CCIPR1", "USART3SEL", uart_inputs_1, {{{"USART3", "USART3EN"}}}},
      {"RCC_CCIPR1", "UART4SEL", uart_inputs_1, {{{"UART4", "UART4EN"}}}},
@@ -79,7 +80,7 @@ constexpr std::array<mux<signal>, 28> muxes{
      {"RCC_CCIPR1", "I2C2SEL", i2c_inputs_1, {{{"I2C2", "I2C2EN"}}}},
      {"RCC_CCIPR1", "I2C4SEL", i2c_inputs_1, {{{"I2C4", "I2C4EN"}}}},
      {"RCC_CCIPR1", "SPI2SEL", i2c_inputs_1, {{{"SPI2", "SPI2EN"}}}},
-     {"RCC_CCIPR1", "LPTIM2SEL", {pclk1, lsi, hsi16, lse}, {{{"LPTIM2", "LPTIM2EN"}}}},
+     {"RCC_CCIPR1", "LPTIM2SEL", {pclk1, lsi, hsi16, lse_system}, {{{"LPTIM2", "LPTIM2EN"}}}},
      {"RCC_CCIPR1", "SPI1SEL", {pclk2, sysclk, hsi16, msik}, {{{"SPI1", "SPI1EN"}}}},
      {"RCC_CCIPR1", "FDCAN1SEL", {hse, pll1_q, pll2_p, none}, {{{"FDCAN1", "FDCAN1EN"}}}},
      {"RCC_CCIPR2", "MDF1SEL", audio_inputs, {{{"MDF1", "MDF1EN"}}}},
@@ -99,7 +100,7 @@ constexpr std::array<mux<signal>, 28> muxes{
      {"RCC_CCIPR2", "I2C6SEL", i2c_inputs_1, {{{"I2C6", "I2C6EN"}}}},
      {"RCC_CCIPR3",
          "LPUART1SEL",
-         {pclk3, sysclk, hsi16, lse, msik},
+         {pclk3, sysclk, hsi16, lse_system, msik},
          {{{"LPUART1", "LPUART1EN"}}}},
      {"RCC_CCIPR3", "SPI3SEL", pclk3_inputs, {{{"SPI3", "SPI3EN"}}}},
      {"RCC_CCIPR3", "I2C3SEL", pclk3_inputs, {{{"I2C3", "I2C3EN"}}}},
@@ -202,6 +203,12 @@ constexpr auto names = std::to_array<named_field<rcc_role>>({
 });
 
 static_assert(names_every_role(names));
+
+constexpr std::array<dependent_clock<signal, source>, 1> dependent_clocks{
+    {
+     {lse_system, lse, source::lse, "RCC_BDCR", "LSESYSEN", "LSESYSRDY", 2},
+     }
+};
 
 constexpr std::array<signal_mux<signal>, 1> signal_muxes{
     {
@@ -414,6 +421,7 @@ struct u5_rcc
   static constexpr auto const& muxes            = u5::muxes;
   static constexpr auto const& signal_muxes     = u5::signal_muxes;
   static constexpr auto const& divided          = u5::divided;
+  static constexpr auto const& dependent_clocks = u5::dependent_clocks;
   static constexpr auto const& internal_signals = u5::internal_signals;
   static constexpr auto const& rtc_sources      = u5::rtc_sources;
   static constexpr auto const& timers           = u5::timers;
@@ -441,8 +449,8 @@ struct u5_rcc
   static constexpr std::string_view                  backup_register  = "RCC_BDCR";
   /** @brief Every field of RCC_BDCR keeps its value through a system reset. */
   static constexpr std::string_view backup_excluded = "";
-  /** @brief Fields of RCC_BDCR that BDRST keeps, RM0456 11.8.49. */
-  static constexpr std::string_view backup_reset_kept    = "LSCOSEL LSCOEN";
+  /** @brief Fields of RCC_BDCR that BDRST keeps, RM0456 11.8.49. LSESYSRDY follows LSERDY. */
+  static constexpr std::string_view backup_reset_kept    = "LSCOSEL LSCOEN LSESYSEN LSESYSRDY";
   static constexpr std::string_view reset_flags_register = "RCC_CSR";
   static constexpr std::uint32_t    sw_mask              = 0b11;
 

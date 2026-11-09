@@ -47,7 +47,23 @@ template <typename Traits>
 inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 
 template <typename Traits>
-inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
+inline constexpr std::size_t dependent_count = [] {
+  if constexpr(requires { Traits::dependent_clocks; })
+  {
+    return Traits::dependent_clocks.size();
+  }
+  else
+  {
+    return std::size_t{};
+  }
+}();
+
+template <typename Traits>
+inline constexpr std::size_t first_dependent_event =
+    source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
+
+template <typename Traits>
+inline constexpr std::size_t event_count = first_dependent_event<Traits> + dependent_count<Traits>;
 
 struct unit_bits
 {
@@ -160,6 +176,15 @@ struct oscillator
   field_ref enable;
 };
 
+struct dependent_fields
+{
+  field_ref enable;
+  field_ref ready;
+};
+
+template <typename Traits>
+using dependent_array = std::array<dependent_fields, dependent_count<Traits>>;
+
 struct pll_fields
 {
   field_ref                                             src;
@@ -271,6 +296,14 @@ template <typename Signal> struct timer
  *        `RCC_CIFR` flags of the description's cross rules, the flags of a Secure oscillator only
  *        for a Secure write. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI, RM0456 11.8.51, and
  *        `RCC_PRIVCFGR` is storage.
+ *
+ *        STM32U5 LSE system clock, RM0456 11.4.7 and 11.8.49: `LSESYSRDY` sets two LSE periods
+ *        after `LSESYSEN` with `LSEON` and `LSERDY` set, and clears at once with `LSESYSEN`,
+ *        `LSEON` or `LSERDY`. The `lse_system` signal runs at the LSE rate while `LSESYSRDY` is
+ *        set and at 0 Hz otherwise. The USART, LPUART and LPTIM kernel clock muxes read the LSE
+ *        through it, and the RTC clock reads the LSE directly. `BDRST` keeps `LSESYSEN`, and
+ *        `LSESYSRDY` follows the LSE that `BDRST` stops. The trait `dependent_clocks` holds such a
+ *        clock: its enable and ready bits, its source oscillator and its delay in source periods.
  *
  *        STM32L1, RM0038 section 6, through `l1_rcc`: one PLL in RCC_CFGR, whose PLLSRC, PLLMUL
  *        and PLLDIV hold while it is on or ready, RM0038 6.3.3, the ready flags and enables in
@@ -409,6 +442,7 @@ private:
   void schedule(std::uint32_t kind, std::optional<std::uint64_t> delay_ps = std::nullopt);
   void cancel(std::uint32_t kind);
   void settle(bool notify);
+  void follow_dependents();
   void publish(bool notify);
   void load(std::span<std::byte const> in) override;
   void refuse_stopped_clock();
@@ -419,6 +453,7 @@ private:
   rcc_options                                          options_;
   register_file&                                       regs_;
   std::array<oscillator, source_count>                 osc_{};
+  dependent_array<Traits>                              dependents_{};
   std::array<pll_fields, Traits::pll_nodes.size()>     pll_{};
   field_table<rcc_role>                                names_;
   std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
@@ -761,6 +796,14 @@ rcc_model<Traits>::rcc_model(
         .ready  = field(names.reg, names.ready),
         .flag   = field(Traits::flag_register, names.flag),
         .enable = field(Traits::enable_register, names.enable)};
+  }
+  if constexpr(requires { Traits::dependent_clocks; })
+  {
+    for(auto const& [index, names] : std::views::enumerate(Traits::dependent_clocks))
+    {
+      dependents_[index] = {
+          .enable = field(names.reg, names.enable), .ready = field(names.reg, names.ready)};
+    }
   }
   if constexpr(requires { Traits::lse_locked_controls; })
   {
@@ -1290,7 +1333,14 @@ void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   state_.pending &= ~(std::uint32_t{1} << kind);
-  if(kind == divider_kind)
+  if(kind >= first_dependent_event<Traits>)
+  {
+    if constexpr(dependent_count<Traits> != 0)
+    {
+      update(regs_, dependents_[kind - first_dependent_event<Traits>].ready, 1);
+    }
+  }
+  else if(kind == divider_kind)
   {
     if(std::exchange(state_.divider_clearing, 0) != 0)
     {
@@ -1312,8 +1362,38 @@ void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
   settle(true);
 }
 
+template <typename Traits> void rcc_model<Traits>::follow_dependents()
+{
+  if constexpr(dependent_count<Traits> != 0)
+  {
+    rate_inputs const inputs{
+        .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
+    for(auto const& [index, names] : std::views::enumerate(Traits::dependent_clocks))
+    {
+      auto const& fields  = dependents_[index];
+      auto const  kind    = first_dependent_event<Traits> + static_cast<std::size_t>(index);
+      auto const  pending = (state_.pending >> kind & 1u) != 0;
+      if(get(regs_, fields.enable) == 0 or not is_ready(names.from))
+      {
+        update(regs_, fields.ready, 0);
+        if(pending)
+        {
+          cancel(kind);
+        }
+      }
+      else if(get(regs_, fields.ready) == 0 and not pending)
+      {
+        auto const hz = std::max<std::uint64_t>(
+            Traits::oscillators[std::to_underlying(names.from)].rate(inputs), 1);
+        schedule(kind, std::uint64_t{names.cycles} * ps_per_second / hz);
+      }
+    }
+  }
+}
+
 template <typename Traits> void rcc_model<Traits>::settle(bool notify)
 {
+  follow_dependents();
   for(std::size_t pll = 0; pll < pll_.size(); ++pll)
   {
     auto const  which = static_cast<source>(std::to_underlying(source::pll1) + pll);
@@ -1354,6 +1434,13 @@ auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
     if(names.rate != nullptr)
     {
       at(names.out) = ready(static_cast<source>(index)) ? names.rate(inputs) : 0;
+    }
+  }
+  if constexpr(requires { Traits::dependent_clocks; })
+  {
+    for(auto const& [names, fields] : std::views::zip(Traits::dependent_clocks, dependents_))
+    {
+      at(names.out) = get(regs_, fields.ready) != 0 ? at(names.in) : 0;
     }
   }
   for(auto const& node : Traits::divided)
@@ -1524,6 +1611,7 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
       start(which);
     }
   }
+  follow_dependents();
   publish(false);
   drive_enables(false);
 }
