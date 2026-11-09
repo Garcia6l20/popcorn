@@ -10,6 +10,7 @@ import threading
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import override
 
 import popcorn
 import pytest
@@ -196,6 +197,7 @@ class Driver(UartDevice):
         self.plan = plan
         self.frames: list[tuple[int, int]] = []
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.frames.append((byte, at.ps))
         pin, level, after = self.plan[byte]
@@ -641,6 +643,7 @@ def test_a_watch_removed_inside_a_running_machine_raises_machine_running_and_sta
 
 
 class Resetting(UartDevice):
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.board.drive_pin("PA0", True)
 
@@ -738,6 +741,7 @@ class BoardDevice(UartDevice):
         self.edges: Edges = []
         self.watch: Unwatch | None = None
 
+    @override
     def on_attach(self) -> None:
         self.watch = self.board.watch_pin("PA5", self.heard)
 

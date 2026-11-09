@@ -10,7 +10,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, override
 
 import popcorn
 import pytest
@@ -667,6 +667,7 @@ def test_a_relative_path_is_refused(make: Callable[[], object], key: str) -> Non
 
 
 class _FsPath(os.PathLike[str]):
+    @override
     def __fspath__(self) -> str:
         return str(DRIVER_ELF)
 

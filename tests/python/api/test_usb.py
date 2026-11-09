@@ -23,7 +23,7 @@ import tty
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import popcorn
 import pytest
@@ -1496,6 +1496,7 @@ class FailOnce(logging.Filter):
         super().__init__()
         self.failed = False
 
+    @override
     def filter(self, record: logging.LogRecord) -> bool:
         if not self.failed:
             self.failed = True

@@ -14,7 +14,7 @@ import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import popcorn
 import pytest
@@ -94,13 +94,16 @@ class Stack(UartDevice):
         self.log: list[tuple[str, int, int]] = []
         self.sent: list[int] = []
 
+    @override
     def on_attach(self) -> None:
         if self.build is not None:
             self.build(self)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.log.append((f"frame {byte:#x}", at.ps, self.now.ps))
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.log.append((kind.name, at.ps, self.now.ps))
 
@@ -414,6 +417,7 @@ def test_a_reset_hook_runs_in_the_loop_on_the_caller_and_restores_the_real_loop(
         late.append(device.now.ps)
 
     class Resetting(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             loop = asyncio.get_running_loop()
             seen.append(loop is self.loop)
@@ -443,6 +447,7 @@ def test_a_reset_hook_runs_in_the_loop_on_the_caller_and_restores_the_real_loop(
 
 def test_a_raising_reset_hook_restores_the_real_loop(u575: popcorn.PartDescription) -> None:
     class Raising(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             raise LookupError("reset says no")
 
@@ -466,6 +471,7 @@ def test_a_base_exception_from_a_reset_hook_restores_the_real_loop(
         pass
 
     class Raising(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             raise Stopping
 
@@ -575,6 +581,7 @@ def test_a_test_thread_reading_during_a_hook_is_not_taken_for_the_hook(
     leave = threading.Event()
 
     class Blocking(Stack):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             entered.set()
             assert leave.wait(10)
@@ -609,6 +616,7 @@ def test_gil_entries_count_each_byte_and_each_stamp_a_timer_fires_and_none_idle(
     u575: popcorn.PartDescription,
 ) -> None:
     class Replying(Stack):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             super().on_frame(byte, at)
             self.loop.call_later(0.00001, lambda: None)
@@ -777,6 +785,7 @@ def test_a_handler_takes_over_task_failures_callbacks_and_hooks_but_not_the_boun
     heard: list[str] = []
 
     class Raising(Stack):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             raise KeyError("hook says no")
 
@@ -944,10 +953,12 @@ def test_every_hook_shares_one_context_and_a_task_gets_a_copy(
         var.set("changed by the task")
 
     class Contextual(Stack):
+        @override
         def on_attach(self) -> None:
             seen.append(("attach", var.get()))
             var.set("set in on_attach")
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             seen.append(("frame", var.get()))
             self.loop.create_task(body())
@@ -1084,6 +1095,7 @@ class ServingStack(UartDevice):
         super().__init__()
         self.out = out
 
+    @override
     def on_attach(self) -> None:
         self.loop.create_task(self.serve())
 
@@ -1118,6 +1130,7 @@ def test_a_reset_from_a_finally_at_close_runs_its_hook_in_that_step(
     seen: list[object] = []
 
     class Resetting(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             seen.append((kind, asyncio.get_running_loop() is self.loop, self.now.ps))
 
@@ -1334,6 +1347,7 @@ def test_a_parked_abort_runs_on_the_machine_thread_at_its_stamp(
     threads: list[bool] = []
 
     class Noting(Stack):
+        @override
         def on_error(self, kind: UartError, at: VirtualTime) -> None:
             super().on_error(kind, at)
             threads.append(_core.on_host_thread())
@@ -1362,6 +1376,7 @@ def wake_on_abort(u575: popcorn.PartDescription, *, firmware: bool) -> tuple[boo
             super().__init__()
             self.waiter: asyncio.Future[int] | None = None
 
+        @override
         def on_attach(self) -> None:
             self.waiter = self.loop.create_future()
             self.loop.create_task(self.waits())
@@ -1373,6 +1388,7 @@ def wake_on_abort(u575: popcorn.PartDescription, *, firmware: bool) -> tuple[boo
             at_ps.append(at)
             self.send(b"\x55", at=VirtualTime(at) + us(100))
 
+        @override
         def on_error(self, kind: UartError, at: VirtualTime) -> None:
             assert self.waiter is not None
             self.waiter.set_result(at.ps)
@@ -1434,6 +1450,7 @@ def mixed_run(
     sent: list[int] = []
 
     class Peer(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.queue: asyncio.Queue[int] = asyncio.Queue()
             asyncio.get_running_loop().create_task(self.serve())
@@ -1455,6 +1472,7 @@ def mixed_run(
                 await asyncio.sleep(0.00025)
                 log.append(("beacon", self.now.ps))
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             log.append(("frame", byte, at.ps, self.now.ps))
             sent.append(byte)
@@ -1622,12 +1640,15 @@ def rts_and_frame_at_one_count(
     replied: list[bytes] = []
 
     class Duplex(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.send(b"x", at=self.now + ps(us(1).ps + gap_ps))
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             log.append(("frame", at.ps, self.now.ps))
 
+        @override
         def on_rts(self, ready: bool, at: VirtualTime) -> None:
             log.append(("rts", at.ps, self.now.ps))
             if not ready:
@@ -1659,6 +1680,7 @@ def test_a_parked_abort_then_a_reset_drops_on_error_and_reset_tells_the_device(
     resets: list[popcorn.ResetKind] = []
 
     class Noting(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             resets.append(kind)
 
@@ -1724,6 +1746,7 @@ def test_two_devices_share_the_loop_and_one_log(u575: popcorn.PartDescription) -
             super().__init__()
             self.name = name
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             log.append((f"{self.name} {byte:#x}", at.ps, self.now.ps))
             self.loop.call_later(
@@ -1771,11 +1794,13 @@ def test_a_retrieval_only_by_another_step_at_the_same_picosecond_is_too_late(
     heard: list[tuple[str, int]] = []
 
     class Starting(UartDevice):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             heard.append(("starts", at.ps))
             parsers.append(self.loop.create_task(parser_fails(), name="the parser"))
 
     class Awaiting(UartDevice):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             heard.append(("awaits", at.ps))
             self.loop.create_task(self.retrieves())
@@ -1807,10 +1832,12 @@ def test_an_awaiter_already_linked_wakes_inside_the_step_and_retrieves_in_time(
     parsed: list[asyncio.Future[asyncio.Task[None]]] = []
 
     class Starting(UartDevice):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             parsed[0].set_result(self.loop.create_task(parser_fails_after_a_step()))
 
     class Linked(UartDevice):
+        @override
         def on_attach(self) -> None:
             parsed.append(self.loop.create_future())
             self.loop.create_task(self.retrieves())
@@ -1918,6 +1945,7 @@ def test_a_power_cycle_tells_the_device_and_keeps_its_timers(
     kinds: list[popcorn.ResetKind] = []
 
     class Noting(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             kinds.append(kind)
             self.loop.call_later(1e-5, self.mark, "later")

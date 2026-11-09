@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import override
+
 from popcorn import ResetKind
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime, ms
@@ -32,6 +34,7 @@ class Eeprom24(I2CTarget):
         self.resets: list[ResetKind] = []
         self.nacks = 0
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         if at.ps < self.busy_until:
             self.nacks += 1
@@ -41,6 +44,7 @@ class Eeprom24(I2CTarget):
         self.pending = bytearray()
         return True
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         if self.written < 2:
             self.pointer = ((self.pointer << 8) | byte) % self.size if self.written else byte
@@ -49,11 +53,13 @@ class Eeprom24(I2CTarget):
         self.pending.append(byte)
         return True
 
+    @override
     def on_read(self, at: VirtualTime) -> int:
         value = self.array[self.pointer]
         self.pointer = (self.pointer + 1) % self.size
         return value
 
+    @override
     def on_stop(self, at: VirtualTime) -> None:
         if self.writing and self.pending:
             base = self.pointer & ~(self.page - 1)
@@ -63,6 +69,7 @@ class Eeprom24(I2CTarget):
         self.writing = False
         self.pending = bytearray()
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         self.resets.append(kind)
         if kind in (ResetKind.POWER_ON, ResetKind.BROWN_OUT):
@@ -89,10 +96,12 @@ class JedecDevice(SpiTarget):
         self.selects: list[bool] = []
         self.resets: list[ResetKind] = []
 
+    @override
     def on_select(self, selected: bool, at: VirtualTime) -> None:
         self.selects.append(selected)
         self.position = 0
 
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         if self.position == 0:
             self.command = out
@@ -102,5 +111,6 @@ class JedecDevice(SpiTarget):
         self.position += 1
         return reply
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         self.resets.append(kind)

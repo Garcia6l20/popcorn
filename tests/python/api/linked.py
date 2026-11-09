@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import override
 
 import popcorn
 import popcorn.model
@@ -64,6 +65,7 @@ class Ticker(popcorn.model.Model):
     raise_at: int = 0
     period_us: int = 10
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         super().reset(kind)
         self.schedule(us(self.period_us), self._tick)

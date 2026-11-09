@@ -9,7 +9,7 @@ import threading
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, assert_type, cast
+from typing import Literal, assert_type, cast, override
 
 import popcorn
 import pytest
@@ -195,14 +195,17 @@ class Flaky(Eeprom24):
         if self.broken == method:
             raise RuntimeError(f"{method} broke")
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.check("on_start")
         return super().on_start(read, at)
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         self.check("on_write")
         return super().on_write(byte, at)
 
+    @override
     def on_read(self, at: VirtualTime) -> int:
         self.check("on_read")
         return super().on_read(at)
@@ -244,14 +247,17 @@ class FlakyAt(Eeprom24):
         if self.method == method and self.calls[method] == self.nth:
             raise RuntimeError(f"{method} broke")
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.check("on_start")
         return super().on_start(read, at)
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         self.check("on_write")
         return super().on_write(byte, at)
 
+    @override
     def on_read(self, at: VirtualTime) -> int:
         self.check("on_read")
         return super().on_read(at)
@@ -290,6 +296,7 @@ class OnceJedec(JedecDevice):
         super().__init__("PA4", (0x1F, 0x87, 0x01))
         self.broken = True
 
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         if self.broken:
             self.broken = False
@@ -316,6 +323,7 @@ class SelectRaiser(JedecDevice):
         self.nth = nth
         self.calls = 0
 
+    @override
     def on_select(self, selected: bool, at: VirtualTime) -> None:
         self.calls += 1
         if self.calls == self.nth:
@@ -363,6 +371,7 @@ def test_a_raising_spi_restore_hook_still_loads_the_later_devices(
     class First(JedecDevice):
         raise_on_restore = False
 
+        @override
         def restore(self, data: bytes) -> None:
             if self.raise_on_restore:
                 self.raise_on_restore = False
@@ -387,11 +396,13 @@ class ResetRaiser(Eeprom24):
         self.raise_on_reset = True
         self.raise_on_restore = False
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         super().reset(kind)
         if self.raise_on_reset and kind is ResetKind.SOFTWARE:
             raise RuntimeError("reset broke")
 
+    @override
     def restore(self, data: bytes) -> None:
         if self.raise_on_restore:
             self.raise_on_restore = False
@@ -435,6 +446,7 @@ def test_a_raising_spi_reset_hook_still_resets_the_later_devices(
     u575: popcorn.PartDescription,
 ) -> None:
     class First(JedecDevice):
+        @override
         def reset(self, kind: ResetKind) -> None:
             super().reset(kind)
             if kind is ResetKind.SOFTWARE:
@@ -453,6 +465,7 @@ class Stamped(Eeprom24):
         super().__init__(0x50, 4096)
         self.starts: list[int] = []
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.starts.append(at.ps)
         return super().on_start(read, at)
@@ -508,6 +521,7 @@ def test_a_read_outside_a_byte_is_a_model_error(
     u575: popcorn.PartDescription, value: object
 ) -> None:
     class Wrong(Eeprom24):
+        @override
         def on_read(self, at: VirtualTime) -> int:
             return cast(int, value)
 
@@ -600,6 +614,7 @@ def test_an_acknowledge_that_is_not_a_bool_is_a_model_error(
     u575: popcorn.PartDescription,
 ) -> None:
     class Loose(Eeprom24):
+        @override
         def on_start(self, read: bool, at: VirtualTime) -> bool:
             return cast(bool, 1)
 
@@ -613,6 +628,7 @@ def test_an_spi_frame_wider_than_its_bits_is_a_model_error(
     u575: popcorn.PartDescription,
 ) -> None:
     class Wide(JedecDevice):
+        @override
         def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
             return 1 << bits
 
@@ -641,6 +657,7 @@ def test_a_plain_i2c_target_acknowledges_and_reads_ff(u575: popcorn.PartDescript
 
 def test_a_device_defining_eq_is_attached_by_identity(u575: popcorn.PartDescription) -> None:
     class Equal(I2CTarget):
+        @override
         def __eq__(self, other: object) -> bool:
             return isinstance(other, Equal)
 
@@ -660,9 +677,11 @@ def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.PartDescript
             self.table = {}
 
     class Custom(Plain):
+        @override
         def snapshot(self) -> bytes:
             return bytes(sorted(self.table))
 
+        @override
         def restore(self, data: bytes) -> None:
             self.table = dict.fromkeys(data, 0)
 
@@ -692,11 +711,13 @@ def test_a_snapshot_returning_no_bytes_is_a_model_error(
 
 
 class _StrSnapshotI2C(I2CTarget):
+    @override
     def snapshot(self) -> bytes:
         return cast(bytes, "text")
 
 
 class _StrSnapshotSpi(SpiTarget):
+    @override
     def snapshot(self) -> bytes:
         return cast(bytes, "text")
 
@@ -1097,6 +1118,7 @@ def test_an_i2c_device_error_inside_running_raises_at_the_next_wait(
 
 
 class BrokenJedec(JedecDevice):
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         raise RuntimeError("exchange broke")
 
@@ -1187,21 +1209,25 @@ class Faulty(I2CTarget):
         self.shots -= 1
         return cast(T, self.error)
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool | I2CError:
         self.calls = 0
         self.events.append(("R" if read else "W", 0, at.ps))
         return self.pick("on_start", True)
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool | I2CError:
         self.calls += 1
         self.events.append(("w", byte, at.ps))
         return self.pick("on_write", True)
 
+    @override
     def on_read(self, at: VirtualTime) -> int | I2CError:
         self.calls += 1
         self.events.append(("r", 0x5A, at.ps))
         return self.pick("on_read", 0x5A)
 
+    @override
     def on_stop(self, at: VirtualTime) -> None:
         self.events.append(("P", 0, at.ps))
 
@@ -1308,18 +1334,22 @@ class Stretching(I2CTarget):
             self.stretched_at = len(self.events) - 1
             self.stretch(cast(VirtualDuration, self.for_))
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool | I2CError:
         self.note("on_start", at)
         return True
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool | I2CError:
         self.note("on_write", at)
         return True
 
+    @override
     def on_read(self, at: VirtualTime) -> int | I2CError:
         self.note("on_read", at)
         return 0x11
 
+    @override
     def on_stop(self, at: VirtualTime) -> None:
         self.events.append(("on_stop", at.ps))
 
@@ -1400,6 +1430,7 @@ class Collecting(Stretching):
         self.collected = -1
         self.freed = False
 
+    @override
     def note(self, hook: str, at: VirtualTime) -> None:
         super().note(hook, at)
         if len(self.events) == 1:
@@ -1458,10 +1489,12 @@ class Listening(I2CTarget):
         super().__init__(address)
         self.events: list[str] = []
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.events.append("read" if read else "write")
         return True
 
+    @override
     def on_stop(self, at: VirtualTime) -> None:
         self.events.append("stop")
 
@@ -1628,6 +1661,7 @@ def test_a_hold_takes_no_gil_on_the_machine_thread(u575: popcorn.PartDescription
 
 
 class Holding(Stamped):
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.hold_bus(for_=ms(1))
         return True
@@ -1647,6 +1681,7 @@ class Moded(SpiTarget):
         super().__init__(cs, mode=mode)
         self.frames: list[int] = []
 
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         self.frames.append(out)
         return (1 << bits) - 1

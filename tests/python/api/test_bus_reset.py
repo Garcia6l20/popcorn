@@ -7,6 +7,7 @@ import gc
 import weakref
 from collections.abc import Callable
 from pathlib import Path
+from typing import override
 
 import popcorn
 import pytest
@@ -40,10 +41,12 @@ class Rng(Model):
         self.reads += 1
         return self.regs.CR
 
+    @override
     def on_bus_reset(self) -> None:
         self.bus_resets += 1
         super().on_bus_reset()
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.resets.append(kind)
         super().reset(kind)
@@ -74,6 +77,7 @@ class Raising(Model):
     def _imr(self, old: int, new: int) -> None:
         pass
 
+    @override
     def on_bus_reset(self) -> None:
         raise RuntimeError("bus reset refused")
 

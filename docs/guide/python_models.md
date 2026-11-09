@@ -102,8 +102,8 @@ Names starting with `_` that popcorn's device bases define are reserved: a subcl
 subclass sets never replaces the base's own state. An instance attribute named like a reserved
 method, such as `self._read`, raises `TypeError` when the machine takes the device. `SpiTarget` also
 reserves `_cs_pin` and `_cs_port` as class-level names, and an instance may set them. In device
-code, pyright's `reportImplicitOverride` with `@typing.override` on the hook methods, when enabled,
-flags an accidental override of any base method at check time.
+code, mark each hook method `@override`, imported with `from typing import override`, and pyright's
+`reportImplicitOverride` flags an accidental override of any base method at check time.
 
 `Periph(devices=[Device(TempSensor, address=0x48, readings=[21.0, 22.5])])` attaches one to a
 peripheral, and `machine.board.devices("I2C1")` returns the objects. As with models, annotated

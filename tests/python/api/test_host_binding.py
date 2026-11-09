@@ -17,7 +17,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from typing import Any
+from typing import Any, override
 
 import popcorn
 import pytest
@@ -211,6 +211,7 @@ class FailOnce(logging.Filter):
         super().__init__()
         self.failed = False
 
+    @override
     def filter(self, record: logging.LogRecord) -> bool:
         if not self.failed:
             self.failed = True
@@ -401,6 +402,7 @@ def test_a_flush_forwards_only_the_records_queued_when_it_began(
     latencies = iter(range(2, 16))
 
     class Writing(logging.Handler):
+        @override
         def emit(self, record: logging.LogRecord) -> None:
             following = next(latencies, None)
             if following is not None:
@@ -1389,6 +1391,7 @@ class Counted(Recorder):
         self.keeper: object = None
 
     @on_read("CNT")
+    @override
     def _cnt(self) -> int:
         READS.append(VALUE.get())
         return 7
@@ -1402,6 +1405,7 @@ class Holding(Eeprom24):
         self.machine: popcorn.Machine | None = None
         self.starts: list[str] = []
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.starts.append(VALUE.get())
         return super().on_start(read, at)
@@ -2944,6 +2948,7 @@ class InterruptOnce(logging.Handler):
         self.interrupted = False
         self.seen: list[str] = []
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         if not self.interrupted:
             self.interrupted = True
@@ -2999,6 +3004,7 @@ def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_tim
     calls = {"all": 0, "dropped": 0}
 
     class Raising(logging.Filter):
+        @override
         def filter(self, record: logging.LogRecord) -> bool:
             calls["all"] += 1
             if "were dropped" in record.getMessage():

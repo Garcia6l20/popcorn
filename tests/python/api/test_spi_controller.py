@@ -9,7 +9,7 @@ import struct
 import weakref
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast, overload
+from typing import cast, overload, override
 
 import popcorn
 import pytest
@@ -34,6 +34,7 @@ class Stamped(SpiController):
         super().__init__(sck_hz=sck_hz, bits=bits, mode=mode)
         self.frames: list[tuple[int, int, int]] = []
 
+    @override
     def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
         super().on_frame(sent, received, at)
         self.frames.append((sent, received, at.ps))
@@ -362,6 +363,7 @@ def test_a_bad_project_controller_is_refused_with_its_key(
 
 def test_a_huge_transfer_is_refused_by_its_length_before_its_frames_are_read() -> None:
     class Huge(Sequence[int]):
+        @override
         def __len__(self) -> int:
             return 10**7
 
@@ -371,6 +373,7 @@ def test_a_huge_transfer_is_refused_by_its_length_before_its_frames_are_read() -
         @overload
         def __getitem__(self, index: slice) -> Sequence[int]: ...
 
+        @override
         def __getitem__(self, index: int | slice) -> int | Sequence[int]:
             raise AssertionError("a frame was read")
 
@@ -415,6 +418,7 @@ def test_a_controller_holding_its_machine_is_reported_and_the_cycle_collected(
 
 
 class Broken(SpiController):
+    @override
     def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
         raise RuntimeError("frame broke")
 

@@ -22,7 +22,7 @@ import traceback
 import types
 import weakref
 from collections.abc import Callable, Coroutine
-from typing import NoReturn, cast
+from typing import NoReturn, cast, override
 
 import popcorn
 import pytest
@@ -88,6 +88,7 @@ class CountingSelector(selectors.DefaultSelector):
         super().__init__()
         self.calls = 0
 
+    @override
     def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
         """Count the call and select."""
         self.calls += 1

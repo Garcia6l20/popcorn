@@ -10,7 +10,7 @@ import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import popcorn
 import pytest
@@ -486,6 +486,7 @@ def test_a_controller_of_a_collected_machine_is_not_called_and_stops_the_run(par
 
 
 class Broken(I2CController):
+    @override
     def on_answer(self, answer: I2CAnswer) -> None:
         raise RuntimeError("answer broke")
 
@@ -508,6 +509,7 @@ class BrokenOnce(I2CController):
         super().__init__()
         self.nth = nth
 
+    @override
     def on_answer(self, answer: I2CAnswer) -> None:
         super().on_answer(answer)
         if len(self.answers) == self.nth:

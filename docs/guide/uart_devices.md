@@ -27,8 +27,9 @@ Names starting with `_` that popcorn's `UartDevice` defines are reserved: a subc
 such as `_reset` or `_frame`, raises `TypeError` at class definition. Other `_` names are free, and
 an attribute a subclass sets, such as `self._loop`, never replaces the device's own state. An
 instance attribute named like a reserved name, such as `self._reset`, raises `TypeError` when the
-machine takes the device. In device code, pyright's `reportImplicitOverride` with `@typing.override`
-on the hook methods, when enabled, flags an accidental override of any base method at check time.
+machine takes the device. In device code, mark each hook method `@override`, imported with
+`from typing import override`, and pyright's `reportImplicitOverride` flags an accidental override
+of any base method at check time.
 
 Attach the device through `devices=` of the machine, or `Periph(devices=[Device(cls)])` in a machine
 description, alone on its UART:

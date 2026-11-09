@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, override
 
 import build_memo
 import pytest
@@ -253,6 +253,7 @@ def test_a_hit_replays_only_the_records_the_logger_still_emits(tmp_path: Path) -
     seen: list[str] = []
 
     class Sink(logging.Handler):
+        @override
         def emit(self, record: logging.LogRecord) -> None:
             seen.append(record.getMessage())
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import weakref
+from typing import override
 
 import popcorn
 import pytest
@@ -30,6 +31,7 @@ class Codec(UartDevice):
         self.stamps: list[int] = []
         self.ports: dict[str, DeviceAudio] = {}
 
+    @override
     def on_attach(self) -> None:
         for block in self.blocks:
             self.ports[block] = self.board.audio_port("SAI1", block, self.heard)  # type: ignore[arg-type]
@@ -40,9 +42,11 @@ class Codec(UartDevice):
         self.frames.append(frame)
         self.stamps.append(stamp(self.loop))
 
+    @override
     def snapshot(self) -> bytes:
         return b""
 
+    @override
     def restore(self, data: bytes) -> None:
         self.on_attach()
 
@@ -148,6 +152,7 @@ class Plain(UartDevice):
         super().__init__()
         self.port: DeviceAudio | None = None
 
+    @override
     def on_attach(self) -> None:
         self.port = self.board.audio_port("SAI1", "A", lambda frame: None)
 
@@ -291,6 +296,7 @@ class Writer(UartDevice):
         self.in_attach = in_attach
         self.port: DeviceAudio | None = None
 
+    @override
     def on_attach(self) -> None:
         self.port = self.board.audio_port("SAI1", "B", lambda frame: None)
         if self.in_attach:
@@ -324,12 +330,15 @@ class Keeper(UartDevice):
         super().__init__()
         self.frames: list[AudioFrame] = []
 
+    @override
     def on_attach(self) -> None:
         self.board.audio_port("SAI1", "A", self.frames.append)
 
+    @override
     def snapshot(self) -> bytes:
         return b""
 
+    @override
     def restore(self, data: bytes) -> None:
         return None
 
@@ -473,6 +482,7 @@ class Raising(Codec):
         super().__init__(*blocks)
         self.at = at
 
+    @override
     def heard(self, frame: AudioFrame) -> None:
         super().heard(frame)
         if len(self.frames) == self.at:

@@ -11,7 +11,7 @@ import logging
 import struct
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, override
 
 import popcorn
 import pytest
@@ -423,6 +423,7 @@ class CodecStandIn(I2CTarget):
         self.started_ps = 0
         self.stopped_ps = 0
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         if not self.selected:
             self.register, self.selected = byte, True
@@ -434,6 +435,7 @@ class CodecStandIn(I2CTarget):
                 self.stopped_ps = at.ps
         return True
 
+    @override
     def on_stop(self, at: VirtualTime) -> None:
         self.selected = False
 

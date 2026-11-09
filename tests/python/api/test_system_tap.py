@@ -8,7 +8,7 @@ import gc
 import threading
 import weakref
 from collections.abc import Callable
-from typing import cast
+from typing import cast, override
 
 import popcorn
 import pytest
@@ -422,6 +422,7 @@ class TapReader(Ticker):
 
     period_us = 1
 
+    @override
     def _tick(self) -> None:
         super()._tick()
         for read in TAP_READS:

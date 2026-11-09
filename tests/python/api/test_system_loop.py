@@ -8,6 +8,7 @@ import os
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import override
 
 import popcorn
 import pytest
@@ -97,16 +98,20 @@ class Stack(UartDevice):
         self.build = build
         self.log: Log = []
 
+    @override
     def on_attach(self) -> None:
         if self.build is not None:
             self.build(self)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.log.append((f"frame {byte:#x}", at.ps, self.now.ps))
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.log.append((kind.name, at.ps, self.now.ps))
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.log.append((f"rts {ready}", at.ps, self.now.ps))
 
@@ -350,12 +355,15 @@ def held_at_beside_a_link_arrival(
     log: Log = []
 
     class Duplex(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.send(b"x", at=self.now + ps(19_900_000))
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             log.append(("frame", at.ps, self.now.ps))
 
+        @override
         def on_rts(self, ready: bool, at: VirtualTime) -> None:
             log.append(("rts", at.ps, self.now.ps))
             if not ready:
@@ -492,6 +500,7 @@ def traffic_scene(
     state = [0]
 
     class Peer(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.loop.call_later(1e-5, self.tick)
 
@@ -502,6 +511,7 @@ def traffic_scene(
                 state[0] += 1
                 self.loop.call_later(3.3e-4, self.tick)
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             log.append(("frame", byte, at.ps, self.now.ps, a.time.ps))
             self.loop.call_later(1.7e-5, self.late, byte)
@@ -564,6 +574,7 @@ class Resetting(Stack):
     def __init__(self) -> None:
         super().__init__(lambda device: device.loop.call_later(1.5e-4, device.mark, "kept"))
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.log.append((kind.name, stamp(self.loop), self.now.ps))
         self.loop.call_later(1e-5, self.mark, "later")

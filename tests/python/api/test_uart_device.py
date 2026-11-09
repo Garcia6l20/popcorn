@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import override
 
 import popcorn
 import pytest
@@ -45,16 +46,20 @@ class Recorder(UartDevice):
         self.attaches: list[int] = []
         self.nows: list[int] = []
 
+    @override
     def on_attach(self) -> None:
         self.attaches.append(threading.get_ident())
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.frames.append((byte, at.ps))
         self.nows.append(self.now.ps)
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.errors.append((kind, at.ps))
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.resets.append(kind)
 
@@ -66,6 +71,7 @@ class Replier(Recorder):
         super().__init__()
         self.after = after
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         super().on_frame(byte, at)
         self.send(bytes([byte ^ 0xFF]), at=at + self.after)
@@ -79,6 +85,7 @@ class Starter(Recorder):
         self.data = data
         self.after = us(after_us)
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.send(self.data, at=self.now + self.after)
@@ -87,6 +94,7 @@ class Starter(Recorder):
 class KickedReplier(Replier):
     """A `Replier` that opens the exchange with one byte when attached."""
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.send(b"\x5a", at=self.now)
@@ -293,6 +301,7 @@ def held_by_brr(row: Row, *, device: bool) -> tuple[bool, bool]:
 
 def held_by_rts(row: Row, *, device: bool) -> tuple[bool, bool]:
     class Two(Recorder):
+        @override
         def on_attach(self) -> None:
             super().on_attach()
             self.send(b"\x41", at=self.now + us(1))
@@ -357,6 +366,7 @@ def test_a_send_behind_queued_frames_starts_when_they_end(u575: popcorn.PartDesc
     row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)
 
     class Twice(Recorder):
+        @override
         def on_attach(self) -> None:
             super().on_attach()
             self.send(b"\x01\x02", at=self.now + us(50))
@@ -403,6 +413,7 @@ def test_now_is_the_frame_stamp_when_the_machine_runs_a_block_past_it(
     late: list[int] = []
 
     class Timed(Recorder):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             late.append(m.time.ps - at.ps)
             super().on_frame(byte, at)
@@ -542,6 +553,7 @@ def abort_reply(row: Row, *, firmware: bool) -> tuple[bool, bool]:
     threads: list[bool] = []
 
     class Answering(Recorder):
+        @override
         def on_error(self, kind: UartError, at: VirtualTime) -> None:
             super().on_error(kind, at)
             threads.append(_core.on_host_thread())
@@ -682,6 +694,7 @@ def test_a_write_refuses_the_abort_tag(u575: popcorn.PartDescription) -> None:
 
 def test_a_hook_exception_stops_the_run_naming_the_device(u575: popcorn.PartDescription) -> None:
     class Broken(Starter):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             raise LookupError("nothing here")
 
@@ -771,6 +784,7 @@ class SendingFromReset(Recorder):
         super().__init__()
         self.caught: list[tuple[str, bool]] = []
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         super().reset(kind)
         try:
@@ -816,6 +830,7 @@ def test_a_send_before_now_raises_and_queues_nothing(u575: popcorn.PartDescripti
     caught: list[BaseException] = []
 
     class Late(Recorder):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             try:
                 self.send(b"x", at=VirtualTime(at.ps - 1))
@@ -864,14 +879,17 @@ class RaisingOnce(Recorder):
             self.hook = ""
             raise LookupError(hook)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         super().on_frame(byte, at)
         self._raise("on_frame")
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         super().on_error(kind, at)
         self._raise("on_error")
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         super().reset(kind)
         self._raise("reset")
@@ -940,6 +958,7 @@ def test_a_raising_reset_hook_still_resets_every_other_model(row: Row) -> None:
 
 def test_a_machine_stopped_by_a_hook_exception_is_collected(u575: popcorn.PartDescription) -> None:
     class Broken(Starter):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             raise LookupError("gone")
 
@@ -1033,6 +1052,7 @@ def test_the_host_thread_runs_a_send_from_on_attach(u575: popcorn.PartDescriptio
     on_host: list[bool] = []
 
     class Where(Recorder):
+        @override
         def on_attach(self) -> None:
             on_host.append(_core.on_host_thread())
 
@@ -1049,10 +1069,12 @@ class FlowRecorder(Recorder):
         self.breaks: list[int] = []
         self.edge_threads: list[int] = []
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.edges.append((ready, at.ps))
         self.edge_threads.append(threading.get_ident())
 
+    @override
     def on_break(self, at: VirtualTime) -> None:
         self.breaks.append(at.ps)
 
@@ -1064,6 +1086,7 @@ class Opening(FlowRecorder):
         super().__init__()
         self.opening = opening
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.opening(self)
@@ -1100,10 +1123,12 @@ def test_cts_holds_the_next_frame_and_releases_it_at_its_stamp(row: Row) -> None
 
 def test_a_cts_release_from_a_hook_counts_from_the_stamp_past_a_block_lag(row: Row) -> None:
     class Releasing(FlowRecorder):
+        @override
         def on_attach(self) -> None:
             super().on_attach()
             self.drive_cts(False, at=self.now + us(1))
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             super().on_frame(byte, at)
             late.append(m.time.ps - at.ps)
@@ -1148,6 +1173,7 @@ def test_a_uart_without_flow_control_refuses_drive_cts_and_reads_rts_ready() -> 
     caught: list[popcorn.ConfigError] = []
 
     class NoFlow(FlowRecorder):
+        @override
         def on_attach(self) -> None:
             try:
                 self.drive_cts(False)
@@ -1212,6 +1238,7 @@ def test_rts_edges_cost_a_gil_entry_only_when_a_device_hears_them(
     u575: popcorn.PartDescription,
 ) -> None:
     class Deaf(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.send(b"\x41\x42\x43", at=self.now + us(1))
 
@@ -1328,6 +1355,7 @@ def test_a_firmware_break_reaches_on_break_at_the_stream_stamp(row: Row) -> None
 
 def test_one_device_hears_all_six_hooks(row: Row) -> None:
     class Hearing(FlowRecorder):
+        @override
         def on_attach(self) -> None:
             super().on_attach()
             self.send(b"\x55", at=self.now + us(1))
@@ -1453,15 +1481,18 @@ class Ordered(FlowRecorder):
         self.release = release
         self.log: list[tuple[str, int, int]] = []
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.drive_cts(False, at=self.now)
         self.send(b"\x41", at=self.now + us(50))
         self.drive_cts(True, at=self.now + us(50) + self.release)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.log.append(("frame", at.ps, self.now.ps))
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.log.append(("rts", at.ps, self.now.ps))
 
@@ -1495,6 +1526,7 @@ def test_a_far_cts_stamp_after_a_reset_raises(row: Row) -> None:
     caught: list[ValueError] = []
 
     class Far(FlowRecorder):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             try:
                 self.drive_cts(True, at=VirtualTime(2**64 - 1000))
@@ -1533,15 +1565,18 @@ def test_a_restored_machine_with_rts_held_goes_on_from_the_held_level(
     row: Row, tmp_path: Path
 ) -> None:
     class Overrunning(FlowRecorder):
+        @override
         def on_rts(self, ready: bool, at: VirtualTime) -> None:
             super().on_rts(ready, at)
             if not ready:
                 self.send(b"\x43", obey_rts=False)
 
     class Saving(Opening):
+        @override
         def snapshot(self) -> bytes:
             return b""
 
+        @override
         def restore(self, data: bytes) -> None:
             pass
 
@@ -1569,12 +1604,14 @@ class RaisingFlow(FlowRecorder):
         super().__init__()
         self.hook = hook
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         super().on_rts(ready, at)
         if self.hook == "on_rts":
             self.hook = ""
             raise LookupError("on_rts")
 
+    @override
     def on_break(self, at: VirtualTime) -> None:
         super().on_break(at)
         if self.hook == "on_break":
@@ -1584,6 +1621,7 @@ class RaisingFlow(FlowRecorder):
 
 def test_a_raising_on_rts_is_named_and_the_run_goes_on(row: Row) -> None:
     class Holding(RaisingFlow):
+        @override
         def on_attach(self) -> None:
             self.send(b"\x41\x42", at=self.now + us(1))
 
@@ -1658,12 +1696,15 @@ def test_the_new_hooks_on_a_member_keep_their_stamps_at_any_quantum(
         log: list[tuple[str, int]] = []
 
         class Hearing(KickedReplier):
+            @override
             def on_rts(self, ready: bool, at: VirtualTime) -> None:
                 log.append(("rts", at.ps))
 
+            @override
             def on_break(self, at: VirtualTime) -> None:
                 log.append(("break", at.ps))
 
+            @override
             def on_frame(self, byte: int, at: VirtualTime) -> None:
                 log.append(("frame", at.ps))
                 self.drive_cts(True, at=at + us(3))
@@ -1771,6 +1812,7 @@ def test_both_directions_come_ordered_by_their_end_and_a_direction_alone_is_filt
 
 
 class Breaking(Recorder):
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.send_break(at=self.now + us(20))
@@ -1876,30 +1918,38 @@ class Everything(Recorder):
         super().__init__()
         self.heard: set[str] = set()
 
+    @override
     def on_attach(self) -> None:
         self.heard.add("attach")
         self.send(b"\x11", at=self.now)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.heard.add("frame")
 
+    @override
     def on_break(self, at: VirtualTime) -> None:
         self.heard.add("break")
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.heard.add("rts")
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.heard.add("error")
         self.heard.add(kind.name)
 
+    @override
     def reset(self, kind: popcorn.ResetKind) -> None:
         self.heard.add("reset")
 
+    @override
     def snapshot(self) -> bytes:
         self.heard.add("save")
         return b""
 
+    @override
     def restore(self, data: bytes) -> None:
         self.heard.add("load")
 
@@ -1949,6 +1999,7 @@ def test_one_tapped_device_runs_every_native_hook_in_one_life(
 
 
 class SwitchOn(Recorder):
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         super().on_frame(byte, at)
         self.tapping = True
@@ -2201,6 +2252,7 @@ def test_a_raising_on_frame_stops_the_run_and_the_uart_goes_on(
     u575: popcorn.PartDescription,
 ) -> None:
     class Raising(Recorder):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             super().on_frame(byte, at)
             if len(self.frames) == 2:
@@ -2283,12 +2335,14 @@ class Lined(Recorder):
         self.edges: list[tuple[bool, int]] = []
         self.began = 0
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.began = (self.now + self.after).ps
         if self.payload:
             self.send(self.payload, at=self.now + self.after)
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.edges.append((ready, at.ps))
 
@@ -2327,6 +2381,7 @@ def test_a_device_frame_keeps_the_format_it_was_sent_in_and_the_tap_shows_the_wi
     second = LineFormat(57_600, Parity.EVEN, 2)
 
     class Switching(Lined):
+        @override
         def on_attach(self) -> None:
             Recorder.on_attach(self)
             self.send(b"\x01\x02\x03", at=self.now + us(10))
@@ -2420,6 +2475,7 @@ def test_a_device_frame_in_flight_keeps_its_rate_and_the_guest_reads_it_at_its_n
 
 def gated(u575: popcorn.PartDescription, *, obey: bool) -> tuple[Lined, popcorn.Machine, int]:
     class Three(Lined):
+        @override
         def on_attach(self) -> None:
             Recorder.on_attach(self)
             self.send(b"\x01\x02\x03", at=self.now + us(10), obey_rts=obey)
@@ -2538,6 +2594,7 @@ def test_a_break_reaches_the_device_as_a_break_in_any_line(u575: popcorn.PartDes
             super().__init__(line)
             self.breaks: list[int] = []
 
+        @override
         def on_break(self, at: VirtualTime) -> None:
             self.breaks.append(at.ps)
 
@@ -2550,9 +2607,11 @@ def test_a_break_reaches_the_device_as_a_break_in_any_line(u575: popcorn.PartDes
 
 
 class Keeping(Lined):
+    @override
     def snapshot(self) -> bytes:
         return b""
 
+    @override
     def restore(self, data: bytes) -> None:
         return None
 
@@ -2672,6 +2731,7 @@ class Blocking(Recorder):
         self.gate = threading.Event()
         self.entered = threading.Event()
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         super().on_frame(byte, at)
         if len(self.frames) == 1:
@@ -2779,6 +2839,7 @@ def test_a_device_frame_behind_a_gap_reads_as_the_sampler_does_whatever_the_gap(
     line = LineFormat(460_800)
 
     class Gapped(Lined):
+        @override
         def on_attach(self) -> None:
             Recorder.on_attach(self)
             first = self.now + us(10)
@@ -2800,6 +2861,7 @@ def test_a_device_frame_behind_a_gap_reads_as_the_sampler_does_whatever_the_gap(
 
 
 class Busy(Lined):
+    @override
     def on_attach(self) -> None:
         Recorder.on_attach(self)
         self.began = (self.now + us(10)).ps

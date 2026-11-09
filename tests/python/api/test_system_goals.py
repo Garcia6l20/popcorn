@@ -11,7 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Coroutine, Iterator
-from typing import Any
+from typing import Any, override
 
 import popcorn
 import pytest
@@ -368,6 +368,7 @@ class Blocking(Ticker):
     entered = threading.Event()
     go = threading.Event()
 
+    @override
     def _tick(self) -> None:
         if self.ticks + 1 == self.raise_at:
             Blocking.entered.set()

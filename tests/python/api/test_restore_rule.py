@@ -8,7 +8,7 @@ import contextvars
 import gc
 import weakref
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, cast, override
 
 import popcorn
 import pytest
@@ -99,14 +99,17 @@ class Stack(UartDevice):
         self.builds = 0
         self.log: list[tuple[str, int]] = []
 
+    @override
     def on_attach(self) -> None:
         self.builds += 1
         if self.build is not None:
             self.build(self)
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.log.append((f"frame {byte:#x}", at.ps))
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.log.append((kind.name, at.ps))
 
@@ -122,9 +125,11 @@ class Saved(Stack):
         self.state = b"boot"
         self.restored: list[bytes] = []
 
+    @override
     def snapshot(self) -> bytes:
         return self.state
 
+    @override
     def restore(self, data: bytes) -> None:
         self.restored.append(data)
         self.state = data
@@ -198,6 +203,7 @@ def test_a_restore_gives_back_the_quiet_of_its_snapshot(u575: popcorn.PartDescri
 
 def test_a_restore_gives_back_the_traffic_of_its_snapshot(u575: popcorn.PartDescription) -> None:
     class Partial(Stack):
+        @override
         def snapshot(self) -> bytes:
             return b""
 
@@ -229,6 +235,7 @@ def test_a_rerun_of_on_attach_at_the_restored_clock(u575: popcorn.PartDescriptio
 
 def test_an_override_does_not_rerun_and_super_does(u575: popcorn.PartDescription) -> None:
     class Calling(Stack):
+        @override
         def restore(self, data: bytes) -> None:
             super().restore(data)
 
@@ -485,6 +492,7 @@ def test_a_send_from_a_rerun_raises_as_a_model_error(u575: popcorn.PartDescripti
 
 def test_the_wire_is_refused_inside_restore(u575: popcorn.PartDescription) -> None:
     class Talking(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             self.send(b"A")
 
@@ -628,6 +636,7 @@ def test_a_restore_from_a_callback_or_a_hook_raises_machine_running(
     caught: list[type[BaseException]] = []
 
     class Restoring(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             if saved:
                 self.attempt()
@@ -657,6 +666,7 @@ def test_what_a_reset_hook_left_ready_goes(u575: popcorn.PartDescription) -> Non
         ran.append("task")
 
     class Readying(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             if armed:
                 self.loop.call_soon(ran.append, "callback")
@@ -682,6 +692,7 @@ def test_a_task_woken_by_a_reset_hook_still_runs_its_finally(
     seen: list[str] = []
 
     class Waking(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             if held and not held[0].done():
                 held[0].set_result(None)
@@ -925,9 +936,11 @@ def without_generation(snapshot: popcorn.Snapshot) -> bytes:
 
 def test_a_replay_gives_the_bytes_of_the_first_run(u575: popcorn.PartDescription) -> None:
     class Timed(Stack):
+        @override
         def snapshot(self) -> bytes:
             return b""
 
+        @override
         def restore(self, data: bytes) -> None:
             self.loop.call_at(1e-4, self.mark, "timer")
 
@@ -1000,15 +1013,19 @@ def test_a_parked_abort_in_a_snapshot_replays_on_error(u575: popcorn.PartDescrip
 
 def test_one_device_runs_every_hook_in_one_life(u575: popcorn.PartDescription) -> None:
     class Everything(Stack):
+        @override
         def on_break(self, at: VirtualTime) -> None:
             self.log.append(("break", at.ps))
 
+        @override
         def on_rts(self, ready: bool, at: VirtualTime) -> None:
             self.log.append(("rts", at.ps))
 
+        @override
         def snapshot(self) -> bytes:
             return b"x"
 
+        @override
         def restore(self, data: bytes) -> None:
             self.log.append(("restore", 0))
 
@@ -1238,6 +1255,7 @@ def test_a_hook_on_a_member_counts_from_the_restored_clock_after_restoring_backw
 
 def test_an_override_snapshot_reads_the_rts_of_a_member(u575: popcorn.PartDescription) -> None:
     class Reading(Saved):
+        @override
         def snapshot(self) -> bytes:
             return b"\x01" if self.rts else b"\x00"
 
@@ -1255,6 +1273,7 @@ def member_replay(
     """A replay from a time pause with an edge held, with a stack rebuilt, at one quantum."""
 
     class Rebuilding(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             self.loop.call_later(3e-5, self.mark, "timer")
 
@@ -1293,6 +1312,7 @@ def idle_replay(u575: popcorn.PartDescription, third: int) -> list[tuple[str, in
     """A stack rebuilt from an IDLE pause, both cores asleep, run on to the next IDLE."""
 
     class Rebuilding(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             self.loop.call_later(3e-5, self.mark, "timer")
 
@@ -1379,6 +1399,7 @@ def test_two_hooks_pending_at_the_restored_clock_run_ahead_of_the_rerun(
     order: list[str] = []
 
     class Replying(Stack):
+        @override
         def on_error(self, kind: UartError, at: VirtualTime) -> None:
             order.append("abort")
             self.send(b"A")
@@ -1624,6 +1645,7 @@ def test_a_drive_from_restore_counts_nothing_at_any_place_against_super(
     u575: popcorn.PartDescription, order: str
 ) -> None:
     class Driving(Stack):
+        @override
         def restore(self, data: bytes) -> None:
             if order == "ahead_of_super":
                 self.board.drive_pin("PA1", True)
@@ -1645,6 +1667,7 @@ def test_a_drive_from_restore_due_past_the_restored_clock_counts(
     u575: popcorn.PartDescription,
 ) -> None:
     class Driving(Stack):
+        @override
         def restore(self, data: bytes) -> None:
             self.board.drive_pin("PA1", True, at=self.now + us(1))
 
@@ -1685,6 +1708,7 @@ def test_an_on_rts_delivery_counts_only_for_a_class_that_overrides_it(
     u575: popcorn.PartDescription,
 ) -> None:
     class Hearing(Stack):
+        @override
         def on_rts(self, ready: bool, at: VirtualTime) -> None:
             self.mark(f"rts {ready}")
 
@@ -1714,6 +1738,7 @@ def test_a_rerun_sets_the_context_every_later_hook_sees(u575: popcorn.PartDescri
         stack.loop.call_later(1e-5, lambda: seen.append(("timer", STACK_VALUE.get())))
 
     class Hearing(Stack):
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             seen.append(("frame", STACK_VALUE.get()))
 
@@ -1735,12 +1760,15 @@ def test_a_snapshot_override_reads_the_stack_value_at_a_system_snapshot_and_rest
     u575: popcorn.PartDescription,
 ) -> None:
     class Keeping(Stack):
+        @override
         def on_attach(self) -> None:
             KEPT_VALUE.set("stack")
 
+        @override
         def snapshot(self) -> bytes:
             return KEPT_VALUE.get().encode()
 
+        @override
         def restore(self, data: bytes) -> None:
             KEPT_VALUE.set(data.decode())
 
@@ -1757,9 +1785,11 @@ def test_a_machine_reset_from_restore_nests_in_the_context(u575: popcorn.PartDes
     holder: list[popcorn.Machine] = []
 
     class Resetting(Saved):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             resets.append(kind)
 
+        @override
         def restore(self, data: bytes) -> None:
             holder[0].reset(popcorn.ResetKind.SOFTWARE)
 
@@ -1811,6 +1841,7 @@ def test_a_restore_restarts_the_context_on_a_machine_with_no_loop(
     seen: list[str] = []
 
     class Reading(I2CTarget):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             seen.append(STACK_VALUE.get())
             STACK_VALUE.set("set")
@@ -1830,10 +1861,12 @@ def test_a_value_set_in_restore_reaches_the_hooks(u575: popcorn.PartDescription)
     seen: list[str] = []
 
     class Setting(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             STACK_VALUE.set("restored")
             self.loop.call_later(1e-6, lambda: seen.append(STACK_VALUE.get()))
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             seen.append(STACK_VALUE.get())
 
@@ -1948,6 +1981,7 @@ def test_a_close_drops_what_a_reset_hook_left_ready(u575: popcorn.PartDescriptio
     ran: list[str] = []
 
     class Readying(Stack):
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             self.loop.call_soon(ran.append, "callback")
 
@@ -1989,6 +2023,7 @@ def test_an_l1_override_gets_its_bytes_back_and_a_default_device_reruns() -> Non
 
 def test_a_hook_error_at_a_system_restore_raises(u575: popcorn.PartDescription) -> None:
     class Failing(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             raise LookupError("from the hook")
 
@@ -2045,6 +2080,7 @@ def test_a_refusing_override_leaves_a_member_stop_undelivered(
     class Refusing(Saved):
         refuses = False
 
+        @override
         def snapshot(self) -> bytes:
             if self.refuses:
                 raise SnapshotRefused("not now", device=repr(self))
@@ -2069,6 +2105,7 @@ def test_an_override_returning_no_bytes_leaves_a_member_stop_undelivered(
     class Wrong(Saved):
         wrong = False
 
+        @override
         def snapshot(self) -> bytes:
             return cast(bytes, 7) if self.wrong else super().snapshot()
 
@@ -2085,6 +2122,7 @@ def test_an_override_returning_no_bytes_leaves_a_member_stop_undelivered(
 class RefusingI2c(I2CTarget):
     refuses = False
 
+    @override
     def snapshot(self) -> bytes:
         if self.refuses:
             raise SnapshotRefused("not now", device=repr(self))
@@ -2094,6 +2132,7 @@ class RefusingI2c(I2CTarget):
 class RefusingSpi(SpiTarget):
     refuses = False
 
+    @override
     def snapshot(self) -> bytes:
         if self.refuses:
             raise SnapshotRefused("not now", device=repr(self))
@@ -2194,6 +2233,7 @@ def test_a_tapped_boot_restored_goes_on_as_the_run_it_was_saved_from(
 class RefusingModel(Model):
     refuses = False
 
+    @override
     def snapshot(self) -> bytes:
         if self.refuses:
             raise LookupError("not now")
@@ -2240,6 +2280,7 @@ def test_a_reset_inside_restore_leaves_the_refusal_of_restore_standing(
     raised: list[str] = []
 
     class Resetting(Saved):
+        @override
         def restore(self, data: bytes) -> None:
             holder[0].reset(popcorn.ResetKind.SOFTWARE)
             try:
@@ -2262,12 +2303,14 @@ class Draining(Model):
         self.log = bytearray(b"abc")
         self.calls: list[str] = []
 
+    @override
     def snapshot(self) -> bytes:
         self.calls.append("snapshot")
         saved = bytes(self.log)
         self.log.clear()
         return saved
 
+    @override
     def restore(self, data: bytes) -> None:
         self.calls.append("restore")
         self.log = bytearray(data)

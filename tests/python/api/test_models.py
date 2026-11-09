@@ -13,6 +13,7 @@ import warnings
 import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import override
 
 import popcorn
 import pytest
@@ -157,6 +158,7 @@ def test_a_value_the_bus_cannot_carry_is_a_model_error() -> None:
         def _cnt(self) -> int:
             return 0
 
+        @override
         def _read(self, offset: int, size: int) -> int | None:
             return 1 << 40
 
@@ -397,9 +399,11 @@ def test_state_without_a_default_encoding_needs_its_own_snapshot() -> None:
             super().__init__()
             self.items = [1, 2]
 
+        @override
         def snapshot(self) -> bytes:
             return bytes(self.items)
 
+        @override
         def restore(self, data: bytes) -> None:
             self.items = list(data)
 
@@ -500,6 +504,7 @@ def test_peer_reaches_another_python_model() -> None:
 
 def test_a_model_requests_a_stop() -> None:
     class Stopper(Timer):
+        @override
         def _expire(self) -> None:
             self.request_stop(popcorn.StopReason.USER, "timer expired")
 
@@ -511,6 +516,7 @@ def test_a_model_requests_a_stop() -> None:
 
 def test_a_model_cannot_stop_with_fault() -> None:
     class Faulting(Timer):
+        @override
         def _expire(self) -> None:
             self.request_stop(popcorn.StopReason.FAULT)
 
@@ -522,6 +528,7 @@ def test_a_model_cannot_stop_with_fault() -> None:
 
 def test_a_snapshot_may_return_a_bytearray() -> None:
     class Loose(Timer):
+        @override
         def snapshot(self) -> bytes:
             return bytearray(super().snapshot())  # pyright: ignore[reportReturnType]
 
@@ -534,6 +541,7 @@ def test_a_snapshot_may_return_a_bytearray() -> None:
 
 def test_a_snapshot_that_is_not_bytes_is_a_model_error() -> None:
     class Wrong(Timer):
+        @override
         def snapshot(self) -> bytes:
             if self.expirations:
                 return 5  # pyright: ignore[reportReturnType]
@@ -547,6 +555,7 @@ def test_a_snapshot_that_is_not_bytes_is_a_model_error() -> None:
 
 def test_a_failed_model_restore_leaves_the_machine_unusable() -> None:
     class Brittle(Timer):
+        @override
         def restore(self, data: bytes) -> None:
             if self.expirations == 9:
                 raise ValueError("cannot restore")
@@ -732,12 +741,14 @@ def test_a_model_error_inside_a_call_restores_the_interrupted_context(
 
 
 class ExpiryFails(Timer):
+    @override
     def _expire(self) -> None:
         raise LookupError("expiry failed")
 
 
 class StatusWriteFails(Timer):
     @on_write("SR")
+    @override
     def _sr(self, old: int, new: int) -> None:
         raise LookupError("SR write failed")
 
@@ -823,6 +834,7 @@ def test_a_raising_model_reset_still_resets_the_other_models(u575: popcorn.PartD
     class Raising(Model):
         armed = False
 
+        @override
         def reset(self, kind: popcorn.ResetKind) -> None:
             if type(self).armed:
                 raise LookupError("model reset")

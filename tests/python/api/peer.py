@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import cast
+from typing import cast, override
 
 from popcorn.board import UartDevice
 from popcorn.units import VirtualTime
@@ -51,6 +51,7 @@ class Peer(UartDevice):
         self._ack = asyncio.Event()
         self._tasks: list[asyncio.Future[None]] = []
 
+    @override
     def on_attach(self) -> None:
         self.state = "reset"
         self.count = 0
@@ -89,9 +90,11 @@ class Peer(UartDevice):
         except TimeoutError:
             self.log.append(("timeout", stamp(self.loop)))
 
+    @override
     def on_rts(self, ready: bool, at: VirtualTime) -> None:
         self.rts_edges.append((ready, at.ps))
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         if not self.partial and byte != 0x01:
             self.log.append((f"junk {byte:#x}", stamp(self.loop)))
@@ -117,6 +120,7 @@ class Peer(UartDevice):
             self.drive_cts(False)
             self.loop.call_later(CTS_PAUSE_S, self.drive_cts, True)
 
+    @override
     def snapshot(self) -> bytes:
         return json.dumps(
             {
@@ -131,6 +135,7 @@ class Peer(UartDevice):
             }
         ).encode()
 
+    @override
     def restore(self, data: bytes) -> None:
         saved = cast("dict[str, object]", json.loads(data))
         self.state = cast(str, saved["state"])
