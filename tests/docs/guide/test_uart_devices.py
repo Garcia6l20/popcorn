@@ -1,7 +1,7 @@
 import json
 import random
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, override
 
 import popcorn
 import pytest
@@ -38,11 +38,13 @@ class AtModem(UartDevice):
         self.commands: list[tuple[bytes, VirtualTime]] = []
         self.errors: list[tuple[UartError, VirtualTime]] = []
 
+    @override
     def on_attach(self) -> None:
         self.buffer = bytearray()
         self.commands = []
         self.errors = []
 
+    @override
     def on_frame(self, byte: int, at: VirtualTime) -> None:
         self.buffer.append(byte)
         if self.buffer.endswith(b"\r\n"):
@@ -55,6 +57,7 @@ class AtModem(UartDevice):
         reply = self.replies.get(command, b"ERROR\r\n")
         self.loop.call_later(self.delay, self.send, reply)
 
+    @override
     def on_error(self, kind: UartError, at: VirtualTime) -> None:
         self.errors.append((kind, at))
 
@@ -130,6 +133,7 @@ async def test_a_stamped_post_tells_the_modem_to_hang_up() -> None:
         def hang_up(self) -> None:
             self.hung_up = True
 
+        @override
         def answer(self, command: bytes) -> None:
             if not self.hung_up:
                 super().answer(command)
@@ -151,10 +155,12 @@ async def test_a_seeded_generator_makes_runs_identical() -> None:
             super().__init__()
             self.seed = seed
 
+        @override
         def on_attach(self) -> None:
             super().on_attach()
             self.rng = random.Random(self.seed)
 
+        @override
         def answer(self, command: bytes) -> None:
             reply = self.replies.get(command, b"ERROR\r\n")
             self.loop.call_later(self.rng.uniform(0.001, 0.009), self.send, reply)
@@ -177,10 +183,12 @@ class Resumable(AtModem):
         super().__init__()
         self.due: list[tuple[int, bytes]] = []
 
+    @override
     def on_attach(self) -> None:
         super().on_attach()
         self.due = []
 
+    @override
     def answer(self, command: bytes) -> None:
         reply = self.replies.get(command, b"ERROR\r\n")
         self.schedule(self.now.ps + round(self.delay * PS_PER_SECOND), reply)
@@ -193,10 +201,12 @@ class Resumable(AtModem):
         self.due.pop(0)
         self.send(reply)
 
+    @override
     def snapshot(self) -> bytes:
         due = [(at, list(reply)) for at, reply in self.due]
         return json.dumps({"buffer": list(self.buffer), "due": due}).encode()
 
+    @override
     def restore(self, data: bytes) -> None:
         saved = json.loads(data)
         self.buffer = bytearray(saved["buffer"])
@@ -272,6 +282,7 @@ async def test_a_raising_hook_stops_the_run_and_the_next_run_goes_on() -> None:
     class Flaky(AtModem):
         raised = False
 
+        @override
         def on_frame(self, byte: int, at: VirtualTime) -> None:
             super().on_frame(byte, at)
             if len(self.buffer) == 1 and not self.raised:
@@ -290,6 +301,7 @@ async def test_a_raising_hook_stops_the_run_and_the_next_run_goes_on() -> None:
 async def test_a_device_watches_and_drives_pins() -> None:
     # --8<-- [start:pins]
     class Presser(UartDevice):
+        @override
         def on_attach(self) -> None:
             self.led: list[tuple[bool, VirtualTime]] = []
             self.board.watch_pin("PA5", self.on_led)
@@ -316,6 +328,7 @@ async def test_a_device_watches_and_drives_pins() -> None:
 
 # --8<-- [start:codec]
 class Codec(UartDevice):
+    @override
     def on_attach(self) -> None:
         self.frames: list[AudioFrame] = []
         self.stamps: list[VirtualTime] = []
@@ -332,9 +345,11 @@ class Codec(UartDevice):
 
 
 class QuietCodec(Codec):
+    @override
     def snapshot(self) -> bytes:
         return b""
 
+    @override
     def restore(self, data: bytes) -> None:
         pass
 

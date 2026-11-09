@@ -6,6 +6,7 @@ returns the 12-bit sample, right-aligned.
 """
 
 from collections.abc import Callable
+from typing import override
 
 from popcorn import ResetKind
 from popcorn.board import SpiTarget
@@ -64,12 +65,14 @@ class Adc(SpiTarget):
         rising = at.ps * self._counts_per_ms // ms(1).ps & FULL_SCALE
         return rising if channel == 0 else FULL_SCALE - rising
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         """Drop the conversion in progress on POWER_ON and BROWN_OUT. The counters stay."""
         if kind in (ResetKind.POWER_ON, ResetKind.BROWN_OUT):
             self.frame = 0
             self.channel = 0
 
+    @override
     def on_select(self, selected: bool, at: VirtualTime) -> None:
         if selected:
             self.selects += 1
@@ -79,6 +82,7 @@ class Adc(SpiTarget):
         if self.frame != 2:
             self.bad_frames += 1
 
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         self.frame += 1
         if bits != FRAME_BITS:

@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from dataclasses import fields
 from functools import wraps
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, override
 
 from popcorn.stm32.description import _builder, _sources
 from popcorn.stm32.description._model import PartDescription
@@ -55,6 +55,7 @@ class _Capture(logging.Handler):
 
         self._thread = threading.get_ident()
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         if record.thread == self._thread:
             self.records.append(record)

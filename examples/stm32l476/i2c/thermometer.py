@@ -6,6 +6,7 @@ register a transfer reads or writes, 0 the temperature, 1 the configuration. The
 """
 
 from collections.abc import Sequence
+from typing import override
 
 from popcorn import ResetKind
 from popcorn.board import I2CTarget
@@ -60,6 +61,7 @@ class Thermometer(I2CTarget):
         """The scripted temperature register values, in counts."""
         return self._readings
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         """Clear the registers on POWER_ON and BROWN_OUT. The script and `served` stay."""
         if kind in (ResetKind.POWER_ON, ResetKind.BROWN_OUT):
@@ -68,6 +70,7 @@ class Thermometer(I2CTarget):
             self.written = 0
             self.pending = 0
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         if self.nack_starts > 0:
             self.nack_starts -= 1
@@ -81,6 +84,7 @@ class Thermometer(I2CTarget):
             self.pending = self.config
         return True
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         if self.written == 0:
             self.pointer = byte
@@ -91,6 +95,7 @@ class Thermometer(I2CTarget):
         self.written += 1
         return True
 
+    @override
     def on_read(self, at: VirtualTime) -> int:
         byte = self.pending >> 8
         self.pending = self.pending << 8 & 0xFFFF

@@ -7,6 +7,8 @@ WHO_AM_I at 0x0F answers 0x33. OUT_X_L to OUT_Z_H, 0x28 to 0x2D, hold each axis 
 little-endian value.
 """
 
+from typing import override
+
 from popcorn import ResetKind
 from popcorn.board import SpiTarget
 from popcorn.units import VirtualTime, ms
@@ -65,17 +67,20 @@ class Accelerometer(SpiTarget):
         """The slope of the X ramp."""
         return self._counts_per_ms
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         """Clear the control register on POWER_ON and BROWN_OUT. The counters stay."""
         if kind in (ResetKind.POWER_ON, ResetKind.BROWN_OUT):
             self.ctrl_reg1 = 0
             self.frame = 0
 
+    @override
     def on_select(self, selected: bool, at: VirtualTime) -> None:
         if selected:
             self.selects += 1
         self.frame = 0
 
+    @override
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         self.frame += 1
         if self.frame == 1:

@@ -6,6 +6,8 @@ stops it. The first byte of a write selects the register, the next ones write it
 the selected register.
 """
 
+from typing import override
+
 from popcorn import ResetKind
 from popcorn.board import I2CTarget
 from popcorn.units import VirtualTime
@@ -36,6 +38,7 @@ class StereoCodec(I2CTarget):
         self.started_ps = 0
         self.stopped_ps = 0
 
+    @override
     def reset(self, kind: ResetKind) -> None:
         """Power down on POWER_ON and BROWN_OUT, as the board supply drops."""
         if kind in (ResetKind.POWER_ON, ResetKind.BROWN_OUT):
@@ -43,10 +46,12 @@ class StereoCodec(I2CTarget):
             self.power = 0
             self.written = 0
 
+    @override
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         self.written = 0
         return True
 
+    @override
     def on_write(self, byte: int, at: VirtualTime) -> bool:
         if self.written == 0:
             self.pointer = byte
@@ -60,5 +65,6 @@ class StereoCodec(I2CTarget):
         self.written += 1
         return True
 
+    @override
     def on_read(self, at: VirtualTime) -> int:
         return self.power if self.pointer == POWER else 0
