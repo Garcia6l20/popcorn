@@ -101,4 +101,31 @@ def test_a_clock_watch_keeps_no_machine_or_callable_alive(u575: popcorn.PartDesc
     del m, table
     assert collected(machine)
     assert collected(watched)
-    assert watch is not None
+    assert not watch.active()
+    watch.remove()
+    watch.remove()
+
+
+def test_a_pin_watch_handle_is_inactive_and_removes_silently_once_its_machine_is_gone(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = parked(u575)
+    table = m._callback_table  # pyright: ignore[reportPrivateUsage]
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    keys = [table.add(lambda *args: None, in_caller=True) for _ in range(4)]
+    level_watch = handle.gpio_watch("GPIOA", 2, Relay(table, keys[0], quiet=True))
+    clock_watch = handle.gpio_clock_watch("GPIOA", 2, Relay(table, keys[1], quiet=True))
+    live_level = handle.gpio_watch("GPIOA", 3, Relay(table, keys[2], quiet=True))
+    live_clock = handle.gpio_clock_watch("GPIOA", 3, Relay(table, keys[3], quiet=True))
+    assert level_watch.active() and clock_watch.active()
+    live_level.remove()
+    live_clock.remove()
+    assert not live_level.active() and not live_clock.active()
+    machine = weakref.ref(m)
+    del m, table, handle
+    assert collected(machine)
+    for gone in (level_watch, clock_watch):
+        assert not gone.active()
+        gone.remove()
+        gone.remove()
+        assert not gone.active()

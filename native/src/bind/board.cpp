@@ -203,12 +203,12 @@ pin_watch::~pin_watch()
 
 void pin_watch::remove()
 {
-  detail::host_access(host_, [this] { watch_->reset(); });
+  detail::host_access_if_alive(host_, [this] { watch_->reset(); });
 }
 
 auto pin_watch::active() const noexcept -> bool
 {
-  return watch_ != nullptr and watch_->active();
+  return watch_ != nullptr and not detail::host_gone(host_) and watch_->active();
 }
 
 auto uart_device_link::has_flow_control() const -> bool

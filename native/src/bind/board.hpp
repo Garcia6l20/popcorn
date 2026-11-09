@@ -196,12 +196,16 @@ public:
   ~pin_watch();
 
   /**
-   * @brief Removes the watch, so no call posted before is made.
+   * @brief Removes the watch, so no call posted before is made. Does nothing once the machine is
+   *        gone.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Remove the watch."}]] void remove();
 
-  /** @brief Whether the watch is still installed. */
+  /**
+   * @brief Whether the watch is still installed: false once the machine is gone. It answers while
+   *        the machine runs, so it reads the handle without the host.
+   */
   [[= py::doc{"Whether the watch is still installed."}]] [[nodiscard]] auto active() const noexcept
       -> bool;
 

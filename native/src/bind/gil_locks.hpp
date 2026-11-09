@@ -711,6 +711,40 @@ inline auto host_never_set(host_ref const& ref) noexcept -> bool
 }
 
 /**
+ * @brief Whether the host of @p ref is gone: its machine's handle destroyed it.
+ * @param ref The slot.
+ */
+inline auto host_gone(host_ref const& ref) noexcept -> bool
+{
+  return ref->host.expired() and not host_never_set(ref);
+}
+
+/**
+ * @brief host_access() through a machine's host_slot that does nothing once the host is gone. The
+ *        host is taken once, so a machine destroyed while the call runs cannot make it throw for
+ *        a missing host. Before the host exists, while its machine is built on this thread,
+ *        @p body runs directly.
+ * @param ref The slot.
+ * @param body Called with no argument, its result dropped.
+ * @return Whether @p body ran, false once the machine's handle destroyed the host.
+ */
+template <typename Body> auto host_access_if_alive(host_ref const& ref, Body&& body) -> bool
+{
+  if(auto const on = ref->host.lock())
+  {
+    logs_flushed const flushed{*ref};
+    host_access(*on, *ref, [&body](core::machine&) { std::invoke(body); });
+    return true;
+  }
+  if(host_gone(ref))
+  {
+    return false;
+  }
+  std::invoke(std::forward<Body>(body));
+  return true;
+}
+
+/**
  * @brief host_access() through a machine's host_slot, for a view or link that reaches the
  *        engine through its own pointers. Before the host exists, while its machine is built on
  *        this thread, @p body runs directly.
@@ -721,16 +755,23 @@ inline auto host_never_set(host_ref const& ref) noexcept -> bool
 template <typename Body>
 auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
 {
-  if(auto const on = ref->host.lock())
+  using result = std::invoke_result_t<Body>;
+  if constexpr(std::is_void_v<result>)
   {
-    logs_flushed const flushed{*ref};
-    return host_access(*on, *ref, [&body](core::machine&) { return std::invoke(body); });
+    if(not host_access_if_alive(ref, body))
+    {
+      throw config_error("machine", 0, "machine", "a machine that still exists");
+    }
   }
-  if(not host_never_set(ref))
+  else
   {
-    throw config_error("machine", 0, "machine", "a machine that still exists");
+    std::optional<result> out;
+    if(not host_access_if_alive(ref, [&] { out.emplace(std::invoke(body)); }))
+    {
+      throw config_error("machine", 0, "machine", "a machine that still exists");
+    }
+    return std::move(*out);
   }
-  return std::invoke(std::forward<Body>(body));
 }
 
 /**
