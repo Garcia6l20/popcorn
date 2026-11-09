@@ -442,6 +442,12 @@ struct u5_rcc
   static constexpr auto const& unit_suffixes    = u5::rcc_unit_suffixes;
   static constexpr auto const& backup_secured   = u5::rcc_backup_secured;
 
+  /**
+   * @brief Fields of RCC_CR that need the LSE: a write keeps them 0 while LSERDY is 0 and they
+   *        clear when the LSE stops, RM0456 11.8.1 MSIPLLEN.
+   */
+  static constexpr std::array<std::string_view, 1> lse_locked_controls{"MSIPLLEN"};
+
   static constexpr bool                              css_held = true;
   static constexpr std::array<kept_fields, 0>        system_reset_kept{};
   static constexpr std::array<reset_kind, 1>         power_resets{reset_kind::power_on};

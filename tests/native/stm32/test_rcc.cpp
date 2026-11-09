@@ -894,6 +894,29 @@ TEST_CASE("RM0456 11.8.49: LSESYSRDY sets two LSE periods after LSESYSEN once LS
   CHECK(probe(f).hz("lpuart1") == 32'768);
 }
 
+TEST_CASE("RM0456 11.8.1: MSIPLLEN stays 0 while LSERDY is 0 and clears when the LSE stops")
+{
+  auto       f   = idle_fixture();
+  auto const pll = bit_of("RCC_CR", "MSIPLLEN");
+  write(f, "RCC_CR", peek(f, "RCC_CR") | pll);
+  CHECK(f.field("RCC", "RCC_CR", "MSIPLLEN") == 0);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") | pll);
+  CHECK(f.field("RCC", "RCC_CR", "MSIPLLEN") == 0);
+  idle_until(f, microseconds{110});
+  REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | pll);
+  CHECK(f.field("RCC", "RCC_CR", "MSIPLLEN") == 1);
+  write(f, "RCC_BDCR", 0);
+  CHECK(f.field("RCC", "RCC_CR", "MSIPLLEN") == 0);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, microseconds{110});
+  write(f, "RCC_CR", peek(f, "RCC_CR") | pll);
+  REQUIRE(f.field("RCC", "RCC_CR", "MSIPLLEN") == 1);
+  write(f, "RCC_BDCR", peek(f, "RCC_BDCR") | bit_of("RCC_BDCR", "BDRST"));
+  CHECK(f.field("RCC", "RCC_CR", "MSIPLLEN") == 0);
+}
+
 TEST_CASE("RM0456 11.4.7: the RTC runs on the LSE without LSESYSEN, LPUART1 does not")
 {
   auto f = idle_fixture();

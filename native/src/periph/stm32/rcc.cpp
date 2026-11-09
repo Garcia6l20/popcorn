@@ -304,6 +304,7 @@ template <typename Signal> struct timer
  *        through it, and the RTC clock reads the LSE directly. `BDRST` keeps `LSESYSEN`, and
  *        `LSESYSRDY` follows the LSE that `BDRST` stops. The trait `dependent_clocks` holds such a
  *        clock: its enable and ready bits, its source oscillator and its delay in source periods.
+ *        The STM32U5 `MSIPLLEN` reads 0 while `LSERDY` is 0 and clears with the LSE, RM0456 11.8.1.
  *
  *        STM32L1, RM0038 section 6, through `l1_rcc`: one PLL in RCC_CFGR, whose PLLSRC, PLLMUL
  *        and PLLDIV hold while it is on or ready, RM0038 6.3.3, the ready flags and enables in
