@@ -24,6 +24,7 @@
 #include <initializer_list>
 #include <memory>
 #include <meta>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -626,6 +627,30 @@ TEST_CASE("RM0481 11.8.40 to 11.8.44: UART9, SPI4, SPI5, SAI1 and USB kernel clo
   CHECK(clocks.hz("usb") == 0);
   idle_until(f, delay);
   CHECK(clocks.hz("usb") == 48 * mhz);
+}
+
+TEST_CASE("RccOptions lsi_hz sets the H5 LSI rate, DS14121 Table 48 bounds it")
+{
+  auto board = [](std::optional<std::uint64_t> hz) {
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(stm32::board{.rcc = {.lsi_hz = hz}}, h573());
+    return with_listener(std::move(options));
+  };
+  auto f = idle_fixture(board(31'550));
+  set(f, "RCC_BDCR", "LSION", 1);
+  idle_until(f, delay);
+  CHECK(probe(f).hz("lsi") == 31'550);
+  for(auto const accepted : {29'400u, 33'600u})
+  {
+    CHECK_NOTHROW(stm32_fixture(h573(), "h573_rcc_ll", board(accepted)));
+  }
+  CHECK_THROWS_WITH_AS(
+      stm32_fixture(h573(), "h573_rcc_ll", board(33601u)),
+      doctest::Contains("from 29400 to 33600 Hz, not 33601 Hz"), popcorn::config_error);
+  for(auto const refused : {29'399u, 33'601u, 0u})
+  {
+    CHECK_THROWS_AS(stm32_fixture(h573(), "h573_rcc_ll", board(refused)), popcorn::config_error);
+  }
 }
 
 TEST_CASE("RM0481 11.8.45: LSI and the RTC clock from LSI, or from HSE over RTCPRE")

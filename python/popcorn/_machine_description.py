@@ -614,8 +614,8 @@ class MachineDescription:
     @property
     def digest(self) -> str:
         """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        without `plugins` when it is empty, without `option_bytes` and `rng` when they are None
-        and without `faults` when it is "stop".
+        without `plugins` when it is empty, without `option_bytes` and `rng` when they are None,
+        without `faults` when it is "stop" and without `rcc.lsi_hz` when it is None.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -1197,6 +1197,13 @@ def _canonical(value: object) -> object:
         if not value.loaded:
             elf["loaded"] = False
         return elf
+    if isinstance(value, RccOptions):
+        rcc = {
+            f.name: _canonical(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+            if f.name != "lsi_hz" or value.lsi_hz is not None
+        }
+        return {"$": "RccOptions", **rcc}
     if dataclasses.is_dataclass(value):
         fields = {f.name: _canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}
         return {"$": type(value).__qualname__, **fields}

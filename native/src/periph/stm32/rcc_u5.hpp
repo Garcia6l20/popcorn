@@ -143,7 +143,7 @@ constexpr std::array<std::uint64_t, 16> msi_hz{
 
 constexpr std::uint64_t hsi16_hz = 16'000'000;
 constexpr std::uint64_t hsi48_hz = 48'000'000;
-constexpr std::uint64_t lsi_hz   = 32'000;
+constexpr lsi_range     lsi_limits{.nominal = 32'000, .min = 30'400, .max = 33'600};
 
 auto msis_rate(rate_inputs const& in) -> std::uint64_t
 {
@@ -159,7 +159,8 @@ auto msik_rate(rate_inputs const& in) -> std::uint64_t
 
 auto lsi_rate(rate_inputs const& in) -> std::uint64_t
 {
-  return in.read(rcc_role::lsi_prediv) != 0 ? lsi_hz / 128 : lsi_hz;
+  auto const hz = configured_lsi<lsi_limits>(in);
+  return in.read(rcc_role::lsi_prediv) != 0 ? hz / 128 : hz;
 }
 
 constexpr std::array<oscillator_names<signal>, 11> oscillators{
@@ -407,6 +408,8 @@ struct u5_rcc
 {
   using source = u5::source;
   using signal = u5::signal;
+
+  static constexpr lsi_range lsi_limits = u5::lsi_limits;
 
   static constexpr bool msi_standby_ranges = true;
   static constexpr bool hsi_divider        = false;

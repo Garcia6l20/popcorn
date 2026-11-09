@@ -201,6 +201,10 @@ def test_the_digest_without_option_bytes_is_the_digest_at_main() -> None:
         plain.replace(boot=popcorn.Boot(vtor=0x0800_0000), rcc=RccOptions()).digest
         == DIGEST_WITH_BOOT_AND_RCC_AT_MAIN
     )
+    assert (
+        plain.replace(rcc=RccOptions(lsi_hz=31_550)).digest
+        != plain.replace(rcc=RccOptions()).digest
+    )
     defaults = plain.replace(option_bytes=OptionBytes())
     secure = plain.replace(option_bytes=OptionBytes(tzen=True))
     assert len({plain.digest, defaults.digest, secure.digest}) == 3

@@ -3,6 +3,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -13,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -57,10 +59,12 @@ public:
   }
 };
 
-auto options() -> core::machine_options
+auto options(std::optional<std::uint64_t> lsi = std::nullopt) -> core::machine_options
 {
   auto               out = popcorn::testing::stm32_options();
-  stm32::board const board{.rcc = {.hse_hz = hse_hz}};
+  stm32::board const board{
+      .rcc = {.hse_hz = hse_hz, .lsi_hz = lsi}
+  };
   out.models = stm32::factories(board, l476rc());
   out.models.insert_or_assign(
       "TSC",
@@ -93,7 +97,8 @@ auto field_of(std::string_view reg, std::string_view name) -> popcorn::field_des
 
 struct rig
 {
-  rig() : f{l476rc(), firmware, options()}
+  explicit rig(std::optional<std::uint64_t> lsi = std::nullopt)
+      : f{l476rc(), firmware, options(lsi)}
   {
     park();
   }
@@ -321,6 +326,25 @@ TEST_CASE("RM0351 6.4.1: CSSON is set only and reads back on the bus")
   CHECK((r.read("CR") & 1u << 19) != 0);
   r.set("CR", "CSSON", 0);
   CHECK(r.field("CR", "CSSON") == 1);
+}
+
+TEST_CASE("RccOptions lsi_hz sets the L4 LSI rate, DS10198 Table 61 bounds it")
+{
+  rig const r{31'550};
+  r.set("CSR", "LSION", 1);
+  r.idle();
+  CHECK(r.hz("lsi") == 31'550);
+  for(auto const accepted : {29'500u, 34'000u})
+  {
+    CHECK_NOTHROW(stm32_fixture(l476rc(), firmware, options(accepted)));
+  }
+  CHECK_THROWS_WITH_AS(
+      stm32_fixture(l476rc(), firmware, options(34001u)),
+      doctest::Contains("from 29500 to 34000 Hz, not 34001 Hz"), popcorn::config_error);
+  for(auto const refused : {29'499u, 34'001u, 0u})
+  {
+    CHECK_THROWS_AS(stm32_fixture(l476rc(), firmware, options(refused)), popcorn::config_error);
+  }
 }
 
 TEST_CASE(

@@ -859,6 +859,7 @@ class Machine:
         if rcc is not None:
             config.rcc_hse_hz = rcc.hse_hz
             config.rcc_lse_hz = rcc.lse_hz
+            config.rcc_lsi_hz = rcc.lsi_hz
         if supply is not None:
             config.vdda_mv = supply.vdda_mv
         if option_bytes is not None:

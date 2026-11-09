@@ -5,6 +5,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -21,6 +22,7 @@
 #include <expected>
 #include <memory>
 #include <meta>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1098,6 +1100,41 @@ TEST_CASE("a snapshot taken in the LSESYS delay restores to the same ready insta
   CHECK(lsesys_ready(f) == 0);
   idle_until(f, microseconds{2});
   CHECK(lsesys_ready(f) == 1);
+}
+
+auto lsi_board(std::optional<std::uint64_t> hz) -> core::machine_options
+{
+  auto               options = popcorn::testing::stm32_options();
+  stm32::board const board{.rcc = {.lsi_hz = hz}};
+  options.models = stm32::factories(board, u575());
+  return with_listener(std::move(options));
+}
+
+TEST_CASE("RccOptions lsi_hz sets the U5 LSI rate before LSIPREDIV, DS13086 Table 86 bounds it")
+{
+  auto set_lsi = [](std::optional<std::uint64_t> hz) {
+    auto f = idle_fixture(lsi_board(hz));
+    write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSION"));
+    idle_until(f, microseconds{300});
+    REQUIRE(f.field("RCC", "RCC_BDCR", "LSIRDY") == 1);
+    return f;
+  };
+  CHECK(probe(set_lsi(std::nullopt)).hz("lsi") == 32'000);
+  auto f = set_lsi(31'550);
+  CHECK(probe(f).hz("lsi") == 31'550);
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSION") | bit_of("RCC_BDCR", "LSIPREDIV"));
+  CHECK(probe(f).hz("lsi") == 31'550 / 128);
+  for(auto const accepted : {30'400u, 33'600u})
+  {
+    CHECK_NOTHROW(stm32_fixture(u575(), "rcc_ll", lsi_board(accepted)));
+  }
+  CHECK_THROWS_WITH_AS(
+      stm32_fixture(u575(), "rcc_ll", lsi_board(33601u)),
+      doctest::Contains("from 30400 to 33600 Hz, not 33601 Hz"), popcorn::config_error);
+  for(auto const refused : {30'399u, 33'601u, 0u})
+  {
+    CHECK_THROWS_AS(stm32_fixture(u575(), "rcc_ll", lsi_board(refused)), popcorn::config_error);
+  }
 }
 
 TEST_CASE("a ready delay pending across a core clock change ends at its virtual time")

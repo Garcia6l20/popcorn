@@ -147,7 +147,7 @@ constexpr std::array<std::string_view, 7> enable_registers{
 constexpr std::uint64_t hsi_hz   = 64'000'000;
 constexpr std::uint64_t csi_hz   = 4'000'000;
 constexpr std::uint64_t hsi48_hz = 48'000'000;
-constexpr std::uint64_t lsi_hz   = 32'000;
+constexpr lsi_range     lsi_limits{.nominal = 32'000, .min = 29'400, .max = 33'600};
 
 auto hsi_rate(rate_inputs const& in) -> std::uint64_t
 {
@@ -166,7 +166,7 @@ constexpr std::array<oscillator_names<signal>, 9> oscillators{
      {"RCC_CR", "CSION", "CSIRDY", "CSIRDYF", "CSIRDYIE", csi, &fixed_rate<csi_hz>},
      {"RCC_CR", "HSI48ON", "HSI48RDY", "HSI48RDYF", "HSI48RDYIE", hsi48, &fixed_rate<hsi48_hz>},
      {"RCC_CR", "HSEON", "HSERDY", "HSERDYF", "HSERDYIE", hse, &hse_rate},
-     {"RCC_BDCR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &fixed_rate<lsi_hz>},
+     {"RCC_BDCR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &configured_lsi<lsi_limits>},
      {"RCC_BDCR", "LSEON", "LSERDY", "LSERDYF", "LSERDYIE", lse, &lse_rate},
      {"RCC_CR", "PLL1ON", "PLL1RDY", "PLL1RDYF", "PLL1RDYIE"},
      {"RCC_CR", "PLL2ON", "PLL2RDY", "PLL2RDYF", "PLL2RDYIE"},
@@ -398,8 +398,9 @@ struct h5_rcc
   using source = h5::source;
   using signal = h5::signal;
 
-  static constexpr bool msi_standby_ranges = false;
-  static constexpr bool hsi_divider        = true;
+  static constexpr lsi_range lsi_limits         = h5::lsi_limits;
+  static constexpr bool      msi_standby_ranges = false;
+  static constexpr bool      hsi_divider        = true;
   /**
    * @brief Cycles of the running HSI rate from an `HSIDIV` write to the `HSIDIVF` clear and to
    *        its set with the new rate, indexed by the running and the new `HSIDIV`. Measured on

@@ -3,6 +3,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -53,10 +55,12 @@ public:
   }
 };
 
-auto with_listener() -> core::machine_options
+auto with_listener(std::optional<std::uint64_t> lsi = std::nullopt) -> core::machine_options
 {
   auto               options = popcorn::testing::stm32_options();
-  stm32::board const board{.rcc = {.hse_hz = hse_hz}};
+  stm32::board const board{
+      .rcc = {.hse_hz = hse_hz, .lsi_hz = lsi}
+  };
   options.models = stm32::factories(board, l152re());
   options.models.insert_or_assign(
       "RI",
@@ -320,6 +324,28 @@ TEST_CASE("RM0038 6.3.4: a ready flag sets under its enable and xxxRDYC clears i
   CHECK(f.field("RCC", "CIR", "HSERDYF") == 0);
   set(f, "CIR", "HSIRDYC", 1);
   CHECK(f.field("RCC", "CIR", "HSIRDYF") == 0);
+}
+
+TEST_CASE("RccOptions lsi_hz sets the L1 LSI rate, DS8928 Table 32 bounds it")
+{
+  stm32_fixture f{l152re(), firmware, with_listener(38'000)};
+  f.set("pc", popcorn::testing::sym(firmware, "idle"));
+  set(f, "CSR", "LSION", 1);
+  idle_for(f, delay);
+  CHECK(probe(f).hz("lsi") == 38'000);
+  CHECK(probe(idle_fixture()).hz("lsi") == 0);
+  for(auto const accepted : {26'000u, 56'000u})
+  {
+    CHECK_NOTHROW(stm32_fixture(l152re(), firmware, with_listener(accepted)));
+  }
+  CHECK_THROWS_WITH_AS(
+      stm32_fixture(l152re(), firmware, with_listener(56001u)),
+      doctest::Contains("from 26000 to 56000 Hz, not 56001 Hz"), popcorn::config_error);
+  for(auto const refused : {25'999u, 56'001u, 0u})
+  {
+    CHECK_THROWS_AS(
+        stm32_fixture(l152re(), firmware, with_listener(refused)), popcorn::config_error);
+  }
 }
 
 TEST_CASE("RM0038 6.3.14: RTCSEL 3 runs the RTC at HSE over RTCPRE, LSE and LSI directly")

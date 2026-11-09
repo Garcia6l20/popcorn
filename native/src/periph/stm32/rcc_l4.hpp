@@ -53,7 +53,7 @@ enum class signal : std::uint8_t
 using enum signal;
 
 constexpr std::uint64_t hsi16_hz = 16'000'000;
-constexpr std::uint64_t lsi_hz   = 32'000;
+constexpr lsi_range     lsi_limits{.nominal = 32'000, .min = 29'500, .max = 34'000};
 
 /** @brief MSI range frequencies of RM0351 6.4.1 MSIRANGE and DS10198 Table 60, range 0 to 11. */
 constexpr std::array<std::uint64_t, 12> msi_hz{100'000,    200'000,    400'000,    800'000,
@@ -153,7 +153,7 @@ constexpr std::array<oscillator_names<signal>, 8> oscillators{
      {"CR", "MSION", "MSIRDY", "MSIRDYF", "MSIRDYIE", msi, &msi_rate},
      {"CR", "HSION", "HSIRDY", "HSIRDYF", "HSIRDYIE", hsi16, &fixed_rate<hsi16_hz>},
      {"CR", "HSEON", "HSERDY", "HSERDYF", "HSERDYIE", hse, &hse_rate},
-     {"CSR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &fixed_rate<lsi_hz>},
+     {"CSR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &configured_lsi<lsi_limits>},
      {"BDCR", "LSEON", "LSERDY", "LSERDYF", "LSERDYIE", lse, &lse_rate},
      {"CR", "PLLON", "PLLRDY", "PLLRDYF", "PLLRDYIE"},
      {"CR", "PLLSAI1ON", "PLLSAI1RDY", "PLLSAI1RDYF", "PLLSAI1RDYIE"},
@@ -314,10 +314,11 @@ struct l4_rcc
   using source = l4::source;
   using signal = l4::signal;
 
-  static constexpr bool msi_standby_ranges       = true;
-  static constexpr bool hsi_divider              = false;
-  static constexpr bool css_held                 = true;
-  static constexpr bool pll1_input_held_while_on = false;
+  static constexpr lsi_range lsi_limits               = l4::lsi_limits;
+  static constexpr bool      msi_standby_ranges       = true;
+  static constexpr bool      hsi_divider              = false;
+  static constexpr bool      css_held                 = true;
+  static constexpr bool      pll1_input_held_while_on = false;
 
   /** @brief MSIRANGE codes below this take a write, RM0351 6.4.1 hardware write protection. */
   static constexpr std::uint32_t writable_msi_ranges = l4::msi_hz.size();

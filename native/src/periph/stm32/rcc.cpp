@@ -673,6 +673,15 @@ rcc_model<Traits>::rcc_model(
       control_{reg(Traits::control_register)}, bdcr_{reg(Traits::backup_register)},
       csr_{reg(Traits::reset_flags_register)}, unit_{unit_named(ctx.part, desc.name)}
 {
+  if(options_.lsi_hz
+     and (*options_.lsi_hz < Traits::lsi_limits.min or *options_.lsi_hz > Traits::lsi_limits.max))
+  {
+    throw config_error(
+        ctx.part.part, 0, "rcc.lsi_hz",
+        std::format(
+            "an LSI frequency from {} to {} Hz, not {} Hz", Traits::lsi_limits.min,
+            Traits::lsi_limits.max, *options_.lsi_hz));
+  }
   for(auto const& [index, entry] : std::views::enumerate(Traits::signal_muxes))
   {
     selects_[index] = field(entry.reg, entry.field);

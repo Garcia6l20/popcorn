@@ -52,6 +52,17 @@ struct hsi_divider_timing
   std::uint8_t set;
 };
 
+/** @brief LSI frequency of one family in Hz: its nominal rate and the datasheet limits. */
+struct lsi_range
+{
+  /** @brief Rate popcorn runs the LSI at when the board sets none. */
+  std::uint64_t nominal;
+  /** @brief Lowest accepted rate. */
+  std::uint64_t min;
+  /** @brief Highest accepted rate. */
+  std::uint64_t max;
+};
+
 struct rate_inputs
 {
   register_file const&         regs;
@@ -230,6 +241,11 @@ template <std::uint64_t Hz> auto fixed_rate(rate_inputs const&) -> std::uint64_t
 template <std::uint64_t N> auto divide_by(rate_inputs const&) -> std::uint64_t
 {
   return N;
+}
+
+template <lsi_range Range> auto configured_lsi(rate_inputs const& in) -> std::uint64_t
+{
+  return in.options.lsi_hz.value_or(Range.nominal);
 }
 
 auto hse_rate(rate_inputs const& in) -> std::uint64_t

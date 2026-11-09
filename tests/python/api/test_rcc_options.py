@@ -70,6 +70,9 @@ def test_the_core_runs_at_the_board_hse_rate_once_switched_to_hse(
         (RccOptions(hse_hz=50_000_001), "rcc.hse_hz"),
         (RccOptions(lse_hz=0), "rcc.lse_hz"),
         (RccOptions(lse_hz=32_768_000), "rcc.lse_hz"),
+        (RccOptions(lsi_hz=30_399), "rcc.lsi_hz"),
+        (RccOptions(lsi_hz=33_601), "rcc.lsi_hz"),
+        (RccOptions(lsi_hz=0), "rcc.lsi_hz"),
     ],
 )
 def test_a_clock_outside_its_range_is_refused(
@@ -78,6 +81,19 @@ def test_a_clock_outside_its_range_is_refused(
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(u575, rcc=rcc)
     assert caught.value.key == key
+
+
+def test_an_lsi_outside_the_family_range_names_the_range(u575: popcorn.PartDescription) -> None:
+    with pytest.raises(ConfigError, match="from 30400 to 33600 Hz, not 33601 Hz"):
+        popcorn.Machine(u575, rcc=RccOptions(lsi_hz=33_601))
+
+
+@pytest.mark.parametrize("lsi_hz", [None, 30_400, 31_550, 33_600])
+def test_an_lsi_inside_the_family_range_builds(
+    u575: popcorn.PartDescription, lsi_hz: int | None
+) -> None:
+    m = popcorn.Machine(u575, rcc=RccOptions(lsi_hz=lsi_hz))
+    assert m.time.ps == 0
 
 
 def test_board_rcc_in_the_project_sets_the_hse_rate(

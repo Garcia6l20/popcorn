@@ -5,6 +5,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
@@ -17,7 +18,8 @@
 
 namespace
 {
-namespace core = popcorn::core;
+namespace core  = popcorn::core;
+namespace stm32 = popcorn::periph::stm32;
 using popcorn::address;
 using popcorn::icount;
 using popcorn::stop_reason;
@@ -224,6 +226,26 @@ TEST_CASE("the started IWDG counts 0xFFF ticks of the reset prescaler, then bite
   auto const expected = std::uint64_t{0xFFF} * 4 * lsi_cycle;
   CHECK(took >= expected);
   CHECK(took < expected + 200'000'000);
+}
+
+TEST_CASE("RccOptions lsi_hz sets the IWDG tick: 0xFFF ticks of the reset prescaler at 31550 Hz")
+{
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(stm32::board{.rcc = {.lsi_hz = std::uint64_t{31'550}}}, u575());
+  auto f         = entered("idle", std::move(options));
+  bus  b{f};
+  b.write("IWDG", "KR", 0x5555);
+  b.write("IWDG", "RLR", 100);
+  REQUIRE(run_for(f, ms).reason == stop_reason::time);
+  b.write("IWDG", "KR", 0xCCCC);
+  auto const started = f.target->virtual_clock().time().ps;
+  auto const stopped = run_for(f, 2'000 * ms);
+  REQUIRE(stopped.reason == stop_reason::reset_request);
+  auto const took     = f.target->virtual_clock().time().ps - started;
+  auto const expected = std::uint64_t{0xFFF} * 4 * (1'000'000'000'000 / 31'550);
+  CHECK(took >= expected);
+  CHECK(took < expected + 200'000'000);
+  CHECK(took > std::uint64_t{0xFFF} * 4 * lsi_cycle + 5 * ms);
 }
 
 TEST_CASE("a snapshot between refresh and expiry restores to the same watchdog stop")

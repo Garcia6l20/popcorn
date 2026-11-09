@@ -37,7 +37,7 @@ constexpr std::uint64_t lse_max_hz = 1'000'000;
 
 auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32::rcc_options>
 {
-  if(not config.rcc_hse_hz and not config.rcc_lse_hz)
+  if(not config.rcc_hse_hz and not config.rcc_lse_hz and not config.rcc_lsi_hz)
   {
     return std::nullopt;
   }
@@ -63,6 +63,7 @@ auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32
     }
     options.lse_hz = *config.rcc_lse_hz;
   }
+  options.lsi_hz = config.rcc_lsi_hz;
   return options;
 }
 

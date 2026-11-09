@@ -44,7 +44,7 @@ enum class signal : std::uint8_t
 using enum signal;
 
 constexpr std::uint64_t hsi_hz = 16'000'000;
-constexpr std::uint64_t lsi_hz = 37'000;
+constexpr lsi_range     lsi_limits{.nominal = 37'000, .min = 26'000, .max = 56'000};
 
 /** @brief MSIRANGE 7 is not allowed, RM0038 6.3.2, and runs at 0 Hz. */
 constexpr std::uint32_t msi_ranges = 7;
@@ -104,7 +104,7 @@ constexpr std::array<oscillator_names<signal>, 6> oscillators{
      {"CR", "MSION", "MSIRDY", "MSIRDYF", "MSIRDYIE", msi, &msi_rate},
      {"CR", "HSION", "HSIRDY", "HSIRDYF", "HSIRDYIE", hsi, &fixed_rate<hsi_hz>},
      {"CR", "HSEON", "HSERDY", "HSERDYF", "HSERDYIE", hse, &hse_rate},
-     {"CSR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &fixed_rate<lsi_hz>},
+     {"CSR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &configured_lsi<lsi_limits>},
      {"CSR", "LSEON", "LSERDY", "LSERDYF", "LSERDYIE", lse, &lse_rate},
      {"CR", "PLLON", "PLLRDY", "PLLRDYF", "PLLRDYIE"},
      }
@@ -220,10 +220,11 @@ struct l1_rcc
   using source = l1::source;
   using signal = l1::signal;
 
-  static constexpr bool msi_standby_ranges       = false;
-  static constexpr bool hsi_divider              = false;
-  static constexpr bool css_held                 = false;
-  static constexpr bool pll1_input_held_while_on = false;
+  static constexpr lsi_range lsi_limits               = l1::lsi_limits;
+  static constexpr bool      msi_standby_ranges       = false;
+  static constexpr bool      hsi_divider              = false;
+  static constexpr bool      css_held                 = false;
+  static constexpr bool      pll1_input_held_while_on = false;
 
   static constexpr auto const& oscillators       = l1::oscillators;
   static constexpr auto const& names             = l1::names;

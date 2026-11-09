@@ -105,6 +105,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief LSE frequency in Hz the board gives the RCC model, above 0 and at most 1 MHz, empty for
    * the model's default. */
   std::optional<std::uint64_t> rcc_lse_hz{};
+  /** @brief LSI frequency in Hz the board gives the RCC model, within the family's datasheet
+   * limits, empty for the family nominal. */
+  std::optional<std::uint64_t> rcc_lsi_hz{};
   /** @brief VDDA in millivolts the board gives the ADC model, from 1620 to 3600, empty for the
    * model's default of 3000. */
   std::optional<std::uint32_t> vdda_mv{};
