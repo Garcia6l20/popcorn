@@ -21,7 +21,10 @@ constexpr dac_ur::rig h5{
     .triggers =
         {"tim1_trgo", "tim2_trgo", "tim4_trgo", "tim5_trgo", "tim6_trgo", "tim7_trgo", "tim8_trgo",
                    "tim15_trgo", "", "", "lptim1_ch1", "lptim2_ch1", "exti9", "", ""},
-    .on_chip_modes = false
+    .variant        = &stm32::h5_dac,
+    .chip_modes     = 0,
+    .pad_modes      = 0b0101'0101,
+    .reserved_modes = 0b1010'1010
 };
 }
 

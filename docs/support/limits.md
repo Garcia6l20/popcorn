@@ -507,7 +507,7 @@ Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## DAC
 
-Source: [dac.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dac.cpp)
+Source: [dac.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dac.cpp), [dac_rows.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dac_rows.hpp)
 
 STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
 
@@ -620,9 +620,12 @@ software trigger register is `DAC_SWTRIGR`.
   ES0125, ES0240 and ES0241 and 2.5.1 to 2.5.3 in the others. 2.x.1, the DMA request not cleared by
   clearing DMAENx or the DAC clock, status A, is reproduced: a high `dac_chx_dma` stays high until a
   DMA transfer acknowledges it. 2.x.2, DMAUDRx not set when an internal trigger lands on the cycle of
-  the DMA acknowledge, status N: popcorn sets DMAUDRx by the rule above at every load, also on the
-  cycle of the acknowledge, and a firmware that mixes software and hardware triggers can see
-  DMAUDRx where silicon does not. 2.x.3,
+  the DMA acknowledge, status N: silicon decides at the trigger detection, popcorn decides DMAUDRx
+  at the load, three APB1 cycles after the trigger, RM0038 13.3.6, and sets the flag when a hardware
+  load finds `dac_chx_dma` still high. A
+  trigger that lands on the cycle of the acknowledge follows that rule, where silicon does not set the
+  flag, so a firmware that mixes software and hardware triggers can see DMAUDRx that silicon does not
+  show. 2.x.3,
   the spurious activation of the output buffer on PA4 and PA5 by a fast falling edge, status A, is an
   electrical effect outside the model.
 
@@ -650,7 +653,22 @@ not change the load timing.
 - SINFORMATx inverts bit 11 of the data when it loads into `DAC_DORx`, RM0456 35.4.5 Table 343. The
   inversion is applied to the holding value before the wave is added, inferred.
 - `DACCxDHRB` of `DAC_DHR12Rx`, `DAC_DHR12Lx` and `DAC_DHR8Rx` store what is written and read back
-  through the three views. DORSTATx stays 0: it applies to the DMA double data mode.
+  through the three views.
+- With DMAENx 1 a hardware load raises `dac1_ch1_dma` or `dac1_ch2_dma`, the GPDMA1 requests of RM0456
+  Table 137 and the RM0481 GPDMA request table, and a DHRx write, SWTRIGx or a load with DMAENx 0
+  raises none. The request drops at the GPDMA acknowledge or when DMAENx clears, inferred. A hardware
+  load that finds the request high sets DMAUDRx and still loads DORx. DMAUDRx with DMAUDRIEx holds
+  `DAC1_IRQn`, the DAC's own line.
+- With DMADOUBLEx and DMAENx 1, RM0456 35.4.9 and RM0481 30.4.9, a hardware trigger alternates: the
+  first loads DORx from DHRx, keeps DHRBx as DORBx and raises the request, the second makes DORBx the
+  output, sets DORSTATx and raises no request, and the next one loads DORx and clears DORSTATx.
+  DORx reads its own value while DORSTATx is 1. SINFORMATx inverts DORBx as it does DORx. The
+  underrun check runs at the first trigger of a pair only, inferred. A DHRx write that loads,
+  a trigger with DMAENx 0 and ENx 0 load DORx, clear DORSTATx and restart the
+  alternation, inferred. The wave term is added at the first trigger only, inferred.
+- STM32U5 `DAC_AUTOCR` is storage: a firmware write logs one `model_warning` and raises `ModelError`
+  under strict_peripherals before the store. The autonomous mode of RM0456 35.4.16 is not modelled,
+  and a hardware trigger with AUTOMODE set behaves as without.
 - DMADOUBLEx written while ENx or DMAENx is 1 keeps the old bit, RM0456 35.4.9. It logs one
   `model_warning` and raises `ModelError` under strict_peripherals, leaving `DAC_MCR`.
 - HFSEL is stored. It has no effect: the model has no conversion delay.

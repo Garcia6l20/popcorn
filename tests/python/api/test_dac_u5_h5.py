@@ -39,3 +39,21 @@ async def test_dac1rdy_sets_after_en1_and_the_signed_format_inverts_the_msb(
     dac.DHR12R1.write(0x000)
     await m.run(for_=us(1))
     assert dac.DOR1.read() & 0xFFF == 0x800
+
+
+@pytest.mark.parametrize(("part", "instance", "elf", "reg", "field"), PARTS)
+async def test_the_double_data_mode_is_set_before_dmaen_and_dorstat_starts_at_0(
+    part: str, instance: str, elf: Path, reg: str, field: str
+) -> None:
+    m = popcorn.MachineDescription(part=part, images=[popcorn.Elf(elf)]).machine()
+    m.reset()
+    m.reg.pc = m.sym("idle")
+    setattr(getattr(m.periph.RCC, reg), field, 1)
+    dac = getattr(m.periph, instance)
+    dac.MCR.DMADOUBLE1 = 1
+    dac.CR.DMAEN1 = 1
+    dac.DHR12R1.write(0x0ABC0123)
+    await m.run(for_=us(1))
+    assert dac.MCR.DMADOUBLE1 == 1
+    assert dac.SR.DORSTAT1 == 0
+    assert dac.DHR12R1.read() == 0x0ABC0123

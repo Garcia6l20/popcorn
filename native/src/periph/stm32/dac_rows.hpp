@@ -67,8 +67,12 @@ struct dac_variant
   bool ready_flags = false;
   /** @brief The peripheral has `SINFORMATx`, the signed input format of RM0456 35.4.5. */
   bool signed_format = false;
-  /** @brief The peripheral has `DMADOUBLEx` and the `DACCxDHRB` fields of the holding registers. */
+  /** @brief The peripheral has `DMADOUBLEx`, `DORSTATx` and the `DACCxDHRB` fields of the holding
+   *         registers. */
   bool double_data = false;
+  /** @brief The peripheral has `DAC_AUTOCR`, RM0456 35.7.21: its bits are stored and the
+   *         autonomous mode of RM0456 35.4.16 is not modelled. */
+  bool autonomous = false;
   /** @brief Picoseconds from ENx set to DACxRDY with the output buffer on, the typical tWAKEUP of
    *         the datasheet, inferred. */
   std::uint64_t wakeup_buffer_ps = 0;
@@ -157,6 +161,7 @@ inline constexpr dac_variant u5_dac{
     .ready_flags         = true,
     .signed_format       = true,
     .double_data         = true,
+    .autonomous          = true,
     .wakeup_buffer_ps    = 4'200'000,
     .wakeup_no_buffer_ps = 2'000'000,
     .buffer_off_modes    = 0b1100'1100,

@@ -3,6 +3,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "model_base.hpp"
+#include "secure_config.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -84,6 +85,8 @@ struct dac_state
   std::array<std::uint8_t, channels>          pad_driven{};
   std::array<std::uint64_t, channels>         ready_event{};
   std::array<std::uint16_t, channels>         dhrb{};
+  std::array<std::uint16_t, channels>         dorb{};
+  std::array<std::uint8_t, channels>          second{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -154,6 +157,20 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        is still high raises no new request and sets DMAUDRx, RM0351 19.4.7, decided at the
  *        load, inferred, and DORx still loads DHRx. DMAUDRx with DMAUDRIEx holds the DAC's
  *        contribution to TIM6_DAC_IRQn, position 54 of RM0351 Table 61, which TIM6 shares.
+ *        On the STM32U5 and STM32H5 the requests are `dac1_ch1_dma` and `dac1_ch2_dma` of the
+ *        GPDMA1 request tables, and DMAUDRx with DMAUDRIEx holds the DAC's own line, DAC1_IRQn.
+ *        With DMADOUBLEx and DMAENx 1 a hardware trigger alternates, RM0456 35.4.9 and RM0481
+ *        30.4.9: the first loads DORx from DHRx, keeps DHRBx as DORBx and raises the request, and
+ *        the second makes DORBx the output, sets DORSTATx and raises none. The next trigger loads
+ *        DORx again and clears DORSTATx. DORx reads its own value while DORSTATx is 1. The
+ *        underrun check runs at the first trigger of a pair only, inferred, the manual giving
+ *        the rule for a single data request. A DHRx write that loads or a trigger with
+ *        DMAENx 0 loads DORx, clears DORSTATx and restarts the alternation, inferred, as does
+ *        ENx 0. The wave term is added at the first trigger only, inferred. The instant of the
+ *        request is the instant inferred for the single data mode.
+ *        DAC_AUTOCR of the STM32U5 is storage: a firmware write logs one model_warning and raises
+ *        model_error under strict_peripherals before it is stored. The autonomous mode of RM0456
+ *        35.4.16 is not modelled.
  *        WAVEx 01 adds the LFSR of RM0351 Figure 141, masked to the MAMPx + 1 low bits, to DHRx
  *        at each SWTRIGx or hardware load, then steps it, RM0351 19.4.8 and 19.4.12, from the
  *        preload 0xAAA, Figure 142 giving 0xAAA then 0xD55. WAVEx 1x adds the triangle counter,
@@ -242,6 +259,7 @@ public:
       std::uint32_t  value,
       access_ctx     access) -> std::expected<void, bus_error> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
   [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
@@ -284,6 +302,7 @@ private:
     field_ref ready;
     field_ref signed_format;
     field_ref double_data;
+    field_ref dorstat;
   };
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -300,6 +319,7 @@ private:
   void               transfer(std::size_t channel, load_kind kind);
   [[nodiscard]] auto wave_term(std::size_t channel) -> std::uint32_t;
   void               release(std::size_t channel);
+  [[nodiscard]] auto live_code(std::size_t channel) const -> std::uint32_t;
   [[nodiscard]] auto output_level(std::size_t channel, std::uint8_t modes) const
       -> std::optional<std::uint32_t>;
   void               publish(std::size_t channel);
@@ -337,6 +357,8 @@ private:
   reg_ref                                                      control_;
   reg_ref                                                      mode_;
   reg_ref                                                      status_;
+  reg_ref                                                      autonomous_;
+  storage_notes                                                notes_;
   std::array<reg_ref, 9>                                       holding_;
   std::array<channel_fields, 2>                                channel_;
   core::clock_domain                                           bus_;
@@ -390,6 +412,7 @@ dac::dac(
 },
       variant_{variant}, supply_{supply}, regs_{ctx.regs}, control_{reg("CR")},
       mode_{variant.mode_register ? reg("MCR") : reg_ref{}}, status_{reg("SR")},
+      autonomous_{variant.autonomous ? reg("AUTOCR") : reg_ref{}},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
       bus_{ctx.clock.domain(variant.bus_clock)}, lsi_{ctx.clock.domain("lsi")},
@@ -416,6 +439,10 @@ dac::dac(
   if(variant.sample_hold)
   {
     bind(dac_sample_hold_writes);
+  }
+  if(variant.autonomous)
+  {
+    bind(std::array<write_entry<dac>, 1>{{{"AUTOCR", nullptr}}});
   }
   auto const present = [&](bool on, std::string_view reg_name, std::string field_name) {
     return on ? field(reg_name, field_name) : field_ref{};
@@ -445,6 +472,7 @@ dac::dac(
         .ready              = present(variant.ready_flags, "SR", std::format("DAC{}RDY", n)),
         .signed_format      = present(variant.signed_format, "MCR", std::format("SINFORMAT{}", n)),
         .double_data        = present(variant.double_data, "MCR", std::format("DMADOUBLE{}", n)),
+        .dorstat            = present(variant.double_data, "SR", std::format("DORSTAT{}", n)),
     };
   }
   restore_trim();
@@ -546,6 +574,10 @@ auto dac::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
+  if(variant_.autonomous and (offset & ~3u) == autonomous_.offset)
+  {
+    notes_.written(ctx_, desc_, "DAC autonomous mode", autonomous_.offset, access, {});
+  }
   if((offset & ~3u) != control_.offset)
   {
     return dispatch_model::on_write(regs, offset, size, old, value, access);
@@ -557,6 +589,11 @@ auto dac::on_write(
   auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
   retune(was);
   return result;
+}
+
+auto dac::storage_only(std::uint32_t offset) const -> bool
+{
+  return variant_.autonomous and offset == autonomous_.offset;
 }
 
 auto dac::software_selected(std::size_t channel) const -> bool
@@ -666,6 +703,8 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
       state_.phase[channel]    = std::to_underlying(sample_phase::off);
       state_.phase_ps[channel] = 0;
       state_.held_set[channel] = 0;
+      state_.second[channel]   = 0;
+      update(regs_, unit.dorstat, 0);
     }
     else if(unit.enable.of(old) == 0 and get(regs_, unit.mode) >= 4)
     {
@@ -1162,9 +1201,26 @@ auto dac::wave_term(std::size_t channel) -> std::uint32_t
 void dac::transfer(std::size_t channel, load_kind kind)
 {
   auto const& unit = channel_[channel];
-  auto const  term = kind == load_kind::write ? 0u : wave_term(channel);
-  auto const  data =
-      std::uint32_t{state_.dhr[channel]} ^ (get(regs_, unit.signed_format) != 0 ? 0x800u : 0u);
+  auto const  twin = kind == load_kind::hardware
+                 and get(regs_, unit.double_data) != 0
+                 and get(regs_, unit.dma) != 0;
+  if(twin and state_.second[channel] != 0)
+  {
+    state_.second[channel] = 0;
+    update(regs_, unit.dorstat, 1);
+    if(state_.phase[channel] != std::to_underlying(sample_phase::off))
+    {
+      start_sample(channel);
+    }
+    drive_output(channel);
+    return;
+  }
+  auto const flip        = get(regs_, unit.signed_format) != 0 ? 0x800u : 0u;
+  state_.dorb[channel]   = static_cast<std::uint16_t>(std::uint32_t{state_.dhrb[channel]} ^ flip);
+  state_.second[channel] = twin ? 1 : 0;
+  update(regs_, unit.dorstat, 0);
+  auto const term = kind == load_kind::write ? 0u : wave_term(channel);
+  auto const data = std::uint32_t{state_.dhr[channel]} ^ flip;
   regs_.poke(unit.output.offset, std::min(data_mask, data + term));
   if(state_.phase[channel] != std::to_underlying(sample_phase::off))
   {
@@ -1195,6 +1251,13 @@ void dac::release(std::size_t channel)
   requests_[channel].set(false);
 }
 
+auto dac::live_code(std::size_t channel) const -> std::uint32_t
+{
+  auto const& unit = channel_[channel];
+  return get(regs_, unit.dorstat) != 0 ? std::uint32_t{state_.dorb[channel]}
+                                       : regs_.peek(unit.output.offset) & data_mask;
+}
+
 auto dac::output_level(std::size_t channel, std::uint8_t modes) const
     -> std::optional<std::uint32_t>
 {
@@ -1208,8 +1271,7 @@ auto dac::output_level(std::size_t channel, std::uint8_t modes) const
   {
     return std::nullopt;
   }
-  auto const code = mode >= 4 ? std::uint64_t{state_.held[channel]}
-                              : std::uint64_t{regs_.peek(unit.output.offset) & data_mask};
+  auto const code = mode >= 4 ? std::uint64_t{state_.held[channel]} : live_code(channel);
   return static_cast<std::uint32_t>(
       (code * supply_.vdda_mv * 1000u + data_mask) / (data_mask + 1u));
 }
@@ -1375,8 +1437,7 @@ void dac::advance_phase(std::size_t channel, std::uint64_t ps)
     auto const current = static_cast<sample_phase>(state_.phase[channel]);
     if(current != sample_phase::hold)
     {
-      state_.held[channel] =
-          static_cast<std::uint16_t>(regs_.peek(channel_[channel].output.offset) & data_mask);
+      state_.held[channel]     = static_cast<std::uint16_t>(live_code(channel));
       state_.held_set[channel] = 1;
       drive_output(channel);
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analog_peers.hpp"
+#include "dac_rows.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
 
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -36,13 +38,18 @@ using popcorn::vtime;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
-constexpr std::uint64_t ps_per_s = 1'000'000'000'000;
-constexpr std::uint32_t en1      = 1u << 0;
-constexpr std::uint32_t ten1     = 1u << 1;
-constexpr std::uint32_t en2      = 1u << 16;
-constexpr std::uint32_t rdy1     = 1u << 11;
-constexpr std::uint32_t rdy2     = 1u << 27;
-constexpr std::uint32_t dmaen1   = 1u << 12;
+constexpr std::uint64_t ps_per_s  = 1'000'000'000'000;
+constexpr std::uint32_t en1       = 1u << 0;
+constexpr std::uint32_t ten1      = 1u << 1;
+constexpr std::uint32_t en2       = 1u << 16;
+constexpr std::uint32_t rdy1      = 1u << 11;
+constexpr std::uint32_t rdy2      = 1u << 27;
+constexpr std::uint32_t dmaen1    = 1u << 12;
+constexpr std::uint32_t dmaudrie1 = 1u << 13;
+constexpr std::uint32_t dmaudr1   = 1u << 13;
+constexpr std::uint32_t dorstat1  = 1u << 12;
+constexpr std::uint32_t double1   = 1u << 8;
+constexpr std::uint64_t samples   = 0x2000'8000;
 
 struct rig
 {
@@ -57,7 +64,10 @@ struct rig
   std::uint64_t                    wake_buffer_ps;
   std::uint64_t                    wake_no_buffer_ps;
   std::array<std::string_view, 15> triggers;
-  bool                             on_chip_modes;
+  stm32::dac_variant const*        variant;
+  std::uint8_t                     chip_modes;
+  std::uint8_t                     pad_modes;
+  std::uint8_t                     reserved_modes;
 };
 
 auto the_rig() -> rig const&;
@@ -187,6 +197,70 @@ struct bench
   void write_of(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
   {
     REQUIRE(f->target->mem().write(at(peripheral, reg), 4, value).has_value());
+  }
+
+  [[nodiscard]] auto irq_number() const -> std::uint32_t
+  {
+    auto const& irqs = f->target->description().irqs;
+    auto const  one  = std::ranges::find(irqs, std::string{"DAC1_IRQn"}, &popcorn::irq_desc::name);
+    REQUIRE(one != irqs.end());
+    return one->number;
+  }
+
+  [[nodiscard]] auto irq_pending() const -> bool
+  {
+    auto const number = irq_number();
+    auto const word   = f->target->mem().read(0xE000'E200u + 4 * (number / 32), 4);
+    REQUIRE(word.has_value());
+    return (*word >> (number % 32) & 1u) != 0;
+  }
+
+  void clear_irq() const
+  {
+    auto const number = irq_number();
+    REQUIRE(f->target->mem()
+                .write(0xE000'E280u + 4 * (number / 32), 4, 1u << (number % 32))
+                .has_value());
+  }
+
+  void dma_channel(
+      std::uint32_t              request,
+      std::string_view           holding,
+      std::vector<std::uint32_t> data,
+      std::string_view           controller = "GPDMA1") const
+  {
+    auto const prefix = std::format("{}_C0", controller.substr(0, 5));
+    if(controller == "LPDMA1")
+    {
+      popcorn::testing::enable_clocks(
+          *f->target, {
+                          {"RCC_AHB3ENR", "LPDMA1EN"}
+      });
+    }
+    else
+    {
+      popcorn::testing::enable_clocks(
+          *f->target, {
+                          {"RCC_AHB1ENR", "GPDMA1EN"}
+      });
+    }
+    for(std::size_t index = 0; index < data.size(); ++index)
+    {
+      REQUIRE(f->target->mem().write(samples + 4 * index, 4, data[index]).has_value());
+    }
+    write_of(controller, prefix + "TR1", 0x2000A);
+    write_of(controller, prefix + "TR2", request | 1u << 10);
+    write_of(controller, prefix + "BR1", static_cast<std::uint32_t>(4 * data.size()));
+    write_of(controller, prefix + "SAR", static_cast<std::uint32_t>(samples));
+    write_of(controller, prefix + "DAR", static_cast<std::uint32_t>(at(r.instance, holding)));
+    write_of(controller, prefix + "LLR", 0);
+    write_of(controller, prefix + "FCR", (1u << 8) | (1u << 9));
+    write_of(controller, prefix + "CR", 1u);
+  }
+
+  [[nodiscard]] auto dma_left(std::string_view controller = "GPDMA1") const -> std::uint32_t
+  {
+    return read_of(controller, std::format("{}_C0BR1", controller.substr(0, 5))) & 0xFFFF;
   }
 
   void trigger(std::string_view name, std::uint64_t settle_cycles = 100) const
@@ -581,7 +655,7 @@ TEST_CASE(
   for(std::uint32_t mode = 0; mode < 8; ++mode)
   {
     CAPTURE(mode);
-    auto const    reserved = not r.on_chip_modes and (mode & 1u) != 0;
+    auto const    reserved = (r.reserved_modes >> mode & 1u) != 0;
     dac_ur::bench b{r};
     b.lsi_on();
     b.write("MCR", mode);
@@ -592,8 +666,8 @@ TEST_CASE(
     b.write("DHR12R1", 0x800);
     b.idle_to(b.now_ps() + 2'000'000'000);
     auto const effective = reserved ? 0u : mode;
-    auto const pad       = effective != 3 and effective != 7;
-    auto const chip      = r.on_chip_modes and (0b1110'1010u >> effective & 1u) != 0;
+    auto const pad       = (r.pad_modes >> effective & 1u) != 0;
+    auto const chip      = (r.chip_modes >> effective & 1u) != 0;
     CHECK(b.logged.size() == (reserved ? 1u : 0u));
     CHECK((b.pad().analog_level(4) == 1'500'000) == pad);
     auto* const source = b.f->model_of<stm32::internal_analog_source>(r.instance);
@@ -710,4 +784,343 @@ TEST_CASE(
   b.write("SWTRGR", 1);
   b.idle_to(b.now_ps() + 4 * dac_ur::cycles(1, r.hclk_hz));
   CHECK((b.read("DOR1") & 0xFFF) == 0x800 + 3);
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and RM0481 30.4.9: a hardware load with DMAEN1 raises dac1_ch1_dma, GPDMA1 "
+    "writes the next sample into DHR12R1 and a software trigger, a DHR write and DMAEN1 0 raise "
+    "none, the instant inferred")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.write("DHR12R1", 0x111);
+  b.dma_channel(2, "DHR12R1", {0x222, 0x333});
+  b.idle_to(b.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+  CHECK(b.dma_left() == 8);
+  for(auto const& [loaded, next, left] : {
+          std::tuple{0x111u, 0x222u, 4u},
+          std::tuple{0x222u, 0x333u, 0u},
+  })
+  {
+    CAPTURE(loaded);
+    b.trigger(tim6);
+    CHECK((b.read("DOR1") & 0xFFF) == loaded);
+    CHECK((b.read("DHR12R1") & 0xFFF) == next);
+    CHECK(b.dma_left() == left);
+  }
+  b.trigger(tim6);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x333);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) != 0);
+  CHECK(b.logged.empty());
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and RM0481 30.4.9: SWTRIG1, a TEN1 0 write and DMAEN1 0 raise no request, and "
+    "clearing DMAEN1 drops a high request, inferred")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(0) | dac_ur::dmaen1);
+  b.write("DHR12R1", 0x111);
+  b.write("SWTRGR", 1);
+  b.write("SWTRGR", 1);
+  b.idle_to(b.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  b.write("CR", dac_ur::dmaen1);
+  b.write("DHR12R1", 0x222);
+  b.idle_to(b.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  b.dma_channel(2, "DHR12R1", {0x333, 0x444});
+  b.idle_to(b.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+  CHECK(b.dma_left() == 8);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.trigger(r.triggers[4]);
+  CHECK(b.dma_left() == 4);
+  b.write_of("GPDMA1", "GPDMA_C0CR", 0);
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and RM0481 30.4.9: a hardware load while the request is high sets DMAUDR1, "
+    "raises no new request and still loads DOR1, and DMAUDR1 with DMAUDRIE1 holds DAC1_IRQn")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1 | dac_ur::dmaudrie1);
+  b.write("DHR12R1", 0x111);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  CHECK_FALSE(b.irq_pending());
+  b.write("DHR12R1", 0x222);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) != 0);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x222);
+  CHECK(b.irq_pending());
+  b.clear_irq();
+  CHECK(b.irq_pending());
+  b.write("SR", dac_ur::dmaudr1);
+  b.clear_irq();
+  CHECK_FALSE(b.irq_pending());
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) != 0);
+  CHECK_FALSE(b.irq_pending());
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and RM0481 30.4.9 double data: DMADOUBLE1 gives a request every second trigger, "
+    "the second makes DORB1 the output with DORSTAT1 set and the third loads DOR1 again")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("MCR", dac_ur::double1);
+  b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.ready();
+  b.write("DHR12R1", 0x0400'0800);
+  b.dma_channel(2, "DHR12R1", {0x0C00'0200, 0x0100'0300});
+  struct step
+  {
+    std::uint32_t dor;
+    bool          second;
+    std::uint32_t dhr;
+    std::uint32_t left;
+    std::uint32_t level_uv;
+  };
+  for(auto const& want : {
+          step{0x800, false, 0x0C00'0200, 4, 1'500'000},
+          step{0x800, true,  0x0C00'0200, 4, 750'000  },
+          step{0x200, false, 0x0100'0300, 0, 375'000  },
+          step{0x200, true,  0x0100'0300, 0, 2'250'000},
+  })
+  {
+    CAPTURE(want.dor);
+    CAPTURE(want.second);
+    b.trigger(tim6);
+    CHECK((b.read("DOR1") & 0xFFF) == want.dor);
+    CHECK(((b.read("SR") & dac_ur::dorstat1) != 0) == want.second);
+    CHECK(b.read("DHR12R1") == want.dhr);
+    CHECK(b.dma_left() == want.left);
+    CHECK(b.pad().analog_level(4) == want.level_uv);
+    CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  }
+  CHECK(b.logged.empty());
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and RM0481 30.4.9 double data: the underrun rule applies to the first trigger, "
+    "a software trigger and a DMAEN1 0 trigger load DOR1 and clear DORSTAT1, inferred")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("MCR", dac_ur::double1);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.write("DHR12R1", 0x0400'0800);
+  b.trigger(tim6);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dorstat1) != 0);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) != 0);
+  CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dorstat1) != 0);
+  b.write("SR", dac_ur::dmaudr1);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(0) | dac_ur::dmaen1);
+  b.write("DHR12R1", 0x0400'0300);
+  b.write("SWTRGR", 1);
+  b.idle_to(b.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+  CHECK((b.read("DOR1") & 0xFFF) == 0x300);
+  CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.trigger(tim6);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5));
+  b.write("SR", dac_ur::dmaudr1);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+  CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+}
+
+TEST_CASE(
+    "checklist 72: a snapshot restored into a machine never reset keeps the request, the "
+    "alternation and DORB, so the second trigger sets DORSTAT1, drives DHRB with or without "
+    "SINFORMAT1 and GPDMA1 serves the restored request")
+{
+  auto const& r = dac_ur::the_rig();
+  for(auto const signed_format : {false, true})
+  {
+    CAPTURE(signed_format);
+    dac_ur::bench b{r};
+    auto const    tim6 = r.triggers[4];
+    b.write("MCR", dac_ur::double1 | (signed_format ? 1u << 9 : 0u));
+    b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+    b.ready();
+    b.write("DHR12R1", 0x0400'0800);
+    b.trigger(tim6);
+    auto const bytes = dac_ur::core::encode_snapshot(b.f->target->snapshot().data());
+
+    dac_ur::bench fresh{r};
+    fresh.f->target->restore(dac_ur::core::snapshot{dac_ur::core::decode_snapshot(bytes)});
+    fresh.f->set("pc", dac_ur::sym(r.firmware, "idle"));
+    fresh.trigger(tim6);
+    CHECK((fresh.read("SR") & dac_ur::dorstat1) != 0);
+    CHECK((fresh.read("SR") & dac_ur::dmaudr1) == 0);
+    CHECK(fresh.pad().analog_level(4) == (signed_format ? 2'250'000u : 750'000u));
+    fresh.dma_channel(2, "DHR12R1", {0x0C00'0200});
+    fresh.idle_to(fresh.now_ps() + 100 * dac_ur::cycles(1, r.hclk_hz));
+    CHECK(fresh.dma_left() == 0);
+    CHECK(fresh.read("DHR12R1") == 0x0C00'0200);
+    fresh.trigger(tim6);
+    CHECK((fresh.read("DOR1") & 0xFFF) == (signed_format ? 0xA00u : 0x200u));
+    CHECK((fresh.read("SR") & dac_ur::dorstat1) == 0);
+  }
+}
+
+TEST_CASE(
+    "checklist 31: the RCC pulse and a machine reset drop the request, the alternation and a "
+    "pending load, and a trigger before the old due loads nothing")
+{
+  auto const& r = dac_ur::the_rig();
+  for(auto const machine_reset : {false, true})
+  {
+    CAPTURE(machine_reset);
+    dac_ur::bench b{r};
+    auto const    tim6 = r.triggers[4];
+    b.write("MCR", dac_ur::double1);
+    b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1 | dac_ur::dmaudrie1);
+    b.write("DHR12R1", 0x0400'0800);
+    b.trigger(tim6);
+    b.trigger(tim6);
+    REQUIRE((b.read("SR") & dac_ur::dorstat1) != 0);
+    auto const at = b.now_ps();
+    b.sink_of().triggered(tim6, stm32::trigger_edge::rising, at);
+    if(machine_reset)
+    {
+      b.f->target->reset(popcorn::reset_kind::software);
+      b.f->set("pc", dac_ur::sym(r.firmware, "idle"));
+      popcorn::testing::enable_clocks(
+          *b.f->target, {
+                            {r.clock_reg, r.clock_field}
+      });
+    }
+    else
+    {
+      b.reset_pulse();
+    }
+    b.idle_to(at + dac_ur::cycles(100, r.hclk_hz));
+    CHECK(b.read("SR") == 0);
+    CHECK(b.read("MCR") == 0);
+    CHECK((b.read("DOR1") & 0xFFF) == 0);
+    b.write("MCR", dac_ur::double1);
+    b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+    b.write("DHR12R1", 0x0400'0800);
+    b.dma_channel(2, "DHR12R1", {0x0C00'0200});
+    b.trigger(tim6);
+    CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+    CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
+    CHECK(b.dma_left() == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 double data: ENx cleared restarts the alternation, so the next trigger "
+    "after the wake-up loads DOR1 again and DORSTAT1 stays 0, inferred")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("MCR", dac_ur::double1);
+  b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.ready();
+  b.write("DHR12R1", 0x0400'0800);
+  b.trigger(tim6);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.write("DHR12R1", 0x0400'0300);
+  b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.ready();
+  b.write("SR", dac_ur::dmaudr1);
+  b.trigger(tim6);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x300);
+  CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+}
+
+TEST_CASE("RM0456 35.4.5 and 35.4.9: SINFORMAT1 inverts the bit 11 of DORB1 as it does of DOR1")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("MCR", dac_ur::double1 | 1u << 9);
+  b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+  b.ready();
+  b.write("DHR12R1", 0);
+  b.trigger(tim6);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x800);
+  CHECK(b.pad().analog_level(4) == 1'500'000);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dorstat1) != 0);
+  CHECK(b.pad().analog_level(4) == 1'500'000);
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 double data, inferred: a DHRx write that loads and a trigger with DMAEN1 0 "
+    "between the two triggers of a pair restart it, so the next trigger loads DOR1 and "
+    "DORSTAT1 stays 0")
+{
+  auto const& r = dac_ur::the_rig();
+  for(auto const dmaen_leg : {false, true})
+  {
+    CAPTURE(dmaen_leg);
+    dac_ur::bench b{r};
+    auto const    tim6 = r.triggers[4];
+    auto const    both = dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1;
+    b.write("MCR", dac_ur::double1);
+    b.write("CR", both);
+    b.ready();
+    b.write("DHR12R1", 0x0400'0800);
+    b.trigger(tim6);
+    if(dmaen_leg)
+    {
+      b.write("CR", both & ~dac_ur::dmaen1);
+      b.trigger(tim6);
+      b.write("CR", both);
+    }
+    else
+    {
+      b.write("CR", both & ~dac_ur::ten1);
+      b.write("DHR12R1", 0x0400'0300);
+      b.idle_to(b.now_ps() + 10 * dac_ur::cycles(1, r.hclk_hz));
+      b.write("CR", both);
+    }
+    b.write("SR", dac_ur::dmaudr1);
+    b.write("DHR12R1", 0x0400'0300);
+    b.trigger(tim6);
+    CHECK((b.read("DOR1") & 0xFFF) == 0x300);
+    CHECK((b.read("SR") & dac_ur::dorstat1) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 35.4.9 and 35.4.10 double data, inferred: the triangle counter steps at the first "
+    "trigger of a pair only")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  auto const    tim6 = r.triggers[4];
+  b.write("MCR", dac_ur::double1);
+  auto const wave = b.shift(r.instance, "CR", "WAVE1");
+  auto const amp  = b.shift(r.instance, "CR", "MAMP1");
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1 | 2u << wave | 3u << amp);
+  b.write("DHR12R1", 0x0400'0100);
+  b.trigger(tim6);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x100);
+  b.trigger(tim6);
+  CHECK((b.read("SR") & dac_ur::dorstat1) != 0);
+  b.trigger(tim6);
+  CHECK((b.read("DOR1") & 0xFFF) == 0x101);
 }
