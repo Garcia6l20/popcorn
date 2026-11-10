@@ -477,8 +477,8 @@ strict_peripherals that keeps `ADC_CR`:
   `OVSE`, the low-frequency trigger mode `LFTRIG` and the analog watchdogs, `AWD1EN` or a channel
   of `ADC_AWD2CR` or `ADC_AWD3CR`: the conversions run without them.
 - The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
-- The overrun, `OVR` and `OVRMOD`: a result finding `EOC` set is logged once, a model_error under
-  strict_peripherals, and replaces `ADC_DR`.
+- `VREFPROT` and `VREFSECSMP` of `ADC_PWRR`: tCONV stays at tSMPL + tSAR, the DS13737 Table 106
+  minimum.
 
 Timing and values:
 
@@ -493,15 +493,24 @@ Timing and values:
   timing above, inferred.
 - The calibration needs the regulator ready, its LDORDY event, whether software cleared the flag
   since, inferred.
-- Sampling starts 4 ADC clock cycles after the `ADSTART` write, the DS13737 Table 106 tLATR at
-  fADC = HCLK, inferred at every ADC clock. A sequence that waited for the ADC clock starts
+- Sampling starts tLATR after the `ADSTART` write: 4 ADC clock cycles at fADC = HCLK and HCLK / 2
+  and 3.75 at HCLK / 4, DS13737 Table 106. Other clocks take 4 cycles, inferred, RM0456
+  Table 330 calls their latency not deterministic. An `ADSTART` before ADRDY samples too,
+  inferred. ADSTP clears ADSTP and ADSTART in the write, inferred. A sequence that waited for the ADC clock starts
   sampling when the clock arrives, inferred. EOC and the result land at the end of tSAR, the
   `ADC_DR` write latency taken as 0, inferred. The next conversion samples from the end of the
   previous one.
 - An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
   strict_peripherals, inferred. `DISCEN` with `CONT`, forbidden by RM0456 34.4.17, converts as
   `DISCEN` alone and is logged once, a model_error under strict_peripherals.
-- `VREFPROT` and `VREFSECSMP` leave tCONV at tSMPL + tSAR, the DS13737 Table 106 minimum.
+- A write changing `ADC_CFGR1`, `ADC_SMPR` or `ADC_CHSELR` with `ADSTART` set keeps the old
+  register, RM0456 34.7.4 to 34.7.10, logged once for the three, a model_error under strict_peripherals.
+- With `OVRMOD` 0 every result is discarded while EOC or OVR is set, RM0456 34.4.23: `ADC_DR`
+  and EOC keep their values and OVR is set. A rank past the end of a shortened sequence starts
+  over at the first channel.
+- `ADC_IER`, `ADC_CFGR2`, `ADC_AWD2CR`, `ADC_AWD3CR` and `ADC_CCR` accept writes while
+  `ADSTART` is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for
+  ADEN 0.
 - ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, as ES0499 2.9.2 states for its startup
   sequence, inferred for every other use.
 - A reserved `ADC_CCR.PRESC`, 1100 to 1111, divides by 256, inferred, and is logged once, a

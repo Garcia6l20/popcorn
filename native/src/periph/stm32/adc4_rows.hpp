@@ -39,9 +39,11 @@ struct adc4_variant
   std::array<std::uint16_t, 8> sampling_halves{3, 7, 15, 25, 39, 79, 159, 1629};
   /** @brief tSAR of RES 12, 10, 8 and 6 bits in half ADC clock cycles, RM0456 Table 332. */
   std::array<std::uint16_t, 4> sar_halves{25, 21, 17, 13};
-  /** @brief ADC clock cycles from an ADSTART write to the start of sampling, the tLATR of DS13737
-   *         Table 106 and DS13086 Table 108 at fADC = HCLK. */
-  std::uint32_t start_latency_cycles = 4;
+  /** @brief Quarter ADC clock cycles from an ADSTART write to the start of sampling, the tLATR
+   *         of DS13737 Table 106 and DS13086 Table 108: 4 cycles at fADC = HCLK and HCLK / 2. */
+  std::uint32_t start_latency_quarters = 16;
+  /** @brief The same at fADC = HCLK / 4, 3.75 cycles. */
+  std::uint32_t start_latency_quarters_div4 = 15;
   /** @brief Lowest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
   std::uint64_t min_hz = 140'000;
   /** @brief Highest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */

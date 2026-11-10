@@ -8,12 +8,13 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn import ModelError, StopReason
-from popcorn.units import us
+from popcorn.units import VirtualDuration, us
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 RCC_ELF = PREBUILT / "rcc_ll.elf"
 ADEN = 1 << 0
 ADDIS = 1 << 1
+ADSTART = 1 << 2
 ADVREGEN = 1 << 28
 ADCAL = 1 << 31
 HSION = 1 << 8
@@ -25,8 +26,15 @@ def settle(m: popcorn.Machine, duration: int) -> None:
     assert asyncio.run(m.run(for_=us(duration))).reason is StopReason.TIME
 
 
-def idle(u575: popcorn.PartDescription, strict: bool = False) -> popcorn.Machine:
-    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), strict_peripherals=strict)
+def idle(
+    u575: popcorn.PartDescription, strict: bool = False, slice_instructions: int = 1_000_000
+) -> popcorn.Machine:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(RCC_ELF),
+        strict_peripherals=strict,
+        slice_instructions=slice_instructions,
+    )
     m.reset()
     assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
     m.reg.pc = m.sym("Default_Handler")
@@ -73,3 +81,57 @@ def test_adcal_without_the_regulator_raises_under_strict_and_keeps_adc_cr(
     settle(m, 30)
     adc.CR.write(ADVREGEN | ADCAL)
     assert adc.CR.ADCAL == 1
+
+
+class SequenceEnded:
+    def ready(self, machine: popcorn.Machine) -> bool:
+        return machine.periph.ADC4.ISR.EOS == 1
+
+
+def enabled(u575: popcorn.PartDescription, slice_instructions: int = 1_000_000) -> popcorn.Machine:
+    m = idle(u575, slice_instructions=slice_instructions)
+    adc = m.periph.ADC4
+    adc.CR.write(ADVREGEN)
+    settle(m, 30)
+    adc.CR.write(ADVREGEN | ADEN)
+    settle(m, 2)
+    assert adc.ISR.ADRDY == 1
+    return m
+
+
+def test_a_driven_pad_converts_against_vdda(u575: popcorn.PartDescription) -> None:
+    m = enabled(u575)
+    adc = m.periph.ADC4
+    adc.input(9).volts = 1.2
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    settle(m, 2)
+    assert (adc.ISR.EOC, adc.ISR.EOS, adc.CR.ADSTART) == (1, 1, 0)
+    assert adc.DR.value == int(1.2 * 4096 / 3.0)
+
+
+def converted(m: popcorn.Machine, running: bool) -> tuple[int, int]:
+    adc = m.periph.ADC4
+    adc.SMPR.write(7)
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    driven = m.write((m.ref.periph.ADC4.input(9).volts, 1.5), at=m.time + VirtualDuration(1))
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await driven
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 60)
+    return adc.DR.value, adc.ISR.EOS
+
+
+def test_a_drive_during_sampling_converts_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = converted(enabled(u575), running=False)
+    assert parked == (int(1.5 * 4096 / 3.0), 1)
+    assert converted(enabled(u575, slice_instructions=1_000), running=True) == parked

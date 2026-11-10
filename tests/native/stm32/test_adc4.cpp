@@ -16,6 +16,7 @@
 #include <functional>
 #include <ranges>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -211,15 +212,27 @@ struct adc4_fixture : stm32_fixture
     return done;
   }
 
-  [[nodiscard]] auto cpu_read(std::string_view reg) const -> std::uint32_t
+  [[nodiscard]] auto
+      cpu_read(std::string_view reg, popcorn::initiator by = popcorn::initiator::cpu) const
+      -> std::uint32_t
   {
     auto&       regs  = target->peripheral("ADC4");
     auto const* found = popcorn::find_register(regs.description(), reg);
     REQUIRE(found != nullptr);
     auto const value = target->model("ADC4")->on_read(
-        regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+        regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = by});
     REQUIRE(value.has_value());
     return *value;
+  }
+
+  [[nodiscard]] auto all_dues() const -> std::vector<std::uint64_t>
+  {
+    std::vector<std::uint64_t> out;
+    for(auto const& event : target->snapshot().data().events.pending)
+    {
+      out.push_back(event.due_ps);
+    }
+    return out;
   }
 
   [[nodiscard]] auto port() const -> stm32::analog_port&
@@ -1439,42 +1452,6 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.4.19 and checklist 53: a CPU read of ADC_DR clears EOC, a result "
-    "finding EOC set logs the overrun once and replaces ADC_DR, a model_error when strict")
-{
-  {
-    adc4_fixture const f;
-    static_cast<void>(f.enable());
-    f.port().drive(pa4, 800'000);
-    f.port().drive(pa5, 1'600'000);
-    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
-    std::vector<core::log_record> logged;
-    auto const                    sink  = recorder(f, logged);
-    auto const                    begin = f.start();
-    f.run_until(begin + halves(28));
-    CHECK(f.cpu_read("DR") == code_of(800'000));
-    CHECK(f.isr("EOC") == 0);
-    f.run_until(begin + 2 * halves(28));
-    CHECK(logged.empty());
-    static_cast<void>(f.start());
-    f.run_until(f.now() + 4 * halves(28));
-    REQUIRE(logged.size() == 1);
-    CHECK(logged[0].message.contains("overrun"));
-    CHECK(f.read("DR") == code_of(1'600'000));
-    CHECK(f.isr("OVR") == 0);
-  }
-  adc4_fixture const f{u575(), true};
-  static_cast<void>(f.enable());
-  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
-  static_cast<void>(f.start());
-  CHECK_THROWS_AS(
-      static_cast<void>(f.run_to_stop(
-          {.max_instructions = icount{1'000'000'000},
-           .until_time       = vtime{f.now() + 4 * halves(28)}})),
-      popcorn::model_error);
-}
-
-TEST_CASE(
     "RM0456 34.7.3 and 34.4.8: ADSTART with ADDIS 1, ADDIS with ADSTART 1 and "
     "ADSTP with ADDIS 1 are ignored, each logs once, a model_error when strict")
 {
@@ -1513,7 +1490,7 @@ TEST_CASE(
   auto const         saved = f.target->snapshot();
   adc4_fixture const fresh{no_reset};
   fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
-  auto const done = at + 16 * (latency + halves(28));
+  auto const done = at + 15 * 4 * cycle + 16 * halves(28);
   fresh.run_until(done - early);
   CHECK(fresh.isr("EOC") == 0);
   fresh.run_until(done);
@@ -1560,4 +1537,234 @@ TEST_CASE(
   fresh.run_until(begin + 2 * halves(28));
   CHECK(fresh.isr("EOS") == 1);
   CHECK(fresh.read("DR") == code_of(2'600'000));
+}
+
+TEST_CASE(
+    "RM0456 34.4.23: a CPU read of ADC_DR clears EOC, a result finding EOC set sets OVR and is "
+    "lost with OVRMOD 0, replaces ADC_DR with OVRMOD 1")
+{
+  for(auto const overwrite : {false, true})
+  {
+    CAPTURE(overwrite);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, 800'000);
+    f.port().drive(pa5, 1'600'000);
+    f.write("CFGR1", overwrite ? ovrmod : 0u);
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+    auto const begin = f.start();
+    f.run_until(begin + 2 * halves(28));
+    CHECK(f.isr("OVR") == 1);
+    CHECK(f.read("DR") == code_of(overwrite ? 1'600'000 : 800'000));
+    CHECK(f.isr("EOC") == 1);
+    static_cast<void>(f.cpu_read("DR"));
+    CHECK(f.isr("EOC") == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.7.4 to 34.7.10: ADC_CFGR1, ADC_SMPR or ADC_CHSELR written with ADSTART 1 keeps the "
+    "old register, logs once, a model_error when strict")
+{
+  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0"})
+  {
+    CAPTURE(std::string_view{reg});
+    {
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.write("CFGR1", cont);
+      f.write("CHSELRMOD0", 1u << pa4);
+      static_cast<void>(f.start());
+      std::vector<core::log_record> logged;
+      auto const                    sink = recorder(f, logged);
+      auto const                    kept = f.read(reg);
+      f.write(reg, kept ^ (1u << 2));
+      CHECK(f.read(reg) == kept);
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains("ADSTART 1"));
+    }
+    adc4_fixture const f{u575(), true};
+    static_cast<void>(f.enable());
+    f.write("CFGR1", cont);
+    f.write("CHSELRMOD0", 1u << pa4);
+    static_cast<void>(f.start());
+    auto const kept = f.read(reg);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(f.at("ADC4", reg), 4, kept ^ (1u << 2))),
+        popcorn::model_error);
+    CHECK(f.read(reg) == kept);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.23: a result read in time sets no OVR, a debugger read keeps EOC, a "
+    "DMA read clears it")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 800'000);
+  f.port().drive(pa5, 1'600'000);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  CHECK(f.read("DR") == code_of(800'000));
+  CHECK(f.isr("EOC") == 1);
+  static_cast<void>(f.cpu_read("DR", popcorn::initiator::dma));
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(begin + 2 * halves(28));
+  CHECK(f.isr("OVR") == 0);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == code_of(1'600'000));
+  CHECK(f.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "RM0456 34.4.23: with OVRMOD 0 every result is discarded while OVR stays set, a result "
+    "lands again once software clears OVR")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 400'000);
+  f.port().drive(pa5, 900'000);
+  f.port().drive(pa6, 1'500'000);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5) | (1u << pa6));
+  auto const begin = f.start();
+  f.run_until(begin + 2 * halves(28));
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.read("DR") == code_of(400'000));
+  static_cast<void>(f.cpu_read("DR"));
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(begin + 3 * halves(28));
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.read("DR") == code_of(400'000));
+  f.write("ISR", ovr | eos);
+  auto const again = f.start();
+  f.run_until(again + halves(28));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == code_of(400'000));
+}
+
+TEST_CASE("ADSTART with DISCEN after CHSELR shrank below the rank restarts at the first channel")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 700'000);
+  f.port().drive(pa5, 1'400'000);
+  f.port().drive(pa6, 2'100'000);
+  f.write("CFGR1", discen);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const first = f.start();
+  f.run_until(first + halves(28));
+  static_cast<void>(f.cpu_read("DR"));
+  REQUIRE(f.cr("ADSTART") == 0);
+  f.write("CHSELRMOD0", 1u << pa6);
+  auto const second = f.start();
+  f.run_until(second + halves(28));
+  CHECK(f.read("DR") == code_of(2'100'000));
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE(
+    "ADSTART with every function ADC4 does not model yet logs ten times, one model_error when "
+    "strict that keeps ADC_CR")
+{
+  auto const setup = [](adc4_fixture const& f) {
+    static_cast<void>(f.regulate());
+    f.put("ADC4", "PWR", "AUTOFF", 1);
+    f.put("ADC4", "PWR", "VREFPROT", 1);
+    f.write("CR", advregen | aden);
+    f.write("CFGR1", (1u << 10) | (1u << 0) | (1u << 14) | (1u << 23) | cont | discen);
+    f.write("CFGR2", (1u << 0) | (1u << 29));
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << 13));
+  };
+  {
+    adc4_fixture const f;
+    setup(f);
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.write("CR", advregen | aden | adstart);
+    CHECK(logged.size() == 10);
+  }
+  adc4_fixture const f{u575(), true};
+  setup(f);
+  CHECK_THROWS_AS(
+      static_cast<void>(f.target->mem().write(f.at("ADC4", "CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+  CHECK(f.read("CR") == (advregen | aden));
+}
+
+TEST_CASE("VREFPROT and VREFSECSMP are not modelled, logged at ADSTART")
+{
+  for(auto const* name : {"VREFPROT", "VREFSECSMP"})
+  {
+    CAPTURE(std::string_view{name});
+    adc4_fixture const f;
+    f.put("ADC4", "PWR", name, 1);
+    static_cast<void>(f.enable());
+    f.write("CHSELRMOD0", 1u << pa4);
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    static_cast<void>(f.start());
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("VREFPROT"));
+  }
+}
+
+TEST_CASE(
+    "DS13737 Table 106: tLATR is 4 ADC clock cycles at fADC = HCLK and HCLK / 2, 3.75 at "
+    "HCLK / 4, inferred for every other clock")
+{
+  for(auto const& [presc, divider, quarters] : {
+          std::tuple{0u, 1u,  16u},
+          std::tuple{2u, 4u,  16u},
+          std::tuple{4u, 8u,  16u},
+          std::tuple{6u, 12u, 16u},
+          std::tuple{7u, 16u, 15u}
+  })
+  {
+    CAPTURE(presc);
+    adc4_fixture const f;
+    f.write("CCR", presc << 18);
+    static_cast<void>(f.regulate());
+    f.write("CR", advregen | aden);
+    f.run_until(f.now() + 64 * tstab);
+    REQUIRE(f.isr("ADRDY") == 1);
+    f.write("CHSELRMOD0", 1u << pa4);
+    auto const at = f.now();
+    f.write("CR", advregen | aden | adstart);
+    REQUIRE(f.dues().size() == 1);
+    auto const hz = 16'000'000ull / divider;
+    CHECK(f.dues()[0] == at + (quarters * 1'000'000'000'000ull + 4 * hz - 1) / (4 * hz));
+  }
+}
+
+TEST_CASE("a sequence that waited for the ADC4 clock samples when the clock arrives, no tLATR")
+{
+  adc4_fixture const f{u575(), false, false};
+  f.put("RCC", "RCC_CR", "HSION", 1);
+  f.run_until(f.now() + 200 * us);
+  static_cast<void>(f.enable());
+  f.write("SMPR", 7);
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.put("RCC", "RCC_CR", "HSION", 0);
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(f.now() + 10 * us);
+  REQUIRE(f.dues().empty());
+  f.put("RCC", "RCC_CR", "HSION", 1);
+  auto const rcc = f.all_dues();
+  REQUIRE_FALSE(rcc.empty());
+  while(f.dues().empty())
+  {
+    f.run_until(f.now() + us);
+  }
+  auto const dues = f.dues();
+  REQUIRE(dues.size() == 2);
+  CHECK(dues[1] - dues[0] == halves(25));
+  auto const arrival = dues[0] - halves(1629);
+  CHECK(std::ranges::any_of(rcc, [&](std::uint64_t due) {
+    return arrival >= due and arrival - due < cycle;
+  }));
 }

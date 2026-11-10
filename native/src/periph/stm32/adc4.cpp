@@ -33,6 +33,7 @@ constexpr std::uint32_t sampling_end       = 5;
 constexpr std::uint32_t conversion_end     = 6;
 constexpr std::uint32_t channels           = 24;
 constexpr std::uint32_t ranks              = 8;
+constexpr std::size_t   unmodelled_kinds   = 10;
 constexpr std::uint32_t sequence_end       = 0xF;
 constexpr std::uint32_t calibration_factor = 0;
 constexpr std::uint16_t reserved_divider   = 256;
@@ -134,27 +135,38 @@ struct refusal
  *        Sequence, RM0456 34.4.9: with CHSELRMOD 0 the channels whose CHSELx bit is set, from
  *        channel 0 up with SCANDIR 0 and from channel 23 down with SCANDIR 1. With CHSELRMOD 1 SQ1
  *        to SQ8 of the alternate ADC_CHSELR in order, up to the first SQx of 1111. An ADSTART write
- *        with EXTEN 00 starts the sequence: sampling starts 4 ADC clock cycles after the write, the
- *        DS13737 Table 106 tLATR at fADC = HCLK, inferred for every clock. A conversion samples for
- *        SMP1 or SMP2 of ADC_SMPR, as its SMPSELx bit selects, 1.5 to 814.5 cycles, then converts
- *        for tSAR, 12.5, 10.5, 8.5 or 6.5 cycles for RES 12, 10, 8 or 6 bits, Table 332. EOSMP sets
- *        at the end of sampling, EOC with the result in ADC_DR at the end of the conversion, the DR
- *        write latency taken as 0, inferred, and EOS with the last result of the sequence. The next
- *        conversion samples from the end of the previous one. CONT 1 starts the sequence over after
- *        EOS. DISCEN 1 converts one channel per ADSTART, the sequence going on at the next one.
- *        ADSTART clears at EOS with CONT 0, and at each EOC with DISCEN 1, 34.4.13. A conversion
- *        keeps the ADC clock it started with. Without an ADC clock a conversion waits for one, then
- *        samples when the clock arrives, inferred. ADSTP drops a conversion in progress, its result
- *        lost, and the sequence starts over at the next ADSTART, 34.4.15.
+ *        with EXTEN 00 starts the sequence: sampling starts tLATR after the write, inferred. tLATR
+ *        is 4 ADC clock cycles at fADC = HCLK and HCLK / 2, and 3.75 at HCLK / 4, DS13737 Table
+ *        106. Other clocks take 4 cycles, inferred: RM0456 Table 330 calls their latency not
+ *        deterministic. ADSTART written before ADRDY samples too, inferred. A conversion samples
+ *        for SMP1 or SMP2 of ADC_SMPR, as its SMPSELx bit selects, 1.5 to 814.5 cycles, then
+ *        converts for tSAR, 12.5, 10.5, 8.5 or 6.5 cycles for RES 12, 10, 8 or 6 bits, Table 332.
+ *        EOSMP sets at the end of sampling, EOC with the result in ADC_DR at the end of the
+ *        conversion, the DR write latency taken as 0, inferred, and EOS with the last result of the
+ *        sequence. The next conversion samples from the end of the previous one. CONT 1 starts the
+ *        sequence over after EOS. DISCEN 1 converts one channel per ADSTART, the sequence going on
+ *        at the next one. ADSTART clears at EOS with CONT 0, and at each EOC with DISCEN 1,
+ *        34.4.13. A conversion keeps the ADC clock it started with. Without an ADC clock a
+ *        conversion waits for one, then samples when the clock arrives, inferred. ADSTP drops a
+ *        conversion in progress, its result lost, and the sequence starts over at the next ADSTART,
+ *        34.4.15. ADSTP clears ADSTP and ADSTART in the write, no figure gives the time, inferred.
+ *        A rank past the end of a shortened sequence starts over at the first channel.
  *
  *        Results, RM0456 34.4.23: an external channel converts the analog level of its pad, the
  *        GPIO pin its description's `channel_pins` names, gpio_port::analog_level(), as V x 4096 /
  *        VDDA, floored and saturated, then shifted right two bits per RES step. The level is held
  *        at the end of sampling. ADC_DR holds the result right-aligned, or with ALIGN 1 on bit 15,
- *        a 6-bit result on bit 7, Figure 291. A CPU or DMA read of ADC_DR clears EOC. `analog_port`
- *        drive and input act on the pad's board slot. Without a pad, drive and input throw
- *        config_error naming `channel_pins.<c>`, and the channel converts 0. A description with
- *        `channel_pins` holds a pad for every external channel, or construction throws
+ *        a 6-bit result on bit 7, Figure 291. A CPU or DMA read of ADC_DR clears EOC. A result
+ *        finding EOC set sets OVR, and replaces ADC_DR with OVRMOD 1. With OVRMOD 0 every result
+ *        is lost while EOC or OVR is set: ADC_DR and EOC keep their values and OVR is set. A
+ *        write changing ADC_CFGR1, ADC_SMPR or ADC_CHSELR with ADSTART set keeps the old register,
+ *        RM0456 34.7.4 to 34.7.10, logged once for the three, a model_error under
+ *        strict_peripherals. ADC_IER, ADC_CFGR2, ADC_AWD2CR, ADC_AWD3CR and ADC_CCR accept writes
+ *        while ADSTART is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18
+ *        asks for ADEN 0.
+ *        `analog_port` drive and input act on the pad's board slot. Without a pad, drive and input
+ *        throw config_error naming `channel_pins.<c>`, and the channel converts 0. A description
+ *        with `channel_pins` holds a pad for every external channel, or construction throws
  *        config_error.
  *
  *        An ADSTART with no channel in the sequence is ignored, logged once, a model_error under
@@ -166,9 +178,8 @@ struct refusal
  *        stays set and nothing converts. The DMA requests DMAEN, the wait mode WAIT, the auto-off
  *        mode AUTOFF, the oversampler OVSE, the low-frequency trigger mode LFTRIG and the analog
  *        watchdogs, AWD1EN or a channel of ADC_AWD2CR or ADC_AWD3CR: the conversions run without
- *        them. The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
- *        The overrun, a result finding EOC set, is logged once at that result, a model_error under
- *        strict_peripherals, and the result replaces ADC_DR.
+ *        them. VREFPROT and VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. The internal
+ *        channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
  */
 class adc4_model final : public dispatch_model<adc4_model, adc4_state>,
                          public analog_port,
@@ -217,6 +228,18 @@ public:
   {
     signal();
   }
+  void cfgr1_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("CFGR1", old, now);
+  }
+  void smpr_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("SMPR", old, now);
+  }
+  void chselr_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("CHSELRMOD0", old, now);
+  }
 
 private:
   void               restore_reset_values();
@@ -230,10 +253,12 @@ private:
   void               end_calibration();
   void               start_disable();
   void               signal();
+  void               config_written(std::string_view name, std::uint32_t old, std::uint32_t now);
   void               forbidden(bool& logged, std::string_view name, std::string_view message);
   [[nodiscard]] auto length() const -> std::uint32_t;
   [[nodiscard]] auto channel_at(std::uint32_t rank) const -> std::uint32_t;
-  [[nodiscard]] auto unmodelled_at_start(std::span<refusal> out) -> std::size_t;
+  [[nodiscard]] auto unmodelled_at_start(std::array<refusal, unmodelled_kinds>& out) -> std::size_t;
+  [[nodiscard]] auto start_latency_ps(std::uint64_t hz) const -> std::uint64_t;
   void               start_sequence();
   void               begin(std::uint64_t start_ps);
   void               end_sampling();
@@ -275,6 +300,8 @@ private:
   field_ref             prescaler_;
   field_ref             sampled_;
   field_ref             converted_;
+  field_ref             overrun_;
+  field_ref             overrun_mode_;
   field_ref             sequenced_;
   reg_ref               config_;
   reg_ref               sampling_;
@@ -296,6 +323,9 @@ private:
   field_ref             smp2_;
   field_ref             oversampler_;
   field_ref             low_frequency_;
+  field_ref             vref_protection_;
+  field_ref             vref_sampling_;
+  core::clock_domain    hclk_;
   std::uint32_t         clearable_{};
   std::uint32_t         set_only_{};
   bool                  regulator_refused_logged_{};
@@ -309,7 +339,7 @@ private:
   bool                  prescaler_refused_logged_{};
   bool                  reserved_logged_{};
   bool                  no_clock_logged_{};
-  bool                  overrun_logged_{};
+  bool                  config_refused_logged_{};
   bool                  empty_logged_{};
   bool                  discontinuous_continuous_logged_{};
   bool                  trigger_logged_{};
@@ -319,6 +349,7 @@ private:
   bool                  oversampler_logged_{};
   bool                  low_frequency_logged_{};
   bool                  watchdog_logged_{};
+  bool                  vref_logged_{};
   bool                  internal_logged_{};
 };
 
@@ -327,9 +358,9 @@ constexpr std::array<write_entry<adc4_model>, 10> writes{
      {"ISR", &adc4_model::isr_written},
      {"IER", &adc4_model::ier_written},
      {"CR", &adc4_model::cr_written},
-     {"CFGR1", nullptr},
-     {"SMPR", nullptr},
-     {"CHSELRMOD0", nullptr},
+     {"CFGR1", &adc4_model::cfgr1_written},
+     {"SMPR", &adc4_model::smpr_written},
+     {"CHSELRMOD0", &adc4_model::chselr_written},
      {"DR", nullptr},
      {"PWR", &adc4_model::pwrr_written},
      {"CALFACT", &adc4_model::calfact_written},
@@ -352,6 +383,7 @@ adc4_model::adc4_model(
       enable_{field("CR", "ADEN")}, data_{field("DR", "DATA")}, auto_off_{field("PWR", "AUTOFF")},
       factor_{field("CALFACT", "CALFACT")}, prescaler_{field("CCR", "PRESC")},
       sampled_{field("ISR", "EOSMP")}, converted_{field("ISR", "EOC")},
+      overrun_{field("ISR", "OVR")}, overrun_mode_{field("CFGR1", "OVRMOD")},
       sequenced_{field("ISR", "EOS")}, config_{reg("CFGR1")}, sampling_{reg("SMPR")},
       selection_{reg("CHSELRMOD0")}, config2_{reg("CFGR2")}, watchdog2_{reg("AWD2CR")},
       watchdog3_{reg("AWD3CR")}, trigger_{field("CFGR1", "EXTEN")},
@@ -361,7 +393,8 @@ adc4_model::adc4_model(
       wait_{field("CFGR1", "WAIT")}, dma_{field("CFGR1", "DMAEN")},
       watchdog1_{field("CFGR1", "AWD1EN")}, smp1_{field("SMPR", "SMP1")},
       smp2_{field("SMPR", "SMP2")}, oversampler_{field("CFGR2", "OVSE")},
-      low_frequency_{field("CFGR2", "LFTRIG")}
+      low_frequency_{field("CFGR2", "LFTRIG")}, vref_protection_{field("PWR", "VREFPROT")},
+      vref_sampling_{field("PWR", "VREFSECSMP")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(auto const& name :
       {"LDORDY", "EOCAL", "AWD3", "AWD2", "AWD1", "OVR", "EOS", "EOC", "EOSMP", "ADRDY"})
@@ -610,8 +643,8 @@ void adc4_model::cr_written(std::uint32_t old, std::uint32_t now)
   }
   if(rises(start_))
   {
-    std::array<refusal, 8> unmodelled{};
-    auto const             found = unmodelled_at_start(unmodelled);
+    std::array<refusal, unmodelled_kinds> unmodelled{};
+    auto const                            found = unmodelled_at_start(unmodelled);
     if(found != 0 and ctx_.strict_peripherals)
     {
       regs_.poke(control_.offset, old);
@@ -887,6 +920,19 @@ void adc4_model::on_clock_change()
   }
 }
 
+void adc4_model::config_written(std::string_view name, std::uint32_t old, std::uint32_t now)
+{
+  if(now == old or get(regs_, start_) == 0)
+  {
+    return;
+  }
+  regs_.poke(reg(name).offset, old);
+  forbidden(
+      config_refused_logged_, name,
+      "ADC_CFGR1, ADC_SMPR or ADC_CHSELR written with ADSTART 1, RM0456 34.7.4 to 34.7.10: the "
+      "write is ignored");
+}
+
 auto adc4_model::length() const -> std::uint32_t
 {
   auto const selected = regs_.peek(selection_.offset);
@@ -921,13 +967,13 @@ auto adc4_model::channel_at(std::uint32_t rank) const -> std::uint32_t
                   : static_cast<std::uint32_t>(std::countr_zero(left));
 }
 
-auto adc4_model::unmodelled_at_start(std::span<refusal> out) -> std::size_t
+auto adc4_model::unmodelled_at_start(std::array<refusal, unmodelled_kinds>& out) -> std::size_t
 {
   std::size_t count = 0;
   auto const  add   = [&](bool when, bool& logged, std::string_view message) {
     if(when)
     {
-      out[count++] = {&logged, message};
+      out.at(count++) = {&logged, message};
     }
   };
   add(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0,
@@ -945,6 +991,8 @@ auto adc4_model::unmodelled_at_start(std::span<refusal> out) -> std::size_t
           or regs_.peek(watchdog2_.offset) != 0
           or regs_.peek(watchdog3_.offset) != 0,
       watchdog_logged_, "AWD1EN, ADC_AWD2CR or ADC_AWD3CR: the analog watchdogs not modelled");
+  add(get(regs_, vref_protection_) != 0 or get(regs_, vref_sampling_) != 0, vref_logged_,
+      "VREFPROT or VREFSECSMP: the extra conversion cycles not modelled, tCONV at its minimum");
   auto internal = false;
   for(std::uint32_t rank = 0; rank < length(); ++rank)
   {
@@ -966,8 +1014,15 @@ void adc4_model::start_sequence()
     return;
   }
   state_.start_pending = true;
-  state_.start_ps      = ctx_.clock.time().ps + cycles_ps(variant_.start_latency_cycles, hz);
+  state_.start_ps      = ctx_.clock.time().ps + start_latency_ps(hz);
   ctx_.events.schedule_at(vtime{state_.start_ps}, start_due, ++state_.generation, ctx_.clock);
+}
+
+auto adc4_model::start_latency_ps(std::uint64_t hz) const -> std::uint64_t
+{
+  auto const quarters = ctx_.clock.hz(hclk_) == 4 * hz ? variant_.start_latency_quarters_div4
+                                                       : variant_.start_latency_quarters;
+  return cycles_ps(quarters, 4 * hz);
 }
 
 void adc4_model::begin(std::uint64_t start_ps)
@@ -978,6 +1033,10 @@ void adc4_model::begin(std::uint64_t start_ps)
     static_cast<void>(no_clock());
     state_.waiting_clock = true;
     return;
+  }
+  if(state_.rank >= length())
+  {
+    state_.rank = 0;
   }
   auto const channel  = channel_at(state_.rank);
   auto const second   = (regs_.peek(sampling_.offset) >> (8 + channel) & 1u) != 0;
@@ -1022,14 +1081,17 @@ void adc4_model::end_conversion()
   auto const result = get(regs_, align_) == 0
                         ? std::uint32_t{state_.held_code}
                         : std::uint32_t{state_.held_code} << (res < 3 ? 4u + 2u * res : 2u);
-  if(get(regs_, converted_) != 0)
+  auto const keeps =
+      get(regs_, overrun_mode_) == 0 and (get(regs_, converted_) != 0 or get(regs_, overrun_) != 0);
+  if(keeps or get(regs_, converted_) != 0)
   {
-    forbidden(
-        overrun_logged_, "ISR",
-        "a result finding EOC set: the overrun, OVR and OVRMOD, not modelled, ADC_DR overwritten");
+    update(regs_, overrun_, 1);
   }
-  update(regs_, data_, result);
-  update(regs_, converted_, 1);
+  if(not keeps)
+  {
+    update(regs_, data_, result);
+    update(regs_, converted_, 1);
+  }
   state_.converting = false;
   auto const last   = state_.rank + 1u >= length();
   state_.rank       = last ? 0 : static_cast<std::uint8_t>(state_.rank + 1u);
