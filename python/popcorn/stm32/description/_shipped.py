@@ -125,6 +125,20 @@ def shipped_names(directory: Path | None = None) -> list[str]:
     return sorted(name for path in directory.glob(f"*{_PARTS_SUFFIX}") for name in _names_in(path))
 
 
+def _layer_fits(path: Path, key: str) -> bool:
+    stem = path.name.removesuffix(_PARTS_SUFFIX)
+    return all(s == "x" or s == k for s, k in zip(stem, key, strict=False))
+
+
+def _names_near(part: str, directory: Path) -> list[str]:
+    """The names of the parts layers in @p directory whose line can hold @p part: the layer
+    stem, an expanded RefName prefix padded with 'x', read as match_refname reads a RefName.
+    Every layer holding a name that match_refname matches against @p part is among them."""
+    key = line_name(part)
+    paths = (path for path in directory.glob(f"*{_PARTS_SUFFIX}") if _layer_fits(path, key))
+    return sorted(name for path in paths for name in _names_in(path))
+
+
 def _layer_paths(name: str, directory: Path) -> tuple[Path, Path, Path]:
     parts, line, family = file_names(line_name(name), family_name(name))
     return directory / parts, directory / line, directory / family
@@ -209,8 +223,14 @@ def shipped_description(
     its own file: a hit refreshes its mtime when the cache is writable, and a write removes the
     files of the same name and another version unused for STALE_SECONDS, except a file the
     directory's sticky bit keeps for its owner. Bound: one file per shipped name per layer
-    version used in the last 7 days."""
-    name = match_name(part, core, shipped_names(), file=str(SHIPPED_DIR))
+    version used in the last 7 days.
+
+    Only the parts layers whose line can hold @p part are decoded first, every layer when none
+    of them names it. A refused parts layer of another line does not fail the lookup of a known
+    part."""
+    name = match_name(part, core, _names_near(part, SHIPPED_DIR), file=str(SHIPPED_DIR))
+    if name is None:
+        name = match_name(part, core, shipped_names(), file=str(SHIPPED_DIR))
     if name is None:
         return None
     paths = _layer_paths(name, SHIPPED_DIR)

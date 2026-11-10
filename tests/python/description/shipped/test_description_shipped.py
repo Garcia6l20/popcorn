@@ -810,3 +810,112 @@ def test_a_refused_parts_layer_is_refused_again_until_it_is_fixed(shipped_dir: P
         assert excinfo.value.key == "<root>"
     (shipped_dir / PARTS).write_bytes(good)
     assert shipped_names() == [NAME]
+
+
+def _decoded_files(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    decoded: list[str] = []
+    real = vars(_shipped)["_layer"]
+
+    def counting(data: bytes, *, file: str, kind: str) -> Any:
+        decoded.append(Path(file).name)
+        return real(data, file=file, kind=kind)
+
+    monkeypatch.setattr(_shipped, "_layer", counting)
+    return decoded
+
+
+def _split_core(name: str) -> tuple[str, str | None]:
+    refname, _, core = name.partition("-")
+    return refname, core or None
+
+
+def _sibling_line(directory: Path, name: str) -> str:
+    write_layers(directory, {NAME: _description(), name: _description(name)})
+    return f"{name[:9]}xx.parts.json.xz"
+
+
+def test_a_shipped_part_is_found_decoding_only_the_layers_of_its_line(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = "STM32T002ABCx"
+    other_parts = _sibling_line(shipped_dir, other)
+    decoded = _decoded_files(monkeypatch)
+    found = shipped_description(NAME)
+    assert found is not None
+    assert found.name.startswith(f"{NAME}-")
+    assert PARTS in decoded
+    assert other_parts not in decoded
+
+
+def test_a_known_part_never_scans_every_layer(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(directory: Path | None = None) -> list[str]:
+        raise AssertionError("shipped_names called")
+
+    monkeypatch.setattr(_shipped, "shipped_names", refuse)
+    assert shipped_description(NAME) is not None
+    assert shipped_description("STM32T001ABC6") is not None
+
+
+@pytest.mark.parametrize(
+    "part", ["STM32T003ABCx", "STM32T001ABDx", "stm32t001abcx", "STM32T00", ""]
+)
+def test_an_unknown_part_falls_back_to_every_layer(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch, part: str
+) -> None:
+    _sibling_line(shipped_dir, "STM32T002ABCx")
+    decoded = _decoded_files(monkeypatch)
+    assert shipped_description(part) is None
+    assert "STM32T002xx.parts.json.xz" in decoded
+    assert PARTS in decoded
+
+
+def test_a_refused_layer_of_another_line_does_not_stop_a_known_part(shipped_dir: Path) -> None:
+    (shipped_dir / "STM32T002xx.parts.json.xz").write_bytes(lzma.compress(b"[]"))
+    assert shipped_description(NAME) is not None
+    with pytest.raises(DescriptionError):
+        shipped_description("STM32T003ABCx")
+
+
+def test_a_part_named_by_two_layers_is_refused_as_the_full_scan_refuses_it(
+    shipped_dir: Path,
+) -> None:
+    wild = "STM32T00xABCx"
+    write_layers(shipped_dir, {NAME: _description(), wild: _description(wild)})
+    part = "STM32T001ABC6"
+    with pytest.raises(DescriptionError, match="exactly one match expected") as full:
+        _shipped.match_name(part, None, shipped_names(), file=str(shipped_dir))
+    with pytest.raises(DescriptionError, match="exactly one match expected") as fast:
+        shipped_description(part)
+    assert str(fast.value) == str(full.value)
+    assert wild in str(fast.value)
+
+
+def test_the_candidate_layers_name_the_same_part_as_every_layer_for_every_shipped_name() -> None:
+    names = shipped_names()
+    names_near = vars(_shipped)["_names_near"]
+    checked = 0
+    for name in names:
+        refname, core = _split_core(name)
+        for part in (refname, refname.replace("x", "6")):
+            near = _shipped.match_name(part, core, names_near(part, SHIPPED_DIR), file="")
+            every = _shipped.match_name(part, core, names, file="")
+            assert near == every == name
+            checked += 1
+    assert checked == 2 * len(names)
+
+
+def test_a_core_suffixed_part_is_found_decoding_only_the_layers_of_its_line(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "core-data"
+    other = "STM32T002ABCx"
+    write_layers(directory, {f"{NAME}-CM4": _description(), other: _description(other)})
+    monkeypatch.setattr(_shipped, "SHIPPED_DIR", directory)
+    decoded = _decoded_files(monkeypatch)
+    found = shipped_description(NAME, core="CM4")
+    assert found is not None
+    assert found.name.startswith(f"{NAME}-CM4-")
+    assert {file for file in decoded if file.endswith(".parts.json.xz")} == {PARTS}
+    assert shipped_description(NAME) is None
