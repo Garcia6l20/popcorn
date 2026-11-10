@@ -466,12 +466,19 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
 Source: [adc4.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc4.cpp), [adc4_rows.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc4_rows.hpp)
 
 STM32U5 ADC4, RM0456 section 34: the voltage regulator, the calibration, the enable and disable
-sequence, the ADC clock and the interrupt.
+sequence, the ADC clock, the interrupt, the channel sequencer, the conversion timing and
+`ADC_DR`.
 
-Not modelled, logged once, a model_error under strict_peripherals:
+Not modelled, each logged once at the `ADSTART` that uses it, a model_error under
+strict_peripherals that keeps `ADC_CR`:
 
-- The conversions. ADSTART with ADEN 1 and ADDIS 0 stays set and converts nothing. ADSTP clears
-  it.
+- The hardware triggers, `EXTEN` not 00: `ADSTART` stays set and nothing converts.
+- The DMA requests `DMAEN`, the wait mode `WAIT`, the auto-off mode `AUTOFF`, the oversampler
+  `OVSE`, the low-frequency trigger mode `LFTRIG` and the analog watchdogs, `AWD1EN` or a channel
+  of `ADC_AWD2CR` or `ADC_AWD3CR`: the conversions run without them.
+- The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
+- The overrun, `OVR` and `OVRMOD`: a result finding `EOC` set is logged once, a model_error under
+  strict_peripherals, and replaces `ADC_DR`.
 
 Timing and values:
 
@@ -486,6 +493,15 @@ Timing and values:
   timing above, inferred.
 - The calibration needs the regulator ready, its LDORDY event, whether software cleared the flag
   since, inferred.
+- Sampling starts 4 ADC clock cycles after the `ADSTART` write, the DS13737 Table 106 tLATR at
+  fADC = HCLK, inferred at every ADC clock. A sequence that waited for the ADC clock starts
+  sampling when the clock arrives, inferred. EOC and the result land at the end of tSAR, the
+  `ADC_DR` write latency taken as 0, inferred. The next conversion samples from the end of the
+  previous one.
+- An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
+  strict_peripherals, inferred. `DISCEN` with `CONT`, forbidden by RM0456 34.4.17, converts as
+  `DISCEN` alone and is logged once, a model_error under strict_peripherals.
+- `VREFPROT` and `VREFSECSMP` leave tCONV at tSMPL + tSAR, the DS13737 Table 106 minimum.
 - ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, as ES0499 2.9.2 states for its startup
   sequence, inferred for every other use.
 - A reserved `ADC_CCR.PRESC`, 1100 to 1111, divides by 256, inferred, and is logged once, a

@@ -30,6 +30,18 @@ struct adc4_variant
   /** @brief ADC clock cycles after ADCAL clears during which an ADEN write is lost, RM0456
    *         34.4.5. */
   std::uint32_t enable_lockout_cycles = 4;
+  /** @brief External channels, bit n for ADC4_INn, RM0456 Figure 283. */
+  std::uint32_t external = 0x00DF'8FFE;
+  /** @brief Internal channels, bit n for VIN[n]: VREFINT, VCORE, VSENSE, VBAT / 4 and the DAC1
+   *         output, RM0456 Table 329. */
+  std::uint32_t internal = 0x0020'7001;
+  /** @brief Sampling times of the SMPx codes 000 to 111 in half ADC clock cycles, RM0456 34.7.6. */
+  std::array<std::uint16_t, 8> sampling_halves{3, 7, 15, 25, 39, 79, 159, 1629};
+  /** @brief tSAR of RES 12, 10, 8 and 6 bits in half ADC clock cycles, RM0456 Table 332. */
+  std::array<std::uint16_t, 4> sar_halves{25, 21, 17, 13};
+  /** @brief ADC clock cycles from an ADSTART write to the start of sampling, the tLATR of DS13737
+   *         Table 106 and DS13086 Table 108 at fADC = HCLK. */
+  std::uint32_t start_latency_cycles = 4;
   /** @brief Lowest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
   std::uint64_t min_hz = 140'000;
   /** @brief Highest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
@@ -41,9 +53,10 @@ inline constexpr adc4_variant u5_adc4{};
 
 /**
  * @brief Factory of the ADC4 model, RM0456 section 34.
+ * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
  * @param variant What differs between the ADC4 units the row serves.
  */
-[[nodiscard]] auto adc4_factory(adc4_variant variant) -> model_factory;
+[[nodiscard]] auto adc4_factory(supply_options supply, adc4_variant variant) -> model_factory;
 
 /** @brief The ADC4 model rows. */
 [[nodiscard]] auto adc4_rows() -> std::span<builtin const>;

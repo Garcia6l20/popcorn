@@ -4,7 +4,9 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
@@ -31,24 +33,48 @@ using popcorn::testing::sym;
 using popcorn::testing::u575;
 using popcorn::testing::u585;
 
-constexpr std::uint32_t aden     = 1u << 0;
-constexpr std::uint32_t addis    = 1u << 1;
-constexpr std::uint32_t adstart  = 1u << 2;
-constexpr std::uint32_t adstp    = 1u << 4;
-constexpr std::uint32_t advregen = 1u << 28;
-constexpr std::uint32_t adcal    = 1u << 31;
-constexpr std::uint32_t adrdy    = 1u << 0;
-constexpr std::uint32_t eocal    = 1u << 11;
-constexpr std::uint32_t ldordy   = 1u << 12;
-constexpr std::uint32_t autoff   = 1u << 0;
-constexpr std::uint32_t irq      = 113;
-constexpr std::uint64_t us       = 1'000'000;
-constexpr std::uint64_t cycle    = 62'500;
-constexpr std::uint64_t ldo      = 25 * us;
-constexpr std::uint64_t tcal     = 123 * cycle;
-constexpr std::uint64_t tstab    = 17 * cycle;
-constexpr std::uint64_t tdis     = 6 * cycle;
-constexpr std::uint64_t early    = 300'000;
+constexpr std::uint32_t aden      = 1u << 0;
+constexpr std::uint32_t addis     = 1u << 1;
+constexpr std::uint32_t adstart   = 1u << 2;
+constexpr std::uint32_t adstp     = 1u << 4;
+constexpr std::uint32_t advregen  = 1u << 28;
+constexpr std::uint32_t adcal     = 1u << 31;
+constexpr std::uint32_t adrdy     = 1u << 0;
+constexpr std::uint32_t eocal     = 1u << 11;
+constexpr std::uint32_t ldordy    = 1u << 12;
+constexpr std::uint32_t autoff    = 1u << 0;
+constexpr std::uint32_t irq       = 113;
+constexpr std::uint64_t us        = 1'000'000;
+constexpr std::uint64_t cycle     = 62'500;
+constexpr std::uint64_t ldo       = 25 * us;
+constexpr std::uint64_t tcal      = 123 * cycle;
+constexpr std::uint64_t tstab     = 17 * cycle;
+constexpr std::uint64_t tdis      = 6 * cycle;
+constexpr std::uint64_t early     = 300'000;
+constexpr std::uint64_t latency   = 4 * cycle;
+constexpr std::uint32_t cont      = 1u << 13;
+constexpr std::uint32_t discen    = 1u << 16;
+constexpr std::uint32_t chselrmod = 1u << 21;
+constexpr std::uint32_t scandir   = 1u << 4;
+constexpr std::uint32_t align     = 1u << 5;
+constexpr std::uint32_t ovrmod    = 1u << 12;
+constexpr std::uint32_t eoc       = 1u << 2;
+constexpr std::uint32_t eos       = 1u << 3;
+constexpr std::uint32_t eosmp     = 1u << 1;
+constexpr std::uint32_t ovr       = 1u << 4;
+constexpr std::uint32_t pa4       = 9;
+constexpr std::uint32_t pa5       = 10;
+constexpr std::uint32_t pa6       = 11;
+
+[[nodiscard]] constexpr auto halves(std::uint64_t count) -> std::uint64_t
+{
+  return count * cycle / 2;
+}
+
+[[nodiscard]] constexpr auto code_of(std::uint64_t microvolts) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(microvolts * 4096 / 3'000'000, 4095));
+}
 
 auto options_with(popcorn::part_description const& description, bool strict)
     -> core::machine_options
@@ -185,6 +211,31 @@ struct adc4_fixture : stm32_fixture
     return done;
   }
 
+  [[nodiscard]] auto cpu_read(std::string_view reg) const -> std::uint32_t
+  {
+    auto&       regs  = target->peripheral("ADC4");
+    auto const* found = popcorn::find_register(regs.description(), reg);
+    REQUIRE(found != nullptr);
+    auto const value = target->model("ADC4")->on_read(
+        regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
+  [[nodiscard]] auto port() const -> stm32::analog_port&
+  {
+    auto* const found = model_of<stm32::analog_port>("ADC4");
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto start() const -> std::uint64_t
+  {
+    auto const at = now();
+    write("CR", advregen | aden | adstart);
+    return at + latency;
+  }
+
   [[nodiscard]] auto enable() const -> std::uint64_t
   {
     static_cast<void>(regulate());
@@ -264,7 +315,8 @@ TEST_CASE("RM0456 34.7.3: ADEN, ADDIS, ADSTART, ADSTP and ADCAL are rs, a write 
 }
 
 TEST_CASE(
-    "RM0456 34.4.3 and DS13737 Table 106: LDORDY sets 25 us after ADVREGEN, with LDORDYIE the IRQ")
+    "RM0456 34.4.3 and DS13737 Table 106: LDORDY "
+    "sets 25 us after ADVREGEN, with LDORDYIE the IRQ")
 {
   adc4_fixture const f;
   f.write("IER", ldordy);
@@ -296,8 +348,8 @@ TEST_CASE("RM0456 34.4.3: LDORDY stays set when ADVREGEN clears, a cleared ADVRE
 }
 
 TEST_CASE(
-    "RM0456 34.4.4 and DS13737 Table 106: ADCAL stays set 123 ADC clock cycles, then EOCAL, the "
-    "factor in ADC_CALFACT and ADC_DR, inferred 0, and with EOCALIE the IRQ")
+    "RM0456 34.4.4 and DS13737 Table 106: ADCAL stays set 123 ADC clock cycles, then "
+    "EOCAL, the factor in ADC_CALFACT and ADC_DR, inferred 0, and with EOCALIE the IRQ")
 {
   adc4_fixture const f;
   static_cast<void>(f.regulate());
@@ -345,8 +397,8 @@ TEST_CASE("RM0456 34.4.4: ADCAL with AUTOFF 1 is ignored and logs once, a model_
 }
 
 TEST_CASE(
-    "RM0456 34.4.4: ADCAL with ADVREGEN 0 or the regulator not ready is ignored and logs once, a "
-    "model_error when strict")
+    "RM0456 34.4.4: ADCAL with ADVREGEN 0 or the regulator not "
+    "ready is ignored and logs once, a model_error when strict")
 {
   check_refused(0, adcal, "CR", "ADCAL", 0);
   check_refused(advregen, advregen | adcal, "CR", "ADCAL", advregen);
@@ -358,8 +410,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "DS13737 Table 106: ADRDY sets tSTAB, 17 ADC clock cycles, after ADEN, inferred, with "
-    "ADRDYIE the IRQ")
+    "DS13737 Table 106: ADRDY sets tSTAB, 17 ADC clock "
+    "cycles, after ADEN, inferred, with ADRDYIE the IRQ")
 {
   adc4_fixture const f;
   static_cast<void>(f.regulate());
@@ -415,8 +467,8 @@ TEST_CASE("RM0456 34.4.5 Note: with AUTOFF 1 ADEN sets no ADRDY")
 }
 
 TEST_CASE(
-    "RM0456 34.4.5 Caution: ADEN during ADCAL or within 4 ADC clock cycles after it is lost, logs "
-    "once, a model_error when strict")
+    "RM0456 34.4.5 Caution: ADEN during ADCAL or within 4 ADC clock "
+    "cycles after it is lost, logs once, a model_error when strict")
 {
   {
     adc4_fixture const            f;
@@ -451,8 +503,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "ES0499 2.9.2: ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, inferred after ADRDY, "
-    "ADRDY stays set, RM0456 34.4.5")
+    "ES0499 2.9.2: ADDIS clears ADEN and ADDIS 6 ADC clock cycles "
+    "later, inferred after ADRDY, ADRDY stays set, RM0456 34.4.5")
 {
   adc4_fixture const f;
   static_cast<void>(f.enable());
@@ -487,7 +539,8 @@ TEST_CASE("RM0456 34.7.3: ADDIS with ADEN 0 is ignored and logs once, a model_er
 }
 
 TEST_CASE(
-    "RM0456 34.7.3: ADVREGEN cleared with ADEN 1 stays 1 and logs once, a model_error when strict")
+    "RM0456 34.7.3: ADVREGEN cleared with ADEN 1 "
+    "stays 1 and logs once, a model_error when strict")
 {
   check_refused(advregen | aden, aden, "CR", "ADVREGEN", advregen, [](adc4_fixture const& f) {
     static_cast<void>(f.enable());
@@ -495,7 +548,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.7.3: ADVREGEN cleared during ADCAL stays 1 and logs once, a model_error when strict")
+    "RM0456 34.7.3: ADVREGEN cleared during ADCAL "
+    "stays 1 and logs once, a model_error when strict")
 {
   check_refused(advregen | adcal, adcal, "CR", "ADVREGEN", advregen, [](adc4_fixture const& f) {
     static_cast<void>(f.regulate());
@@ -503,8 +557,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the ADC4 conversions are not modelled: ADSTART logs once and stays set until ADSTP, a "
-    "model_error when strict")
+    "an ADSTART with no channel in the sequence is "
+    "ignored and logs once, inferred, a model_error when strict")
 {
   {
     adc4_fixture const            f;
@@ -512,14 +566,9 @@ TEST_CASE(
     auto const                    sink = recorder(f, logged);
     static_cast<void>(f.enable());
     f.write("CR", advregen | aden | adstart);
-    CHECK(f.cr("ADSTART") == 1);
-    REQUIRE(logged.size() == 1);
-    CHECK(logged[0].message.contains("not modelled"));
-    f.write("CR", advregen | aden | adstp);
     CHECK(f.cr("ADSTART") == 0);
-    CHECK(f.cr("ADSTP") == 0);
-    f.write("CR", advregen | aden | adstart);
-    CHECK(logged.size() == 1);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("no channel"));
   }
   adc4_fixture const f{u575(), true};
   static_cast<void>(f.enable());
@@ -530,16 +579,16 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.7.3 and 34.4.8: ADSTART with ADEN 0 and ADSTP with ADEN 0 are ignored, each logs "
-    "once, a model_error when strict")
+    "RM0456 34.7.3 and 34.4.8: ADSTART with ADEN 0 and ADSTP with "
+    "ADEN 0 are ignored, each logs once, a model_error when strict")
 {
   check_refused(advregen, advregen | adstart, "CR", "ADSTART");
   check_refused(advregen, advregen | adstp, "CR", "ADSTP");
 }
 
 TEST_CASE(
-    "RM0456 34.4.13 Note and 34.4.5: ADSTP with ADEN 1 and ADSTART 0 clears itself and logs "
-    "nothing, strict included")
+    "RM0456 34.4.13 Note and 34.4.5: ADSTP with ADEN 1 and "
+    "ADSTART 0 clears itself and logs nothing, strict included")
 {
   for(auto const strict : {false, true})
   {
@@ -672,8 +721,8 @@ TEST_CASE("RM0456 34.6: each ADC_ISR flag with its ADC_IER bit raises ADC4_IRQn"
 }
 
 TEST_CASE(
-    "checklist 31: an RCC reset of ADC4 drops a pending ADRDY, a later ADEN sets it at its own "
-    "LDORDY plus tSTAB")
+    "checklist 31: an RCC reset of ADC4 drops a pending "
+    "ADRDY, a later ADEN sets it at its own LDORDY plus tSTAB")
 {
   adc4_fixture const f;
   static_cast<void>(f.regulate());
@@ -694,8 +743,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 31: an RCC reset of ADC4 drops a pending LDORDY, calibration end and ADDIS end, "
-    "each ignored at its old due time")
+    "checklist 31: an RCC reset of ADC4 drops a pending LDORDY, "
+    "calibration end and ADDIS end, each ignored at its old due time")
 {
   {
     adc4_fixture const f;
@@ -735,8 +784,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 31: a calibration started after an RCC reset of ADC4 ends at its own time, not at "
-    "the dropped one's")
+    "checklist 31: a calibration started after an RCC reset "
+    "of ADC4 ends at its own time, not at the dropped one's")
 {
   adc4_fixture const f;
   f.write("CCR", 11u << 18);
@@ -758,8 +807,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 66 and 72: snapshots mid-calibration, in the ADEN lockout and mid-ADRDY end each at "
-    "the same time, restored into a machine never reset")
+    "checklist 66 and 72: snapshots mid-calibration, in the ADEN lockout and "
+    "mid-ADRDY end each at the same time, restored into a machine never reset")
 {
   adc4_fixture const f;
   f.write("CCR", 4u << 18);
@@ -820,8 +869,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 66: a snapshot between ADEN and LDORDY restored into a machine never reset sets "
-    "ADRDY at LDORDY plus tSTAB")
+    "checklist 66: a snapshot between ADEN and LDORDY restored "
+    "into a machine never reset sets ADRDY at LDORDY plus tSTAB")
 {
   adc4_fixture const f;
   auto const         start = f.now();
@@ -838,8 +887,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.4.5 Caution: the 4-cycle ADEN lockout counts from the calibration end, not from "
-    "its dispatch at the next instruction")
+    "RM0456 34.4.5 Caution: the 4-cycle ADEN lockout counts from the "
+    "calibration end, not from its dispatch at the next instruction")
 {
   adc4_fixture const f;
   f.write("RCC", "RCC_PLL2DIVR", (8u << 0) | (1u << 9) | (1u << 16) | (1u << 24));
@@ -862,8 +911,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 79: ADRDY after LDORDY counts tSTAB from the LDORDY due, off the grid of a "
-    "3.072 MHz core")
+    "checklist 79: ADRDY after LDORDY counts tSTAB "
+    "from the LDORDY due, off the grid of a 3.072 MHz core")
 {
   adc4_fixture const f;
   f.put("RCC", "RCC_ICSCR1", "MSIRGSEL", 1);
@@ -877,8 +926,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 31: an ADVREGEN rewritten after an RCC reset sets LDORDY at its own due, not at the "
-    "dropped one's")
+    "checklist 31: an ADVREGEN rewritten after an RCC "
+    "reset sets LDORDY at its own due, not at the dropped one's")
 {
   adc4_fixture const f;
   auto const         first = f.now();
@@ -896,8 +945,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 31: an ADDIS written after an RCC reset clears ADEN at its own due, not at the "
-    "dropped one's")
+    "checklist 31: an ADDIS written after an RCC reset "
+    "clears ADEN at its own due, not at the dropped one's")
 {
   adc4_fixture const f;
   f.write("CCR", 11u << 18);
@@ -918,8 +967,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "ES0499 2.9.2 workaround: ADEN, ADDIS 2 cycles later, ADVREGEN cleared once ADEN reads 0, "
-    "leaves no LDORDY and no ADRDY")
+    "ES0499 2.9.2 workaround: ADEN, ADDIS 2 cycles later, "
+    "ADVREGEN cleared once ADEN reads 0, leaves no LDORDY and no ADRDY")
 {
   adc4_fixture const f;
   auto const         start = f.now();
@@ -967,8 +1016,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "without an ADC4 kernel clock ADRDY and ADDIS wait for one, also across a snapshot into a "
-    "machine never reset")
+    "without an ADC4 kernel clock ADRDY and ADDIS wait for "
+    "one, also across a snapshot into a machine never reset")
 {
   for(auto const restored : {false, true})
   {
@@ -1021,7 +1070,8 @@ TEST_CASE("without an ADC4 kernel clock ADRDY waits for one, then sets tSTAB aft
 }
 
 TEST_CASE(
-    "a calibration waiting for an ADC4 kernel clock survives a snapshot into a machine never reset")
+    "a calibration waiting for an ADC4 kernel clock "
+    "survives a snapshot into a machine never reset")
 {
   adc4_fixture const f{u575(), false, false};
   static_cast<void>(f.regulate());
@@ -1034,4 +1084,480 @@ TEST_CASE(
   fresh.run_until(fresh.now() + 200 * us);
   CHECK(fresh.cr("ADCAL") == 0);
   CHECK(fresh.isr("EOCAL") == 1);
+}
+
+TEST_CASE(
+    "RM0456 34.4.11 and 34.4.14: a single conversion samples 1.5 "
+    "cycles from tLATR, 4 cycles after ADSTART, inferred, sets "
+    "EOSMP, then EOC, EOS and the code 12.5 cycles later, ADSTART cleared")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 1'500'000);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  CHECK(f.dues().back() == begin);
+  f.run_until(begin);
+  CHECK(f.dues() == std::vector<std::uint64_t>{begin + halves(3), begin + halves(28)});
+  f.run_until(begin + halves(3));
+  CHECK((f.read("ISR") & (eosmp | eoc)) == eosmp);
+  f.run_until(begin + halves(28) - early);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(begin + halves(28));
+  CHECK((f.read("ISR") & (eoc | eos)) == (eoc | eos));
+  CHECK(f.read("DR") == code_of(1'500'000));
+  CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE("RM0456 34.7.6: SMPSELx picks SMP1 or SMP2, each code sets its sampling time")
+{
+  constexpr std::array<std::uint64_t, 8> sampling{3, 7, 15, 25, 39, 79, 159, 1629};
+  for(std::uint32_t smp = 0; smp < 8; ++smp)
+  {
+    for(auto const second : {false, true})
+    {
+      CAPTURE(smp);
+      CAPTURE(second);
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.write("SMPR", second ? (smp << 4) | (1u << (8 + pa4)) : smp);
+      f.write("CHSELRMOD0", 1u << pa4);
+      auto const begin = f.start();
+      f.run_until(begin);
+      CHECK(
+          f.dues()
+          == std::vector<std::uint64_t>{
+              begin + halves(sampling[smp]), begin + halves(sampling[smp] + 25)});
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 Table 332 and Figure 291: RES sets tSAR and drops two bits "
+    "per step, ALIGN 1 puts the result on bit 15, a 6-bit one on bit 7")
+{
+  constexpr std::array<std::uint64_t, 4> sar{25, 21, 17, 13};
+  constexpr std::array<std::uint32_t, 4> left{4, 6, 8, 2};
+  for(std::uint32_t res = 0; res < 4; ++res)
+  {
+    for(auto const left_aligned : {false, true})
+    {
+      CAPTURE(res);
+      CAPTURE(left_aligned);
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.port().drive(pa4, 2'345'678);
+      f.write("CFGR1", (res << 2) | (left_aligned ? align : 0u));
+      f.write("CHSELRMOD0", 1u << pa4);
+      auto const begin = f.start();
+      f.run_until(begin);
+      CHECK(f.dues().back() == begin + halves(3 + sar[res]));
+      f.run_until(begin + halves(3 + sar[res]));
+      auto const result = code_of(2'345'678) >> (2 * res);
+      CHECK(f.read("DR") == (left_aligned ? result << left[res] : result));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.9: CHSELRMOD 0 scans the CHSEL channels up with SCANDIR "
+    "0 and down with SCANDIR 1, CHSELRMOD 1 follows SQ1 to SQ8 up to 1111")
+{
+  struct order
+  {
+    std::uint32_t                config;
+    std::uint32_t                selection;
+    std::array<std::uint32_t, 3> channels;
+  };
+  for(auto const& [config, selection, channels] : {
+          order{0,         (1u << pa4) | (1u << pa5) | (1u << pa6),      {pa4, pa5, pa6}},
+          order{scandir,   (1u << pa4) | (1u << pa5) | (1u << pa6),      {pa6, pa5, pa4}},
+          order{chselrmod, 0xFFFF'F000u | (pa5 << 8) | (pa4 << 4) | pa6, {pa6, pa4, pa5}}
+  })
+  {
+    CAPTURE(config);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, 500'000);
+    f.port().drive(pa5, 1'000'000);
+    f.port().drive(pa6, 2'000'000);
+    f.write("CFGR1", config | ovrmod);
+    f.write("CHSELRMOD0", selection);
+    auto const begin = f.start();
+    for(std::uint64_t index = 0; index < 3; ++index)
+    {
+      CAPTURE(index);
+      f.run_until(begin + (index + 1) * halves(28));
+      CHECK(f.read("DR") == code_of(f.port().input(channels[index])));
+      CHECK(f.isr("EOS") == (index == 2 ? 1u : 0u));
+    }
+    CHECK(f.cr("ADSTART") == 0);
+  }
+}
+
+TEST_CASE("RM0456 34.4.12 and 34.4.15: CONT 1 starts the sequence over after EOS until ADSTP")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 600'000);
+  f.port().drive(pa5, 1'200'000);
+  f.write("CFGR1", cont | ovrmod);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + 3 * halves(28));
+  CHECK(f.read("DR") == code_of(600'000));
+  CHECK(f.cr("ADSTART") == 1);
+  f.write("CR", advregen | aden | adstart | adstp);
+  CHECK(f.read("CR") == (advregen | aden));
+  auto const stopped = f.read("DR");
+  f.run_until(f.now() + 4 * halves(28));
+  CHECK(f.read("DR") == stopped);
+  f.write("ISR", eos);
+  auto const again = f.start();
+  f.run_until(again + halves(28));
+  CHECK(f.read("DR") == code_of(600'000));
+}
+
+TEST_CASE(
+    "RM0456 34.4.17: DISCEN converts one channel per "
+    "ADSTART, ADSTART cleared at each EOC, EOS after the last")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 700'000);
+  f.port().drive(pa5, 1'400'000);
+  f.write("CFGR1", discen | ovrmod);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  for(auto const& [channel, last] : {
+          std::pair{pa4, false},
+          std::pair{pa5, true },
+          std::pair{pa4, false}
+  })
+  {
+    CAPTURE(channel);
+    auto const begin = f.start();
+    f.run_until(begin + 2 * halves(28));
+    CHECK(f.read("DR") == code_of(f.port().input(channel)));
+    CHECK(f.cr("ADSTART") == 0);
+    CHECK(f.isr("EOS") == (last ? 1u : 0u));
+    f.write("ISR", eos);
+  }
+}
+
+TEST_CASE("a pad drive after the end of sampling leaves the held level, one before it converts")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 1'000'000);
+  f.write("SMPR", 7);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(1629) - us);
+  f.port().drive(pa4, 2'000'000);
+  f.run_until(begin + halves(1629) + early);
+  f.port().drive(pa4, 500'000);
+  f.run_until(begin + halves(1654));
+  CHECK(f.read("DR") == code_of(2'000'000));
+}
+
+TEST_CASE(
+    "checklist 53: each function ADC4 does not model yet logs "
+    "once at ADSTART, a model_error when strict that keeps ADC_CR")
+{
+  struct function
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    std::uint32_t    selection;
+    std::string_view phrase;
+  };
+  for(auto const& [reg, value, selection, phrase] : {
+          function{"CFGR1",  1u << 10,      1u << pa4, "EXTEN"           },
+          function{"CFGR1",  1u << 0,       1u << pa4, "DMAEN"           },
+          function{"CFGR1",  1u << 14,      1u << pa4, "WAIT"            },
+          function{"CFGR2",  1u << 0,       1u << pa4, "OVSE"            },
+          function{"CFGR2",  1u << 29,      1u << pa4, "LFTRIG"          },
+          function{"CFGR1",  1u << 23,      1u << pa4, "AWD1EN"          },
+          function{"AWD2CR", 1u << pa4,     1u << pa4, "AWD1EN"          },
+          function{"AWD3CR", 1u << pa4,     1u << pa4, "AWD1EN"          },
+          function{"CFGR1",  cont | discen, 1u << pa4, "DISCEN with CONT"},
+          function{"CFGR1",  0,             1u << 13,  "internal channel"}
+  })
+  {
+    CAPTURE(reg);
+    CAPTURE(phrase);
+    {
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.write(reg, value);
+      f.write("CHSELRMOD0", selection);
+      std::vector<core::log_record> logged;
+      auto const                    sink = recorder(f, logged);
+      static_cast<void>(f.start());
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(phrase));
+    }
+    adc4_fixture const f{u575(), true};
+    static_cast<void>(f.enable());
+    f.write(reg, value);
+    f.write("CHSELRMOD0", selection);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(f.at("ADC4", "CR"), 4, advregen | aden | adstart)),
+        popcorn::model_error);
+    CHECK(f.read("CR") == (advregen | aden));
+  }
+}
+
+TEST_CASE("with EXTEN not 00 ADSTART stays set and converts nothing")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.write("CFGR1", 1u << 10);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + 4 * halves(28));
+  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.isr("EOC") == 0);
+}
+
+TEST_CASE("ADSTP during a conversion drops its result, the sequence starts over at rank 1")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 900'000);
+  f.port().drive(pa5, 1'800'000);
+  f.write("CFGR1", discen);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  static_cast<void>(f.cpu_read("DR"));
+  auto const second = f.start();
+  f.run_until(second + halves(10));
+  f.write("CR", advregen | aden | adstart | adstp);
+  f.run_until(second + 2 * halves(28));
+  CHECK(f.isr("EOC") == 0);
+  auto const third = f.start();
+  f.run_until(third + halves(28));
+  CHECK(f.read("DR") == code_of(900'000));
+}
+
+TEST_CASE("without an ADC4 clock the sequence waits for one, then converts")
+{
+  adc4_fixture const f{u575(), false, false};
+  f.put("RCC", "RCC_CR", "HSION", 1);
+  f.run_until(f.now() + 200 * us);
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.put("RCC", "RCC_CR", "HSION", 0);
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(f.now() + 10 * us);
+  CHECK(f.isr("EOC") == 0);
+  f.put("RCC", "RCC_CR", "HSION", 1);
+  f.run_until(f.now() + 200 * us);
+  CHECK(f.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "checklist 31: an RCC reset of ADC4 drops a "
+    "conversion in progress, a later one ends at its own time")
+{
+  adc4_fixture const f;
+  auto const         slow_enable = [&] {
+    f.write("CCR", 11u << 18);
+    static_cast<void>(f.regulate());
+    f.write("CR", advregen | aden);
+    f.run_until(f.now() + 256 * tstab);
+    REQUIRE(f.isr("ADRDY") == 1);
+  };
+  slow_enable();
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const at    = f.now();
+  auto const stale = at + 256 * (latency + halves(28));
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(at + 256 * latency + us);
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 1);
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 0);
+  slow_enable();
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const own = f.now() + 256 * (latency + halves(28));
+  f.write("CR", advregen | aden | adstart);
+  REQUIRE(own > stale);
+  f.run_until(stale + us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(own);
+  CHECK(f.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot mid-sequence restored into a machine never "
+    "reset converts the held level and the rest of the sequence at the same times")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 1'100'000);
+  f.port().drive(pa5, 2'200'000);
+  f.write("CFGR1", ovrmod);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + halves(3) + early);
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc4_fixture const& g) {
+    g.port().drive(pa4, 100'000);
+    g.run_until(begin + halves(28));
+    CHECK(g.read("DR") == code_of(1'100'000));
+    g.run_until(begin + 2 * halves(28) - early);
+    CHECK(g.isr("EOS") == 0);
+    g.run_until(begin + 2 * halves(28));
+    CHECK(g.isr("EOS") == 1);
+    CHECK(g.read("DR") == code_of(2'200'000));
+  };
+  f.target->restore(saved);
+  check(f);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(fresh);
+}
+
+TEST_CASE(
+    "checklist 72: a pad drive before the end of "
+    "sampling reaches a machine restored from a snapshot")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 1'000'000);
+  f.write("SMPR", 7);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + us);
+  auto const         saved = f.target->snapshot();
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  fresh.run_until(begin + halves(1629) + early);
+  fresh.port().drive(pa4, 2'500'000);
+  fresh.run_until(begin + halves(1654));
+  CHECK(fresh.read("DR") == code_of(1'000'000));
+}
+
+TEST_CASE(
+    "RM0456 34.4.19 and checklist 53: a CPU read of ADC_DR clears EOC, a result "
+    "finding EOC set logs the overrun once and replaces ADC_DR, a model_error when strict")
+{
+  {
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, 800'000);
+    f.port().drive(pa5, 1'600'000);
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+    std::vector<core::log_record> logged;
+    auto const                    sink  = recorder(f, logged);
+    auto const                    begin = f.start();
+    f.run_until(begin + halves(28));
+    CHECK(f.cpu_read("DR") == code_of(800'000));
+    CHECK(f.isr("EOC") == 0);
+    f.run_until(begin + 2 * halves(28));
+    CHECK(logged.empty());
+    static_cast<void>(f.start());
+    f.run_until(f.now() + 4 * halves(28));
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("overrun"));
+    CHECK(f.read("DR") == code_of(1'600'000));
+    CHECK(f.isr("OVR") == 0);
+  }
+  adc4_fixture const f{u575(), true};
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  static_cast<void>(f.start());
+  CHECK_THROWS_AS(
+      static_cast<void>(f.run_to_stop(
+          {.max_instructions = icount{1'000'000'000},
+           .until_time       = vtime{f.now() + 4 * halves(28)}})),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "RM0456 34.7.3 and 34.4.8: ADSTART with ADDIS 1, ADDIS with ADSTART 1 and "
+    "ADSTP with ADDIS 1 are ignored, each logs once, a model_error when strict")
+{
+  check_refused(
+      advregen | aden | addis, advregen | aden | addis | adstart, "CR", "ADSTART", advregen,
+      [](adc4_fixture const& f) {
+        static_cast<void>(f.enable());
+        f.write("CHSELRMOD0", 1u << pa4);
+      });
+  check_refused(
+      advregen | aden | adstart, advregen | aden | adstart | addis, "CR", "ADDIS", advregen,
+      [](adc4_fixture const& f) {
+        static_cast<void>(f.enable());
+        f.write("CFGR1", cont);
+        f.write("CHSELRMOD0", 1u << pa4);
+      });
+  check_refused(
+      advregen | aden | addis, advregen | aden | addis | adstp, "CR", "ADSTP", advregen,
+      [](adc4_fixture const& f) { static_cast<void>(f.enable()); });
+}
+
+TEST_CASE(
+    "checklist 66: a snapshot inside the tLATR of an ADSTART "
+    "restored into a machine never reset samples at the same time")
+{
+  adc4_fixture const f;
+  f.write("CCR", 7u << 18);
+  static_cast<void>(f.regulate());
+  f.write("CR", advregen | aden);
+  f.run_until(f.now() + 16 * tstab);
+  f.port().drive(pa4, 1'700'000);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const at = f.now();
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(at + 8 * latency);
+  auto const         saved = f.target->snapshot();
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  auto const done = at + 16 * (latency + halves(28));
+  fresh.run_until(done - early);
+  CHECK(fresh.isr("EOC") == 0);
+  fresh.run_until(done);
+  CHECK(fresh.isr("EOC") == 1);
+  CHECK(fresh.read("DR") == code_of(1'700'000));
+}
+
+TEST_CASE(
+    "a sequence waiting for an ADC4 clock survives a snapshot "
+    "into a machine never reset, then converts when the clock arrives")
+{
+  adc4_fixture const f{u575(), false, false};
+  f.put("RCC", "RCC_CR", "HSION", 1);
+  f.run_until(f.now() + 200 * us);
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.put("RCC", "RCC_CR", "HSION", 0);
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(f.now() + 10 * us);
+  auto const         saved = f.target->snapshot();
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(fresh.isr("EOC") == 0);
+  fresh.put("RCC", "RCC_CR", "HSION", 1);
+  fresh.run_until(fresh.now() + 200 * us);
+  CHECK(fresh.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "checklist 66: a snapshot at rank 2 of a sequence "
+    "restored into a machine never reset converts rank 2")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, 300'000);
+  f.port().drive(pa5, 2'600'000);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + halves(28) + halves(3) + early);
+  static_cast<void>(f.cpu_read("DR"));
+  auto const         saved = f.target->snapshot();
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  fresh.run_until(begin + 2 * halves(28));
+  CHECK(fresh.isr("EOS") == 1);
+  CHECK(fresh.read("DR") == code_of(2'600'000));
 }
