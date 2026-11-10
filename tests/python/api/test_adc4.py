@@ -135,3 +135,44 @@ def test_a_drive_during_sampling_converts_the_same_parked_and_running(
     parked = converted(enabled(u575), running=False)
     assert parked == (int(1.5 * 4096 / 3.0), 1)
     assert converted(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+TIM15EN = 1 << 16
+EXTEN_RISING = 1 << 10
+EXTSEL_TIM15_TRGO = 3 << 6
+OVRMOD = 1 << 12
+
+
+def triggered_scan(m: popcorn.Machine, running: bool) -> tuple[int, int, int]:
+    rcc = m.periph.RCC
+    adc = m.periph.ADC4
+    rcc.RCC_APB2ENR.write(rcc.RCC_APB2ENR.value | TIM15EN)
+    tim = m.periph.TIM15
+    tim.PSC.write(0)
+    tim.ARR.write(3999)
+    tim.EGR.write(1)
+    tim.SR.write(0)
+    tim.CR2.write(2 << 4)
+    tim.CR1.write(1)
+    adc.input(9).volts = 1.5
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.CFGR1.write(OVRMOD | EXTEN_RISING | EXTSEL_TIM15_TRGO)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 1_200)
+    return adc.DR.value, adc.ISR.EOS, adc.CR.ADSTART
+
+
+def test_a_triggered_scan_converts_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = triggered_scan(enabled(u575), running=False)
+    assert parked == (int(1.5 * 4096 / 3.0), 1, 1)
+    assert triggered_scan(enabled(u575, slice_instructions=1_000), running=True) == parked

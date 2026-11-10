@@ -472,13 +472,30 @@ sequence, the ADC clock, the interrupt, the channel sequencer, the conversion ti
 Not modelled, each logged once at the `ADSTART` that uses it, a model_error under
 strict_peripherals that keeps `ADC_CR`:
 
-- The hardware triggers, `EXTEN` not 00: `ADSTART` stays set and nothing converts.
-- The DMA requests `DMAEN`, the wait mode `WAIT`, the auto-off mode `AUTOFF`, the oversampler
+- The triggers `tim1_trgo2`, `lptim1_ch1`, `lptim3_ch2` and `exti15`, `EXTSEL` 0, 5, 6 and 7: no
+  model produces them, `ADSTART` stays set and nothing converts.
+- The wait mode `WAIT`, the auto-off mode `AUTOFF`, the oversampler
   `OVSE`, the low-frequency trigger mode `LFTRIG` and the analog watchdogs, `AWD1EN` or a channel
   of `ADC_AWD2CR` or `ADC_AWD3CR`: the conversions run without them.
 - The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
 - `VREFPROT` and `VREFSECSMP` of `ADC_PWRR`: tCONV stays at tSMPL + tSAR, the DS13737 Table 106
   minimum.
+
+Triggers and DMA:
+
+- With `EXTEN` not 00 the ADC listens to the signal `EXTSEL` selects, RM0456 Table 329:
+  `tim1_cc4`, `tim2_trgo`, `tim15_trgo` and `tim6_trgo` are produced. `EXTEN` 01 takes the rising
+  edge of a TRGO pulse, 10 the falling edge one timer clock later, 11 both. An edge during a
+  conversion or the tLATR is ignored. The sequence starts tLATR after the edge, inferred for every
+  clock. An edge ahead of the machine time is taken at its own time, after the ADC's own events
+  due then, inferred. `ADSTART` stays set at the end of a sequence. The `tim1_oc4` selection takes
+  the capture/compare event `tim1_cc4`, inferred.
+- DMAEN holds the `adc4_dma` request high while EOC is set and OVR clear, a DMA read of `ADC_DR`
+  drops it. With DMACFG 0 the request stops and `ADC_DR` freezes when the GPDMA channel
+  completes, `ADSTART` staying set until it rises again, inferred. A result arriving then leaves
+  `ADC_DR` and EOC as they are, and the last result of a sequence sets EOS, inferred. DMACFG 1
+  keeps requesting. DMAEN written with EOC set raises the request, inferred. The calibration
+  order RM0456 34.4.23 asks for DMAEN is not checked.
 
 Timing and values:
 
@@ -494,17 +511,18 @@ Timing and values:
 - The calibration needs the regulator ready, its LDORDY event, whether software cleared the flag
   since, inferred.
 - Sampling starts tLATR after the `ADSTART` write: 4 ADC clock cycles at fADC = HCLK and HCLK / 2
-  and 3.75 at HCLK / 4, DS13737 Table 106. Other clocks take 4 cycles, inferred, RM0456
-  Table 330 calls their latency not deterministic. An `ADSTART` before ADRDY samples too,
-  inferred. ADSTP clears ADSTP and ADSTART in the write, inferred. A sequence that waited for the ADC clock starts
-  sampling when the clock arrives, inferred. EOC and the result land at the end of tSAR, the
-  `ADC_DR` write latency taken as 0, inferred. The next conversion samples from the end of the
-  previous one.
+  and 3.75 at HCLK / 4 with the bus clock as kernel clock, DS13737 Table 106. Any other kernel clock
+  takes 4 cycles, inferred, RM0456 Table 330 calls its latency not deterministic. An `ADSTART`
+  before ADRDY samples too, inferred. ADSTP clears ADSTP and ADSTART in the write, inferred. A
+  sequence that waited for the ADC clock starts sampling when the clock arrives, inferred. EOC and
+  the result land at the end of tSAR, the `ADC_DR` write latency taken as 0, inferred. The next
+  conversion samples from the end of the previous one.
 - An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
   strict_peripherals, inferred. `DISCEN` with `CONT`, forbidden by RM0456 34.4.17, converts as
   `DISCEN` alone and is logged once, a model_error under strict_peripherals.
 - A write changing `ADC_CFGR1`, `ADC_SMPR` or `ADC_CHSELR` with `ADSTART` set keeps the old
-  register, RM0456 34.7.4 to 34.7.10, logged once for the three, a model_error under strict_peripherals.
+  register, RM0456 34.7.4 to 34.7.10, logged once for the three, a model_error under
+  strict_peripherals.
 - With `OVRMOD` 0 every result is discarded while EOC or OVR is set, RM0456 34.4.23: `ADC_DR`
   and EOC keep their values and OVR is set. A rank past the end of a shortened sequence starts
   over at the first channel.

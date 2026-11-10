@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace popcorn::periph::stm32
 {
@@ -44,6 +45,11 @@ struct adc4_variant
   std::uint32_t start_latency_quarters = 16;
   /** @brief The same at fADC = HCLK / 4, 3.75 cycles. */
   std::uint32_t start_latency_quarters_div4 = 15;
+  /** @brief Signals of adc_trg0 to adc_trg7 selected by EXTSEL, RM0456 Table 329. A timer output
+   *         compare event is the timer's `_cc` capture/compare event signal. */
+  std::array<std::string_view, 8> trigger_signals{"tim1_trgo2", "tim1_cc4",  "tim2_trgo",
+                                                  "tim15_trgo", "tim6_trgo", "lptim1_ch1",
+                                                  "lptim3_ch2", "exti15"};
   /** @brief Lowest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
   std::uint64_t min_hz = 140'000;
   /** @brief Highest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
