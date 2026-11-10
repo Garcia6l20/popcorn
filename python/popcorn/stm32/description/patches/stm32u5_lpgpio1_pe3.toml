@@ -1,0 +1,10 @@
+format = 1
+source = "LPGPIO1_Py on AF11 of the pad, DS13737 Rev 10 and DS13086 alternate function table, which the CubeMX GPIO modes file of the STM32U575 and STM32U585 omits. PE3 is bonded on every package but the 48-pin and 64-pin ones"
+
+[match]
+parts = ["STM32U5[78]5A*", "STM32U5[78]5O*", "STM32U5[78]5Q*", "STM32U5[78]5V*", "STM32U5[78]5Z*"]
+
+[alternates]
+add = [
+  { peripheral = "GPIOE", pin = 3, af = 11, signal = "lpgpio1_p15", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PE3" },
+]

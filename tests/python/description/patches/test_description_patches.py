@@ -13,8 +13,10 @@ from popcorn.stm32.description._model import (
     WriteEffect,
 )
 from popcorn.stm32.description._patches import (
+    LoadedPatch,
     PatchReport,
     PatchTarget,
+    apply_alternate_adds,
     apply_alternate_drops,
     apply_patches,
     is_smps_part,
@@ -1876,6 +1878,150 @@ def test_alternates_drop_pin_and_af_are_four_bit(
 def test_alternates_drop_accepts_pin_15_and_af_15(tmp_path: Path) -> None:
     path = _alternates_patch(tmp_path, _drop("A", 15, 15, "x_a"))
     load_patches([path], part="TOY1", svd_name="synthetic.svd")
+
+
+def _add_patch(tmp_path: Path, *entries: str) -> Path:
+    body = ",\n".join(entries)
+    return _write_patch(
+        tmp_path,
+        f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [alternates]
+    add = [{body}]
+    """,
+    )
+
+
+def _add_load(tmp_path: Path, *entries: str) -> list[LoadedPatch]:
+    return load_patches([_add_patch(tmp_path, *entries)], part="TOY1", svd_name="synthetic.svd")
+
+
+def test_alternates_add_inserts_in_sorted_order_and_counts(tmp_path: Path) -> None:
+    patches = _add_load(tmp_path, _drop("A", 9, 11, "x_d"), _drop("A", 0, 3, "x_e"))
+    target = _alternates_target()
+    assert apply_alternate_adds(patches, target.peripherals) == 2
+    assert next(p for p in target.peripherals if p.name == "A").alternates == [
+        AlternateDesc(pin=0, af=3, signal="x_e"),
+        AlternateDesc(pin=1, af=2, signal="x_a"),
+        AlternateDesc(pin=9, af=5, signal="x_c"),
+        AlternateDesc(pin=9, af=11, signal="x_d"),
+        AlternateDesc(pin=9, af=13, signal="x_b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [_drop("A", 9, 13, "x_b"), _drop("NOPE", 1, 2, "x_a"), _drop("B", 1, 2, "x_a")],
+)
+def test_alternates_add_of_a_listed_entry_or_an_absent_port_is_an_error(
+    tmp_path: Path, entry: str
+) -> None:
+    patches = _add_load(tmp_path, entry)
+    target = _alternates_target()
+    before = copy.deepcopy(target.peripherals)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_adds(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.add[0]"
+    assert target.peripherals == before
+
+
+def test_alternates_add_of_one_entry_twice_changes_nothing(tmp_path: Path) -> None:
+    patches = _add_load(tmp_path, _drop("A", 4, 11, "x_f"), _drop("A", 4, 11, "x_f"))
+    target = _alternates_target()
+    before = copy.deepcopy(target.peripherals)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_adds(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.add[1]"
+    assert target.peripherals == before
+
+
+def test_alternates_add_on_a_pin_the_port_does_not_bond_is_an_error(tmp_path: Path) -> None:
+    patches = _add_load(tmp_path, _drop("A", 4, 11, "x_f"))
+    target = _alternates_target()
+    port = next(p for p in target.peripherals if p.name == "A")
+    port.bonded = 0xFFFF & ~(1 << 4)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_adds(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.add[0]"
+    port.bonded = 1 << 4
+    assert apply_alternate_adds(patches, target.peripherals) == 1
+
+
+def test_alternates_add_without_a_source_is_an_error(tmp_path: Path) -> None:
+    path = _add_patch(tmp_path, _drop("A", 4, 11, "x_f", source=""))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.add[0].source"
+
+
+@pytest.mark.parametrize(
+    ("pin", "af", "key"),
+    [(16, 2, "pin"), (-1, 2, "pin"), (1, 16, "af"), (1, -1, "af")],
+)
+def test_alternates_add_pin_and_af_are_four_bit(
+    tmp_path: Path, pin: int, af: int, key: str
+) -> None:
+    path = _add_patch(tmp_path, _drop("A", pin, af, "x_f"))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == f"alternates.add[0].{key}"
+
+
+def test_alternates_drop_and_add_in_one_patch_load(tmp_path: Path) -> None:
+    path = _write_patch(
+        tmp_path,
+        f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [alternates]
+    drop = [{_drop("A", 9, 13, "x_b")}]
+    add = [{_drop("A", 9, 13, "x_g")}]
+    """,
+    )
+    target = _alternates_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert apply_alternate_drops(patches, target.peripherals) == 1
+    assert apply_alternate_adds(patches, target.peripherals) == 1
+    assert AlternateDesc(pin=9, af=13, signal="x_g") in (
+        next(p for p in target.peripherals if p.name == "A").alternates or []
+    )
+
+
+def _alternates_table_patch(tmp_path: Path, body: str) -> Path:
+    return _write_patch(
+        tmp_path,
+        f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [alternates]
+    {body}
+    """,
+    )
+
+
+def test_alternates_table_without_a_list_is_an_error(tmp_path: Path) -> None:
+    path = _alternates_table_patch(tmp_path, "")
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates"
+
+
+@pytest.mark.parametrize("list_name", ["drop", "add"])
+def test_alternates_table_with_one_list_loads(tmp_path: Path, list_name: str) -> None:
+    path = _alternates_table_patch(tmp_path, f"{list_name} = []")
+    assert len(load_patches([path], part="TOY1", svd_name="synthetic.svd")) == 1
+
+
+@pytest.mark.parametrize("signal", ["LPGPIO1_P0", "", "lpgpio1-p0", "x a"])
+def test_alternates_add_signal_is_lower_case_and_not_empty(tmp_path: Path, signal: str) -> None:
+    path = _add_patch(tmp_path, _drop("A", 4, 11, signal))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.add[0].signal"
 
 
 def _field_drop_patch(tmp_path: Path, *rules: str) -> Path:

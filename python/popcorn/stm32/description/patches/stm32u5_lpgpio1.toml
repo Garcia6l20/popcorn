@@ -1,0 +1,16 @@
+format = 1
+source = "LPGPIO1_Py on AF11 of the pad, DS13737 Rev 10 and DS13086 alternate function table, which the CubeMX GPIO modes file of the STM32U575 and STM32U585 omits. Pads every package bonds"
+
+[match]
+parts = ["STM32U575*", "STM32U585*"]
+
+[alternates]
+add = [
+  { peripheral = "GPIOA", pin = 1, af = 11, signal = "lpgpio1_p0", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PA1" },
+  { peripheral = "GPIOA", pin = 3, af = 11, signal = "lpgpio1_p1", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PA3" },
+  { peripheral = "GPIOA", pin = 6, af = 11, signal = "lpgpio1_p2", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PA6" },
+  { peripheral = "GPIOB", pin = 1, af = 11, signal = "lpgpio1_p3", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PB1" },
+  { peripheral = "GPIOB", pin = 0, af = 11, signal = "lpgpio1_p9", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PB0" },
+  { peripheral = "GPIOB", pin = 3, af = 11, signal = "lpgpio1_p11", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PB3" },
+  { peripheral = "GPIOB", pin = 4, af = 11, signal = "lpgpio1_p12", source = "DS13737 Rev 10 and DS13086 alternate function table, AF11 of PB4" },
+]

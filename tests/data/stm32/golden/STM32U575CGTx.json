@@ -1,7 +1,7 @@
 {
   "counts": {
     "aliases": 98,
-    "alternates": 265,
+    "alternates": 273,
     "cross_rules": 584,
     "fields": 47922,
     "irqs": 121,
@@ -13,7 +13,7 @@
   "part": "STM32U575CGTx",
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
   "tables": {
-    "alternates": "ba86fe4fee01e52100ba4bb110e9b16e13a43cc392362aa768d3ea68b7aa1294",
+    "alternates": "832b90aaa82cd9d17d750f08f4eaab5c8543c1ca400fc90d22b3130807297f5f",
     "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
     "fields": "11796245309e0eb2663e81b8c3d5a924f38f0a7dd6fc63ea39867591ddc4ca53",
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",

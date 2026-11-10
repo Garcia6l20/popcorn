@@ -1,7 +1,7 @@
 {
   "counts": {
     "aliases": 100,
-    "alternates": 229,
+    "alternates": 236,
     "cross_rules": 584,
     "fields": 48120,
     "irqs": 128,
@@ -13,7 +13,7 @@
   "part": "STM32U585CIUxQ",
   "svd_sha256": "722e5a40b1f07c11e28417b3438da1eaa2017835cfdebcb41f9a41abacf4bd3e",
   "tables": {
-    "alternates": "1c154795a5c72ff2cf447b2427a2dcb0ac55f7dccb587ad19643f12f763bad01",
+    "alternates": "d706d13efce35006f5180f818f2826090b9c41a241f71f68cb3941b2899b774b",
     "core": "b3670836dc9d6be886bf59e3220dd97aaece14de3970c6ea09acef64cca6938c",
     "fields": "17ea74226fd9b6383b2446a4136d73d7c4c38972926a3e0b4449bd5b5e3c33e4",
     "irqs": "dd7dadcefc8962285e9defab79d899d232aad31ecf7ee22e7eaf550ce2a1277b",

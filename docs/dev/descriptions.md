@@ -230,6 +230,26 @@ on the port and no rule may repeat it, otherwise the build raises `DescriptionEr
 rule's index. The builder applies the rules after it reads the CubeMX modes, validates all of
 them before removing any, and counts the drops in the patch report.
 
+## Alternate function adds
+
+A function the CubeMX modes file omits is added by the `add` list of the same table:
+
+```toml
+[alternates]
+add = [
+  { peripheral = "GPIOA", pin = 1, af = 11, signal = "lpgpio1_p0", source = "DS13737 Rev 10, AF table" },
+]
+```
+
+The rule has the fields of a drop, and the `signal` is lower case, `[a-z0-9_]+`. An `[alternates]` table needs a `drop` or an `add` list. The port must have an alternate table, which a build with a
+modes file gives every GPIO port, the entry must not be listed already, and its pin must be set
+in the port's `bonded` mask, otherwise the build raises `DescriptionError` keyed
+`alternates.add[<n>]`. The builder applies the rules after the bonded masks, validates all of them
+before adding any, keeps each port's list sorted by pin, function and signal, and counts the
+adds in the patch report. A pad bonded on some packages only is added by a patch whose `[match]`
+lists exactly the parts that bond it. The STM32U575 and STM32U585 LPGPIO1_P0 to P15 pads on AF11
+come from five such files, `stm32u5_lpgpio1*.toml`. A build whose modes file is missing or selects no alternate function by AF number applies no add.
+
 ## Bonded pins
 
 Each GPIO port of a description built from CubeMX or pin data carries `bonded`, the mask of its

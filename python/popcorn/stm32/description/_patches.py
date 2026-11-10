@@ -162,6 +162,9 @@ class PatchIrqs:
     share: list[IrqShare] | None = None
 
 
+_SIGNAL_RE = re.compile(r"[a-z0-9_]+")
+
+
 @dataclass(slots=True, kw_only=True)
 class AlternateDrop:
     peripheral: str
@@ -172,8 +175,18 @@ class AlternateDrop:
 
 
 @dataclass(slots=True, kw_only=True)
+class AlternateAdd:
+    peripheral: str
+    pin: int = field(metadata={"minimum": 0, "maximum": 15})
+    af: int = field(metadata={"minimum": 0, "maximum": 15})
+    signal: str
+    source: str = field(metadata={"min_length": 1})
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchAlternates:
-    drop: list[AlternateDrop]
+    drop: list[AlternateDrop] | None = None
+    add: list[AlternateAdd] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -322,6 +335,7 @@ class PatchReport:
     irqs_dropped: int = 0
     irqs_added: int = 0
     alternates_dropped: int = 0
+    alternates_added: int = 0
     sizes_set: int = 0
     registers_added: int = 0
     resets_set: int = 0
@@ -377,8 +391,23 @@ def _parsed(path: Path) -> _ParsedFile:
 
 def _patch_of(path: Path, entry: _ParsedFile) -> Patch:
     if entry.patch is None:
-        entry.patch = from_mapping(Patch, entry.data, file=str(path))
+        patch = from_mapping(Patch, entry.data, file=str(path))
+        _check_alternates(patch, str(path))
+        entry.patch = patch
     return entry.patch
+
+
+def _check_alternates(patch: Patch, file: str) -> None:
+    table = patch.alternates
+    if table is None:
+        return
+    if table.drop is None and table.add is None:
+        raise DescriptionError(file, 0, "alternates", "a drop or an add list")
+    for index, rule in enumerate(table.add or []):
+        if _SIGNAL_RE.fullmatch(rule.signal) is None:
+            raise DescriptionError(
+                file, 0, f"alternates.add[{index}].signal", "a lower case signal name [a-z0-9_]+"
+            )
 
 
 def read_patch(path: Path) -> Patch:
@@ -1209,7 +1238,8 @@ def apply_alternate_drops(
         name: list(p.alternates) for name, p in by_name.items() if p.alternates is not None
     }
     for loaded in patches:
-        for j, rule in enumerate(loaded.patch.alternates.drop if loaded.patch.alternates else []):
+        rules = loaded.patch.alternates.drop if loaded.patch.alternates else None
+        for j, rule in enumerate(rules or []):
             entry = AlternateDesc(pin=rule.pin, af=rule.af, signal=rule.signal)
             if entry not in remaining.get(rule.peripheral, []):
                 raise DescriptionError(
@@ -1226,6 +1256,48 @@ def apply_alternate_drops(
         dropped += len(peripheral.alternates) - len(kept)
         peripheral.alternates = kept
     return dropped
+
+
+def apply_alternate_adds(
+    patches: Sequence[LoadedPatch], peripherals: Sequence[PeripheralDesc]
+) -> int:
+    """Adds the GPIO alternate functions the `[alternates]` `add` rules of @p patches name to
+    @p peripherals, the ports read from the CubeMX GPIO modes file, keeps each port's list sorted
+    by pin, function and signal, and returns how many. A rule names a port, a pin, an AF number
+    and a signal. Run after the bonded pin masks are set: a pin the port's `bonded` mask leaves
+    out is an error. Raises DescriptionError when the port has no alternate table, the entry is
+    already listed or added before, or its pin is not bonded. Validates every rule before adding
+    any."""
+    by_name = {p.name: p for p in peripherals}
+    result = {name: list(p.alternates) for name, p in by_name.items() if p.alternates is not None}
+    added = 0
+    for loaded in patches:
+        rules = loaded.patch.alternates.add if loaded.patch.alternates else None
+        for j, rule in enumerate(rules or []):
+            key = f"alternates.add[{j}]"
+            peripheral = by_name.get(rule.peripheral)
+            if peripheral is None or peripheral.name not in result:
+                raise DescriptionError(
+                    str(loaded.path), 0, key, f"a port {rule.peripheral} with an alternate table"
+                )
+            if peripheral.bonded is not None and not peripheral.bonded >> rule.pin & 1:
+                raise DescriptionError(
+                    str(loaded.path), 0, key, f"a pin bonded on {rule.peripheral}"
+                )
+            entry = AlternateDesc(pin=rule.pin, af=rule.af, signal=rule.signal)
+            if entry in result[rule.peripheral]:
+                raise DescriptionError(
+                    str(loaded.path),
+                    0,
+                    key,
+                    f"an alternate function not listed on {rule.peripheral}",
+                )
+            result[rule.peripheral].append(entry)
+            added += 1
+    for name, entries in result.items():
+        if len(entries) != len(by_name[name].alternates or []):
+            by_name[name].alternates = sorted(entries, key=lambda e: (e.pin, e.af, e.signal))
+    return added
 
 
 def _apply_drops(

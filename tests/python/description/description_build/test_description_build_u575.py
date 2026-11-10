@@ -98,6 +98,27 @@ def test_build_u575_gpio_ports_carry_their_alternate_functions(u575_sources: Sou
     )
 
 
+def test_build_u575_ports_carry_the_lpgpio1_pads_the_modes_file_omits(
+    u575_sources: Sources,
+) -> None:
+    by_name = {p.name: p for p in build_description(u575_sources).peripherals}
+    assert by_name["LPGPIO1"].alternates is None
+    porta = by_name["GPIOA"].alternates
+    assert porta is not None
+    assert AlternateDesc(pin=1, af=11, signal="lpgpio1_p0") in porta
+    assert AlternateDesc(pin=3, af=11, signal="lpgpio1_p1") in porta
+    assert AlternateDesc(pin=6, af=11, signal="lpgpio1_p2") in porta
+    assert porta == sorted(porta, key=lambda a: (a.pin, a.af, a.signal))
+    pads = {
+        (p.name, a.pin, a.signal)
+        for p in by_name.values()
+        for a in p.alternates or []
+        if a.signal.startswith("lpgpio1_p")
+    }
+    assert len(pads) == 16
+    assert {signal for _, _, signal in pads} == {f"lpgpio1_p{n}" for n in range(16)}
+
+
 def test_a_modes_file_without_af_numbers_logs_and_carries_none(
     u575_sources: Sources, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -27,6 +27,7 @@ from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
 from popcorn.stm32.description._model import (
     AdcPadDesc,
+    AlternateDesc,
     CoreDesc,
     IrqDesc,
     PadRole,
@@ -36,6 +37,7 @@ from popcorn.stm32.description._model import (
 from popcorn.stm32.description._patches import (
     PatchReport,
     PatchTarget,
+    apply_alternate_adds,
     apply_alternate_drops,
     apply_patches,
     load_patches,
@@ -316,6 +318,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
 
     target.core.num_irqs = irq_table.num_irqs
 
+    alternates: dict[str, list[AlternateDesc]] = {}
     if sources.gpio_modes is None:
         _LOG.warning(
             "%s: no CubeMX GPIO modes file, GPIO ports carry no alternate functions", sources.part
@@ -345,6 +348,8 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
             else read_part(sources.pad_reference.read_bytes(), file=str(sources.pad_reference))
         )
         apply_adc_pads(sources.part, target.peripherals, adc_pads(reference))
+    if alternates:
+        report.alternates_added = apply_alternate_adds(loaded_patches, target.peripherals)
 
     description = PartDescription(
         part=sources.part,
