@@ -11,7 +11,7 @@ from the shipped descriptions and the model registry at each docs build, so they
   the STM32L1 family.
 - [STM32L4](stm32l4.md): the lines, order codes, memory map, boot memory, option bytes and read
   protection of the STM32L4 family.
-- [Limits](limits.md): what each model leaves out, and where it differs from the reference manual.
+- [Limits](limits/index.md): what each model leaves out, and where it differs from the reference manual.
 
 ## What the states mean
 
@@ -45,7 +45,7 @@ line or an I2C target. An instance without a model keeps plain register storage.
 access to it logs a warning, and raises `ModelError` under `strict`.
 
 A model does not make every field behaviour-exact. Each model covers the features the firmware
-of the examples and the tests use. [Limits](limits.md) lists the rest.
+of the examples and the tests use. [Limits](limits/index.md) lists the rest.
 
 The model column of a part page reads:
 

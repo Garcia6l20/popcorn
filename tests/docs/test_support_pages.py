@@ -22,7 +22,7 @@ from popcorn_build.support_pages import LIMIT_ROOTS
 
 ROOT = Path(__file__).parents[2]
 MODELS = ROOT / "native/src/periph/stm32"
-LIMITS = ROOT / "docs/support/limits.md"
+LIMITS = ROOT / "docs/support/limits_legacy.md"
 LIMIT_SITE = re.compile(
     r"throw unmodelled_config|warn_unsupported\(|unmodelled\(|not modelled|deviation|divergence",
     re.IGNORECASE,
@@ -90,9 +90,43 @@ def test_each_limits_page_is_generated_from_its_blocks(generated: Path) -> None:
     pages = limits_docs.read_pages(LIMIT_ROOTS)
     assert sorted(p.stem for p in (generated / "limits").glob("*.md")) == sorted(pages)
     table = (generated / "limits_table.inc").read_text()
+    assert "[Core]" not in table
+    assert table.splitlines()[-1].startswith(f"| **{len(pages) - 1} IPs** |")
     for ident, page in pages.items():
-        assert f"[{page.title}](../generated/limits/{ident}.md)" in table
+        if ident != "core":
+            assert f"[{page.title}](../generated/limits/{ident}.md)" in table
         assert (generated / "limits" / f"{ident}.md").read_text().startswith(f"# {page.title}\n")
+
+
+def heading_slugs(text: str) -> set[str]:
+    return {
+        re.sub(r"[^\w\- ]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+        for line in text.splitlines()
+        if line.startswith("#")
+    }
+
+
+@pytest.mark.timeout(60)
+def test_the_general_limits_pages_link_to_existing_pages(generated: Path) -> None:
+    docs = ROOT / "docs"
+    built = docs / "support/generated"
+    names = {path.name for path in (docs / "support/limits").glob("*.md")}
+    assert names == {"index.md", "unmodelled.md", "memory.md", "stm32l4.md", "stm32l1.md"}
+    assert "(../limits_legacy.md)" in (docs / "support/limits/index.md").read_text()
+    pages = [*(docs / "support/limits").glob("*.md"), docs / "support/index.md"]
+    pages += [docs / "guide/faults.md", docs / "guide/uart_devices.md"]
+    checked = 0
+    for page in pages:
+        for target, anchor in re.findall(r"\]\(([^)#:]+\.md)(?:#([^)]*))?\)", page.read_text()):
+            resolved = Path(os.path.normpath(page.parent / target))
+            if resolved.is_relative_to(built):
+                resolved = generated / resolved.relative_to(built)
+            assert resolved.is_file(), (page.name, target)
+            if anchor:
+                assert anchor in heading_slugs(resolved.read_text()), (page.name, target, anchor)
+            checked += 1
+    assert checked > 20
+    assert (generated / "limits/core.md").read_text().count("\n## ") == 2
 
 
 @pytest.mark.timeout(60)
@@ -121,7 +155,7 @@ def limited_models() -> list[str]:
 
 
 def section_sources() -> dict[str, str]:
-    """The `Source:` line that opens each `## ` section of limits.md, by heading."""
+    """The `Source:` line that opens each `## ` section of limits_legacy.md, by heading."""
     found: dict[str, str] = {}
     for section in LIMITS.read_text().split("\n## ")[1:]:
         heading, _, body = section.partition("\n")

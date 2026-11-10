@@ -31,7 +31,7 @@ order-code letter after the pin count gives the flash size, `C` 256 KiB, `E` 512
 
 The instances of a code follow its line and package, and its peripheral page lists them. The
 STM32L471 has no OTG_FS and no LCD, the STM32L485 and STM32L486 carry the AES unit. The STM32L485
-follows the STM32L486 documents, see [Limits](limits.md#stm32l485). The packages are LQFP64,
+follows the STM32L486 documents, see [Limits](limits/stm32l4.md#stm32l485). The packages are LQFP64,
 LQFP100, LQFP144, UFBGA132, UFBGA144, WLCSP72, WLCSP81 and WLCSP99. The suffix `P` marks the codes
 with the external SMPS pinout, `STM32L476JGYxP`, `STM32L476QGIxP`, `STM32L476VGYxP` and
 `STM32L476ZGTxP`.
@@ -44,7 +44,7 @@ example runs on its class.
 
 ## What is modelled
 
-These instances have a built-in model on every code that has them. [Limits](limits.md) lists
+These instances have a built-in model on every code that has them. [Limits](limits/index.md) lists
 what each model leaves out.
 
 | Block | Instances | Notes |
@@ -138,7 +138,7 @@ every debugger access does. A PCROP area reads 0 for a CPU, DMA or debugger load
 sets `FLASH_SR.RDERR` and drops a debugger store. Writing RDP 0xAA at level 1 erases the flash
 and zeroes SRAM2 at once, inferred. The
 [TrustZone guide](../guide/trustzone.md) lists the debug views these rules reach, and
-[Limits](limits.md) the details.
+[Limits](limits/index.md) the details.
 
 ## Examples
 
@@ -149,7 +149,7 @@ names the evidence behind each code.
 
 ## Inferred rules
 
-Rules that no reference manual section settles are marked inferred in [Limits](limits.md).
+Rules that no reference manual section settles are marked inferred in [Limits](limits/index.md).
 The STM32L4 ones are the peripheral timings and orderings that need a NUCLEO-L476RG to
 confirm, among them:
 

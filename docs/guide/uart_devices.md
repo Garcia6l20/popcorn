@@ -323,7 +323,7 @@ stays parked and usable, and the next run goes on:
 - `DeviceAudio` callbacks: an exception from `on_frame` stops the run after the frame event. The
   block goes on sending.
 - The all-ones answer of an absent or raising I2C or SPI device is the model's open-drain rule, the
-  replies ANDed as on an open-drain bus. It is inferred, see [Limits](../support/limits.md).
+  replies ANDed as on an open-drain bus. It is inferred, see [Limits](../support/limits/index.md).
 
 ## Where next
 

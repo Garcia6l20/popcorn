@@ -20,6 +20,29 @@
 #include <string_view>
 #include <vector>
 
+/**
+ * @limits core Core
+ *
+ * @group all rule "Core faults"
+ * Under `faults="handler"`, a fault enters the firmware's handler as the core does, with these
+ * exceptions. They stop the run with a FAULT stop instead:
+ *
+ * - Lockup, and an INVSTATE fault.
+ * - Without TrustZone: INVPC, UNSTKERR, STKERR, a STKOF on exception entry, VECTTBL, and the NOCP
+ *   of an exception entry over an FP context or of a return to an extended frame.
+ * - With TrustZone: a STKOF of the additional state context alone, and a fault while taking a
+ *   derived exception.
+ *
+ * [Faults and errors](../../../guide/faults.md) shows both policies.
+ *
+ * @group all rule "Reset requests"
+ * - Only a lone Python `Machine` applies the reset a RESET_REQUEST stop reported at its next
+ *   run, step or free run. A C++ driver of `machine::run_slice` or `host::run` resumes the old
+ *   code after the stop. A member of a linked system follows `on_member_reset`.
+ * - A reset a store requests applies after the instructions that follow the store up to the next
+ *   branch, as for AIRCR.SYSRESETREQ.
+ */
+
 namespace popcorn::arch::armv8m
 {
 namespace

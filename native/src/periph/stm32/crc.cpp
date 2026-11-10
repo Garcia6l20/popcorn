@@ -76,10 +76,10 @@ struct crc_state
  *        buffer hides the 4 HCLK latency, 24.3.3, so no access stalls. CR.RESET reloads CRC_DR from
  *        the low POLYSIZE bits of CRC_INIT and reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL
  *        write does not. CRC_IDR is storage, untouched by both. Every reset kind restores the
- *        description reset values. Each access the model refuses or deviates on logs once and
- *        raises model_error under strict_peripherals, and a narrow read returns the stored bits.
- *        The STM32L1 unit has DR, IDR and CR.RESET only. The STM32L4 unit is the programmable unit
- *        with an 8-bit CRC_IDR, and its log records cite `crc_variant::access_rule` and
+ *        description reset values. A refused access and an even polynomial log once and raise
+ *        model_error under strict_peripherals, and a narrow read returns the stored bits. The
+ *        STM32L1 unit has DR, IDR and CR.RESET only. The STM32L4 unit is the programmable unit with
+ *        an 8-bit CRC_IDR, and its log records cite `crc_variant::access_rule` and
  *        `crc_variant::polynomial_rule`.
  *
  * @limits crc CRC

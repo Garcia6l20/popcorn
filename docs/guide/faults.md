@@ -60,7 +60,7 @@ UsageFault or SecureFault handler, as silicon does, and the run goes on:
 
 The BusFault here escalates to HardFault, because the firmware did not enable BusFault in
 SHCSR: IPSR reads 3 and HFSR has FORCED set. Some faults stop the run under both policies, such as a lockup.
-[Limits](../support/limits.md#core-faults) lists them.
+[Limits](../support/generated/limits/core.md#core-faults) lists them.
 
 ## Host accesses
 
@@ -133,7 +133,7 @@ loses its writes:
 - The enable gates register access only. Timers keep counting, transfers keep running and
   events stay queued while the clock is off.
 - Read 0 and write lost are inferred, the reference manuals say only that access is not
-  supported. [Limits](../support/limits.md#rcc) lists the instances gated on a host block's bit.
+  supported. [Limits](../support/limits_legacy.md#rcc) lists the instances gated on a host block's bit.
 
 ## Errors
 

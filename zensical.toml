@@ -35,7 +35,15 @@ nav = [
     ] },
     "support/generated/cores.md",
     "support/stm32l1.md",
-    "support/limits.md",
+    { "Limits" = [
+      "support/limits/index.md",
+      "support/limits/unmodelled.md",
+      "support/limits/memory.md",
+      "support/generated/limits/core.md",
+      "support/limits/stm32l4.md",
+      "support/limits/stm32l1.md",
+      "support/limits_legacy.md",
+    ] },
   ] },
   { "Reference" = [
     { "Python" = [

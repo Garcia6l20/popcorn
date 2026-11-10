@@ -42,6 +42,7 @@ LIMIT_ROOTS = (
     ROOT / "native/include/popcorn/periph/stm32",
     ROOT / "native/src/arch/armv8m",
 )
+ARCH_ROOT = ROOT / "native/src/arch"
 SOURCE_URL = "https://github.com/Garcia6l20/popcorn/blob/main/"
 LIMITS = "limits"
 LIMITS_TABLE = "limits_table.inc"
@@ -213,8 +214,8 @@ def part_page(part: PartDescription) -> str:
         "",
         "Each row is one IP and version, as the description names them. Secure aliases are left "
         "out. The last column names the model row that serves the instances, as "
-        "`python -m popcorn.stm32 explain` prints it. See [Limits](../limits.md) for what each "
-        "model leaves out.",
+        "`python -m popcorn.stm32 explain` prints it. See [Limits](../limits/index.md) for what "
+        "each model leaves out.",
         "",
         *_table(["IP", "Version", "Instances", "Model", "Row"], rows),
         "",
@@ -396,7 +397,12 @@ def write(out: Path) -> list[Path]:
             for ident, page in limits.items()
         }
     )
-    pages[LIMITS_TABLE] = limits_docs.render_table(limits, f"../generated/{LIMITS}/")
+    ips = {
+        ident: page
+        for ident, page in limits.items()
+        if not all(ARCH_ROOT in path.parents for path in page.sources)
+    }
+    pages[LIMITS_TABLE] = limits_docs.render_table(ips, f"../generated/{LIMITS}/")
     written: list[Path] = []
     for file, text in pages.items():
         path = out / file
