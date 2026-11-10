@@ -9,7 +9,8 @@ from popcorn.stm32 import mcu
 part = mcu("STM32L152RETx")
 ```
 
-The [Parts](generated/parts.md) page lists every code with its die, package, memory and state.
+The [STM32L1 parts](generated/families/stm32l1.md) page lists every code with its die, package,
+memory and state.
 Each row links to the peripheral page of its code, such as
 [STM32L152RETx](generated/STM32L152RETx.md), with its instances and their models.
 

@@ -26,7 +26,13 @@ nav = [
   ] },
   { "Support" = [
     "support/index.md",
-    "support/generated/parts.md",
+    { "Parts" = [
+      "support/generated/parts.md",
+      "support/generated/families/stm32h5.md",
+      "support/generated/families/stm32l1.md",
+      "support/generated/families/stm32l4.md",
+      "support/generated/families/stm32u5.md",
+    ] },
     "support/generated/cores.md",
     "support/stm32l1.md",
     "support/limits.md",

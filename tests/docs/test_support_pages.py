@@ -153,26 +153,31 @@ EXTRA_PARTS = {part for row in EXAMPLE_PARTS.values() for part in row.extra}
 GEOMETRY_NOTE = "FLASH geometry cases"
 
 
-def state_rows(page: str) -> dict[str, str]:
-    """The state cell of each part row of the generated parts page, by part name."""
-    found: dict[str, str] = {}
-    for line in page.splitlines():
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if line.startswith("| [") and len(cells) == 9:
-            name = cells[0][1 : cells[0].index("]")]
-            assert name not in found, name
-            found[name] = cells[8]
-    return found
+def family_tables(root: Path) -> dict[str, str]:
+    """The text of each family page, by family name such as `STM32L1`."""
+    return {
+        "STM32" + page.stem[5:].upper(): page.read_text()
+        for page in sorted((root / "families").glob("*.md"))
+    }
 
 
-def part_cells(page: str) -> dict[str, list[str]]:
-    """The cells of each part row of the generated parts page, by part name."""
+def part_cells(root: Path) -> dict[str, list[str]]:
+    """The cells of each part row of the family pages, by part name, with the family inserted as
+    the second cell."""
     found: dict[str, list[str]] = {}
-    for line in page.splitlines():
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if line.startswith("| [") and len(cells) == 9:
-            found[cells[0][1 : cells[0].index("]")]] = cells
+    for family, page in family_tables(root).items():
+        for line in page.splitlines():
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if line.startswith("| [") and len(cells) == 8:
+                name = cells[0][1 : cells[0].index("]")]
+                assert name not in found, name
+                found[name] = [cells[0], family, *cells[1:]]
     return found
+
+
+def state_rows(root: Path) -> dict[str, str]:
+    """The state cell of each part row of the family pages, by part name."""
+    return {name: cells[8] for name, cells in part_cells(root).items()}
 
 
 def kind(cell: str) -> str:
@@ -181,7 +186,7 @@ def kind(cell: str) -> str:
 
 @pytest.mark.timeout(60)
 def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
-    rows = state_rows((generated / "parts.md").read_text())
+    rows = state_rows(generated)
     assert sorted(rows) == sorted(popcorn.stm32.shipped_parts())
     assert all(kind(cell) in STATES for cell in rows.values())
     by_state = {state: {n for n, c in rows.items() if kind(c) == state} for state in STATES}
@@ -209,7 +214,7 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
 
 @pytest.mark.timeout(60)
 def test_a_class_row_names_a_part_of_its_class_that_runs_examples(generated: Path) -> None:
-    rows = state_rows((generated / "parts.md").read_text())
+    rows = state_rows(generated)
     running = TESTED_PARTS | EXTRA_PARTS
     for name, cell in rows.items():
         if kind(cell) == "class":
@@ -222,9 +227,9 @@ def test_a_class_row_names_a_part_of_its_class_that_runs_examples(generated: Pat
 def test_the_parts_page_prints_the_line_of_the_name_and_the_die_of_the_class(
     generated: Path,
 ) -> None:
-    page = (generated / "parts.md").read_text()
-    cells = part_cells(page)
-    assert "| Part | Family | Line | Die | Package |" in page
+    cells = part_cells(generated)
+    for page in family_tables(generated).values():
+        assert "| Part | Line | Die | Package |" in page
     assert cells["STM32U585QIIx"][1:4] == ["STM32U5", "U585", "U575/U585"]
     assert cells["STM32H562RGTx"][1:4] == ["STM32H5", "H562", "H56x/H573"]
     assert cells["STM32L152RETx"][1:4] == ["STM32L1", "L152", "DIE437"]
@@ -233,7 +238,7 @@ def test_the_parts_page_prints_the_line_of_the_name_and_the_die_of_the_class(
         assert row[2] == name[5:9], name
         assert row[3] == part_class(name.partition("-")[0]).die, name
     other_line = 0
-    for name, cell in state_rows(page).items():
+    for name, cell in state_rows(generated).items():
         if kind(cell) == "class":
             named = cell.split(" of ")[1].split(",")[0]
             other_line += cells[named][2] != cells[name][2] and not name.startswith(
@@ -241,6 +246,68 @@ def test_the_parts_page_prints_the_line_of_the_name_and_the_die_of_the_class(
             )
             assert cells[named][3] == cells[name][3], name
     assert other_line == 43
+
+
+@pytest.mark.timeout(60)
+def test_the_overview_has_one_row_per_line_and_links_its_table(generated: Path) -> None:
+    rows = [
+        [cell.strip() for cell in line.strip("|").split("|")]
+        for line in (generated / "parts.md").read_text().splitlines()
+        if line.startswith("| STM32")
+    ]
+    cells = part_cells(generated)
+    assert len(rows) == len({(row[1], row[2]) for row in cells.values()}) == 14
+    assert sum(int(row[2]) for row in rows) == len(cells) == len(popcorn.stm32.shipped_parts())
+    pages = family_tables(generated)
+    for family, line, count, *states, link in rows:
+        in_line = [row for row in cells.values() if row[1] == family and row[2] == line]
+        assert int(count) == len(in_line), (family, line)
+        assert states == [str(sum(kind(r[8]) == s for r in in_line)) for s in STATES]
+        target, _, anchor = link[link.index("(") + 1 : -1].partition("#")
+        assert target == f"families/{family.lower()}.md"
+        assert f"\n## {anchor.upper()}\n" in pages[family]
+        assert anchor == line.lower()
+
+
+@pytest.mark.timeout(60)
+def test_the_overview_lists_no_part_row(generated: Path) -> None:
+    page = (generated / "parts.md").read_text()
+    assert not [line for line in page.splitlines() if line.startswith("| [STM32")]
+    assert len(page.splitlines()) < 60
+
+
+@pytest.mark.timeout(60)
+def test_a_family_page_has_a_section_per_line(generated: Path) -> None:
+    pages = family_tables(generated)
+    assert sorted(pages) == ["STM32H5", "STM32L1", "STM32L4", "STM32U5"]
+    sections = {
+        family: [line[3:] for line in page.splitlines() if line.startswith("## ")]
+        for family, page in pages.items()
+    }
+    assert sections["STM32L1"] == ["L100", "L151", "L152", "L162"]
+    assert sections["STM32U5"] == ["U575", "U585"]
+    assert "(../../stm32l1.md)" in pages["STM32L1"]
+
+
+@pytest.mark.timeout(60)
+def test_the_relative_links_of_the_generated_pages_resolve(generated: Path) -> None:
+    docs = ROOT / "docs/support/generated"
+    pages = [
+        generated / "parts.md",
+        generated / "STM32L152RETx.md",
+        *sorted((generated / "families").glob("*.md")),
+    ]
+    checked = 0
+    for page in pages:
+        home = docs / page.relative_to(generated)
+        for target in re.findall(r"\]\(([^)#]+\.md)(?:#[^)]*)?\)", page.read_text()):
+            assert not target.startswith(("http:", "https:")), target
+            resolved = Path(os.path.normpath(home.parent / target))
+            if resolved.is_relative_to(docs):
+                resolved = generated / resolved.relative_to(docs)
+            assert resolved.is_file(), (page.name, target)
+            checked += 1
+    assert checked > 280
 
 
 @pytest.mark.timeout(60)
@@ -303,7 +370,7 @@ def test_a_class_with_no_example_part_shows_attaches() -> None:
 
 @pytest.mark.timeout(60)
 def test_a_part_that_only_the_flash_geometry_cases_run_is_never_tested(generated: Path) -> None:
-    rows = state_rows((generated / "parts.md").read_text())
+    rows = state_rows(generated)
     assert {"STM32U575ZITxQ", "STM32H563ZGTx"} == GEOMETRY_PARTS
     assert rows["STM32U575ZITxQ"].startswith("examples: ")
     assert rows["STM32U575ZITxQ"].endswith(f", {GEOMETRY_NOTE}")
@@ -370,7 +437,7 @@ def test_a_part_page_lists_the_bonded_pins_of_each_port(generated: Path) -> None
 
 @pytest.mark.timeout(60)
 def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated: Path) -> None:
-    cells = part_cells((generated / "parts.md").read_text())
+    cells = part_cells(generated)
     assert len(L1_NAMES) == 132
     assert [name for name in cells if name.startswith("STM32L1")] == L1_NAMES
     assert {cells[name][1] for name in L1_NAMES} == {"STM32L1"}

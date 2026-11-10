@@ -35,6 +35,8 @@ EXAMPLES = "examples"
 CLASS = "class"
 ATTACHES = "attaches"
 GEOMETRY_NOTE = "FLASH geometry cases"
+STATES = (TESTED, EXAMPLES, CLASS, ATTACHES)
+FAMILIES = "families"
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,31 +219,91 @@ def part_page(part: PartDescription) -> str:
     return "\n".join(lines)
 
 
+def family_of(name: str) -> str:
+    """The family of a part name, such as `STM32L4`."""
+    return name[:7]
+
+
+def _part_row(name: str, part: PartDescription, state: PartState) -> list[str]:
+    kind = part_class(name.partition("-")[0])
+    return [
+        f"[{name}]({name}.md)",
+        name[5:9],
+        kind.die,
+        kind.package,
+        _kib(_memory(part, "rom", "Flash")),
+        _kib(_memory(part, "ram", "SRAM")),
+        "yes" if kind.smps else "no",
+        _state_cell(state),
+    ]
+
+
+def _by_family_and_line(
+    parts: Mapping[str, PartDescription],
+) -> dict[str, dict[str, list[str]]]:
+    found: dict[str, dict[str, list[str]]] = {}
+    for name in parts:
+        found.setdefault(family_of(name), {}).setdefault(name[5:9], []).append(name)
+    return found
+
+
+def family_file(family: str) -> str:
+    """The path of the page of @p family, relative to the generated directory."""
+    return f"{FAMILIES}/{family.lower()}.md"
+
+
+def family_page(
+    family: str, parts: Mapping[str, PartDescription], states: Mapping[str, PartState]
+) -> str:
+    """The table of every shipped part of @p family, one section per line, each part linking to
+    its peripheral page."""
+    lines = [
+        f"# {family}",
+        "",
+        "Flash and SRAM count the Non-secure aliases only, backup SRAM included. The state column "
+        "names the firmware evidence, as the [parts overview](../parts.md) defines it.",
+        "",
+    ]
+    if family == "STM32L1":
+        lines += ["See [STM32L1](../../stm32l1.md) for the categories of this family.", ""]
+    for line, names in _by_family_and_line(parts)[family].items():
+        rows = [
+            [cell if i else f"[{name}](../{name}.md)" for i, cell in enumerate(row)]
+            for name in names
+            for row in [_part_row(name, parts[name], states[name])]
+        ]
+        lines += [
+            f"## {line}",
+            "",
+            *_table(["Part", "Line", "Die", "Package", "Flash", "SRAM", "SMPS", "State"], rows),
+            "",
+        ]
+    return "\n".join(lines)
+
+
 def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState]) -> str:
-    """The list of shipped parts with family, line, die, package, memory and state, each linking
-    to its peripheral page."""
+    """The overview of the shipped parts: the meaning of the states and one row per line with
+    its part count per state, linking to the table of the line on the page of its family."""
     rows: list[list[str]] = []
-    for name, part in parts.items():
-        kind = part_class(name.partition("-")[0])
-        rows.append(
-            [
-                f"[{name}]({name}.md)",
-                name[:7],
-                name[5:9],
-                kind.die,
-                kind.package,
-                _kib(_memory(part, "rom", "Flash")),
-                _kib(_memory(part, "ram", "SRAM")),
-                "yes" if kind.smps else "no",
-                _state_cell(states[name]),
-            ]
-        )
+    for family, lines_ in _by_family_and_line(parts).items():
+        for line, names in lines_.items():
+            counts = [sum(states[n].state == state for n in names) for state in STATES]
+            rows.append(
+                [
+                    family,
+                    line,
+                    str(len(names)),
+                    *map(str, counts),
+                    f"[{line}]({family_file(family)}#{line.lower()})",
+                ]
+            )
     lines = [
         "# Parts",
         "",
         "These parts ship with a description, so `popcorn.stm32.mcu()` loads them from the "
-        "shipped description alone. Flash and SRAM count the Non-secure aliases only, backup "
-        "SRAM included. A part's class is its die, flash size, package and SMPS supply. The dies "
+        "shipped description alone. A page per family lists the parts of each line with their "
+        "die, package, memory and state. A part's class is its die, flash size, package and SMPS "
+        "supply. The dies "
         "are U575/U585 and H56x/H573, and on the STM32L1 the DBGMCU DEV_ID such as DIE437. "
         "See [STM32L1](../stm32l1.md) for the categories of that family.",
         "",
@@ -257,9 +319,7 @@ def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState
         "",
         f"A part in the {TESTED}, {EXAMPLES} or {CLASS} state is supported.",
         "",
-        *_table(
-            ["Part", "Family", "Line", "Die", "Package", "Flash", "SRAM", "SMPS", "State"], rows
-        ),
+        *_table(["Family", "Line", "Parts", *STATES, "Table"], rows),
         "",
     ]
     return "\n".join(lines)
@@ -312,6 +372,9 @@ def write(out: Path) -> list[Path]:
         parts[name] = mcu(refname, core=core or None)
     states = part_states(parts)
     pages = {"parts.md": parts_page(parts, states), "cores.md": cores_page(parts)}
+    (out / FAMILIES).mkdir(exist_ok=True)
+    for family in _by_family_and_line(parts):
+        pages[family_file(family)] = family_page(family, parts, states)
     pages.update({f"{name}.md": part_page(part) for name, part in parts.items()})
     written: list[Path] = []
     for file, text in pages.items():

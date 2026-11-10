@@ -3,8 +3,9 @@
 These pages say which parts, cores and peripherals popcorn emulates. The tables are generated
 from the shipped descriptions and the model registry at each docs build, so they follow the code.
 
-- [Parts](generated/parts.md): the parts that ship with a description and the state of each, with
-  a page per part of its peripheral instances, their models and its bonded pins.
+- [Parts](generated/parts.md): the parts that ship with a description, one row per line with its
+  count of parts per state. A page per family lists every part of each line with its state, and
+  a page per part lists its peripheral instances, their models and its bonded pins.
 - [Cores](generated/cores.md): the arch modules and the core of each part.
 - [STM32L1](stm32l1.md): the categories, memory, bit-banding, data EEPROM and option bytes of
   the STM32L1 family.
@@ -17,7 +18,8 @@ from the shipped descriptions and the model registry at each docs build, so they
 A part is supported when firmware examples run on its class: its die, flash size, package and
 SMPS supply. The dies are U575/U585 and H56x/H573, and on the STM32L1 and the STM32L4 the DBGMCU
 DEV_ID such as DIE437 or DIE415. The STM32L4 codes with the `P` suffix have the SMPS supply. The
-state column of the [Parts](generated/parts.md) page names the evidence:
+state column of the family pages, linked from the [Parts](generated/parts.md) overview, names
+the evidence:
 
 - **tested**: the tests of the firmware examples name the part and run on it. The STM32U575QGIx,
   the STM32H573AIIx and the STM32L152RETx run every example of their family, the STM32L152RBTx the

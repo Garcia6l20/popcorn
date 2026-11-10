@@ -10,7 +10,8 @@ from popcorn.stm32 import mcu
 part = mcu("STM32L476RGTx")
 ```
 
-The [Parts](generated/parts.md) page lists every code with its die, package, memory and state.
+The [STM32L4 parts](generated/families/stm32l4.md) page lists every code with its die, package,
+memory and state.
 Each row links to the peripheral page of its code, such as
 [STM32L476RGTx](generated/STM32L476RGTx.md), with its instances and their models.
 
@@ -38,7 +39,7 @@ with the external SMPS pinout, `STM32L476JGYxP`, `STM32L476QGIxP`, `STM32L476VGY
 The examples classify a code by its die, flash size, package and SMPS supply. The 12 codes in
 the WLCSP72, WLCSP81, WLCSP99 and UFBGA144 packages classify through the `JY`, `MY`, `VY` and
 `ZJ` package suffixes of the family, and the `P` suffix sets the SMPS supply of the STM32L4
-codes only. So every code has a class on the parts page, with the state `attaches` when no
+codes only. So every code has a class on its family page, with the state `attaches` when no
 example runs on its class.
 
 ## What is modelled
