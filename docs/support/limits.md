@@ -614,32 +614,6 @@ Errata of ES0499 Rev 12:
 - 2.2.8, MSIK and HSI16 kept on when ADCDACSEL selects them, is a clock-tree effect outside the
   model.
 
-## CRC
-
-Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crc.cpp)
-
-- On the STM32U5, STM32H5 and STM32L4 a `CRC_DR` write that is not right-aligned is ignored and
-  logged, RM0456 24.4, RM0351 15.4.
-- An even polynomial, which RM0456 24.3.3 and RM0351 15.3.3 do not support, is computed anyway and
-  logged.
-- A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 and STM32L4
-  `CRC_IDR`, is ignored and logged. Such a read is logged.
-- The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from 0xFFFFFFFF,
-  with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its byte lanes
-  repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4 states the
-  repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access size, are
-  inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4 HCLK of the
-  computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038
-  4.4 asks for words. RM0038 4.4 says "The CRC registers have to be accessed by words (32 bits)",
-  CRC_IDR included. The model takes byte and half-word CRC_IDR accesses with no log, as ST's CMSIS
-  header declares IDR a byte and LL_CRC_Write_IDR stores one. Under `strict` each logged access
-  raises `ModelError`.
-- The STM32L4 CRC, RM0351 15, is the programmable unit of the STM32U5 with an 8-bit CRC_IDR, RM0351
-  15.4.2. RM0351 15.3.3 and 15.4 allow only 32-bit accesses to registers other than CRC_DR, "For
-  the other registers only 32-bit accesses are allowed". The model takes byte and half-word
-  CRC_IDR accesses with no log, as ST's CMSIS header declares IDR a byte and LL_CRC_Write_IDR
-  stores one.
-
 ## CRS
 
 Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crs.cpp)
@@ -1458,29 +1432,6 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   raises, answers that phase as an absent target: a NACK, a read byte of all ones, no match. The
   phase and its flags complete, and the exception leaves at the end of the event, inferred:
   RM0456 65.4.9 and RM0038 26.3.4 describe a NACK, none describes a target that fails.
-
-## IWDG
-
-Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/iwdg.cpp)
-
-- A new prescaler restarts the division sequence when PVU falls, an error below one period of
-  the old prescaled clock.
-- A refresh reloads at the key write, not one period later.
-- EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
-- The IWDG starts at the first `KR` 0xCCCC whatever the hardware watchdog option holds:
-  FLASH_OPTR.IWDG_SW on the STM32U5, FLASH_OPTSR_CUR.IWDG_SW on the STM32H5, FLASH_OBR.IWDG_SW on
-  the STM32L1. RM0456 61.4.3 and RM0038 21.3.1 start it at power-on with IWDG_SW 0.
-- The STM32L1 IWDG, RM0038 21, has KR, PR, RLR and SR with PVU and RVU. A refresh reloads at any
-  counter value. PR 110 and 111 both divide by 256. PVU and RVU fall 5 LSI cycles after the
-  write, the "up to 5" of RM0038 21.4.4 taken as 5, inferred, 6 on the STM32U5 and STM32H5.
-- An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
-  starts keeps its flag set until the LSI is ready, inferred.
-- The STM32L4 IWDG, RM0351 36, has KR, PR, RLR, SR with PVU, RVU and WVU, and WINR. PR 110 and 111
-  both divide by 256. RM0351 36.4 says an update "takes up to five LSI/prescaled clock cycles". The
-  model clears PVU, RVU and WVU 5 LSI cycles after the write, whatever the prescaler, inferred. With
-  FLASH_OPTR.IWDG_SW 0 the IWDG starts at every reset without a key, RM0351 36.3.3. RM0351 names
-  power-on only, the start after the other resets is inferred. FLASH_OPTR.IWDG_STOP and IWDG_STDBY
-  are stored: the model runs in Run mode only.
 
 ## LPTIM
 

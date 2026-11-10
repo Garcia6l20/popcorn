@@ -139,7 +139,8 @@ auto status_of(std::vector<popcorn::register_desc>& registers) -> popcorn::regis
 
 TEST_CASE(
     "a refreshed L1 IWDG keeps running, the last refresh plus RL ticks of /32 requests a watchdog "
-    "reset, RL and not the RL + 1 of RM0038 Table 92 by the refresh deviation of limits.md")
+    "reset, RL and not the RL + 1 of RM0038 Table 92 by the refresh deviation of the IWDG limits "
+    "page")
 {
   std::uint64_t first = 0;
   for(int run = 0; run < 2; ++run)
@@ -248,7 +249,7 @@ TEST_CASE("RM0038 21.4.2: PR 110 and 111 both divide by 256, 101 by 128")
 
 TEST_CASE(
     "with no window, a refresh at once after the start bites RL ticks later, RL and not the RL + 1 "
-    "of RM0038 Table 92 by the refresh deviation of limits.md")
+    "of RM0038 Table 92 by the refresh deviation of the IWDG limits page")
 {
   auto f = entered("idle");
   bus  b{f};

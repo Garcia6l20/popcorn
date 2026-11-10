@@ -67,41 +67,63 @@ struct crc_state
 };
 
 /**
- * @brief CRC calculation unit of the STM32U5 and STM32H5, RM0456 section 24, and of the
- *        STM32L1. A right-aligned 8-, 16- or 32-bit CRC_DR write feeds its bits MSB first through
- *        the low POLYSIZE bits of CRC_POL, after the REV_IN reversal by byte, half-word or word, a
- *        group no wider than the write. The running CRC is kept unreversed in the CRC_DR storage
- *        word, REV_OUT reverses the low POLYSIZE bits of the CRC_DR read only, the bits above read
- *        0. RM0456 gives both readings for 32-bit data only, unverified on silicon below that. The
- *        computation completes on the write: the input buffer hides the 4 HCLK latency, 24.3.3, so
- *        no access stalls. CR.RESET reloads CRC_DR from the low POLYSIZE bits of CRC_INIT and
- *        reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL write does not. CRC_IDR is storage,
- *        untouched by both. Every reset kind restores the description reset values. The RCC clock
- *        gate is not modelled. An even polynomial, which RM0456 does not support, logs once,
- *        raises model_error under strict_peripherals, and is computed anyway otherwise. A CRC_DR
- *        write that is not right-aligned and a write narrower than 32 bits to another register,
- *        which RM0456 24.4 forbids, log once, raise model_error under strict_peripherals, and are
- *        ignored. A narrow read of another register logs once, raises model_error under
- *        strict_peripherals, and returns the stored bits.
- *        The STM32L1 unit, RM0038 section 4, has DR, IDR and CR.RESET only: it computes CRC-32
- *        over the fixed polynomial 0x04C11DB7, RM0038 4.2, and CR.RESET loads 0xFFFFFFFF, 4.3,
- *        with no reversal. Its accesses are words, RM0038 4.4, so a narrow read of DR or CR logs
- *        once, raises model_error under strict_peripherals, and returns the stored lanes. A byte
- *        or half-word DR write does the same and feeds the word its byte lanes repeat: a byte 0xB0
- *        feeds 0xB0B0B0B0. For the DMA RM0038 11.3.4 states the repeated lanes, "the data are
- *        duplicated on the unused lanes of the HWDATA[31:0] bus". Inferred: a CPU byte or
- *        half-word store repeats its lanes the same way, and the unit ignores the access size,
- *        RM0038 4.3 "CRC computation is done on the whole 32-bit data word". Deviation: RM0038 4.4
- *        has every register accessed by words, CRC_IDR included, and the model takes byte and
- *        half-word IDR accesses with no log, as ST's CMSIS header declares IDR a byte and
- *        LL_CRC_Write_IDR stores one. Deviation: a DR write completes with no stall, where
- *        RM0038 4.3 stalls it until the end of the 4 HCLK computation of 4.2.
- *        The STM32L4 unit, RM0351 section 15, is the programmable unit with an 8-bit CRC_IDR,
- *        15.4.2. Deviation: RM0351 15.3.3 and 15.4 allow only 32-bit accesses to registers other
- *        than CRC_DR, and the model takes byte and half-word IDR accesses with no log as on the
- *        STM32L1, as ST's CMSIS header declares IDR a byte and LL_CRC_Write_IDR stores one. Its
- *        log records cite RM0351 15.4 and 15.3.3, `crc_variant::access_rule` and
+ * @brief CRC calculation unit of the STM32U5 and STM32H5, RM0456 section 24, of the STM32L1, RM0038
+ *        section 4, and of the STM32L4, RM0351 section 15. A right-aligned 8-, 16- or 32-bit CRC_DR
+ *        write feeds its bits MSB first through the low POLYSIZE bits of CRC_POL, after the REV_IN
+ *        reversal by byte, half-word or word, a group no wider than the write. The running CRC is
+ *        kept unreversed in the CRC_DR storage word, REV_OUT reverses the low POLYSIZE bits of the
+ *        CRC_DR read only, the bits above read 0. The computation completes on the write: the input
+ *        buffer hides the 4 HCLK latency, 24.3.3, so no access stalls. CR.RESET reloads CRC_DR from
+ *        the low POLYSIZE bits of CRC_INIT and reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL
+ *        write does not. CRC_IDR is storage, untouched by both. Every reset kind restores the
+ *        description reset values. Each access the model refuses or deviates on logs once and
+ *        raises model_error under strict_peripherals, and a narrow read returns the stored bits.
+ *        The STM32L1 unit has DR, IDR and CR.RESET only. The STM32L4 unit is the programmable unit
+ *        with an 8-bit CRC_IDR, and its log records cite `crc_variant::access_rule` and
  *        `crc_variant::polynomial_rule`.
+ *
+ * @limits crc CRC
+ *
+ * @group all unmodelled
+ * - The RCC clock gate is not modelled.
+ *
+ * @group u5,h5,l4 note "Unverified on silicon"
+ * - The running CRC is kept unreversed in the CRC_DR storage word and REV_OUT reverses the low
+ *   POLYSIZE bits of the CRC_DR read only. RM0456 gives both readings for 32-bit data only,
+ *   unverified on silicon below that.
+ *
+ * @group u5,h5,l4 deviation "Differs from RM0456 and RM0351"
+ * - On the STM32U5, STM32H5 and STM32L4 a `CRC_DR` write that is not right-aligned is ignored
+ *   and logged, RM0456 24.4, RM0351 15.4.
+ * - An even polynomial, which RM0456 24.3.3 and RM0351 15.3.3 do not support, is computed anyway
+ *   and logged.
+ *
+ * @group all rule "Every family"
+ * - A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 and STM32L4
+ *   `CRC_IDR`, is ignored and logged. Such a read is logged.
+ *
+ * @group l1 rule
+ * - The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from
+ *   0xFFFFFFFF, with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word
+ *   its byte lanes repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038
+ *   11.3.4 states the repeated lanes. For a CPU store the repeated lanes, and the unit ignoring
+ *   the access size, are inferred. A DR write completes with no stall, where RM0038 4.3 stalls
+ *   it for the 4 HCLK of the computation. A narrow read of CRC_DR or CRC_CR and a narrow write
+ *   to CRC_CR log once, as RM0038 4.4 asks for words. RM0038 4.4 says "The CRC registers have to
+ *   be accessed by words (32 bits)", CRC_IDR included. The model takes byte and half-word
+ *   CRC_IDR accesses with no log, as ST's CMSIS header declares IDR a byte and LL_CRC_Write_IDR
+ *   stores one. Under `strict` each logged access raises `ModelError`.
+ * - The fixed polynomial is RM0038 4.2 and CR.RESET loads 0xFFFFFFFF, RM0038 4.3. The DMA
+ *   statement of RM0038 11.3.4 reads "the data are duplicated on the unused lanes of the
+ *   HWDATA[31:0] bus". RM0038 4.3 reads "CRC computation is done on the whole 32-bit data word",
+ *   the ground of the CPU store case above.
+ *
+ * @group l4 rule
+ * - The STM32L4 CRC, RM0351 15, is the programmable unit of the STM32U5 with an 8-bit CRC_IDR,
+ *   RM0351 15.4.2. RM0351 15.3.3 and 15.4 allow only 32-bit accesses to registers other than
+ *   CRC_DR, "For the other registers only 32-bit accesses are allowed". The model takes byte and
+ *   half-word CRC_IDR accesses with no log, as ST's CMSIS header declares IDR a byte and
+ *   LL_CRC_Write_IDR stores one.
  */
 class crc final : public dispatch_model<crc, crc_state>, public bus_reset_listener
 {

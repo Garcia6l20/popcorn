@@ -81,7 +81,7 @@ pymdownx.inlinehilite = {}
 pymdownx.superfences.custom_fences = [
   { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
 ]
-pymdownx.snippets.base_path = ["tests/docs", "examples"]
+pymdownx.snippets.base_path = ["tests/docs", "examples", "docs/support/generated"]
 pymdownx.snippets.check_paths = true
 pymdownx.snippets.dedent_subsections = true
 pymdownx.tabbed.alternate_style = true

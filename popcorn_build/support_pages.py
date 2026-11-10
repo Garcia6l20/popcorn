@@ -14,6 +14,7 @@ import popcorn
 from popcorn import PartDescription
 from popcorn.stm32 import PeripheralSupport, mcu, shipped_parts, support
 
+from popcorn_build import limits_docs
 from popcorn_build.example_parts import (
     EXAMPLE_PARTS,
     GEOMETRY_PARTS,
@@ -35,6 +36,15 @@ EXAMPLES = "examples"
 CLASS = "class"
 ATTACHES = "attaches"
 GEOMETRY_NOTE = "FLASH geometry cases"
+ROOT = Path(__file__).resolve().parents[1]
+LIMIT_ROOTS = (
+    ROOT / "native/src/periph/stm32",
+    ROOT / "native/include/popcorn/periph/stm32",
+    ROOT / "native/src/arch/armv8m",
+)
+SOURCE_URL = "https://github.com/Garcia6l20/popcorn/blob/main/"
+LIMITS = "limits"
+LIMITS_TABLE = "limits_table.inc"
 STATES = (TESTED, EXAMPLES, CLASS, ATTACHES)
 FAMILIES = "families"
 
@@ -376,6 +386,17 @@ def write(out: Path) -> list[Path]:
     for family in _by_family_and_line(parts):
         pages[family_file(family)] = family_page(family, parts, states)
     pages.update({f"{name}.md": part_page(part) for name, part in parts.items()})
+    limits = limits_docs.read_pages(LIMIT_ROOTS)
+    (out / LIMITS).mkdir(exist_ok=True)
+    pages.update(
+        {
+            f"{LIMITS}/{ident}.md": limits_docs.render_page(
+                page, lambda path: SOURCE_URL + path.relative_to(ROOT).as_posix()
+            )
+            for ident, page in limits.items()
+        }
+    )
+    pages[LIMITS_TABLE] = limits_docs.render_table(limits, f"../generated/{LIMITS}/")
     written: list[Path] = []
     for file, text in pages.items():
         path = out / file

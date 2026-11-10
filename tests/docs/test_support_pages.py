@@ -10,6 +10,7 @@ from pathlib import Path
 import popcorn.stm32
 import pytest
 
+from popcorn_build import limits_docs
 from popcorn_build.example_parts import (
     EXAMPLE_PARTS,
     GEOMETRY_PARTS,
@@ -17,6 +18,7 @@ from popcorn_build.example_parts import (
     ExampleParts,
     part_class,
 )
+from popcorn_build.support_pages import LIMIT_ROOTS
 
 ROOT = Path(__file__).parents[2]
 MODELS = ROOT / "native/src/periph/stm32"
@@ -84,6 +86,16 @@ def table_instances(page: str) -> list[str]:
 
 
 @pytest.mark.timeout(60)
+def test_each_limits_page_is_generated_from_its_blocks(generated: Path) -> None:
+    pages = limits_docs.read_pages(LIMIT_ROOTS)
+    assert sorted(p.stem for p in (generated / "limits").glob("*.md")) == sorted(pages)
+    table = (generated / "limits_table.inc").read_text()
+    for ident, page in pages.items():
+        assert f"[{page.title}](../generated/limits/{ident}.md)" in table
+        assert (generated / "limits" / f"{ident}.md").read_text().startswith(f"# {page.title}\n")
+
+
+@pytest.mark.timeout(60)
 def test_every_shipped_part_has_a_page(generated: Path) -> None:
     assert sorted(p.stem for p in generated.glob("*.md")) == sorted(
         [*popcorn.stm32.shipped_parts(), "cores", "parts"]
@@ -119,10 +131,20 @@ def section_sources() -> dict[str, str]:
     return found
 
 
+@cache
+def limit_pages() -> dict[str, limits_docs.Page]:
+    return limits_docs.read_pages(LIMIT_ROOTS)
+
+
+def has_limits_page(model: str) -> bool:
+    return any(model in {path.name for path in page.sources} for page in limit_pages().values())
+
+
 @pytest.mark.parametrize("model", limited_models())
 def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
     link = f"native/src/periph/stm32/{model})"
-    assert [heading for heading, source in section_sources().items() if link in source]
+    legacy = [heading for heading, source in section_sources().items() if link in source]
+    assert legacy or has_limits_page(model)
 
 
 def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
@@ -514,6 +536,11 @@ def section_bodies() -> dict[str, str]:
 def test_each_l1_model_has_a_limits_section_that_covers_the_stm32l1(model: str) -> None:
     link = f"native/src/periph/stm32/{model})"
     bodies = [body for body in section_bodies().values() if link in body.split("\n\n")[0]]
+    if not bodies:
+        pages = [p for p in limit_pages().values() if model in {f.name for f in p.sources}]
+        assert len(pages) == 1
+        assert any("l1" in g.scopes or "STM32L1" in g.body for g in pages[0].groups)
+        return
     assert len(bodies) == 1
     assert "STM32L1" in bodies[0]
 

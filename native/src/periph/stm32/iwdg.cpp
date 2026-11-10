@@ -65,37 +65,60 @@ struct iwdg_state
 };
 
 /**
- * @brief IWDG of the STM32U5 and STM32H5, RM0456 section 61 "Independent watchdog (IWDG)", of the
- *        STM32L1, RM0038 section 21, and of the STM32L4, RM0351 section 36. The 12-bit down-counter
- *        is derived from the LSI clock and the virtual time of its last reload, never ticked. `KR`
- *        0xCCCC starts it from 0xFFF and forces the LSI on through the RCC peer, 0xAAAA reloads it
- *        from RL, 0x5555 unlocks PR, RLR, WINR and EWCR until another key. PVU, RVU, WVU and EWU
- *        stay set for the variant's update cycles of the LSI after a write, six on the U5, RM0456
- *        Table 623, five on the L1, RM0038 21.4.4 "up to 5", inferred. The new prescaler applies
- *        then, a new window reloads the counter then, a new EWIT and EWIE apply then. The counter
- *        reaching 0, or a reload while it is above WIN, requests a watchdog reset. EWIF and the
- *        IWDG IRQ follow the counter reaching EWIT - 1 while EWIE is set. The variant says whether
- *        the window and the early wake-up exist, the L1 has neither, and the largest PR with its
- *        own divider. The kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is
- *        kept in virtual time, re-derived when the LSI rate changes. An LSI rate change keeps the
- *        partial division sequence, a stopped LSI drops it. An update flag falls only while the LSI
- *        runs, inferred. Deviations: the new prescaler restarts the division sequence when PVU
- *        falls, an error under one period of the old prescaled clock, a refresh reloads at the key
- *        write instead of one period later, EWIC acknowledges without the 0x5555 key, as
- *        LL_IWDG_ClearFlag_EWIF expects, and the watchdog starts only at the first `KR` 0xCCCC
- *        whatever the hardware watchdog option holds, `FLASH_OPTR.IWDG_SW` on the U5,
- *        `FLASH_OPTSR_CUR.IWDG_SW` on the H5 and `FLASH_OBR.IWDG_SW` on the L1, where RM0456 61.4.3
- *        and RM0038 21.3.1 start it at power-on with IWDG_SW 0. With
- *        `iwdg_variant::hardware_option`, the STM32L4, the watchdog starts at every reset when
- *        FLASH_OPTR.IWDG_SW reads 0, RM0351 36.3.3, read once every model has reset, so after the
- *        option load of that reset. RM0351 names power-on only: the start after the other resets is
- *        inferred.
- *        Once started it runs until reset. While the machine holds its core with DBGMCU
- *        `DBG_IWDG_STOP` set, the counter, the early wake-up and the register update
- *        synchronisers stop at the time of the hold and resume at the release, their phase kept
- *        to the picosecond. RM0456 says only "IWDG is frozen while CPU is in debug mode": that
- *        the update synchronisers stop with the counter is an assumption. The bit is read at the
- *        hold.
+ * @brief IWDG of the STM32U5, STM32H5, STM32L1 and STM32L4, a 12-bit down-counter derived from the
+ *        LSI clock and the virtual time of its last reload, never ticked. The sections are RM0456
+ *        61 "Independent watchdog (IWDG)", RM0038 21 and RM0351 36. `KR` 0xCCCC starts it from
+ *        0xFFF and forces the LSI on through the RCC peer, 0xAAAA reloads it from RL, 0x5555
+ *        unlocks PR, RLR, WINR and EWCR until another key. PVU, RVU, WVU and EWU stay set for the
+ *        variant's update cycles of the LSI after a write, six on the U5, RM0456 Table 623, five on
+ *        the L1, RM0038 21.4.4 "up to 5", inferred. The new prescaler applies then, a new window
+ *        reloads the counter then, a new EWIT and EWIE apply then. The counter reaching 0, or a
+ *        reload while it is above WIN, requests a watchdog reset. EWIF and the IWDG IRQ follow the
+ *        counter reaching EWIT - 1 while EWIE is set. The variant says whether the window and the
+ *        early wake-up exist, the L1 has neither, and the largest PR with its own divider. The
+ *        kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is kept in virtual
+ *        time, re-derived when the LSI rate changes. An LSI rate change keeps the partial division
+ *        sequence, a stopped LSI drops it. With `iwdg_variant::hardware_option`, the STM32L4, the
+ *        watchdog starts at every reset when FLASH_OPTR.IWDG_SW reads 0, read once every model has
+ *        reset, so after the option load of that reset. Once started it runs until reset.
+ *
+ * @limits iwdg IWDG
+ *
+ * @group all rule "Every family"
+ * - A new prescaler restarts the division sequence when PVU falls, an error below one period of
+ *   the old prescaled clock.
+ * - A refresh reloads at the key write, not one period later.
+ * - EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
+ *
+ * @group u5,h5,l1 deviation "Differs from RM0456 and RM0038"
+ * - The IWDG starts at the first `KR` 0xCCCC whatever the hardware watchdog option holds:
+ *   FLASH_OPTR.IWDG_SW on the STM32U5, FLASH_OPTSR_CUR.IWDG_SW on the STM32H5, FLASH_OBR.IWDG_SW
+ *   on the STM32L1. RM0456 61.4.3 and RM0038 21.3.1 start it at power-on with IWDG_SW 0.
+ *
+ * @group l1 rule
+ * - The STM32L1 IWDG, RM0038 21, has KR, PR, RLR and SR with PVU and RVU. A refresh reloads at
+ *   any counter value. PR 110 and 111 both divide by 256. PVU and RVU fall 5 LSI cycles after
+ *   the write, the "up to 5" of RM0038 21.4.4 taken as 5, inferred, 6 on the STM32U5 and
+ *   STM32H5.
+ *
+ * @group all rule "Update flags"
+ * - An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
+ *   starts keeps its flag set until the LSI is ready, inferred.
+ *
+ * @group l4 rule
+ * - The STM32L4 IWDG, RM0351 36, has KR, PR, RLR, SR with PVU, RVU and WVU, and WINR. PR 110 and
+ *   111 both divide by 256. RM0351 36.4 says an update "takes up to five LSI/prescaled clock
+ *   cycles". The model clears PVU, RVU and WVU 5 LSI cycles after the write, whatever the
+ *   prescaler, inferred. With FLASH_OPTR.IWDG_SW 0 the IWDG starts at every reset without a key,
+ *   RM0351 36.3.3. RM0351 names power-on only, the start after the other resets is inferred.
+ *   FLASH_OPTR.IWDG_STOP and IWDG_STDBY are stored: the model runs in Run mode only.
+ *
+ * @group all note "Debug hold"
+ * - While the machine holds its core with DBGMCU `DBG_IWDG_STOP` set, the counter, the early
+ *   wake-up and the register update synchronisers stop at the time of the hold and resume at the
+ *   release, their phase kept to the picosecond. RM0456 says only "IWDG is frozen while CPU is in
+ *   debug mode": that the update synchronisers stop with the counter is inferred. The bit is
+ *   read at the hold.
  */
 class iwdg final : public dispatch_model<iwdg, iwdg_state>,
                    public clock_listener,
