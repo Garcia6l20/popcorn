@@ -626,6 +626,41 @@ software trigger register is `DAC_SWTRIGR`.
   the spurious activation of the output buffer on PA4 and PA5 by a fast falling edge, status A, is an
   electrical effect outside the model.
 
+STM32U5 DAC1, RM0456 section 35, and STM32H5 DAC1, RM0481 section 30, the L4 model with another
+register layout. The digital interface runs on the AHB clock, `dac_hclk`: loads take one cycle with
+TENx 0 and three cycles after a trigger, RM0456 35.4.6. The clock selection of RCC ADCDACSEL does
+not change the load timing.
+
+- TSELx 0000 is SWTRIGx and 0001 to 1111 listen to `dac_chx_trg1` to `trg15`, RM0456 Table 342 and
+  RM0481 Table 306: `tim1_trgo`, `tim2_trgo`, `tim4_trgo`, `tim5_trgo`, `tim6_trgo`, `tim7_trgo`,
+  `tim8_trgo`, `tim15_trgo`, trg9 and trg10 reserved, trg11 `lptim1_ch1`, trg12 `lptim3_ch1` on the
+  STM32U5 and `lptim2_ch1` on the STM32H5, trg13 `exti9`, trg14 and trg15 reserved. The STM32H5
+  trg14 and trg15 are `play_out11` and `play_out12` of the STM32H533 and STM32H543 only. A
+  reserved TSELx, or an LPTIM source that no model produces, with TENx set logs one `model_warning`
+  and loads on no source. Under strict_peripherals it raises `ModelError` and leaves `DAC_CR` as
+  before the write.
+- DACxRDY sets the typical `tWAKEUP` of the datasheet after ENx rises and clears with ENx, RM0456
+  35.4.4: 4.2 us with the output buffer on and 2 us with it off on the STM32U5, 5 us and 2 us on the
+  STM32H5, DS13737 and DS14121. The datasheet value is the analog settling time, so the DACxRDY
+  duration is inferred. A holding register write or a SWTRIGx write with ENx 1 and DACxRDY 0, which
+  RM0456 35.4.4 does not allow, logs one `model_warning`. Under strict_peripherals it raises
+  `ModelError` and leaves the register. A hardware trigger in that window loads DAC_DORx and logs
+  nothing, inferred, since the manual gives no effect. ENx cleared before DACxRDY sets cancels the
+  wake-up.
+- SINFORMATx inverts bit 11 of the data when it loads into `DAC_DORx`, RM0456 35.4.5 Table 343. The
+  inversion is applied to the holding value before the wave is added, inferred.
+- `DACCxDHRB` of `DAC_DHR12Rx`, `DAC_DHR12Lx` and `DAC_DHR8Rx` store what is written and read back
+  through the three views. DORSTATx stays 0: it applies to the DMA double data mode.
+- DMADOUBLEx written while ENx or DMAENx is 1 keeps the old bit, RM0456 35.4.9. It logs one
+  `model_warning` and raises `ModelError` under strict_peripherals, leaving `DAC_MCR`.
+- HFSEL is stored. It has no effect: the model has no conversion delay.
+- STM32U5 `DAC_MCR.MODEx` drives the pad and the on-chip peripherals as the STM32L4 table does. On the
+  STM32H5 MODEx 000, 010, 100 and 110 connect the external pin only, and 001, 011, 101 and 111 are
+  reserved, RM0481 30.7.16: a write of a reserved value keeps the old MODEx, logs one `model_warning`
+  and raises `ModelError` under strict_peripherals.
+- ES0499 2.2.8 and ES0565 2.2.31, kernel clock request and output voltage with another ADCDACSEL, are
+  clock-tree and electrical effects outside the model.
+
 ## DBGMCU
 
 Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dbgmcu.cpp)

@@ -82,6 +82,8 @@ struct dac_state
   std::array<std::uint32_t, channels>         internal{};
   std::array<std::uint8_t, channels>          internal_set{};
   std::array<std::uint8_t, channels>          pad_driven{};
+  std::array<std::uint64_t, channels>         ready_event{};
+  std::array<std::uint16_t, channels>         dhrb{};
 
   friend auto operator==(dac_state const&, dac_state const&) -> bool = default;
 };
@@ -100,6 +102,10 @@ enum class rule : std::uint8_t
   refresh_locked,
   wave_untriggered,
   trigger_reserved,
+  trigger_unproduced,
+  not_ready,
+  mode_reserved,
+  double_locked,
   count,
 };
 
@@ -275,6 +281,9 @@ private:
     reg_ref   sample;
     field_ref hold;
     field_ref refresh;
+    field_ref ready;
+    field_ref signed_format;
+    field_ref double_data;
   };
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -298,6 +307,9 @@ private:
   void               drive_outputs();
   void               refresh_line();
   void               start_busy(std::size_t channel);
+  void               start_ready(std::size_t channel);
+  void               cancel_ready(std::size_t channel);
+  [[nodiscard]] auto not_ready(std::size_t channel) const -> bool;
   void               settle_busy(std::size_t channel, std::uint64_t ps);
   [[nodiscard]] auto lsi_periods_ps(std::uint64_t periods) const -> std::uint64_t;
   [[nodiscard]] auto phase_periods(std::size_t channel, sample_phase which) const -> std::uint64_t;
@@ -380,10 +392,17 @@ dac::dac(
       mode_{variant.mode_register ? reg("MCR") : reg_ref{}}, status_{reg("SR")},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
-      bus_{ctx.clock.domain("pclk1")}, lsi_{ctx.clock.domain("lsi")}, line_{&irq(variant.irq)},
+      bus_{ctx.clock.domain(variant.bus_clock)}, lsi_{ctx.clock.domain("lsi")},
+      line_{&irq(variant.irq)},
       requests_{
-          dma_signal{ctx.peers, lower(desc.name) + "_ch1_dma"},
-          dma_signal{ctx.peers, lower(desc.name) + "_ch2_dma"}}
+          dma_signal{
+              ctx.peers,
+              std::string{variant.dma_prefix.empty() ? lower(desc.name) : variant.dma_prefix}
+                  + "_ch1_dma"},
+          dma_signal{
+              ctx.peers,
+              std::string{variant.dma_prefix.empty() ? lower(desc.name) : variant.dma_prefix}
+                  + "_ch2_dma"}}
 {
   bind(std::array<write_entry<dac>, 1>{{{variant.swtrig_register, &dac::trigger_written}}});
   if(variant.calibration)
@@ -423,6 +442,9 @@ dac::dac(
         .sample             = variant.sample_hold ? reg(std::format("SHSR{}", n)) : reg_ref{},
         .hold               = present(variant.sample_hold, "SHHR", std::format("THOLD{}", n)),
         .refresh            = present(variant.sample_hold, "SHRR", std::format("TREFRESH{}", n)),
+        .ready              = present(variant.ready_flags, "SR", std::format("DAC{}RDY", n)),
+        .signed_format      = present(variant.signed_format, "MCR", std::format("SINFORMAT{}", n)),
+        .double_data        = present(variant.double_data, "MCR", std::format("DMADOUBLE{}", n)),
     };
   }
   restore_trim();
@@ -597,13 +619,21 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
           std::format("EN{0} set while CEN{0} is 1, not allowed by RM0351 19.4.11", n));
     }
     if(auto const hardware = variant_.hardware_index(unit.trigger_select.of(word));
-       unit.trigger_enable.of(word) != 0
-       and hardware
-       and variant_.hardware_triggers[*hardware].empty())
+       unit.trigger_enable.of(word) != 0 and hardware)
     {
-      refuse(
-          rule::trigger_reserved, "CR", control_, old,
-          std::format("TSEL{} selects a reserved trigger with TEN{} set", n, n));
+      auto const name = variant_.hardware_triggers[*hardware];
+      if(name.empty())
+      {
+        refuse(
+            rule::trigger_reserved, "CR", control_, old,
+            std::format("TSEL{} selects a reserved trigger with TEN{} set", n, n));
+      }
+      else if(std::ranges::contains(variant_.unproduced, name))
+      {
+        refuse(
+            rule::trigger_unproduced, "CR", control_, old,
+            std::format("TSEL{} selects {}, which no model produces, with TEN{} set", n, name, n));
+      }
     }
     if(unit.wave.of(word) == 3)
     {
@@ -624,8 +654,14 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
     auto const& unit = channel_[channel];
+    if(variant_.ready_flags and unit.enable.of(old) == 0 and get(regs_, unit.enable) != 0)
+    {
+      start_ready(channel);
+    }
     if(get(regs_, unit.enable) == 0)
     {
+      update(regs_, unit.ready, 0);
+      cancel_ready(channel);
       cancel_phase(channel);
       state_.phase[channel]    = std::to_underlying(sample_phase::off);
       state_.phase_ps[channel] = 0;
@@ -663,6 +699,32 @@ void dac::mode_written(std::uint32_t old, std::uint32_t now)
       refuse(
           rule::mode_locked, "MCR", mode_, old,
           std::format("MODE{0} written while EN{0} or CEN{0} is 1, ignored by RM0351 19.7.16", n));
+    }
+  }
+  for(std::size_t index = 0; index < channels; ++index)
+  {
+    auto const& unit = channel_[index];
+    auto const  n    = index + 1;
+    if(unit.mode.of(word) != unit.mode.of(old)
+       and (variant_.reserved_modes >> unit.mode.of(word) & 1u) != 0)
+    {
+      word = unit.mode.with(word, unit.mode.of(old));
+      regs_.poke(mode_.offset, word);
+      refuse(
+          rule::mode_reserved, "MCR", mode_, old,
+          std::format("MODE{} written with a reserved value, the old MODE{} kept", n, n));
+    }
+    if(unit.double_data.of(word) != unit.double_data.of(old)
+       and (get(regs_, unit.enable) != 0 or get(regs_, unit.dma) != 0))
+    {
+      word = unit.double_data.with(word, unit.double_data.of(old));
+      regs_.poke(mode_.offset, word);
+      refuse(
+          rule::double_locked, "MCR", mode_, old,
+          std::format(
+              "DMADOUBLE{0} written while EN{0} or DMAEN{0} is 1, which RM0456 35.4.9 does not "
+              "allow",
+              n));
     }
   }
   for(std::size_t index = 0; index < channels; ++index)
@@ -751,6 +813,32 @@ template <std::size_t Channel> void dac::sample_written(std::uint32_t old, std::
     return;
   }
   start_busy(Channel);
+}
+
+void dac::start_ready(std::size_t channel)
+{
+  auto const mode  = get(regs_, channel_[channel].mode);
+  auto const delay = (variant_.buffer_off_modes >> mode & 1u) != 0 ? variant_.wakeup_no_buffer_ps
+                                                                   : variant_.wakeup_buffer_ps;
+  state_.ready_event[channel] =
+      ctx_.events.schedule_at(
+          vtime{now_ps() + delay}, static_cast<std::uint32_t>(3 * channels + channel),
+          state_.generation, ctx_.clock)
+      + 1;
+}
+
+void dac::cancel_ready(std::size_t channel)
+{
+  if(auto const seq = std::exchange(state_.ready_event[channel], 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+  }
+}
+
+auto dac::not_ready(std::size_t channel) const -> bool
+{
+  auto const& unit = channel_[channel];
+  return variant_.ready_flags and get(regs_, unit.enable) != 0 and get(regs_, unit.ready) == 0;
 }
 
 void dac::start_busy(std::size_t channel)
@@ -856,8 +944,21 @@ void dac::restore_trim()
   }
 }
 
-void dac::trigger_written(std::uint32_t, std::uint32_t now)
+void dac::trigger_written(std::uint32_t old, std::uint32_t now)
 {
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
+    if(channel_[channel].software.of(now) != 0 and not_ready(channel))
+    {
+      regs_.poke(channel_[0].software.offset, 0);
+      refuse(
+          rule::not_ready, "SWTRGR", reg(variant_.swtrig_register), old,
+          std::format(
+              "a software trigger while EN{0} is 1 and DAC{0}RDY is 0, which RM0456 35.4.4 does "
+              "not allow",
+              channel + 1));
+    }
+  }
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
     if(channel_[channel].software.of(now) != 0
@@ -870,29 +971,36 @@ void dac::trigger_written(std::uint32_t, std::uint32_t now)
   regs_.poke(channel_[0].software.offset, 0);
 }
 
-template <holding Which> void dac::holding_written(std::uint32_t, std::uint32_t now)
+template <holding Which> void dac::holding_written(std::uint32_t old, std::uint32_t now)
 {
   using enum holding;
   std::array<std::optional<std::uint32_t>, channels> data;
+  std::array<std::optional<std::uint32_t>, channels> second;
   switch(Which)
   {
     case right12_1:
-      data[0] = now & data_mask;
+      data[0]   = now & data_mask;
+      second[0] = now >> 16 & data_mask;
       break;
     case left12_1:
-      data[0] = now >> 4 & data_mask;
+      data[0]   = now >> 4 & data_mask;
+      second[0] = now >> 20 & data_mask;
       break;
     case right8_1:
-      data[0] = (now & 0xFF) << 4;
+      data[0]   = (now & 0xFF) << 4;
+      second[0] = (now >> 8 & 0xFF) << 4;
       break;
     case right12_2:
-      data[1] = now & data_mask;
+      data[1]   = now & data_mask;
+      second[1] = now >> 16 & data_mask;
       break;
     case left12_2:
-      data[1] = now >> 4 & data_mask;
+      data[1]   = now >> 4 & data_mask;
+      second[1] = now >> 20 & data_mask;
       break;
     case right8_2:
-      data[1] = (now & 0xFF) << 4;
+      data[1]   = (now & 0xFF) << 4;
+      second[1] = (now >> 8 & 0xFF) << 4;
       break;
     case right12_dual:
       data = {now & data_mask, now >> 16 & data_mask};
@@ -903,6 +1011,18 @@ template <holding Which> void dac::holding_written(std::uint32_t, std::uint32_t 
     case right8_dual:
       data = {(now & 0xFF) << 4, (now >> 8 & 0xFF) << 4};
       break;
+  }
+  for(std::size_t channel = 0; channel < channels; ++channel)
+  {
+    if(data[channel] and not_ready(channel))
+    {
+      refuse(
+          rule::not_ready, "DHR", holding_[std::to_underlying(Which)], old,
+          std::format(
+              "a holding register write while EN{0} is 1 and DAC{0}RDY is 0, which RM0456 35.4.4 "
+              "does not allow",
+              channel + 1));
+    }
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
@@ -928,6 +1048,10 @@ template <holding Which> void dac::holding_written(std::uint32_t, std::uint32_t 
       continue;
     }
     auto const changed = *data[channel] != state_.dhr[channel];
+    if(variant_.double_data and second[channel])
+    {
+      state_.dhrb[channel] = static_cast<std::uint16_t>(*second[channel]);
+    }
     store(channel, *data[channel]);
     if(changed and state_.phase[channel] != std::to_underlying(sample_phase::off))
     {
@@ -950,16 +1074,12 @@ void dac::mirror()
 {
   auto const                         one = std::uint32_t{state_.dhr[0]};
   auto const                         two = std::uint32_t{state_.dhr[1]};
+  auto const                         b1  = std::uint32_t{state_.dhrb[0]};
+  auto const                         b2  = std::uint32_t{state_.dhrb[1]};
   std::array<std::uint32_t, 9> const views{
-      one,
-      one << 4,
-      one >> 4,
-      two,
-      two << 4,
-      two >> 4,
-      one | two << 16,
-      one << 4 | two << 20,
-      one >> 4 | (two >> 4) << 8};
+      one | b1 << 16,  one << 4 | b1 << 20,  one >> 4 | (b1 >> 4) << 8,
+      two | b2 << 16,  two << 4 | b2 << 20,  two >> 4 | (b2 >> 4) << 8,
+      one | two << 16, one << 4 | two << 20, one >> 4 | (two >> 4) << 8};
   for(std::size_t index = 0; index < views.size(); ++index)
   {
     regs_.poke(holding_[index].offset, views[index]);
@@ -1043,7 +1163,9 @@ void dac::transfer(std::size_t channel, load_kind kind)
 {
   auto const& unit = channel_[channel];
   auto const  term = kind == load_kind::write ? 0u : wave_term(channel);
-  regs_.poke(unit.output.offset, std::min(data_mask, std::uint32_t{state_.dhr[channel]} + term));
+  auto const  data =
+      std::uint32_t{state_.dhr[channel]} ^ (get(regs_, unit.signed_format) != 0 ? 0x800u : 0u);
+  regs_.poke(unit.output.offset, std::min(data_mask, data + term));
   if(state_.phase[channel] != std::to_underlying(sample_phase::off))
   {
     start_sample(channel);
@@ -1202,6 +1324,12 @@ void dac::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     advance_phase(kind - 2 * channels, now_ps());
   }
+  else if(kind < 4 * channels)
+  {
+    auto const channel          = kind - 3 * channels;
+    state_.ready_event[channel] = 0;
+    update(regs_, channel_[channel].ready, 1);
+  }
 }
 
 auto dac::lsi_periods_ps(std::uint64_t periods) const -> std::uint64_t
@@ -1358,6 +1486,7 @@ void dac::restore_reset_values()
   {
     release(channel);
     cancel_phase(channel);
+    cancel_ready(channel);
   }
   auto const generation   = state_.generation + 1;
   auto const internal     = state_.internal;
@@ -1387,6 +1516,10 @@ namespace
 constexpr auto dac_row_table = std::to_array<builtin>({
     row_of<^^dac_factory, ^^l4_dac, ^^board::supply>(
         {.ip = "DAC", .ip_version_glob = "dacif_v2_0_Cube", .families = family::l4}),
+    row_of<^^dac_factory, ^^u5_dac, ^^board::supply>(
+        {.ip = "DAC", .ip_version_glob = "dacif_v2_0_U5*", .families = family::u5}),
+    row_of<^^dac_factory, ^^h5_dac, ^^board::supply>(
+        {.ip = "DAC", .ip_version_glob = "dacif_v5*", .families = family::h5}),
     row_of<^^dac_factory, ^^l1_dac, ^^board::supply>(
         {.ip = "DAC", .ip_version_glob = "dacif_v1*", .families = family::l1}),
 });

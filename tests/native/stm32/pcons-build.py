@@ -194,6 +194,7 @@ u575_programs = [
         ("stm32-tim", "test_tim.cpp"),
         ("stm32-iwdg", "test_iwdg.cpp"),
         ("stm32-wwdg-u5", "test_wwdg_u5.cpp"),
+        ("stm32-dac-u5", "test_dac_u5.cpp"),
         ("stm32-rtc", "test_rtc.cpp"),
         ("stm32-spi", "test_spi.cpp"),
         ("stm32-i2c", "test_i2c.cpp"),
@@ -269,6 +270,18 @@ wwdg_h573.private.include_dirs.append(private_dir)
 for _, target in h573_firmwares.values():
     if target is not None:
         wwdg_h573.depends(target)
+
+dac_h573 = add_doctest(
+    "stm32-dac-h5",
+    [here / "test_dac_h5.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+dac_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        dac_h573.depends(target)
 
 flash_h573 = add_doctest(
     "stm32-flash-h573",
