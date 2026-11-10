@@ -19,6 +19,8 @@ private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
+u575cgu = cached_st_description("STM32U575CGUx", "POPCORN_U575CGU_DESC")
+u585 = cached_st_description("STM32U585AIIx", "POPCORN_U585_DESC")
 h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
 l152re = cached_st_description("STM32L152RETx", "POPCORN_L152RE_DESC")
 l152rb = cached_st_description("STM32L152RBTx", "POPCORN_L152RB_DESC")
@@ -144,6 +146,8 @@ l4_env = {
 }
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
+    "POPCORN_U575CGU_DESC": str(u575cgu),
+    "POPCORN_U585_DESC": str(u585),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
     **h573_env,
     "POPCORN_MDF_VECTORS": str(periph_data / "mdf"),
@@ -207,6 +211,7 @@ u575_programs = [
         ("stm32-adc", "test_adc.cpp"),
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
+        ("stm32-lpgpio", "test_lpgpio.cpp"),
         ("stm32-crs", "test_crs.cpp"),
         ("stm32-hash", "test_hash.cpp"),
         ("stm32-rng", "test_rng.cpp"),

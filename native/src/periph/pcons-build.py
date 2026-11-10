@@ -24,6 +24,7 @@ stm32 = [
         "tim.cpp",
         "iwdg.cpp",
         "wwdg.cpp",
+        "lpgpio.cpp",
         "lptim.cpp",
         "rtc.cpp",
         "rtc_classic.cpp",

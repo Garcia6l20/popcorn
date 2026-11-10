@@ -55,8 +55,8 @@ def support(description: PartDescription, *, trustzone: bool = False) -> list[Pe
     It asks the native registry, as a machine built now with no board model would: the latest
     registration of the IP whose glob matches the IP version serves it. A built-in model whose
     factory declines an instance, such as the GTZC models without TrustZone, counts as no model,
-    while `row` still names the selected row. An instance no row lists, such as LPGPIO1, has
-    no row either. Board models and plugin models are set per machine and do not show here.
+    while `row` still names the selected row. An instance no row lists has no row either. Board
+    models and plugin models are set per machine and do not show here.
 
     Args:
         description: The part, such as `mcu("STM32U575QGIx")`.

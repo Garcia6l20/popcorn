@@ -105,8 +105,7 @@ inline constexpr gpio_variant l4_gpio{
     .names         = l1_gpio_names};
 
 /**
- * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7. Returns no model
- *        for LPGPIO1.
+ * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7.
  * @param variant What differs between the ports of the family the row serves.
  */
 [[nodiscard]] auto gpio_factory(gpio_variant variant) -> model_factory;

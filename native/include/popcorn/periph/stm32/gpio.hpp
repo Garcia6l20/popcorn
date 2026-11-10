@@ -252,6 +252,23 @@ public:
   virtual void drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) = 0;
 
   /**
+   * @brief Drives the digital level of a pin from a model of the MCU that owns the pad in an
+   *        alternate function, such as the LPGPIO, or releases it. The chip drive acts only while
+   *        the pin is in alternate function mode, whatever AFSEL selects, with the precedence of
+   *        an output pin: a low level wins, a high level on a push-pull pin (`GPIOx_OTYPER` 0)
+   *        wins over a board drive of drive(), and a high level on an open-drain pin releases the
+   *        pin to the board drive, else to the `GPIOx_PUPDR` pull-up. That precedence and the
+   *        action for every AFSEL are inferred. The chip drive belongs to its driver: the port
+   *        keeps it through a machine reset, a GPIOx bus reset and a pin mode change, a snapshot
+   *        restores it, and the driver releases it. The level reaches the change listeners, the
+   *        EXTI model and the trigger_sink peers like any other change of the pin.
+   * @param pin Pin number, a pin of the port.
+   * @param level Level driven, empty to release the chip drive.
+   * @throws config_error when the port has no pin @p pin.
+   */
+  virtual void drive_chip_digital(std::uint8_t pin, std::optional<bool> level) = 0;
+
+  /**
    * @brief Analog level of a pin, as an ADC channel on its pad converts it: the chip slot when
    *        set, else the board slot when set, else 0. With both slots set the chip slot wins and
    *        the first overlap on a pin logs one model_warning per machine life.

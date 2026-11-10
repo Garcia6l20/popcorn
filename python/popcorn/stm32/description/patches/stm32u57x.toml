@@ -115,3 +115,10 @@ peripheral = "RCC"
 register = "RCC_AHB2ENR2"
 reset = 0x00000000
 source = "RM0456 Rev 7, 11.8.31 RCC_AHB2ENR2: reset value 0x0000 0000 for STM32U535/545/575/585, 0x8000 0000 for STM32U59x/5Ax, where SRAM5EN resets to 1. ST's STM32U575 and STM32U585 SVDs give 0x80000000"
+
+[[fields]]
+instances = ["LPGPIO1"]
+registers = ["LPGPIO_BRR"]
+fields = ["BRy15", "BRy14", "BRy13", "BRy12", "BRy11", "BRy10", "BRy9", "BRy8", "BRy7", "BRy6", "BRy5", "BRy4", "BRy3", "BRy2", "BRy1", "BRy0"]
+acc = "write_only"
+source = "RM0456 Rev 7, 14.4.5: LPGPIO_BRR bits BRy are write-only and a read returns zero. The STM32U575 and STM32U585 SVDs declare them read-only, the other STM32U5 SVDs declare them write-only"

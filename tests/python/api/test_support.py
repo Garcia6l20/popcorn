@@ -79,6 +79,7 @@ U575_BUILTIN = [
     "ADC1",
     "ADC12",
     "OTG_FS",
+    "LPGPIO1",
 ]
 U575_TRUSTZONE_ONLY = [
     "GTZC1_MPCBB1",
@@ -269,8 +270,10 @@ def test_an_instance_no_row_lists_has_no_row() -> None:
     found = {s.name: s for s in support(U575)}
     assert found["COMP"].row is None
     assert found["COMP"].source == "none_no_row"
-    assert found["LPGPIO1"].row is None
-    assert found["LPGPIO1"].source == "none_no_row"
+    assert found["OCTOSPIM"].row is None
+    assert found["OCTOSPIM"].source == "none_no_row"
+    assert found["LPGPIO1"].source == "row"
+    assert found["LPGPIO1"].row == "GPIO/STM32U5x_gpio_*/u5/LPGPIO1"
 
 
 def test_a_factory_that_declines_an_instance_keeps_its_row() -> None:

@@ -31,6 +31,21 @@ inline auto u575() -> part_description const&
   return desc;
 }
 
+/** @brief The shipped STM32U575CGUx description, `POPCORN_U575CGU_DESC`: the 48-pin package, 7 of
+ *         the 16 LPGPIO1 pads bonded. */
+inline auto u575cgu() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_U575CGU_DESC");
+  return desc;
+}
+
+/** @brief The shipped STM32U585AIIx description, `POPCORN_U585_DESC`, read once. */
+inline auto u585() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_U585_DESC");
+  return desc;
+}
+
 /** @brief The STM32H573 description built from ST's files, `POPCORN_H573_DESC`, read once. */
 inline auto h573() -> part_description const&
 {

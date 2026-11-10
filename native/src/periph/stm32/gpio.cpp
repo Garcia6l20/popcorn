@@ -98,6 +98,8 @@ struct gpio_state
 {
   std::uint32_t                                driven{};
   std::uint32_t                                driven_high{};
+  std::uint32_t                                chip_driven{};
+  std::uint32_t                                chip_high{};
   std::uint32_t                                lock_step{};
   std::uint32_t                                lock_value{};
   std::vector<pending_edge>                    edges;
@@ -187,6 +189,15 @@ struct watch_table
  *        from the two slots alone, in every pin mode, an output pin's level included. Listeners
  *        run before a slot changes. Snapshots save both slots.
  *
+ *        A model that owns a pad in an alternate function, such as the LPGPIO, drives its digital
+ *        level through drive_chip_digital(). The drive acts while the pin is in alternate
+ *        function mode, whatever AFSEL selects, and has the precedence of an output pin: a low
+ *        level wins, a high level on a push-pull pin wins over a board drive, and a high level on
+ *        an open-drain pin releases the pin to the board drive, else to the PUPDR pull-up. The
+ *        drive survives every reset and a pin mode change, its driver releases it, and a
+ *        snapshot saves it. That the precedence is the output pin's and that the drive acts for
+ *        every AFSEL are inferred, the reference manuals describe neither.
+ *
  *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
  *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER, OSPEEDR,
  *        PUPDR, IDR, ODR, BSRR, LCKR, AFRL, AFRH, BRR and HSLVR, with no illegal access event.
@@ -226,6 +237,7 @@ public:
   void drive_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) override;
   [[nodiscard]] auto analog_drive(std::uint8_t pin) const -> std::optional<std::uint32_t> override;
   void drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts) override;
+  void drive_chip_digital(std::uint8_t pin, std::optional<bool> level) override;
   [[nodiscard]] auto analog_level(std::uint8_t pin) const -> std::uint32_t override;
   [[nodiscard]] auto on_analog_changing(std::move_only_function<void(std::uint8_t pin)> listener)
       -> subscription override;
@@ -676,8 +688,21 @@ auto gpio::computed() const -> std::uint32_t
           high = get(regs_, type_[pin]) == 0 or floating_level;
         }
         break;
-      case pin_mode::input:
       case pin_mode::alternate:
+        if((state_.chip_driven & bit) == 0)
+        {
+          high = floating_level;
+        }
+        else if((state_.chip_high & bit) == 0)
+        {
+          high = false;
+        }
+        else
+        {
+          high = get(regs_, type_[pin]) == 0 or floating_level;
+        }
+        break;
+      case pin_mode::input:
         high = floating_level;
         break;
       case pin_mode::analog:
@@ -1174,6 +1199,15 @@ auto gpio::analog_drive(std::uint8_t pin) const -> std::optional<std::uint32_t>
 {
   check_pin(pin);
   return state_.analog_board[pin];
+}
+
+void gpio::drive_chip_digital(std::uint8_t pin, std::optional<bool> level)
+{
+  check_pin(pin);
+  auto const bit     = std::uint32_t{1} << pin;
+  state_.chip_driven = level ? state_.chip_driven | bit : state_.chip_driven & ~bit;
+  state_.chip_high   = level and *level ? state_.chip_high | bit : state_.chip_high & ~bit;
+  settle(true);
 }
 
 void gpio::drive_chip_analog(std::uint8_t pin, std::optional<std::uint32_t> microvolts)
