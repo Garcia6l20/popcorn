@@ -365,6 +365,7 @@ for program, source in (
     ("stm32-i2c-l1", "test_i2c_l1.cpp"),
     ("stm32-tim-l1", "test_tim_l1.cpp"),
     ("stm32-iwdg-l1", "test_iwdg_l1.cpp"),
+    ("stm32-dac-l1", "test_dac_l1.cpp"),
     ("stm32-wwdg-l1", "test_wwdg_l1.cpp"),
     ("stm32-crc-l1", "test_crc_l1.cpp"),
     ("stm32-rtc-l1", "test_rtc_l1.cpp"),

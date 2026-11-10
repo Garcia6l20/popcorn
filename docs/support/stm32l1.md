@@ -59,12 +59,13 @@ each model leaves out.
 | ADC | ADC | channels, internal channels, the analog watchdog |
 | RTC | RTC | calendar, wakeup timer, alarms, backup registers |
 | IWDG, CRC | IWDG, CRC | fixed CRC-32 polynomial |
+| DAC | DAC | two channels, triggers, waves, DMA, the pad |
 | WWDG | WWDG | window, early wake-up interrupt, `APB1RSTR.WWDGRST` |
 | USB | USB, USB_SRAM | full-speed device with the packet memory |
 | DBGMCU | DBGMCU | `DBGMCU_IDCODE` reads the die |
 
 The model column of a part page marks the instances without a model as `none`. On the STM32L1
-these are COMP, DAC, OPAMP, RI, LCD, AES, FSMC and SDIO. They keep plain register storage.
+these are COMP, OPAMP, RI, LCD, AES, FSMC and SDIO. They keep plain register storage.
 A firmware access logs one `model_warning` per register and raises `ModelError` under `strict`.
 
 ## Boot memory

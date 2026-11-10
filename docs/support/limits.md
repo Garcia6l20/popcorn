@@ -603,6 +603,29 @@ STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock.
 - In Stop 0 and Stop 1 a channel keeps its level and a sample and hold channel runs its phases, as
   RM0351 Table 131 states for the sample and hold mode, since popcorn models no Stop entry.
 
+STM32L1 DAC, RM0038 section 13, the same model as a subset of the STM32L4 one. It has no
+self-calibration (`CENx`, `DAC_CCR`, `CAL_FLAGx`), no `DAC_MCR` and no sample and hold, and its
+software trigger register is `DAC_SWTRIGR`.
+
+- With ENx 1 the channel drives its pad, PA4 or PA5, with `DAC_DORx` x VDDA / 4096 from each load on.
+  The output drives the pad only. BOFFx is stored and has no effect on the level, inferred.
+- TSELx follows RM0038 Table 68: 000 `tim6_trgo`, 010 `tim7_trgo`, 011 `tim9_trgo`, 100
+  `tim2_trgo`, 101 `tim4_trgo`, 110 `exti9`, 111 SWTRIGx. TSELx 001 is reserved: a `DAC_CR` write
+  with TENx set that selects it loads on no source, logs one `model_warning`, and raises
+  `ModelError` under strict_peripherals, leaving `DAC_CR` as before the write.
+- The loads, the waves, the holding register views, DMAENx with `dac_ch1_dma` and `dac_ch2_dma` on
+  DMA1 channels 2 and 3, DMAUDRx and the interrupt line `DAC_IRQn` follow the STM32L4 rules above
+  with RM0038 13.3 in place of RM0351 19.4.
+- ES0125, ES0224, ES0240, ES0241, ES0242 and ES0578 hold the same three DAC items, 2.6.1 to 2.6.3 in
+  ES0125, ES0240 and ES0241 and 2.5.1 to 2.5.3 in the others. 2.x.1, the DMA request not cleared by
+  clearing DMAENx or the DAC clock, status A, is reproduced: a high `dac_chx_dma` stays high until a
+  DMA transfer acknowledges it. 2.x.2, DMAUDRx not set when an internal trigger lands on the cycle of
+  the DMA acknowledge, status N: popcorn sets DMAUDRx by the rule above at every load, also on the
+  cycle of the acknowledge, and a firmware that mixes software and hardware triggers can see
+  DMAUDRx where silicon does not. 2.x.3,
+  the spurious activation of the output buffer on PA4 and PA5 by a fast falling edge, status A, is an
+  electrical effect outside the model.
+
 ## DBGMCU
 
 Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dbgmcu.cpp)

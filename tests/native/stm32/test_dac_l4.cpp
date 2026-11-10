@@ -434,6 +434,31 @@ TEST_CASE(
   CHECK(r.read(dac1 + dor1) == 0x333);
 }
 
+TEST_CASE("checklist 39: the L4 DAC row needs DAC_CCR, DAC_MCR, DAC_SHSR1 and the CEN1 field")
+{
+  CHECK_NOTHROW(stm32_fixture(l476rc(), firmware));
+  for(auto const name : {"CCR", "MCR", "SHSR1"})
+  {
+    CAPTURE(name);
+    auto desc = l476rc();
+    auto unit = std::ranges::find(
+        desc.peripherals, std::string_view{"DAC1"}, &popcorn::peripheral_desc::name);
+    REQUIRE(unit != desc.peripherals.end());
+    std::erase_if(
+        unit->registers, [&](popcorn::register_desc const& reg) { return reg.name == name; });
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), firmware), popcorn::config_error);
+  }
+  auto desc = l476rc();
+  auto unit = std::ranges::find(
+      desc.peripherals, std::string_view{"DAC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != desc.peripherals.end());
+  for(auto& reg : unit->registers)
+  {
+    std::erase_if(reg.fields, [](popcorn::field_desc const& one) { return one.name == "CEN1"; });
+  }
+  CHECK_THROWS_AS(stm32_fixture(std::move(desc), firmware), popcorn::config_error);
+}
+
 TEST_CASE("DMAEN, DMAUDRIE, a hardware TSEL and WAVE with TEN log nothing, also under strict")
 {
   rig const quiet{true};

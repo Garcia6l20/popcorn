@@ -30,12 +30,10 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::size_t   channels   = 2;
-constexpr std::size_t   depth      = 3;
-constexpr std::uint32_t data_mask  = 0xFFF;
-constexpr std::uint16_t lfsr_seed  = 0xAAA;
-constexpr std::uint8_t  pad_modes  = 0b0111'0111;
-constexpr std::uint8_t  chip_modes = 0b1110'1010;
+constexpr std::size_t   channels  = 2;
+constexpr std::size_t   depth     = 3;
+constexpr std::uint32_t data_mask = 0xFFF;
+constexpr std::uint16_t lfsr_seed = 0xAAA;
 
 enum class sample_phase : std::uint8_t
 {
@@ -101,6 +99,7 @@ enum class rule : std::uint8_t
   hold_locked,
   refresh_locked,
   wave_untriggered,
+  trigger_reserved,
   count,
 };
 
@@ -338,13 +337,10 @@ private:
   bool                                                         readers_known_{};
 };
 
-constexpr std::array<write_entry<dac>, 20> dac_writes{
+constexpr std::array<write_entry<dac>, 13> dac_writes{
     {
      {"CR", &dac::control_written},
-     {"MCR", &dac::mode_written},
-     {"CCR", &dac::trim_written},
      {"SR", &dac::status_written},
-     {"SWTRGR", &dac::trigger_written},
      {"DHR12R1", &dac::holding_written<holding::right12_1>},
      {"DHR12L1", &dac::holding_written<holding::left12_1>},
      {"DHR8R1", &dac::holding_written<holding::right8_1>},
@@ -356,6 +352,15 @@ constexpr std::array<write_entry<dac>, 20> dac_writes{
      {"DHR8RD", &dac::holding_written<holding::right8_dual>},
      {"DOR1", nullptr},
      {"DOR2", nullptr},
+     }
+};
+
+constexpr std::array<write_entry<dac>, 1> dac_calibration_writes{{{"CCR", &dac::trim_written}}};
+
+constexpr std::array<write_entry<dac>, 1> dac_mode_writes{{{"MCR", &dac::mode_written}}};
+
+constexpr std::array<write_entry<dac>, 4> dac_sample_hold_writes{
+    {
      {"SHSR1", &dac::sample_written<0>},
      {"SHSR2", &dac::sample_written<1>},
      {"SHHR", &dac::hold_written},
@@ -371,15 +376,31 @@ dac::dac(
     : dispatch_model{
           ctx, desc, "DAC", dac_writes
 },
-      variant_{variant}, supply_{supply}, regs_{ctx.regs}, control_{reg("CR")}, mode_{reg("MCR")},
-      status_{reg("SR")},
+      variant_{variant}, supply_{supply}, regs_{ctx.regs}, control_{reg("CR")},
+      mode_{variant.mode_register ? reg("MCR") : reg_ref{}}, status_{reg("SR")},
       holding_{reg("DHR12R1"), reg("DHR12L1"), reg("DHR8R1"),  reg("DHR12R2"), reg("DHR12L2"),
                reg("DHR8R2"),  reg("DHR12RD"), reg("DHR12LD"), reg("DHR8RD")},
-      bus_{ctx.clock.domain("pclk1")}, lsi_{ctx.clock.domain("lsi")}, line_{&irq("TIM6_DAC_IRQn")},
+      bus_{ctx.clock.domain("pclk1")}, lsi_{ctx.clock.domain("lsi")}, line_{&irq(variant.irq)},
       requests_{
           dma_signal{ctx.peers, lower(desc.name) + "_ch1_dma"},
           dma_signal{ctx.peers, lower(desc.name) + "_ch2_dma"}}
 {
+  bind(std::array<write_entry<dac>, 1>{{{variant.swtrig_register, &dac::trigger_written}}});
+  if(variant.calibration)
+  {
+    bind(dac_calibration_writes);
+  }
+  if(variant.mode_register)
+  {
+    bind(dac_mode_writes);
+  }
+  if(variant.sample_hold)
+  {
+    bind(dac_sample_hold_writes);
+  }
+  auto const present = [&](bool on, std::string_view reg_name, std::string field_name) {
+    return on ? field(reg_name, field_name) : field_ref{};
+  };
   for(std::size_t index = 0; index < channels; ++index)
   {
     auto const n    = index + 1;
@@ -389,19 +410,19 @@ dac::dac(
         .trigger_select     = field("CR", std::format("TSEL{}", n)),
         .amplitude          = field("CR", std::format("MAMP{}", n)),
         .wave               = field("CR", std::format("WAVE{}", n)),
-        .calibration        = field("CR", std::format("CEN{}", n)),
-        .software           = field("SWTRGR", std::format("SWTRIG{}", n)),
+        .calibration        = present(variant.calibration, "CR", std::format("CEN{}", n)),
+        .software           = field(variant.swtrig_register, std::format("SWTRIG{}", n)),
         .output             = reg(std::format("DOR{}", n)),
-        .mode               = field("MCR", std::format("MODE{}", n)),
-        .trim               = field("CCR", std::format("OTRIM{}", n)),
-        .flag               = field("SR", std::format("CAL_FLAG{}", n)),
+        .mode               = present(variant.mode_register, "MCR", std::format("MODE{}", n)),
+        .trim               = present(variant.calibration, "CCR", std::format("OTRIM{}", n)),
+        .flag               = present(variant.calibration, "SR", std::format("CAL_FLAG{}", n)),
         .underrun           = field("SR", std::format("DMAUDR{}", n)),
         .dma                = field("CR", std::format("DMAEN{}", n)),
         .underrun_interrupt = field("CR", std::format("DMAUDRIE{}", n)),
-        .busy               = field("SR", std::format("BWST{}", n)),
-        .sample             = reg(std::format("SHSR{}", n)),
-        .hold               = field("SHHR", std::format("THOLD{}", n)),
-        .refresh            = field("SHRR", std::format("TREFRESH{}", n)),
+        .busy               = present(variant.sample_hold, "SR", std::format("BWST{}", n)),
+        .sample             = variant.sample_hold ? reg(std::format("SHSR{}", n)) : reg_ref{},
+        .hold               = present(variant.sample_hold, "SHHR", std::format("THOLD{}", n)),
+        .refresh            = present(variant.sample_hold, "SHRR", std::format("TREFRESH{}", n)),
     };
   }
   restore_trim();
@@ -435,10 +456,9 @@ auto dac::listened(std::uint32_t control) const -> selection
   selection which;
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    auto const select = channel_[channel].trigger_select.of(control);
-    if(channel_[channel].trigger_enable.of(control) != 0 and select < variant_.software_trigger)
+    if(channel_[channel].trigger_enable.of(control) != 0)
     {
-      which[channel] = select;
+      which[channel] = variant_.hardware_index(channel_[channel].trigger_select.of(control));
     }
   }
   return which;
@@ -448,7 +468,7 @@ void dac::notify(selection const& which)
 {
   for(auto const& select : which)
   {
-    if(select)
+    if(select and not variant_.hardware_triggers[*select].empty())
     {
       static_cast<void>(interest_changed(ctx_.peers, variant_.hardware_triggers[*select]));
     }
@@ -468,13 +488,13 @@ void dac::retune(selection const& was)
 auto dac::listens(std::string_view signal) const -> bool
 {
   return std::ranges::any_of(listened(regs_.peek(control_.offset)), [&](auto const& select) {
-    return select and variant_.hardware_triggers[*select] == signal;
+    return select and not signal.empty() and variant_.hardware_triggers[*select] == signal;
   });
 }
 
 auto dac::can_listen(std::string_view signal) const -> bool
 {
-  return std::ranges::contains(variant_.hardware_triggers, signal);
+  return not signal.empty() and std::ranges::contains(variant_.hardware_triggers, signal);
 }
 
 void dac::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
@@ -486,7 +506,9 @@ void dac::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
   auto const which = listened(regs_.peek(control_.offset));
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    if(which[channel] and variant_.hardware_triggers[*which[channel]] == signal)
+    if(which[channel]
+       and not signal.empty()
+       and variant_.hardware_triggers[*which[channel]] == signal)
     {
       catch_up(channel, at.ps);
       request(channel, at.ps + load_delay_ps(at), load_kind::hardware);
@@ -574,6 +596,15 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
           rule::calibration_enable, "CR", control_, old,
           std::format("EN{0} set while CEN{0} is 1, not allowed by RM0351 19.4.11", n));
     }
+    if(auto const hardware = variant_.hardware_index(unit.trigger_select.of(word));
+       unit.trigger_enable.of(word) != 0
+       and hardware
+       and variant_.hardware_triggers[*hardware].empty())
+    {
+      refuse(
+          rule::trigger_reserved, "CR", control_, old,
+          std::format("TSEL{} selects a reserved trigger with TEN{} set", n, n));
+    }
     if(unit.wave.of(word) == 3)
     {
       refuse(
@@ -607,7 +638,7 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
   {
-    if(get(regs_, channel_[channel].dma) == 0)
+    if(get(regs_, channel_[channel].dma) == 0 and not variant_.dmaen_keeps_request)
     {
       release(channel);
     }
@@ -1072,7 +1103,7 @@ auto dac::internal_level(std::size_t output) const -> std::optional<std::uint32_
 
 void dac::publish(std::size_t channel)
 {
-  auto const target = output_level(channel, chip_modes);
+  auto const target = output_level(channel, variant_.chip_modes);
   if(target == internal_level(channel))
   {
     return;
@@ -1107,7 +1138,7 @@ void dac::drive_output(std::size_t channel)
   {
     pad_port_ = dynamic_cast<gpio_port*>(ctx_.peers.find(variant_.pad_port));
   }
-  auto const level = output_level(channel, pad_modes);
+  auto const level = output_level(channel, variant_.pad_modes);
   if(pad_port_ != nullptr and (level or state_.pad_driven[channel] != 0))
   {
     pad_port_->drive_chip_analog(variant_.pads[channel], level);
@@ -1356,6 +1387,8 @@ namespace
 constexpr auto dac_row_table = std::to_array<builtin>({
     row_of<^^dac_factory, ^^l4_dac, ^^board::supply>(
         {.ip = "DAC", .ip_version_glob = "dacif_v2_0_Cube", .families = family::l4}),
+    row_of<^^dac_factory, ^^l1_dac, ^^board::supply>(
+        {.ip = "DAC", .ip_version_glob = "dacif_v1*", .families = family::l1}),
 });
 }
 
