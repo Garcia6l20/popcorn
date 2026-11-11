@@ -276,3 +276,44 @@ def test_a_dac1_output_converts_on_channel_21_the_same_parked_and_running(
     parked = dac_channel(enabled(u575), running=False)
     assert parked == (0x800, 1)
     assert dac_channel(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+WAIT = 1 << 14
+EOC = 1 << 2
+
+
+class ConversionDone:
+    def ready(self, machine: popcorn.Machine) -> bool:
+        return machine.periph.ADC4.ISR.EOC == 1
+
+
+def waited(m: popcorn.Machine, running: bool) -> tuple[int, int, int, int]:
+    adc = m.periph.ADC4
+    adc.input(9).volts = 1.0
+    adc.input(10).volts = 2.0
+    adc.CHSELRMOD0.write((1 << 9) | (1 << 10))
+    adc.CFGR1.write((1 << 13) | WAIT)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await m.wait_for(ConversionDone())
+
+        asyncio.run(body())
+    else:
+        settle(m, 30)
+    settle(m, 30)
+    first = adc.DR.value
+    held = adc.ISR.OVR
+    adc.ISR.write(EOC)
+    settle(m, 30)
+    return first, held, adc.DR.value, adc.ISR.EOS
+
+
+def test_a_wait_mode_conversion_holds_until_eoc_clears_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = waited(enabled(u575), running=False)
+    assert parked == (int(1.0 * 4096 / 3.0), 0, int(2.0 * 4096 / 3.0), 1)
+    assert waited(enabled(u575, slice_instructions=1_000), running=True) == parked

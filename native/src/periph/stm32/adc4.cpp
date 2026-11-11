@@ -90,6 +90,8 @@ struct adc4_state
   std::uint8_t             masked{};
   std::uint32_t            accumulated{};
   std::uint16_t            taken{};
+  bool                     waiting_read{};
+  bool                     rearmed{};
   bool                     dma_stopped{};
   std::uint32_t            edge_generation{};
   std::array<adc4_edge, 2> edges{};
@@ -294,9 +296,19 @@ using source_ptr = internal_analog_source const*;
  *        0, inferred, and a sampling shorter than the typical tS_vrefint or the tS_temp minimum of
  *        the datasheet is logged once at ADSTART or at the enable write, inferred.
  *
+ *        Low-power features, RM0456 34.4.22 and 34.4.24: with WAIT a new conversion starts only
+ *        when ADC_DR is read by a bus master other than the debugger or EOC is cleared, from that
+ *        instant, inferred, a hardware trigger during a conversion or while EOC is set is ignored
+ *        and no overrun occurs. With AUTOFF ADRDY stays clear and each start from a software
+ *        ADSTART or a hardware trigger waits tLATR then tSTAB, a read that releases WAIT waits
+ *        tSTAB, 17 ADC clock cycles, inferred, the conversions of a continuous sequence following
+ *        with no power-up, Figure 295. LFTRIG delays a software or hardware trigger by 2 ADC clock
+ *        cycles, with WAIT only the first trigger, taken as the first after ADSTART, inferred, and
+ *        adds nothing with AUTOFF, inferred.
+ *
  *        Not modelled, each logged once at an ADSTART that uses it, a model_error under
- *        strict_peripherals that keeps the old ADC_CR. The wait mode WAIT, the auto-off mode AUTOFF
- *        and the low-frequency trigger mode LFTRIG: the conversions run without them. VREFPROT and
+ *        strict_peripherals that keeps the old ADC_CR. AUTOFF with DPD, the autonomous mode: the
+ *        conversions run as with AUTOFF alone. VREFPROT and
  *        VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. VIN[12] and VIN[14] with VBATEN:
  *        they convert 0.
  */
@@ -418,6 +430,9 @@ private:
   void               retune();
   void               fire_edge(adc4_edge& slot);
   [[nodiscard]] auto busy() const -> bool;
+  [[nodiscard]] auto trigger_blocked() const -> bool;
+  void               release_wait();
+  [[nodiscard]] auto startup_ps() const -> std::uint64_t;
   [[nodiscard]] auto frozen() const -> bool;
   [[nodiscard]] auto dma_level() const -> bool;
   void               begin(std::uint64_t start_ps);
@@ -502,6 +517,7 @@ private:
   field_ref                    oversampling_shift_;
   field_ref                    triggered_oversampling_;
   field_ref                    low_frequency_;
+  field_ref                    deep_power_down_;
   field_ref                    trigger_select_;
   field_ref                    dma_mode_;
   dma_signal                   request_;
@@ -530,10 +546,8 @@ private:
   bool                         discontinuous_continuous_logged_{};
   std::array<bool, 8>          trigger_logged_{};
   std::string                  trigger_message_;
-  bool                         wait_logged_{};
-  bool                         auto_off_logged_{};
+  bool                         autonomous_logged_{};
   bool                         oversampler_logged_{};
-  bool                         low_frequency_logged_{};
   bool                         watchdog_logged_{};
   bool                         vref_logged_{};
   bool                         vcore_logged_{};
@@ -595,11 +609,12 @@ adc4_model::adc4_model(
       smp2_{field("SMPR", "SMP2")}, oversampler_{field("CFGR2", "OVSE")},
       oversampling_ratio_{field("CFGR2", "OVSR")}, oversampling_shift_{field("CFGR2", "OVSS")},
       triggered_oversampling_{field("CFGR2", "TOVS")}, low_frequency_{field("CFGR2", "LFTRIG")},
-      trigger_select_{field("CFGR1", "EXTSEL")}, dma_mode_{field("CFGR1", "DMACFG")},
-      request_{ctx.peers, lower(desc.name) + "_dma"}, vref_protection_{field("PWR", "VREFPROT")},
-      vref_sampling_{field("PWR", "VREFSECSMP")}, vrefint_enable_{field("CCR", "VREFEN")},
-      sensor_enable_{field("CCR", "VSENSESEL")}, battery_enable_{field("CCR", "VBATEN")},
-      dac_select_{field("OR", "CHN21SEL")}, hclk_{ctx.clock.domain("hclk")}
+      deep_power_down_{field("PWR", "DPD")}, trigger_select_{field("CFGR1", "EXTSEL")},
+      dma_mode_{field("CFGR1", "DMACFG")}, request_{ctx.peers, lower(desc.name) + "_dma"},
+      vref_protection_{field("PWR", "VREFPROT")}, vref_sampling_{field("PWR", "VREFSECSMP")},
+      vrefint_enable_{field("CCR", "VREFEN")}, sensor_enable_{field("CCR", "VSENSESEL")},
+      battery_enable_{field("CCR", "VBATEN")}, dac_select_{field("OR", "CHN21SEL")},
+      hclk_{ctx.clock.domain("hclk")}
 {
   for(auto const& name :
       {"LDORDY", "EOCAL", "AWD3", "AWD2", "AWD1", "OVR", "EOS", "EOC", "EOSMP", "ADRDY"})
@@ -721,6 +736,7 @@ auto adc4_model::on_read(
   if((offset & ~3u) == data_.offset and ctx.by != initiator::debugger)
   {
     update(regs_, converted_, 0);
+    release_wait();
     signal();
   }
   return value;
@@ -792,6 +808,7 @@ void adc4_model::check_clock_range()
 void adc4_model::isr_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(isr_.offset, old & ~(now & clearable_));
+  release_wait();
   signal();
 }
 
@@ -895,6 +912,7 @@ void adc4_model::cr_written(std::uint32_t old, std::uint32_t now)
   regulator_written(old, now);
   if(rises(start_))
   {
+    state_.rearmed     = false;
     state_.dma_stopped = false;
     if(get(regs_, trigger_) == 0)
     {
@@ -1110,6 +1128,27 @@ auto adc4_model::busy() const -> bool
   return state_.start_pending or state_.converting or state_.waiting_clock;
 }
 
+auto adc4_model::trigger_blocked() const -> bool
+{
+  return busy() or (get(regs_, wait_) != 0 and get(regs_, converted_) != 0);
+}
+
+auto adc4_model::startup_ps() const -> std::uint64_t
+{
+  auto const hz = adc_hz();
+  return get(regs_, auto_off_) != 0 and hz != 0 ? cycles_ps(variant_.stabilisation_cycles, hz) : 0;
+}
+
+void adc4_model::release_wait()
+{
+  if(not state_.waiting_read or get(regs_, converted_) != 0)
+  {
+    return;
+  }
+  state_.waiting_read = false;
+  begin(ctx_.clock.time().ps + startup_ps());
+}
+
 auto adc4_model::frozen() const -> bool
 {
   return get(regs_, dma_) != 0 and get(regs_, dma_mode_) == 0 and state_.dma_stopped;
@@ -1301,13 +1340,12 @@ auto adc4_model::unmodelled_at_start() -> std::vector<refusal>
   add(get(regs_, trigger_) != 0
           and trigger_source_of(ctx_.peers, variant_.trigger_signals[selection]) == nullptr,
       trigger_logged_[selection], trigger_message_);
-  add(get(regs_, wait_) != 0, wait_logged_, "WAIT: the wait mode not modelled");
-  add(get(regs_, auto_off_) != 0, auto_off_logged_, "AUTOFF: the auto-off mode not modelled");
+  add(get(regs_, auto_off_) != 0 and get(regs_, deep_power_down_) != 0, autonomous_logged_,
+      "AUTOFF with DPD: the autonomous mode of RM0456 34.4.24 not modelled, converted as AUTOFF "
+      "alone");
   add(get(regs_, oversampler_) != 0
           and get(regs_, oversampling_shift_) > variant_.max_oversampling_shift,
       oversampler_logged_, "OVSS 9 to 15 is reserved, RM0456 34.7.5: shifted by 8, inferred");
-  add(get(regs_, low_frequency_) != 0, low_frequency_logged_,
-      "LFTRIG: the low-frequency trigger mode not modelled");
   add(get(regs_, watchdog1_) != 0
           and get(regs_, watchdog1_single_) != 0
           and (variant_.awd1_channels >> get(regs_, watchdog1_channel_) & 1u) == 0,
@@ -1343,8 +1381,16 @@ void adc4_model::start_sequence(std::uint64_t from_ps)
     state_.waiting_clock = true;
     return;
   }
+  auto rearm = 0ull;
+  if(get(regs_, low_frequency_) != 0
+     and get(regs_, auto_off_) == 0
+     and not(get(regs_, wait_) != 0 and state_.rearmed))
+  {
+    rearm          = cycles_ps(variant_.rearm_cycles, hz);
+    state_.rearmed = true;
+  }
   state_.start_pending = true;
-  state_.start_ps      = from_ps + start_latency_ps(hz);
+  state_.start_ps      = from_ps + start_latency_ps(hz) + rearm + startup_ps();
   ctx_.events.schedule_at(vtime{state_.start_ps}, start_due, ++state_.generation, ctx_.clock);
 }
 
@@ -1368,6 +1414,11 @@ auto adc4_model::start_latency_ps(std::uint64_t hz) const -> std::uint64_t
 
 void adc4_model::begin(std::uint64_t start_ps)
 {
+  if(get(regs_, wait_) != 0 and get(regs_, converted_) != 0)
+  {
+    state_.waiting_read = true;
+    return;
+  }
   auto const hz = adc_hz();
   if(hz == 0)
   {
@@ -1617,6 +1668,8 @@ void adc4_model::abort()
   state_.rank          = 0;
   state_.accumulated   = 0;
   state_.taken         = 0;
+  state_.waiting_read  = false;
+  state_.rearmed       = false;
 }
 
 void adc4_model::retune()
@@ -1674,7 +1727,7 @@ void adc4_model::triggered(std::string_view signal, trigger_edge edge, trigger_t
     ctx_.events.schedule_at(vtime{at.ps}, edge_due, free->generation, ctx_.clock);
     return;
   }
-  if(not busy())
+  if(not trigger_blocked())
   {
     start_sequence(at.ps);
   }
@@ -1689,13 +1742,13 @@ void adc4_model::fire_edge(adc4_edge& slot)
     slot.pending = false;
     return;
   }
-  if(busy() and not std::exchange(slot.reposted, true))
+  if(trigger_blocked() and not std::exchange(slot.reposted, true))
   {
     ctx_.events.schedule_at(vtime{slot.ps}, edge_due, slot.generation, ctx_.clock);
     return;
   }
   slot.pending = false;
-  if(not busy())
+  if(not trigger_blocked())
   {
     start_sequence(slot.ps);
   }

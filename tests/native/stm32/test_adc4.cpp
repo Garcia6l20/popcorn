@@ -1327,9 +1327,7 @@ TEST_CASE(
   };
   for(auto const& [reg, value, selection, phrase] : {
           function{"CFGR1", (1u << 10) | (5u << 6),                1u << pa4, "EXTSEL 5"                },
-          function{"CFGR1", 1u << 14,                              1u << pa4, "WAIT"                    },
           function{"CFGR2", (1u << 0) | (9u << 5),                 1u << pa4, "OVSS 9 to 15"            },
-          function{"CFGR2", 1u << 29,                              1u << pa4, "LFTRIG"                  },
           function{
                    "CFGR1", (1u << 23) | (1u << 22) | (24u << 26), 1u << pa4,
                    "AWD1CH 18 to 21 and 24 to 31"                                                       },
@@ -1699,25 +1697,19 @@ TEST_CASE("ADSTART with DISCEN after CHSELR shrank below the rank restarts at th
 }
 
 TEST_CASE(
-    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSS 9, LFTRIG, AWD1CH 24, "
-    "VREFPROT and VCORE logs nine times, one model_error when "
+    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, AUTOFF with DPD, OVSS 9, AWD1CH 24, "
+    "VREFPROT and VCORE logs seven times, one model_error when "
     "strict that keeps ADC_CR")
 {
   auto const setup = [](adc4_fixture const& f) {
     static_cast<void>(f.regulate());
     f.put("ADC4", "PWR", "AUTOFF", 1);
+    f.put("ADC4", "PWR", "DPD", 1);
     f.put("ADC4", "PWR", "VREFPROT", 1);
     f.write("CR", advregen | aden);
     f.write(
-        "CFGR1", (1u << 10)
-                     | (5u << 6)
-                     | (1u << 14)
-                     | (1u << 23)
-                     | (1u << 22)
-                     | (24u << 26)
-                     | cont
-                     | discen);
-    f.write("CFGR2", (1u << 0) | (9u << 5) | (1u << 29));
+        "CFGR1", (1u << 10) | (5u << 6) | (1u << 23) | (1u << 22) | (24u << 26) | cont | discen);
+    f.write("CFGR2", (1u << 0) | (9u << 5));
     f.write("CHSELRMOD0", (1u << pa4) | (1u << 12));
   };
   {
@@ -1726,7 +1718,7 @@ TEST_CASE(
     std::vector<core::log_record> logged;
     auto const                    sink = recorder(f, logged);
     f.write("CR", advregen | aden | adstart);
-    CHECK(logged.size() == 9);
+    CHECK(logged.size() == 7);
   }
   adc4_fixture const f{u575(), true};
   setup(f);
@@ -3727,4 +3719,371 @@ TEST_CASE(
     CHECK(convert(f, vrefint_in) == vrefint_code);
     CHECK(convert(f, vsense_in) == sensor_code);
   }
+}
+
+namespace
+{
+constexpr std::uint32_t wait_mode = 1u << 14;
+constexpr std::uint32_t lftrig    = 1u << 29;
+
+[[nodiscard]] auto last_due(adc4_fixture const& f) -> std::uint64_t
+{
+  auto const dues = f.dues();
+  REQUIRE(not dues.empty());
+  return dues.back();
+}
+
+void auto_off_enable(adc4_fixture const& f)
+{
+  f.write("CCR", 8u << 18);
+  static_cast<void>(f.regulate());
+  f.put("ADC4", "PWR", "AUTOFF", 1);
+  f.write("CR", advregen | aden);
+  f.run_until(f.now() + 20 * slow_cycle);
+  REQUIRE(f.cr("ADEN") == 1);
+  REQUIRE(f.isr("ADRDY") == 0);
+}
+
+void hardware_sequence(adc4_fixture const& f, std::uint32_t cfgr1, std::uint32_t cfgr2 = 0)
+{
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR1", ovrmod | exten_rising | extsel(3) | cfgr1);
+  f.write("CFGR2", cfgr2);
+  f.write("CR", advregen | aden | adstart);
+}
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: with WAIT a continuous sequence starts the next conversion only when DR is "
+    "read or EOC is cleared, from that instant, with no overrun")
+{
+  for(auto const by_read : {true, false})
+  {
+    CAPTURE(by_read);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x300));
+    f.port().drive(pa5, level_of(0x700));
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+    f.write("CFGR1", cont | wait_mode);
+    auto const begin = f.start();
+    f.run_until(begin + 10 * conversion);
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("OVR") == 0);
+    CHECK(f.read("DR") == 0x300u);
+    CHECK(f.dues().empty());
+    auto const at = f.now();
+    if(by_read)
+    {
+      static_cast<void>(f.cpu_read("DR"));
+    }
+    else
+    {
+      f.write("ISR", eoc);
+    }
+    CHECK(f.dues() == std::vector<std::uint64_t>{at + halves(3), at + halves(28)});
+    f.run_until(at + halves(28));
+    CHECK(f.read("DR") == 0x700u);
+    CHECK(f.isr("EOS") == 1);
+    CHECK(f.isr("OVR") == 0);
+    f.run_until(at + 20 * conversion);
+    CHECK(f.dues().empty());
+    CHECK(f.cr("ADSTART") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: with WAIT a software ADSTART with EOC set converts after the read, a "
+    "debugger read of DR does not release it")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", wait_mode);
+  auto const first = f.start();
+  f.run_until(first + conversion);
+  REQUIRE(f.isr("EOC") == 1);
+  f.port().drive(pa4, level_of(0x500));
+  static_cast<void>(f.start());
+  f.run_until(f.now() + 10 * conversion);
+  CHECK(f.read("DR") == 0x300u);
+  CHECK(f.dues().empty());
+  auto const at = f.now();
+  static_cast<void>(f.cpu_read("DR"));
+  f.run_until(at + conversion);
+  CHECK(f.read("DR") == 0x500u);
+  CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: hardware triggers during a conversion or while EOC waits for the read are "
+    "ignored with WAIT, taken without it")
+{
+  for(auto const wait : {true, false})
+  {
+    CAPTURE(wait);
+    adc4_fixture const f;
+    arm(f, exten_rising, 3, wait ? wait_mode : 0, false);
+    f.port().drive(pa4, level_of(0x400));
+    f.write("CR", advregen | aden | adstart);
+    auto const first = f.now() + us;
+    fire(f, first);
+    f.run_until(first + slow_latency + slow_halves(28) + us);
+    REQUIRE(f.isr("EOC") == 1);
+    auto const second = f.now() + us;
+    fire(f, second);
+    f.run_until(second + us);
+    CHECK(f.dues().empty() == wait);
+    f.run_until(second + slow_latency + slow_halves(28) + us);
+    CHECK(f.isr("OVR") == (wait ? 0u : 1u));
+    static_cast<void>(f.cpu_read("DR"));
+    auto const third = f.now() + us;
+    fire(f, third);
+    f.run_until(third + us);
+    CHECK_FALSE(f.dues().empty());
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: with AUTOFF ADRDY stays clear and each software start waits tSTAB, 17 ADC "
+    "clock cycles, after tLATR for the power-up, inferred")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.regulate());
+  f.put("ADC4", "PWR", "AUTOFF", 1);
+  f.write("CR", advregen | aden);
+  f.run_until(f.now() + 40 * cycle);
+  REQUIRE(f.cr("ADEN") == 1);
+  CHECK(f.isr("ADRDY") == 0);
+  f.port().drive(pa4, level_of(0x300));
+  f.write("CHSELRMOD0", 1u << pa4);
+  for(auto count = 0; count < 2; ++count)
+  {
+    CAPTURE(count);
+    auto const begin = f.start() + 17 * cycle;
+    CHECK(last_due(f) == begin);
+    f.run_until(begin);
+    CHECK(last_due(f) == begin + halves(28));
+    f.run_until(begin + halves(28));
+    CHECK(f.read("DR") == 0x300u);
+    CHECK(f.cr("ADSTART") == 0);
+    static_cast<void>(f.cpu_read("DR"));
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: with AUTOFF each hardware trigger waits tLATR and tSTAB, a continuous "
+    "sequence converts its channels back to back")
+{
+  adc4_fixture const f;
+  auto_off_enable(f);
+  f.port().drive(pa4, level_of(0x200));
+  f.port().drive(pa5, level_of(0x600));
+  hardware_sequence(f, cont);
+  auto const at = f.now() + us;
+  fire(f, at);
+  f.run_until(at + us);
+  CHECK(last_due(f) == at + slow_latency + 17 * slow_cycle);
+  f.run_until(at + slow_latency + 17 * slow_cycle + 2 * slow_halves(28));
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.read("DR") == 0x600u);
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: AUTOFF with WAIT powers up again after each read, tSTAB after the read "
+    "instant, inferred")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.regulate());
+  f.put("ADC4", "PWR", "AUTOFF", 1);
+  f.write("CR", advregen | aden);
+  f.run_until(f.now() + 40 * cycle);
+  f.port().drive(pa4, level_of(0x300));
+  f.port().drive(pa5, level_of(0x700));
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR1", cont | wait_mode);
+  auto const begin = f.start() + 17 * cycle;
+  f.run_until(begin + 10 * conversion);
+  CHECK(f.read("DR") == 0x300u);
+  CHECK(f.dues().empty());
+  auto const at = f.now();
+  static_cast<void>(f.cpu_read("DR"));
+  CHECK(
+      f.dues()
+      == std::vector<std::uint64_t>{at + 17 * cycle + halves(3), at + 17 * cycle + halves(28)});
+  f.run_until(at + 17 * cycle + halves(28));
+  CHECK(f.read("DR") == 0x700u);
+  CHECK(f.isr("OVR") == 0);
+}
+
+TEST_CASE(
+    "RM0456 34.4.22: LFTRIG adds 2 ADC clock cycles to a software or hardware trigger, with WAIT "
+    "only the first trigger, not with AUTOFF, inferred for AUTOFF")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR2", lftrig);
+  auto const begin = f.start();
+  CHECK(last_due(f) == begin + 2 * cycle);
+  f.run_until(begin + 2 * cycle + halves(28));
+  CHECK(f.cr("ADSTART") == 0);
+  adc4_fixture const g;
+  static_cast<void>(g.regulate());
+  g.put("ADC4", "PWR", "AUTOFF", 1);
+  g.write("CR", advregen | aden);
+  g.run_until(g.now() + 40 * cycle);
+  g.write("CHSELRMOD0", 1u << pa4);
+  g.write("CFGR2", lftrig);
+  auto const expected = g.start() + 17 * cycle;
+  CHECK(last_due(g) == expected);
+}
+
+TEST_CASE(
+    "RM0456 34.4.22: with LFTRIG and WAIT only the first hardware trigger after ADSTART is "
+    "delayed by 2 ADC clock cycles, the after ADSTART reading inferred")
+{
+  adc4_fixture const f;
+  arm(f, exten_rising, 3, 0, false);
+  f.write("CFGR1", ovrmod | exten_rising | extsel(3) | wait_mode);
+  f.write("CFGR2", lftrig);
+  f.write("CR", advregen | aden | adstart);
+  f.port().drive(pa4, level_of(0x400));
+  auto const first = f.now() + us;
+  fire(f, first);
+  f.run_until(first + us);
+  CHECK(last_due(f) == first + slow_latency + 2 * slow_cycle);
+  f.run_until(first + slow_latency + 2 * slow_cycle + slow_halves(28) + us);
+  static_cast<void>(f.cpu_read("DR"));
+  auto const second = f.now() + us;
+  fire(f, second);
+  f.run_until(second + us);
+  CHECK(last_due(f) == second + slow_latency);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot while WAIT holds a conversion, restored into a machine never "
+    "reset, resumes it at the read, an RCC reset drops the hold")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.port().drive(pa5, level_of(0x700));
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR1", cont | wait_mode);
+  auto const begin = f.start();
+  f.run_until(begin + 10 * conversion);
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc4_fixture const& g) {
+    CHECK(g.dues().empty());
+    auto const at = g.now();
+    static_cast<void>(g.cpu_read("DR"));
+    g.run_until(at + conversion);
+    CHECK(g.read("DR") == 0x700u);
+  };
+  f.target->restore(saved);
+  check(f);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(fresh);
+  adc4_fixture const g;
+  static_cast<void>(g.enable());
+  g.port().drive(pa4, level_of(0x300));
+  g.write("CHSELRMOD0", 1u << pa4);
+  g.write("CFGR1", cont | wait_mode);
+  static_cast<void>(g.start());
+  g.run_until(g.now() + 10 * conversion);
+  g.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 1);
+  g.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 0);
+  static_cast<void>(g.enable());
+  g.write("CHSELRMOD0", 1u << pa4);
+  auto const again = g.start();
+  g.run_until(again + conversion);
+  CHECK(g.isr("EOC") == 1);
+  CHECK(g.read("DR") == 0x300u);
+  static_cast<void>(g.cpu_read("DR"));
+  g.run_until(g.now() + 10 * conversion);
+  CHECK(g.dues().empty());
+  CHECK(g.isr("EOC") == 0);
+}
+
+TEST_CASE(
+    "RM0456 34.4.24: DPD alone logs nothing, AUTOFF with DPD logs once at ADSTART and converts "
+    "as AUTOFF alone")
+{
+  for(auto const autonomous : {false, true})
+  {
+    CAPTURE(autonomous);
+    adc4_fixture const f;
+    static_cast<void>(f.regulate());
+    f.put("ADC4", "PWR", "DPD", 1);
+    if(autonomous)
+    {
+      f.put("ADC4", "PWR", "AUTOFF", 1);
+    }
+    f.write("CR", advregen | aden);
+    f.run_until(f.now() + 40 * cycle);
+    f.port().drive(pa4, level_of(0x300));
+    f.write("CHSELRMOD0", 1u << pa4);
+    std::vector<core::log_record> logged;
+    auto const                    sink  = recorder(f, logged);
+    auto const                    begin = f.start() + (autonomous ? 17 * cycle : 0);
+    f.run_until(begin + halves(28));
+    CHECK(f.read("DR") == 0x300u);
+    REQUIRE(logged.size() == (autonomous ? 1u : 0u));
+    if(autonomous)
+    {
+      CHECK(logged[0].message.contains("AUTOFF with DPD"));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.22: with LFTRIG and WAIT each software ADSTART is a first trigger, delayed by 2 "
+    "ADC clock cycles")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", wait_mode);
+  f.write("CFGR2", lftrig);
+  for(auto count = 0; count < 2; ++count)
+  {
+    CAPTURE(count);
+    auto const begin = f.start();
+    CHECK(last_due(f) == begin + 2 * cycle);
+    f.run_until(begin + 2 * cycle + halves(28));
+    CHECK(f.cr("ADSTART") == 0);
+    static_cast<void>(f.cpu_read("DR"));
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.24 and 34.4.26: with WAIT and the oversampler a series waits for the read, its N "
+    "conversions follow with no hold, EOC and the next hold come after the Nth")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", cont | wait_mode);
+  f.write("CFGR2", oversampling(0, 0));
+  auto const begin = f.start();
+  f.run_until(begin + 10 * conversion);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("OVR") == 0);
+  CHECK(f.read("DR") == 2 * 0x300u);
+  CHECK(f.dues().empty());
+  auto const at = f.now();
+  static_cast<void>(f.cpu_read("DR"));
+  CHECK(f.dues() == std::vector<std::uint64_t>{at + halves(3), at + halves(28)});
+  f.run_until(at + conversion);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.dues().back() == at + 2 * conversion);
+  f.run_until(at + 2 * conversion);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == 2 * 0x300u);
+  f.run_until(at + 12 * conversion);
+  CHECK(f.dues().empty());
 }

@@ -71,6 +71,8 @@ struct adc4_variant
   std::array<std::string_view, 8> trigger_signals{"tim1_trgo2", "tim1_cc4",  "tim2_trgo",
                                                   "tim15_trgo", "tim6_trgo", "lptim1_ch1",
                                                   "lptim3_ch2", "exti15"};
+  /** @brief ADC clock cycles ADC_CFGR2.LFTRIG adds to the trigger latency, RM0456 34.4.22. */
+  std::uint32_t rearm_cycles = 2;
   /** @brief Largest ADC_CFGR2.OVSS shift, RM0456 34.7.5. */
   std::uint32_t max_oversampling_shift = 8;
   /** @brief Lowest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */

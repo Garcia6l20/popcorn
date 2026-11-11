@@ -474,8 +474,8 @@ strict_peripherals that keeps `ADC_CR`:
 
 - The triggers `tim1_trgo2`, `lptim1_ch1`, `lptim3_ch2` and `exti15`, `EXTSEL` 0, 5, 6 and 7: no
   model produces them, `ADSTART` stays set and nothing converts.
-- The wait mode `WAIT`, the auto-off mode `AUTOFF` and the low-frequency trigger mode `LFTRIG`:
-  the conversions run without them.
+- `AUTOFF` with `DPD`, the autonomous mode of RM0456 34.4.24: its clock requests and LDO
+  power-off are not modelled, the conversions run as with `AUTOFF` alone. `DPD` alone is stored.
 - `VIN[12]`, VCORE, and `VIN[14]`, VBAT / 4, with `VBATEN` in the sequence: they convert 0, the
   board model has no VBAT source and the level of VCORE depends on the PWR voltage range of
   DS13737, which is not modelled.
@@ -518,6 +518,22 @@ Oversampler, RM0456 34.4.26:
   1, each trigger starts one conversion and the series goes on at the next trigger. A software
   `ADSTART` clears at the end of each conversion with `TOVS`, and the oversampler fields of
   `ADC_CFGR2` are then writable between the conversions, both inferred.
+
+Low-power features, RM0456 34.4.22 and 34.4.24:
+
+- With `WAIT` a new conversion starts only when `ADC_DR` is read by a bus master other than the
+  debugger or `EOC` is cleared, from that instant, inferred. A continuous sequence holds after each
+  conversion, a software `ADSTART` with `EOC` set holds until then, and a hardware trigger that
+  arrives while a conversion runs or `EOC` is set is ignored. No overrun occurs.
+- With `AUTOFF` `ADRDY` stays clear and each start from a software `ADSTART` or a hardware
+  trigger waits tLATR then tSTAB, a read that releases `WAIT` waits tSTAB, 17 ADC clock cycles,
+  inferred. The conversions of a continuous sequence follow each other with no power-up,
+  Figure 295.
+- With `LFTRIG` a software or hardware trigger starts 2 ADC clock cycles later. With `WAIT` only
+  the first trigger does, taken as the first after `ADSTART`, inferred. With `AUTOFF` it adds
+  nothing, inferred.
+- `ADC_PWRR` bits are stored. `VREFPROT` and `VREFSECSMP` are logged as above. The ADC4 has no
+  VREGPW bit.
 
 Triggers and DMA:
 
