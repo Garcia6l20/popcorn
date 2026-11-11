@@ -221,6 +221,98 @@ struct interrupt_pair
  * RM0038 24.5.1 ISTR.WKUP and Table 51, the level inferred. Not modelled, logged once and a
  * model_error under strict_peripherals: remote wake-up CNTR.RESUME, and a CPU byte access or an
  * access of the upper half of a packet memory word.
+ *
+ * @limits usb USB
+ *
+ * @group h5 rule
+ * The USB full-speed device controller of the STM32H5 runs in device mode.
+ *
+ * - A byte or half-word write of the packet memory stores its lanes and writes 0 to the other lanes
+ *   of the word, from the CPU and the debugger alike, as measured on an STM32H573. A narrow read
+ *   returns its lanes. Word accesses are the ones RM0481 61.7 allows, so a CPU byte or half-word
+ *   access logs once and raises `ModelError` under `strict`. Debugger accesses of any width pass.
+ * - A byte or half-word write of a USB register is a word write with the other lanes 0, as measured
+ *   on an STM32H573 for `CHEPnR` and `DADDR` and applied to every register: in `CHEPnR` a toggle
+ *   bit there stays, `VTRX` and `VTTX` there clear and `EA` or `UTYPE` there read 0.
+ * - The packet memory reads 0 after a power-on reset and keeps its content across every other
+ *   reset, an RCC USBFSRST pulse included.
+ * - While `BCDR.DPPU_DPD` is set and `CNTR.SUSPEN` is clear, `ISTR.ESOF` rises and `FNR.LSOF`
+ *   counts every 1 ms with no SOF, with a host attached or not. `SUSP` rises at each ESOF that
+ *   brings the count of missed frames to 3, the count wrapping at 4 and starting again at a SOF, a
+ *   bus reset, a resume and the timer start, so with no SOF it rises every 4 ms, as read on an
+ *   STM32H573 with nothing attached and with a PC host before its bus reset. Setting `SUSPEN` stops
+ *   the count and clears `LSOF`, as read on the part. The first ESOF comes 1 ms after the pull-up
+ *   and each SOF moves the next one to 1 ms plus 1 us after it, both inferred. A bus reset stops
+ *   the count while SE0 lasts, as read on an STM32H573 with a PC host after a reset with and
+ *   without suspend. The next ESOF comes 1 ms after SE0 ends, as RM0481 61.6.2 enables the suspend
+ *   check right after any USB reset. Clearing `DPPU_DPD` stops the count, and `FN`, `LCK`, `LSOF`
+ *   and the `ISTR` flags keep their values, as read on the part.
+ * - A bus reset or a SOF while `CNTR.SUSPEN` is set raises `ISTR.WKUP` and clears `SUSPEN` and
+ *   `SUSPRDY`, RM0481 61.5.7 and 61.6.2, the bus reset as read on an STM32H573 with a PC host.
+ * - `FNR.LCK` sets at the second SOF after a bus reset, with `ISTR.RST_DCON` pending or cleared,
+ *   and reads 0 while `ISTR.WKUP` is set, as measured on an STM32H573 with a PC host after a bus
+ *   reset. After a resume it sets at the second SOF, RM0481 FNR.LCK, and reads 0 while `WKUP` is
+ *   set, inferred. A SOF while `WKUP` is set starts the count of two again, so `LCK` sets at the
+ *   second SOF after the firmware clears `WKUP`, inferred: on the part `WKUP` was cleared before
+ *   SE0 ended. A firmware that leaves `WKUP` set reads `LCK` 0.
+ * - FNR.RXDP and FNR.RXDM read 1 and 1 with no host attached, as measured on an STM32H573. With a
+ *   host attached they read SE0, 0 and 0, while the device does not pull D+ up, and the idle J
+ *   state, 1 and 0, while it does, as measured on an STM32H573 with a PC host. A suspend raises
+ *   SUSP after the host's 3 ms of idle bus.
+ * - Transfers run whatever kernel clock `RCC_CCIPR4.USBFSSEL` selects.
+ * - A double-buffered endpoint fills or sends descriptor word 2n while its DTOG is 0 and word 2n +
+ *   1 while it is 1, in both directions, as RM0481 61.5.3 states in its text and the ST HAL and
+ *   tinyusb drivers expect.
+ * - The first transaction of a double-buffered bulk endpoint after `EPKIND` or `UTYPE` changes, or
+ *   after a reset, sets its STAT to NAK. Every later transaction keeps STAT VALID.
+ * - Writing `CNTR.USBRST` from 0 to 1 clears every `CHEPnR` but `VTRX` and `VTTX`. `DADDR`,
+ *   `ISTR.RST_DCON` and `FNR.LCK` stay as they are, `DADDR` as measured on an STM32H573.
+ * - A written 0 keeps `CNTR.SUSPEN`, as measured on an STM32H573. A resume and a bus reset clear
+ *   it.
+ * - A bus reset clears the endpoints and `DADDR` when SE0 starts, inferred, and sets
+ *   `ISTR.RST_DCON` when SE0 ends, as measured on an STM32H573 with a PC host.
+ * - Tokens get no answer while `ISTR.RST_DCON` is set.
+ * - A SETUP to control endpoint 0 is acknowledged with `STATRX` NAK or STALL, and leaves both
+ *   toggles at 1.
+ *
+ * @group h5 unmodelled "Not modelled, logged"
+ * - Host mode, `CNTR.HOST`. The controller stays a device.
+ * - LPM, `LPMCSR.LPMEN`.
+ * - Battery charging detection, `BCDR.BCDEN`.
+ * - Remote wake-up signalling, `CNTR.L1RES` and `CNTR.L2RES`.
+ *
+ * @group l1 rule
+ * On the STM32L1, RM0038 section 24, the same model runs with the L1 register names: `EPnR` with
+ * `STAT_TX`, `DTOG_TX`, `CTR_TX`, `EP_KIND`, `EP_TYPE`, `STAT_RX`, `DTOG_RX` and `CTR_RX`,
+ * `ISTR.RESET` and `EP_ID`, and `CNTR.FRES`, `FSUSP`, `LPMODE` and `RESUME`.
+ *
+ * - The rules above that were measured on an STM32H573 apply as inferred: the narrow register
+ *   write, the suspend timer, `FNR.LCK`, `FNR.RXDP` and `RXDM`, and the first transaction of a
+ *   double-buffered bulk endpoint.
+ * - The packet memory is 512 bytes in the `USB_SRAM` peripheral, local half-word k in the low half
+ *   of the word at offset 4k, RM0038 24.5.3. The upper half reads 0 and ignores writes, inferred.
+ *   Half-word and word accesses of the low half pass. A CPU byte access or an access of the upper
+ *   half logs once and raises `ModelError` under `strict`. Debugger accesses of any width pass.
+ * - The descriptor table starts at `BTABLE`, and a buffer address ignores bit 0, inferred from
+ *   RM0038 24.5.3, which says bit 0 must be written 0.
+ * - The D+ pull-up is `SYSCFG_PMC.USB_PU`, RM0038 24.4.2. A write or a SYSCFG reset that changes it
+ *   tells the host at once. `LCD_CAPA` in the same register is storage: a CPU write that sets a bit
+ *   of it logs once and raises `ModelError` under `strict`.
+ * - `FRES` written from 0 to 1 clears every `EPnR` but `CTR_RX` and `CTR_TX` and clears `DADDR`,
+ *   RM0038 24.5.1 `CNTR.FRES`, which resets the peripheral like a USB reset, and `ISTR.RESET`,
+ *   which resets the function address and endpoint registers at a USB reset. `ISTR.RESET` sets at
+ *   the write, inferred.
+ * - `FSUSP` and `LPMODE` keep what the firmware writes. While `FSUSP` is set the suspend timer
+ *   stops. A bus reset, a SOF or a resume while `FSUSP` is set raises `WKUP` and clears `LPMODE`,
+ *   and `FSUSP` stays set, RM0038 24.4.5.
+ * - `USB_LP` is any `ISTR` flag whose `CNTR` mask is set. `USB_HP` is a `CTR_RX` or `CTR_TX` of an
+ *   isochronous or double-buffered bulk endpoint whatever `CNTR.CTRM` holds, inferred from RM0038
+ *   24.3.1 and the endpoint interrupt condition of 24.5.2.
+ * - EXTI line 18 follows `ISTR.WKUP`: it rises when `WKUP` sets and falls when the firmware clears
+ *   it, inferred from RM0038 24.5.1, so `USB_FS_WKUP` needs the line's EXTI rising edge and mask.
+ *
+ * @group l1 unmodelled "Not modelled on the STM32L1, logged, `ModelError` under `strict`"
+ * - Remote wake-up signalling, `CNTR.RESUME`.
  */
 class usb_drd final : public dispatch_model<usb_drd, usb_drd_state>,
                       public usb_device_link<usb_drd>,

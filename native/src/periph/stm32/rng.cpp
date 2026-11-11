@@ -155,6 +155,42 @@ struct rng_state
  *        RNGEN 1 while the fault is still set. SECS clears at RNGEN 0 and stays 1 with RNGEN 1
  *        after the fault ends, inferred: RM0351 gives the recovery sequence, not when SECS
  *        clears. The 32-bit access rule is 27.2, RNGRST is in RCC_AHB2RSTR, 6.4.11.
+ *
+ * @limits rng RNG
+ *
+ * @group u5,h5 deviation "Differs from RM0456 Rev 7 chapter 48"
+ * The words come from a seed in the machine description or a queue the test fills, never from a
+ * noise source. The model differs from RM0456 Rev 7 chapter 48 here:
+ *
+ * - `RCC_AHB2ENR1.RNGEN` 0 gates the register access, see RCC, and stops generation.
+ * - `RCC_AHB2RSTR1.RNGRST` written from 0 to 1 resets the RNG, CONFIGLOCK included, and keeps the
+ *   entropy test controls, as every other reset kind does. While the bit is 1, writes are ignored
+ *   as the RCC section says, and a debugger read of DR shows the empty FIFO.
+ * - There is no noise source. NSCR and HTCR are storage, and SECS comes only from a test's fault
+ *   injection.
+ * - Configuration B timing is not modelled. The configuration A and C column of Table 463 applies
+ *   to every configuration.
+ * - A clock rate change does not rescale an init or a conditioning round already started.
+ * - The tamper output to TAMP is not modelled.
+ * - With ARDIS 0, SECS clears 2 AHB plus 2 RNG cycles after the injected fault is released. RM0456
+ *   gives no auto-reset time.
+ *
+ * @group l4 rule "On the STM32L4, RM0351 section 27"
+ * - RNG_CR holds IE, RNGEN and CED. The ST SVDs and CMSIS headers lack CED, the description adds it
+ *   at bit 5, RM0351 27.7.1. DR holds one word: the first comes 46 RNG clock cycles after RNGEN 1,
+ *   the next 42 cycles after the read that empties DR, 27.5. RNGEN 0 keeps the DR word and ends the
+ *   word in progress, 27.3.8.
+ * - With CED 0 and RNGEN 1, CECS is 1 while fRNG is below fHCLK / 16 and its rise sets CEIS, which
+ *   stays 1 until written 0, 27.7.2. Words keep coming at the unchanged rate, inferred, RM0351
+ *   27.3.7 as corrected by ES0250 2.15.1.
+ * - A CED write while RNGEN is 1 before and in the write keeps CED, inferred. RM0351 27.7.1 asks
+ *   for the RNG disabled and gives no rule for such a write.
+ * - A seed error sets SECS and SEIS and stops generation, 27.3.7, and DR reads 0, the 27.3.5 note
+ *   and 27.7.3.
+ * - The 27.3.7 recovery, SEIS cleared and RNGEN cleared and set, restarts the RNG. SECS clears when
+ *   RNGEN is written 0 and stays 1 with RNGEN 1 after the injected fault ends, both inferred:
+ *   RM0351 gives the recovery sequence, not when SECS clears.
+ * - RNGEN 1 while DR holds a word starts the 46 cycles at the read that empties DR, inferred.
  */
 class rng final : public dispatch_model<rng, rng_state>,
                   public clock_listener,

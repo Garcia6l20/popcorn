@@ -275,6 +275,74 @@ struct pwr_variant
  *        through usb_supply_listener. DBP, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and
  *        PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the wakeup and
  *        Standby flags stay 0.
+ *
+ * @limits pwr PWR
+ *
+ * @group u5,h5 unmodelled
+ * - The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
+ *   modelled. A deep-sleep WFI idles as a plain WFI.
+ *
+ * @group u5 rule
+ * - STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50
+ *   us by default. A write that steps to a higher voltage clears VOSRDY for that delay, one that
+ *   steps to a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+ *
+ * @group h5 rule
+ * - STM32H5: a VOS write moves ACTVOS one level toward VOS at once and one more level every 10.4
+ *   us, and VOSRDY and ACTVOSRDY set 15.2 us after the last step. VOS3 to VOS0 reads 0x4000, 0x8000
+ *   and 0xC000 in PWR_VOSSR, then 0xE008 36 us after the write, as measured on an STM32H573. A step
+ *   to a lower voltage keeps VOSRDY set and takes the same steps, and a change of one or two levels
+ *   follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH checks its latency
+ *   against the range of the last ready.
+ * - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
+ * - STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
+ *   part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
+ *   read-only. The supply the model runs is the board's.
+ *
+ * @group u5 rule "STM32U5 PWR_CR3 and supply selection"
+ * - STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value of
+ *   `PWR_CR3.REGSEL` after the typical transition time of DS13737 Table 75 for the range ACTVOS
+ *   gives at the REGSEL write: LDO to SMPS 14, 17, 16 and 16 us in range 4 to 1, SMPS to LDO 16,
+ *   15, 14 and 14 us. The figures are the DS13737 typical values, applied to every U5 SMPS part.
+ *   Every reset sets both to 0, the LDO.
+ * - STM32U5 packages without the SMPS: REGSEL is reserved, RM0456 10.10.3, and REGS stays 0. A
+ *   firmware write that changes REGSEL from 0 to 1 logs one warning per machine life. Under
+ *   `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
+ *   Otherwise the firmware REGSEL write is stored, an inferred rule.
+ * - STM32U5: `PWR_CR3.FSTEN` is storage.
+ *
+ * @group l1 rule
+ * - STM32L1: a VOS write to another range sets `PWR_CSR.VOSF` for the board's `ready_delay`, 50 us
+ *   by default, in either direction, and the new range applies when VOSF clears, RM0038 5.4.1 and
+ *   5.4.2. The delay is not a silicon figure. A write of VOS 00 keeps the range, RM0038 5.4.1. A
+ *   firmware write of it also logs one warning per machine life and is a `model_error` under
+ *   `strict_peripherals`.
+ * - STM32L1: the low-power modes `PWR_CR.PDDS` selects are not modelled, the first PDDS change logs
+ *   one warning. `DBP` does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR,
+ *   LPRUN, ULP, FWU, the PVD and the wakeup flags are storage. A peripheral reset through
+ *   `RCC_APB1RSTR.PWRRST` keeps FWU and ULP, RM0038 5.4.1.
+ *
+ * @group l4 rule
+ * - STM32L47x/L48x: a VOS write to the other range sets `PWR_SR2.VOSF` for the board's
+ *   `ready_delay`, 50 us by default, in either direction, and the new range applies when VOSF
+ *   clears, RM0351 5.1.8 and 5.4.6. DS10198 Table 53 gives tVOST 20 us typical and 40 us maximum,
+ *   the board option sets the delay. A write of VOS 00 or 11 keeps the range, RM0351 5.4.1. A
+ *   firmware write of either also logs one warning per machine life and is a `model_error` under
+ *   `strict_peripherals`.
+ * - STM32L47x/L48x: the low-power modes `PWR_CR1.LPMS` selects are not modelled, the first LPMS
+ *   change logs one warning naming the mode, and a deep-sleep WFI idles as a plain WFI. A firmware
+ *   write that sets `LPR`, `PVDE`, `PVME1` to `PVME4`, `EWUP1` to `EWUP5` or `APC` from 0 logs one
+ *   warning per field per machine life and stores the bit. Under `strict_peripherals` it is a
+ *   `model_error` and the register keeps its value before the write. `REGLPS`, `REGLPF`, `PVDO`,
+ *   the `PVMOx` flags and the wakeup and Standby flags stay 0.
+ * - STM32L47x/L48x: `RCC_BDCR` and the RTC registers take writes whatever `DBP` holds. `USV`,
+ *   `IOSV`, `PLS`, `RRS`, `EIWUL`, `PWR_CR4`, `PWR_SCR` and `PWR_PUCRx` and `PWR_PDCRx` are
+ *   storage. A peripheral reset through `RCC_APB1RSTR1.PWRRST` resets every PWR register.
+ *
+ * @group l4 note
+ * - STM32L47x/L48x PWR errata, ES0250 2.2: a `PWR_CR4` write takes effect whatever low-power entry
+ *   follows it, 2.2.21. The PWR model raises no reset, so a short run sequence gives no brown-out
+ *   reset, 2.2.5.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,

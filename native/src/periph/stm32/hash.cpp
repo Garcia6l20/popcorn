@@ -545,6 +545,74 @@ struct hash_state
  *          strict_peripherals.
  *
  *        The RCC clock gate is not modelled.
+ *
+ * @limits hash HASH
+ *
+ * @group u5,h5 rule "HMAC"
+ * - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block
+ *   is 64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family and the sponge
+ *   rate for SHA-3.
+ *
+ * @group h5 rule "H5 variants"
+ * - The H5 HASH keeps SHA-3 and SHAKE on the STM32H543, H553, H5E and H5F only, RM0481 Table 397
+ *   and RM0517 46.2. On the STM32H52x, H53x, H56x and H57x, ALGO keeps 0000, 0010, 0011 and 1100 to
+ *   1111. A CR write of another code, with or without INIT, stores ALGO 0000 and the hash runs
+ *   SHA-1, as read back on an STM32H573 for 0001 and 0100 to 1011. The H543, H553, H5E and H5F
+ *   store 0000 for 0001, 1010 and 1011 by the same rule, which is the H573 reading applied there,
+ *   inferred. The write logs once and raises a model_error under strict_peripherals before CR
+ *   changes.
+ * - The SHA-3 and SHAKE rules follow RM0481 and RM0517 and are served on the STM32H543, H553, H5E
+ *   and H5F rows. Building a description for the H543 and H553 needs ST's DIE47C rzone file, and
+ *   for the H5E and H5F the DIE47A file. The H5E and H5F parts need a CMSIS SVD, which ST's pack
+ *   does not hold. The SHA-3 variant refuses a description whose SR.NBWE is narrower than 6 bits.
+ * - The STM32H503 HASH is the U5 model without MD5: ALGO[1:0] and NBWE[4:0] as RM0492 25.6 give
+ *   them, with SHA-1, SHA-224 and SHA-256. ALGO 01 is reserved there. A CR write with it stores
+ *   ALGO 00 and the hash runs SHA-1, logged once and raised under strict_peripherals, inferred from
+ *   the H573 reading. A board check of ALGO 01 on an H503 would settle it.
+ *
+ * @group u5,h5 rule "Timing"
+ * - The H5 BUSY time of one block, from its launching DIN write, is 67 HCLK cycles under SHA-1 and
+ *   SHA2-512 and 51 under SHA2-256, as measured on an STM32H573 at 32 MHz. RM0481 Table 401 gives
+ *   82, 98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS 1 cycle
+ *   later, as measured. While BUSY, NBWP counts the launched block's words with the pending ones.
+ *   SHA2-384, SHA2-512/224 and SHA2-512/256 take the SHA2-512 times and SHA2-224 the SHA2-256
+ *   times, inferred from their families. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66 under
+ *   MD5, SHA2-224 and SHA2-256.
+ * - An H5 final digest keeps BUSY its compressions times the block time plus 17 HCLK cycles under
+ *   SHA-1 and SHA2-256 and 33 under SHA2-512. DCIS, NBWE and the digest registers follow 1 cycle
+ *   after BUSY clears and DINIS 1 cycle later. An STM32H573 measured from the DCAL store BUSY 0 at
+ *   84, 68 and 100 cycles for one compression and 150, 118 and 166 for two, 152, 120 and 168 when
+ *   the padding spills into a second block, under SHA-1, SHA2-256 and SHA2-512. The rule gives each
+ *   within 1 cycle. The digest registers read 0 in the one cycle between BUSY 0 and DCIS, and after
+ *   INIT. A DIN write in between completes the digest first. SHA-3 and SHAKE digests take their
+ *   block times, DCIS with BUSY 0. The U5 sets DCIS with BUSY 0 after one block time per padded
+ *   block.
+ *
+ * @group h5 rule "SHA-3 and SHAKE"
+ * - The H5 HASH reads SHA-3 and SHAKE DIN words as the SHA-2 core does: the first message byte of a
+ *   word, after the DATATYPE swap, is its most significant byte, and the digest bytes fill HR0 and
+ *   up from bit 31. RM0481 40.4.4 does not spell this out for SHA-3. DATATYPE 00, 01 and 11 follow
+ *   the same mapping.
+ * - The H5 BUSY time of SHAKE128 and SHAKE256, 66 and 58 cycles, follows the SHA-3 rule of RM0481
+ *   Table 401, which has no SHAKE row. A DCAL that squeezes the next rate takes the same time. A
+ *   DCAL written while BUSY of a SHAKE digest squeezes the next rate at once, logs once, and the
+ *   rate of the first DCAL is never shown. NBWP and CR.NBW read 0 after a SHAKE digest, as after a
+ *   SHA-3 digest.
+ * - A DIN word after a SHAKE digest with no INIT starts a new message and logs once. MODE 1 with
+ *   SHAKE logs once at INIT and MODE 1 is ignored.
+ * - The H5 CSR registers use popcorn's layout too: CSR4 up hold the Keccak lanes or the SHA-512
+ *   chaining value and pending block, the inner HMAC digest sits at CSR55, CSR72 or CSR52 by
+ *   algorithm. A save of CSR0 to CSR71 covers every SHA-3 context but the SHA3-384 and SHA3-512
+ *   HMAC, as RM0481 40.4.8 says.
+ *
+ * @group u5,h5 rule "DMA, state registers and bus"
+ * - DMA input works through GPDMA request 89. A machine with no DMA controller that serves
+ *   `hash_in_dma` logs DMAE 1 once and requests nothing.
+ * - The CSR registers hold popcorn's own serialisation of the state, not the silicon layout. CSR0
+ *   reads 0x48530001, out of reset too, where RM0456 gives 0x00000002.
+ * - A CSR0 write other than popcorn's tag, or a CSR1 write that does not match the state latched at
+ *   INIT, is refused and logged.
+ * - A DIN write while BUSY does not stall the bus. The CPU runs on.
  */
 class hash final : public dispatch_model<hash, hash_state>,
                    public dma_requester,

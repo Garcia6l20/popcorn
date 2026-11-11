@@ -278,6 +278,55 @@ struct out_fields
  * Not modelled, logged once and a model_error under strict_peripherals: host mode, HNP and SRP,
  * battery charging detection, test modes, a TX FIFO numbered other than its endpoint. DMA and LPM
  * are not modelled either.
+ *
+ * @limits otg_fs OTG_FS
+ *
+ * @group u5,l4 unmodelled "Not modelled, logged"
+ * - Host mode, `GUSBCFG.FHMOD`. The core stays a device.
+ * - Session request and host negotiation, `GOTGCTL` SRQ and HNPRQ.
+ * - Battery charging detection, `GCCFG.BCDEN`.
+ * - Test modes, `DCTL.TCTL`.
+ * - A TX FIFO numbered other than its IN endpoint. DFIFOn feeds IN endpoint n.
+ * - An isochronous endpoint armed with PKTCNT above 1. One packet goes per frame.
+ *
+ * @group u5,l4 rule "Full speed timing"
+ * The timing is full speed. A firmware `GCCFG.PWRDWN` write that powers the transceiver, PWRDWN
+ * going from 0 to 1, while the 48 MHz kernel clock, `RCC_CCIPR1.ICLKSEL` on the STM32U5 and
+ * `RCC_CCIPR.CLK48SEL` on the STM32L4, is stopped or off 48 MHz by more than 0.25 % logs one
+ * `model_warning` per machine life and raises `model_error` under `strict_peripherals`. A debugger
+ * write, a later write while powered and a clock change after the power-up check nothing. 0.25 % is
+ * the full-speed data rate tolerance of USB 2.0 7.1.11, the reference manuals give no figure,
+ * inferred. A machine without an RCC model checks nothing.
+ *
+ * @group u5,l4 rule "VDDUSB"
+ * The device connects only once firmware declares VDDUSB valid, `PWR_SVMCR.USV` on the STM32U5,
+ * RM0456 10.4.6, and `PWR_CR2.USV` on the STM32L4, RM0351 5.1.3. `HAL_PWREx_EnableVddUSB` sets it.
+ * With USV 0 and every other connect condition met the device stays disconnected and logs one
+ * `model_warning` per machine life. A USV change, a PWR reset included, connects or disconnects the
+ * device at once. Everything driven by the host's SOF stops with it, so on the STM32U5 a CRS
+ * synchronised on the USB SOF, `CRS_CFGR.SYNCSRC` 2, gets no SYNC, no SYNCOKF and no trim until USV
+ * is set. A test rig that attaches a host to the U5 OTG_FS sets USV first.
+ *
+ * @group l4 deviation "Differences of the STM32L47x/L48x core, RM0351 section 47"
+ * The STM32L47x/L48x core, RM0351 section 47, is the STM32U5 core with these differences:
+ *
+ * - GRSTCTL bit 2 is FCRST, RM0351 47.15.5, read 0 again as soon as it is written, as FSRST on the
+ *   STM32U5.
+ * - No PSRST, ERRATIM, STSPHST or CURMOD, RM0351 Table 322. The PSRST note of 47.15.5 and the
+ *   ERRATIM note of 47.15.35 agree: "This bit is available in STM32L49x/L4Ax products, reserved
+ *   otherwise". The 47.15.1 GOTGCTL drawing shows CURMOD at bit 21. The model follows the table,
+ *   inferred: GRSTCTL bit 1 and GOTGCTL bit 21 read 0.
+ * - GSNPSID at offset 0x40 reads 0x4F54310A, with GHWCFG1 to GHWCFG4 and GDFIFOCFG at their L476
+ *   reset values, inferred: RM0351 47.15 documents no register at 0x040 to 0x05C. The values come
+ *   from the HAL core ID and a TinyUSB register dump of an STM32L476.
+ * - The ADP registers `GPWRDN` and `GADPCTL`, RM0351 47.15.18 and 47.15.19, are storage. A firmware
+ *   write logs one `model_warning` per register and raises `model_error` under `strict_peripherals`
+ *   before it is stored.
+ * - The model raises `OTG_FS_IRQn`, 67, itself. EXTI line 17, the OTG_FS wakeup, is a Stop mode
+ *   wakeup line, RM0351 14.3, and stays idle.
+ * - ES0250 2.27.1, a TX FIFO write sequence interrupted by an access to an endpoint register
+ *   corrupts the FIFO on silicon. The model keeps the FIFO whole.
+ * - ES0250 2.27.2 concerns host mode through a hub to a low-speed device. The core is a device.
  */
 class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>,
                      public usb_device_link<otg_fs>,
