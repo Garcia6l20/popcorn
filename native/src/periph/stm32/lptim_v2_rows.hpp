@@ -25,11 +25,16 @@ struct lptim_v2_variant
   bool encoder = true;
   /** @brief The instance has the input capture mode, CCMR1.CC1SEL and CC2SEL. */
   bool capture = true;
+  /** @brief RCC clock domain of the APB bus the instance sits on, which the RCR write crosses
+   *         before the kernel clock domain. */
+  std::string_view bus_clock = "pclk3";
 };
 
-/** @brief STM32U5 LPTIM1 and LPTIM2, RM0456 58.3 Table 599: encoder, input capture, two
+/** @brief STM32U5 LPTIM1 on APB3, RM0456 58.3 Table 599: encoder, input capture, two
  *         channels. */
-inline constexpr lptim_v2_variant u5_lptim_full{};
+inline constexpr lptim_v2_variant u5_lptim1{};
+/** @brief STM32U5 LPTIM2: LPTIM1 on APB1, its clock enable in RCC_APB1ENR2. */
+inline constexpr lptim_v2_variant u5_lptim2{.bus_clock = "pclk1"};
 /** @brief STM32U5 LPTIM3: LPTIM1 without the encoder mode, RM0456 58.3 Table 599. */
 inline constexpr lptim_v2_variant u5_lptim3{.encoder = false};
 /** @brief STM32U5 LPTIM4, RM0456 58.3 Table 599 and 58.7.1: no channel, no encoder, no input

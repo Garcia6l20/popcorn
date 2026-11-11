@@ -10,7 +10,7 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn.stm32 import mcu, support
-from popcorn.units import ms
+from popcorn.units import ms, us
 
 from .conftest import run_bounded
 
@@ -71,3 +71,20 @@ def test_the_matches_are_equal_parked_and_running() -> None:
         results.append(seen[: 2 * PERIODS])
     assert results[0] == results[1]
     assert [name for name, _ in results[0]] == ["compare", "reload"] * PERIODS
+
+
+async def test_ue_sets_at_every_third_overflow_with_rep_2() -> None:
+    m = booted()
+    m.reg.pc = m.sym("idle")
+    m.periph.RCC.APB3ENR.LPTIM1EN = 1
+    timer = m.periph.LPTIM1
+    timer.CR.write(1)
+    timer.RCR.write(2)
+    timer.ARR.write(9)
+    await m.run(for_=us(5))
+    timer.CR.write(1 | 1 << 2)
+    await m.run(for_=us(8))
+    assert timer.ISR_output.UE == 0
+    await m.run(for_=us(0.5))
+    assert timer.ISR_output.UE == 1
+    assert timer.ISR_output.REPOK == 1

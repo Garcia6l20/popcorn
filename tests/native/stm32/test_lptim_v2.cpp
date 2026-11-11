@@ -54,7 +54,9 @@ constexpr std::uint32_t    cc1if    = 1u << 0;
 constexpr std::uint32_t    arrm     = 1u << 1;
 constexpr std::uint32_t    cmp1ok   = 1u << 3;
 constexpr std::uint32_t    arrok    = 1u << 4;
-constexpr std::uint32_t    ueie     = 1u << 7;
+constexpr std::uint32_t    ue       = 1u << 7;
+constexpr std::uint32_t    repok    = 1u << 8;
+constexpr std::uint32_t    exttrig  = 1u << 2;
 constexpr std::uint32_t    dierok   = 1u << 24;
 constexpr std::uint32_t    enable   = 1u << 0;
 constexpr std::uint32_t    sngstrt  = 1u << 1;
@@ -233,14 +235,36 @@ struct rig
     write(icr, cmp1ok | arrok);
   }
 
+  void settle_repetition(std::uint32_t value) const
+  {
+    write(rcr, value);
+    idle_to(now_ps() + 8 * cycle);
+    write(icr, repok);
+  }
+
+  [[nodiscard]] auto cpu_read(address offset) const -> std::uint32_t
+  {
+    auto& regs  = f->target->peripheral(u.name);
+    auto  value = f->target->model(u.name)->on_read(
+        regs, static_cast<std::uint32_t>(offset), 4,
+        {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
   [[nodiscard]] auto started(
       std::uint32_t compare,
       std::uint32_t reload,
-      std::uint32_t mode   = cntstrt,
-      std::uint32_t irqs   = 0,
-      std::uint32_t config = 0) const -> std::uint64_t
+      std::uint32_t mode       = cntstrt,
+      std::uint32_t irqs       = 0,
+      std::uint32_t config     = 0,
+      std::uint32_t repetition = 0) const -> std::uint64_t
   {
     enable_with(irqs, config);
+    if(repetition != 0)
+    {
+      settle_repetition(repetition);
+    }
     settle_values(compare, reload);
     auto const at = now_ps();
     write(cr, enable | mode);
@@ -318,9 +342,11 @@ TEST_CASE(
     CHECK(r.pending() == start + 10 * cycle);
     r.idle_to(start + 10 * cycle);
     CHECK(r.read(isr) == (cc1if | arrm));
+    CHECK(r.pending() == start + 11 * cycle);
     r.idle_to(start + 11 * cycle);
     CHECK(r.read(cnt) == 0);
-    r.write(icr, cc1if | arrm);
+    CHECK(r.read(isr) == (cc1if | arrm | ue));
+    r.write(icr, cc1if | arrm | ue);
     CHECK(r.read(isr) == 0);
     CHECK(r.pending() == start + 17 * cycle);
   }
@@ -338,7 +364,7 @@ TEST_CASE("RM0456 58.4.8: SNGSTRT stops the counter at 0 at the wrap after ARR")
   CHECK_FALSE(r.pending().has_value());
   r.idle_to(start + 40 * cycle);
   CHECK(r.read(cnt) == 0);
-  CHECK(r.read(isr) == 0);
+  CHECK(r.read(isr) == ue);
 }
 
 TEST_CASE(
@@ -387,13 +413,17 @@ TEST_CASE(
     r.idle_to(start + (written + 2) * cycle);
     CHECK((r.read(isr) & arrok) == 0);
     r.idle_to(start + (written + 3) * cycle);
-    CHECK(r.read(isr) == (arrok | (old_reload ? arrm : 0u)));
+    CHECK((r.read(isr) & (arrok | arrm)) == (arrok | (old_reload ? arrm : 0u)));
     r.write(icr, arrok | arrm);
-    CHECK(r.pending() == start + first * cycle);
+    r.idle_to(start + first * cycle - cycle);
+    CHECK((r.read(isr) & arrm) == 0);
     r.idle_to(start + first * cycle);
-    CHECK(r.read(isr) == arrm);
+    CHECK((r.read(isr) & arrm) == arrm);
     r.write(icr, arrm);
-    CHECK(r.pending() == start + next * cycle);
+    r.idle_to(start + next * cycle - cycle);
+    CHECK((r.read(isr) & arrm) == 0);
+    r.idle_to(start + next * cycle);
+    CHECK((r.read(isr) & arrm) == arrm);
   }
 }
 
@@ -418,7 +448,7 @@ TEST_CASE(
       r.write(ccr1, value);
       CHECK(r.pending() == start + 5 * cycle);
       r.idle_to(start + 5 * cycle);
-      CHECK(r.read(isr) == cmp1ok);
+      CHECK((r.read(isr) & ~ue) == cmp1ok);
       r.write(icr, cmp1ok);
       r.idle_to(start + match * cycle - cycle);
       CHECK((r.read(isr) & cc1if) == 0);
@@ -447,7 +477,7 @@ TEST_CASE(
   CHECK(r.read(isr) == dierok);
   r.write(icr, dierok);
   r.idle_to(start + 17 * cycle);
-  CHECK(r.read(isr) == (cc1if | arrm));
+  CHECK(r.read(isr) == (cc1if | arrm | ue));
   CHECK(r.irq_pending());
 }
 
@@ -460,13 +490,15 @@ TEST_CASE(
   r.idle_to(start + 10 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm));
   r.write(dier, arrm);
+  CHECK(r.pending() == start + 11 * cycle);
+  r.idle_to(start + 11 * cycle);
   CHECK(r.pending() == start + 13 * cycle);
   r.idle_to(start + 13 * cycle - cycle);
-  CHECK(r.read(isr) == (cc1if | arrm));
+  CHECK(r.read(isr) == (cc1if | arrm | ue));
   r.idle_to(start + 13 * cycle);
-  CHECK(r.read(isr) == (arrm | dierok));
+  CHECK(r.read(isr) == (arrm | ue | dierok));
   CHECK(r.irq_pending());
-  r.write(icr, arrm | dierok);
+  r.write(icr, arrm | ue | dierok);
   r.write_at(0xE000'E280 + 4 * (r.u.irq / 32), 1u << (r.u.irq % 32));
   CHECK_FALSE(r.irq_pending());
   r.idle_to(start + 17 * cycle);
@@ -596,9 +628,14 @@ TEST_CASE(
     r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
     CHECK(r.read(cnt) == count);
     auto const due = start + at + hsi + (match - count - 1) * 2 * hsi;
+    if(count == 10)
+    {
+      CHECK(r.pending() == start + at + hsi);
+      r.idle_to(start + at + hsi);
+    }
     CHECK(r.pending() == due);
     r.idle_to(due);
-    CHECK(r.read(isr) == cc1if);
+    CHECK((r.read(isr) & cc1if) == cc1if);
   }
 }
 
@@ -668,7 +705,7 @@ TEST_CASE(
   {
     CHECK(one->read(cnt) == 1);
     one->idle_to(start + 15 * cycle);
-    CHECK(one->read(isr) == (arrm | cmp1ok));
+    CHECK(one->read(isr) == (arrm | ue | cmp1ok));
     CHECK(one->irq_pending());
   }
 }
@@ -686,14 +723,13 @@ TEST_CASE(
     bool             logs;
   };
   for(auto const& [text, which, config, channels, logs] : {
-          one{"PRELOAD",      units[0], preload, 0,      true },
-          one{"WAVE",         units[3], wave,    0,      true },
-          one{"CKSEL",        units[1], cksel,   0,      true },
-          one{"ENC 1",        units[0], enc,     0,      true },
-          one{"ENC 1",        units[2], enc,     0,      false},
-          one{"CC1E or CC2E", units[2], 0,       cc1e,   true },
-          one{"CC1SEL",       units[1], 0,       cc1sel, true },
-          one{"CC1SEL",       units[1], 0,       0,      false},
+          one{"WAVE",         units[3], wave,  0,      true },
+          one{"CKSEL",        units[1], cksel, 0,      true },
+          one{"ENC 1",        units[0], enc,   0,      true },
+          one{"ENC 1",        units[2], enc,   0,      false},
+          one{"CC1E or CC2E", units[2], 0,     cc1e,   true },
+          one{"CC1SEL",       units[1], 0,     cc1sel, true },
+          one{"CC1SEL",       units[1], 0,     0,      false},
   })
   {
     CAPTURE(text);
@@ -729,11 +765,10 @@ TEST_CASE(
     "strict_peripherals, COUNTRST reading 0 and TRIGEN leaving the counter stopped")
 {
   for(auto const& [reg, value, text] : {
-          std::tuple{rcr,  3u,                std::string_view{"RCR"}              },
-          std::tuple{ccr2, 3u,                std::string_view{"CCR2"}             },
-          std::tuple{dier, ueie,              std::string_view{"DIER enable of UE"}},
-          std::tuple{cr,   enable | countrst, std::string_view{"COUNTRST"}         },
-          std::tuple{cr,   enable | rstare,   std::string_view{"RSTARE"}           },
+          std::tuple{ccr2, 3u,                std::string_view{"CCR2"}                  },
+          std::tuple{dier, exttrig,           std::string_view{"DIER enable of EXTTRIG"}},
+          std::tuple{cr,   enable | countrst, std::string_view{"COUNTRST"}              },
+          std::tuple{cr,   enable | rstare,   std::string_view{"RSTARE"}                },
   })
   {
     CAPTURE(text);
@@ -809,6 +844,226 @@ TEST_CASE("the LL firmware runs LPTIM4 once: one ARRM, the counter stopped at 0"
 }
 
 TEST_CASE(
+    "RM0456 58.4.16: with REP r the update event comes at every (r+1)-th overflow, UE raises "
+    "the IRQ through UEIE, and ICR.UECF clears it")
+{
+  for(auto const repetition : {0u, 1u, 3u})
+  {
+    CAPTURE(repetition);
+    rig        r;
+    auto const start = r.started(30, 10, cntstrt, ue, 0, repetition);
+    auto const span  = (repetition + 1) * 11 * cycle;
+    r.idle_to(start + 10 * cycle);
+    CHECK(r.read(isr) == arrm);
+    CHECK(r.pending() == start + span);
+    r.idle_to(start + span - cycle);
+    CHECK(r.read(isr) == arrm);
+    CHECK_FALSE(r.irq_pending());
+    r.idle_to(start + span);
+    CHECK(r.read(isr) == (arrm | ue));
+    CHECK(r.irq_pending());
+    r.idle_to(start + span + 3 * cycle);
+    r.write(icr, ue);
+    r.write_at(0xE000'E280 + 4 * (r.u.irq / 32), 1u << (r.u.irq % 32));
+    CHECK_FALSE(r.irq_pending());
+    CHECK(r.pending() == start + 2 * span);
+    r.idle_to(start + 5 * span + cycle);
+    r.write(icr, ue);
+    CHECK(r.pending() == start + 6 * span);
+  }
+}
+
+TEST_CASE("RM0456 58.4.8 and 58.4.16: SNGSTRT with REP 3 stops the counter at the update event")
+{
+  rig        r;
+  auto const start = r.started(30, 10, sngstrt, 0, 0, 3);
+  r.idle_to(start + 10 * cycle);
+  CHECK(r.pending() == start + 44 * cycle);
+  r.idle_to(start + 43 * cycle);
+  CHECK(r.read(cnt) == 10);
+  r.idle_to(start + 44 * cycle);
+  CHECK(r.read(cnt) == 0);
+  CHECK(r.read(isr) == (arrm | ue));
+  CHECK_FALSE(r.pending().has_value());
+  r.idle_to(start + 60 * cycle);
+  CHECK(r.read(cnt) == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.16: REPOK sets 4 APB clocks plus 3 kernel clocks after an RCR write, the APB "
+    "clock of the instance's bus")
+{
+  struct shot
+  {
+    unit          which;
+    std::uint32_t ppre3;
+    std::uint64_t latency;
+  };
+  for(auto const& [which, ppre3, latency] : {
+          shot{units[0], 0, 7 * cycle             },
+          shot{units[0], 7, 64 * cycle + 3 * cycle},
+          shot{units[1], 7, 7 * cycle             },
+  })
+  {
+    CAPTURE(which.name);
+    CAPTURE(ppre3);
+    rig r{which};
+    r.rcc("RCC_CFGR3", "PPRE3", ppre3);
+    r.write(cr, enable);
+    auto const at = r.now_ps();
+    r.write(rcr, 2);
+    CHECK(r.pending() == at + latency);
+    r.idle_to(at + latency - cycle);
+    CHECK(r.read(isr) == 0);
+    r.idle_to(at + latency);
+    CHECK(r.read(isr) == repok);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.16: a new REP reaches the repetition counter at the first underflow at or "
+    "after REPOK, PRELOAD 0 and 1, inferred at the underflow instant")
+{
+  struct shot
+  {
+    std::uint64_t written;
+    std::uint64_t loaded;
+  };
+  for(auto const config : {0u, preload})
+  {
+    for(auto const& [written, loaded] : {
+            shot{2,  11},
+            shot{26, 33},
+            shot{30, 44},
+    })
+    {
+      CAPTURE(config);
+      CAPTURE(written);
+      rig        r;
+      auto const start = r.started(30, 10, cntstrt, 0, config);
+      r.idle_to(start + written * cycle);
+      r.write(icr, ue);
+      r.write(rcr, 2);
+      auto const ok = start + (written + 7) * cycle;
+      CHECK(r.pending() == std::min(ok, start + ((written + 10) / 11) * 11 * cycle));
+      r.idle_to(ok);
+      CHECK((r.read(isr) & repok) == repok);
+      r.idle_to(start + loaded * cycle);
+      CHECK((r.read(isr) & ue) == ue);
+      r.write(icr, ue | repok);
+      CHECK(r.pending() == start + (loaded + 33) * cycle);
+      r.idle_to(start + (loaded + 33) * cycle);
+      r.write(icr, ue);
+      CHECK(r.pending() == start + (loaded + 66) * cycle);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.11: with PRELOAD 1 and the counter started, ARR and CCR1 take effect at the "
+    "first update event at or after their OK flag, inferred at the update instant")
+{
+  struct shot
+  {
+    std::uint32_t repetition;
+    std::uint64_t written;
+    std::uint64_t applied;
+  };
+  for(auto const& [repetition, written, applied] : {
+          shot{0, 2,  11},
+          shot{0, 24, 33},
+          shot{0, 30, 33},
+          shot{1, 2,  22},
+          shot{1, 41, 44},
+  })
+  {
+    CAPTURE(repetition);
+    CAPTURE(written);
+    rig        r;
+    auto const start = r.started(30, 10, cntstrt, 0, preload, repetition);
+    r.idle_to(start + written * cycle);
+    r.write(arr, 20);
+    r.write(ccr1, 3);
+    r.idle_to(start + (written + 3) * cycle);
+    CHECK((r.read(isr) & (arrok | cmp1ok)) == (arrok | cmp1ok));
+    r.write(icr, arrok | cmp1ok | arrm | ue);
+    if(applied > written + 3)
+    {
+      r.idle_to(start + applied * cycle - cycle);
+      CHECK(r.read(cnt) == 10);
+      CHECK((r.read(isr) & cc1if) == 0);
+    }
+    r.idle_to(start + applied * cycle);
+    CHECK(r.read(cnt) == 0);
+    r.write(icr, ue | cc1if | arrm);
+    CHECK(r.pending() == start + (applied + 3) * cycle);
+    r.idle_to(start + (applied + 3) * cycle);
+    CHECK(r.read(isr) == cc1if);
+    r.idle_to(start + (applied + 20) * cycle);
+    CHECK(r.read(isr) == (cc1if | arrm));
+    r.write(icr, cc1if | arrm);
+    CHECK(r.pending() == start + (applied + (repetition == 0 ? 21 : 24)) * cycle);
+  }
+}
+
+TEST_CASE("RM0456 58.7.2: an ARR write clears UE and lowers its IRQ")
+{
+  rig        r;
+  auto const start = r.started(30, 10, cntstrt, ue);
+  r.idle_to(start + 12 * cycle);
+  CHECK(r.read(isr) == (arrm | ue));
+  CHECK(r.irq_pending());
+  r.write(arr, 10);
+  CHECK((r.read(isr) & ue) == 0);
+  r.write_at(0xE000'E280 + 4 * (r.u.irq / 32), 1u << (r.u.irq % 32));
+  CHECK_FALSE(r.irq_pending());
+}
+
+TEST_CASE(
+    "a snapshot mid repetition with a preloaded ARR restores into a machine with no reset, the "
+    "updates equal")
+{
+  rig        r;
+  auto const start = r.started(30, 10, cntstrt, ue, preload, 3);
+  r.idle_to(start + 15 * cycle);
+  r.write(arr, 20);
+  r.idle_to(start + 19 * cycle);
+  auto const saved = r.f->target->snapshot();
+  rig        other{no_reset};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.saved() == r.saved());
+  CHECK(other.pending() == r.pending());
+  for(auto const* one : {&r, &other})
+  {
+    CHECK(one->pending() == start + 44 * cycle);
+    one->idle_to(start + 44 * cycle);
+    CHECK((one->read(isr) & ue) == ue);
+    one->write(icr, ue);
+    CHECK(one->pending() == start + (44 + 4 * 21) * cycle);
+  }
+}
+
+TEST_CASE(
+    "inferred: ENABLE written to 0 drops the repetition count, the next start loads REP again")
+{
+  rig        r;
+  auto const start = r.started(30, 10, cntstrt, 0, 0, 3);
+  r.idle_to(start + 20 * cycle);
+  r.write(ccr1, 29);
+  r.idle_to(start + 25 * cycle);
+  r.write(cr, 0);
+  r.write(cr, enable);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const again = r.now_ps() + 3 * cycle;
+  r.write(cr, enable | cntstrt);
+  r.idle_to(again + 10 * cycle);
+  r.write(icr, ue);
+  CHECK((r.read(isr) & arrm) == arrm);
+  CHECK(r.pending() == again + 44 * cycle);
+}
+
+TEST_CASE(
     "RM0456 58.4.7, inferred for the same write: CNTSTRT with ENABLE 0, or in the write that sets "
     "ENABLE, is discarded and reads 0")
 {
@@ -867,7 +1122,7 @@ TEST_CASE(
   lowered.write(arr, 5);
   lowered.idle_to(from + 18 * cycle);
   lowered.write(icr, arrok);
-  CHECK(lowered.pending() == from + (18 + 0x1'0000 - 18 + 5) * cycle);
+  CHECK(lowered.pending() == from + 0x1'0000 * cycle);
   lowered.idle_to(from + 118 * cycle);
   CHECK(lowered.read(cnt) == 118);
 }
@@ -899,6 +1154,14 @@ TEST_CASE(
   CHECK(strict.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2)) == 0);
   REQUIRE(store(strict, 2, popcorn::initiator::debugger).has_value());
   CHECK(strict.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2)) == 2);
+  rig   narrow{units[0], true};
+  auto& regs = narrow.f->target->peripheral("LPTIM1");
+  regs.poke(static_cast<std::uint32_t>(cfgr2), 1);
+  CHECK_THROWS_AS(
+      static_cast<void>(narrow.f->target->model("LPTIM1")->on_write(
+          regs, static_cast<std::uint32_t>(cfgr2) + 2, 1, 0, 0,
+          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu})),
+      popcorn::model_error);
 }
 
 TEST_CASE(
@@ -921,4 +1184,19 @@ TEST_CASE(
     CHECK(r.read(cfgr) == presc(4));
     CHECK(r.logged.empty());
   }
+}
+
+TEST_CASE(
+    "inferred: an ARR OK at the instant of a one-shot update event lets the update stop the "
+    "counter with the old ARR")
+{
+  rig        r;
+  auto const start = r.started(30, 10, sngstrt);
+  r.idle_to(start + 8 * cycle);
+  r.write(arr, 20);
+  CHECK(r.pending() == start + 10 * cycle);
+  r.idle_to(start + 11 * cycle);
+  CHECK(r.read(isr) == (arrm | arrok | ue));
+  CHECK(r.read(cnt) == 0);
+  CHECK_FALSE(r.pending().has_value());
 }

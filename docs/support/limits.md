@@ -1449,58 +1449,74 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   58.4.7, and the ENABLE write plus two prescaled clocks, RM0456 58.4.13, the prescaled reading
   inferred. A start write made with ENABLE 0 is discarded, also when the same write sets ENABLE,
   inferred. CNTSTRT and SNGSTRT read 0 at once, inferred.
-- Continuous mode counts 0 to ARR and wraps. One-shot mode stops at 0 at the wrap after ARR, the
-  update event of RM0456 58.4.8 with RCR 0.
+- The counter counts 0 to ARR and overflows to 0. The repetition counter, loaded with REP at the
+  start, inferred, counts the overflows down, and an overflow with it at 0 is the update event:
+  UE sets and it reloads REP, RM0456 58.4.16. One-shot mode stops at 0 at the update event, RM0456
+  58.4.8. An ARR write clears UE, RM0456 58.7.2.
 - CC1IF and ARRM set at the kernel clock edge where the counter reaches CCR1 and ARR, RM0456
   58.7.2, the instant inferred. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with
   ARRM, and a counter above a lowered ARR counts to 0xFFFF before it wraps, inferred.
-- CMP1OK and ARROK set 3 kernel clocks after the CCR1 or ARR write, and the value applies then,
-  inferred: RM0456 58.4.11 states a latency with no number. Counter ticks up to the OK compare
-  with the old values, inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred.
+- CMP1OK and ARROK set 3 kernel clocks after the CCR1 or ARR write, inferred: RM0456 58.4.11
+  states a latency with no number. With PRELOAD 0, or with the counter stopped, the value applies
+  at the flag, and counter ticks up to it compare with the old values, inferred. With PRELOAD 1
+  and the counter started, from the CNTSTRT or SNGSTRT write on, inferred, it applies at the
+  first update event at or after the flag, RM0456 58.4.11. ENABLE written to 0 and the one-shot
+  stop apply such a value at once, inferred.
+- REPOK sets 4 APB clocks plus 3 kernel clocks after an RCR write, RM0456 58.4.16, the APB clock
+  of the instance's bus, APB3 or APB1 for LPTIM2, taken at the write, inferred. The repetition
+  counter takes the new REP at the first update event at or after REPOK, with PRELOAD 0 or 1,
+  RM0456 58.4.16. The caution of RM0456 58.7.16, an RCR change less than five counter cycles
+  before the autoreload match with PRELOAD 0, gets no special case: the rule above applies.
+- A flag due at the instant of an update event applies before it: the update and a one-shot
+  stop use the old value, the new one counts from then, and a REPOK at that instant reloads the
+  new REP, inferred.
 - DIEROK sets 3 kernel clocks after a DIER write, and the enables take effect then, inferred:
   RM0456 58.7.8 states the flag with no latency. Each DIER bit the write changes clears its ISR
   flag at that instant, ES0499 2.17.3, the instant inferred. A flag that sets while its DIER bit
   is in effect raises the LPTIM IRQ until ICR clears it, so a DIER bit set after its flag raises
   nothing, RM0456 58.6.
-- Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK, CC1IF, ARRM, wrap, mode
-  switch, inferred.
-- SNGSTRT written while the counter runs in continuous mode makes it stop at a later wrap, and
-  CNTSTRT written in one-shot mode makes it go on counting, RM0456 58.4.8. The new mode reaches
-  the counter 3 kernel clocks after the write, inferred. The same mode written again while the
+- Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK, REPOK, CC1IF, ARRM,
+  update event, mode switch, inferred.
+- SNGSTRT written while the counter runs in continuous mode makes it stop at a later update
+  event, and CNTSTRT written in one-shot mode makes it go on counting, RM0456 58.4.8. The new mode
+  reaches the counter 3 kernel clocks after the write, inferred, so an update event before then
+  keeps the old mode. The same mode written again while the
   counter runs is discarded, inferred. A second CNTSTRT or SNGSTRT before the first reaches the
   counter replaces it, logs one `model_warning` and raises `ModelError` under `strict`, inferred.
-- ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CCR1, ARR or DIER
-  write, inferred.
-- A CFGR write with ENABLE 1, a DIER, CCR1 or ARR write with ENABLE 0, RM0456 58.7.8, 58.7.10,
-  58.7.12 and 58.7.13, and a second DIER, CCR1 or ARR write before its OK flag, RM0456 58.4.11
-  and 58.7.8, log one `model_warning` each and raise `ModelError` under `strict`. The register
-  keeps its value, inferred, except the second write outside `strict`, whose value replaces the
-  pending one, inferred.
+- ENABLE written to 0 stops the counter at 0, keeps the flags and a pending CCR1, ARR, RCR or DIER
+  write, and drops the repetition count, inferred.
+- A CFGR write with ENABLE 1, a DIER, CCR1, ARR or RCR write with ENABLE 0, RM0456 58.7.8,
+  58.7.10, 58.7.12, 58.7.13 and 58.7.16, and a second DIER, CCR1, ARR or RCR write before its OK
+  flag, RM0456 58.4.11, 58.4.16 and 58.7.8, log one `model_warning` each and raise `ModelError`
+  under `strict`. The register keeps its value, inferred, except the second write outside
+  `strict`, whose value replaces the pending one, inferred.
 - CFGR2 is storage: a firmware write that sets a bit logs one `model_warning` and raises
   `ModelError` under `strict` before it is stored, and the coverage report lists it as
   `storage_only`. A write of the reset value 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make,
   passes.
 - No LPTIM output drives a pin or a trigger signal.
 - A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
-  start latency, and the kernel clocks left before each pending OK flag, mode switch and one-shot
-  stop, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
+  start latency, and the kernel clocks left before each pending OK flag and mode switch,
+  inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
   them until it runs again, inferred.
 - LPTIM1RST to LPTIM4RST reset the registers and the state of their LPTIM.
 - CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
 - These functions are not modelled. Each logs one `model_warning` at its first use and raises
   `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
-  counter start PRELOAD, WAVE, CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2, CC1E or CC2E with
-  the channel as output and CC1SEL or CC2SEL on LPTIM1 to LPTIM3, the CCMR1 ones also at a CCMR1
+  counter start WAVE, CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2, CC1E or CC2E with the
+  channel as output and CC1SEL or CC2SEL on LPTIM1 to LPTIM3, the CCMR1 ones also at a CCMR1
   write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN not 00, which leaves
-  the counter stopped, any RCR or CCR2 write, so REPOK, UE, CMP2OK and CC2IF never set, a DIER
-  bit other than CC1IE, ARRMIE, CMP1OKIE and ARROKIE, COUNTRST, which reads 0 at once, and
-  RSTARE. A function the model lacks otherwise counts the kernel clock with channel 1 comparing
-  CCR1.
+  the counter stopped, any CCR2 write, so CMP2OK and CC2IF never set, a DIER bit other than
+  CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, COUNTRST, which reads 0 at once, and
+  RSTARE. A function the model lacks otherwise
+  counts the kernel clock with channel 1 comparing CCR1.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
-- ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, and
-  2.17.2, ARRM and CMPM missed in one-shot mode with an odd REP under an APB clock slower than the
-  kernel clock, are probabilistic and outside the model. ES0499 2.17.4, the over-capture lost
+- ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, is
+  probabilistic and outside the model. ES0499 2.17.2, ARRM and CMPM that "there is a chance" are
+  not set at the end of a one-shot REP cycle with an odd REP and an APB clock slower than the
+  kernel clock, unless {ARR, CMP} >= KER_CLK / (2 * APB_CLK), is probabilistic: the model always
+  sets them and logs nothing. ES0499 2.17.4, the over-capture lost
   when CCxOF clears with a capture pulse active, concerns the input capture mode, not modelled.
 - ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, concerns the LPTIM inputs, not
   modelled. ES0499 2.3.2, TIMICSEL not protected by LPTIM2SEC, is reproduced: the RCC model
