@@ -19,12 +19,12 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-struct syscfg_state
+struct syscfg_u5_state
 {
-  friend auto operator==(syscfg_state const&, syscfg_state const&) -> bool = default;
+  friend auto operator==(syscfg_u5_state const&, syscfg_u5_state const&) -> bool = default;
 };
 
-static_assert(std::is_empty_v<syscfg_state>);
+static_assert(std::is_empty_v<syscfg_u5_state>);
 
 /**
  * @brief SYSCFG of the STM32U5, RM0456 section 15, storage with the TrustZone rules of RM0456
@@ -59,12 +59,12 @@ static_assert(std::is_empty_v<syscfg_state>);
  *   event the TrustZone rules give and is not noted.
  * - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
  */
-class syscfg final : public dispatch_model<syscfg, syscfg_state>,
-                     public trustzone_aware,
-                     public bus_reset_listener
+class syscfg_u5 final : public dispatch_model<syscfg_u5, syscfg_u5_state>,
+                        public trustzone_aware,
+                        public bus_reset_listener
 {
 public:
-  syscfg(model_context& ctx, peripheral_desc const& desc);
+  syscfg_u5(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -90,9 +90,9 @@ private:
 constexpr std::array<std::string_view, 3> system_reset_only{
     "SYSCFG_CFGR2", "SYSCFG_CSLCKR", "SYSCFG_CNSLCKR"};
 
-auto syscfg_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscfg>>
+auto syscfg_u5_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscfg_u5>>
 {
-  std::vector<write_entry<syscfg>> out;
+  std::vector<write_entry<syscfg_u5>> out;
   for(auto const& described : desc.registers)
   {
     if(not described.alternate_of)
@@ -103,8 +103,8 @@ auto syscfg_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscf
   return out;
 }
 
-syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes(desc)}, regs_{ctx.regs},
+syscfg_u5::syscfg_u5(model_context& ctx, peripheral_desc const& desc)
+    : dispatch_model{ctx, desc, "SYSCFG", syscfg_u5_writes(desc)}, regs_{ctx.regs},
       secure_{reg("SYSCFG_SECCFGR")}, rules_{
                                           .system  = field("SYSCFG_SECCFGR", "SYSCFGSEC"),
                                           .class_b = field("SYSCFG_SECCFGR", "CLASSBSEC"),
@@ -135,17 +135,17 @@ syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
   };
 }
 
-void syscfg::reset(register_file&, reset_kind)
+void syscfg_u5::reset(register_file&, reset_kind)
 {
   restore_reset_values();
 }
 
-void syscfg::on_held_write(std::uint32_t offset, access_ctx ctx)
+void syscfg_u5::on_held_write(std::uint32_t offset, access_ctx ctx)
 {
   static_cast<void>(rule(offset & ~3u, ctx, true));
 }
 
-void syscfg::on_bus_reset()
+void syscfg_u5::on_bus_reset()
 {
   std::vector<std::pair<std::uint32_t, std::uint32_t>> kept;
   for(auto const name : system_reset_only)
@@ -163,7 +163,7 @@ void syscfg::on_bus_reset()
   }
 }
 
-void syscfg::restore_reset_values()
+void syscfg_u5::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -171,30 +171,30 @@ void syscfg::restore_reset_values()
   }
 }
 
-void syscfg::on_event(std::uint32_t, std::uint64_t)
+void syscfg_u5::on_event(std::uint32_t, std::uint64_t)
 {}
 
-auto syscfg::secure_word() const -> std::uint32_t
+auto syscfg_u5::secure_word() const -> std::uint32_t
 {
   return ctx_.trustzone ? regs_.peek(secure_.offset) : 0;
 }
 
-auto syscfg::stateless() const -> bool
+auto syscfg_u5::stateless() const -> bool
 {
   return true;
 }
 
-auto syscfg::secure_function() const -> bool
+auto syscfg_u5::secure_function() const -> bool
 {
   return rules_.system.of(secure_word()) != 0;
 }
 
-auto syscfg::storage_only(std::uint32_t offset) const -> bool
+auto syscfg_u5::storage_only(std::uint32_t offset) const -> bool
 {
   return offset != secure_.offset;
 }
 
-auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+auto syscfg_u5::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const result = rule(word, ctx, write);
   if(write and storage_only(word))
@@ -204,7 +204,7 @@ auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus
   return result;
 }
 
-auto syscfg::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+auto syscfg_u5::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
   if(word == secure_.offset)
@@ -232,17 +232,17 @@ auto syscfg::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
 }
 }
 
-auto syscfg_factory() -> model_factory
+auto syscfg_u5_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<syscfg>(ctx, desc);
+    return std::make_shared<syscfg_u5>(ctx, desc);
   };
 }
 
 namespace
 {
 constexpr auto syscfg_u5_row_table = std::to_array<builtin>({
-    row_of<^^syscfg_factory>(
+    row_of<^^syscfg_u5_factory>(
         {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .families = family::u5}),
 });
 }

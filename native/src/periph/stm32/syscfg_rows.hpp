@@ -119,7 +119,7 @@ inline constexpr syscfg_l1l4_variant l1_syscfg_cat12{
     .storage_registers    = l1_syscfg_storage};
 
 /** @brief Factory of the SYSCFG model, RM0456 section 15. */
-[[nodiscard]] auto syscfg_factory() -> model_factory;
+[[nodiscard]] auto syscfg_u5_factory() -> model_factory;
 
 /**
  * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
