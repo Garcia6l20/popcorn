@@ -14,6 +14,7 @@ from popcorn_build.plugin_sdk import SDK, sdk_headers
 from popcorn_build.python import (
     add_extension,
     add_package_install,
+    add_source_mirror,
     add_stub,
     ext_suffix,
     interpreter,
@@ -310,6 +311,13 @@ if VARIANT not in ("asan", "tsan"):
     devices_stub = add_stub(
         devices_ext, "popcorn.devices", "_native", after=[stub], include_private=True
     )
+    for generated, relative in (
+        (stub, "_core.pyi"),
+        (obs_python[1], "_obs.pyi"),
+        (devices_stub, "devices/_native.pyi"),
+        (regs, "arm/_regs.pyi"),
+    ):
+        add_source_mirror(generated, python_package, relative)
     sdk_json_path = build_dir / SDK / "sdk.json"
     sdk_compiler = shutil.which(env.cxx.cmd) or env.cxx.cmd
     sdk_fields = {

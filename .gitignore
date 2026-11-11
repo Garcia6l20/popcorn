@@ -10,3 +10,7 @@ compile_commands.json
 site/
 docs/support/generated/
 docs/reference/sdk/api/
+python/popcorn/_core.pyi
+python/popcorn/_obs.pyi
+python/popcorn/devices/_native.pyi
+python/popcorn/arm/_regs.pyi

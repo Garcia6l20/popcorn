@@ -3,8 +3,9 @@
 `pcons.pyproject` reads a static `[project].version`. This wrapper replaces its pyproject loader
 with one that fills in `popcorn_build.version.popcorn_version` when `version` is listed in
 `dynamic`, and drops that entry, then re-exports every hook. `build_editable` also leaves out the
-`[tool.pcons] variables`, so the editable install keeps the development build of `build/`. The
-patch of `pcons.pyproject._load_pyproject` is the only coupling to pcons internals.
+`[tool.pcons] variables`, so the editable install keeps the development build of `build/`.
+`build_sdist` leaves out the `.pyi` copies of build outputs under `python/popcorn`. The patches of
+`pcons.pyproject._load_pyproject` and `_sdist_files` are the only coupling to pcons internals.
 """
 
 from __future__ import annotations
@@ -59,6 +60,25 @@ def _load_with_version(source_dir: Path) -> dict[str, Any]:
 
 
 _pcons._load_pyproject = _load_with_version  # pyright: ignore[reportPrivateUsage]
+
+_sdist_files = _pcons._sdist_files  # pyright: ignore[reportPrivateUsage]
+
+
+def _sdist_without_mirrors(source_dir: Path, build_dir: Path) -> list[Path]:
+    """The sdist files of pcons, less the `.pyi` copies the build puts under `python/popcorn`.
+
+    The source package holds no `.pyi` of its own: every one there is a git-ignored copy of a
+    build output, made for pyright, see `popcorn_build.python.add_source_mirror`.
+    """
+    package = source_dir / "python" / "popcorn"
+    return [
+        path
+        for path in _sdist_files(source_dir, build_dir)
+        if not (path.suffix == ".pyi" and path.is_relative_to(package))
+    ]
+
+
+_pcons._sdist_files = _sdist_without_mirrors  # pyright: ignore[reportPrivateUsage]
 
 
 def build_editable(

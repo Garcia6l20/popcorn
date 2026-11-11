@@ -74,11 +74,21 @@ typeCheckingMode = "strict"
 pythonVersion = "3.14"
 reportImplicitOverride = "error"
 include = ["python", "tests/build_memo.py", "tests/python", "tests/data", "tests/docs", "examples", "popcorn_build"]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "python/popcorn/_core.pyi",
+    "python/popcorn/_obs.pyi",
+    "python/popcorn/devices/_native.pyi",
+    "python/popcorn/arm/_regs.pyi",
+]
 venvPath = "."
 venv = ".venv"
+extraPaths = ["python"]
 executionEnvironments = [
     { root = "popcorn_build", extraPaths = ["."], reportMissingTypeStubs = false },
-    { root = "tests/python", extraPaths = [".", "tests"] },
+    { root = "tests/python", extraPaths = ["python", ".", "tests"] },
 ]
 
 [tool.uv]

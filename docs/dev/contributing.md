@@ -18,8 +18,9 @@ needs the full run. A change to the docs needs the docs stage and `tests/docs`.
 - C++ is C++26, built with GCC 16 and checked by `clang-format` with the repository's
   `.clang-format`. Use `std::move_only_function`, `std::copyable_function` or
   `std::function_ref` for callables, not `std::function`.
-- Python is fully typed and checked by pyright. ruff and black use a line length of 100, and
-  imports are sorted by ruff.
+- Python is fully typed and checked by pyright. Run a build once first: it copies the generated
+  stubs next to the sources, where pyright resolves `popcorn`. ruff and black use a line length
+  of 100, and imports are sorted by ruff.
 - Run the formatters in their fixing form first: `ruff check --fix`, `black` and
   `clang-format -i`.
 - Comments: the only comments are doxygen `/** */` blocks on C++ declarations and docstrings in

@@ -112,6 +112,26 @@ def add_stub(
     return stub
 
 
+def add_source_mirror(generated: Target, package_dir: Path, relative: str) -> Target:
+    """Copy the build-only module or stub @p generated to @p package_dir/@p relative.
+
+    pyright resolves `popcorn` from the source tree, where the extension stubs and the generated
+    register module do not exist. The copy is git-ignored and ends in `.pyi`, so package_files
+    neither stages nor installs it. An unchanged copy keeps its timestamp.
+    """
+    project = context.current_project
+    mirror = project.Command(
+        project.default_environment,
+        name=f"source-mirror-{relative.replace('/', '-')}",
+        target=package_dir / relative,
+        source=generated,
+        command=["cp", "$SOURCE", "$TARGET"],
+        write_if_different=True,
+    )
+    mirror.build_tier = "default"
+    return mirror
+
+
 def package_files(package_dir: Path) -> list[Path]:
     """Python sources and package data under @p package_dir, recursively, sorted."""
     return sorted(
