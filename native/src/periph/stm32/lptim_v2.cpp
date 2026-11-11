@@ -5,6 +5,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <algorithm>
 #include <array>
@@ -48,6 +49,9 @@ constexpr std::uint64_t start_cycles             = 3;
 constexpr std::uint64_t ok_cycles                = 3;
 constexpr std::uint64_t bus_cycles               = 4;
 constexpr std::uint64_t reset_cycles             = 3;
+constexpr std::uint16_t enable_edges             = 2;
+constexpr std::uint32_t input1_select            = 3u;
+constexpr std::uint32_t stored_inputs            = 3u << 4 | 3u << 16 | 3u << 20;
 
 enum class term : std::uint8_t
 {
@@ -64,11 +68,12 @@ enum class term : std::uint8_t
   update,
   mode_switch,
   output,
+  input,
 };
 
 enum class use : std::uint8_t
 {
-  external_clock,
+  input_source,
   trigger,
   encoder,
   capture,
@@ -77,8 +82,8 @@ enum class use : std::uint8_t
 };
 
 constexpr auto unmodelled_table = std::to_array<std::string_view>({
-    "CKSEL 1 or COUNTMODE 1, a count of input 1 edges, at a counter start: not modelled, the "
-    "counter counts the kernel clock",
+    "IN1SEL not 00, comp1_out or a reserved input 1, with CKSEL 1 or COUNTMODE 1 at a counter "
+    "start: not modelled, input 1 reads 0",
     "TRIGEN not 00, a start by an external trigger, at a CNTSTRT or SNGSTRT write: not modelled, "
     "no trigger starts the counter",
     "ENC 1, the encoder mode, at a counter start: not modelled, the counter counts the "
@@ -110,6 +115,7 @@ struct lptim_v2_state
   std::uint64_t paused_units{};
   std::uint64_t generation{};
   std::uint64_t queued{};
+  std::uint64_t input_due{};
   std::uint32_t anchor_count{};
   std::uint32_t isr{};
   std::uint32_t armed{};
@@ -136,6 +142,12 @@ struct lptim_v2_state
   std::uint8_t  out{};
   std::uint8_t  latched{};
   std::uint8_t  started_once{};
+  std::uint8_t  input_level{};
+  std::uint8_t  input_filtered{};
+  std::uint8_t  input_pending{};
+  std::uint8_t  divided{};
+  std::uint8_t  update_pending{};
+  std::uint16_t enable_left{};
 
   friend auto operator==(lptim_v2_state const&, lptim_v2_state const&) -> bool = default;
 };
@@ -158,12 +170,13 @@ struct lptim_v2_state
  *        update event flag. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with ARRM,
  *        and a counter above a lowered ARR runs to 0xFFFF before it overflows, inferred. A CCR1
  *        value the counter holds at the instant the value takes effect matches one counter cycle
- *        later, a smaller one in the next period, inferred. A match flag in flight when its value
- *        takes effect at or after its match instant and before the flag sets at that instant,
- *        inferred. COUNTRST and a RSTARE read lose a flag in flight. A CCR1 or ARR write
- *        with ENABLE 1 sets CMP1OK or ARROK 3 kernel clocks later, inferred: RM0456 58.4.11 states
- *        a latency with no number. With PRELOAD 0, or with the counter stopped, the value takes
- *        effect at the flag, and counter ticks up to it compare with the old values, inferred.
+ *        later, a smaller one in the next period, inferred. With the kernel clock counting, a
+ *        match flag in flight, its match at or before the instant its value takes effect and
+ *        its flag after, sets at that instant, inferred. COUNTRST and a RSTARE read lose a flag
+ *        in flight. A CCR1 or ARR write with ENABLE 1 sets CMP1OK or ARROK 3 kernel clocks
+ *        later, inferred: RM0456 58.4.11 states a latency with no number. With PRELOAD 0, or
+ *        with the counter stopped, the value takes effect at the flag, and counter ticks up to
+ *        it compare with the old values, inferred.
  *        With PRELOAD 1 and the counter started, from the CNTSTRT or SNGSTRT write on, inferred, it
  *        takes effect at the first update event at or after the flag, RM0456 58.4.11. ENABLE
  *        written to 0 and the one-shot stop apply such a value at once, inferred. An RCR write
@@ -195,10 +208,10 @@ struct lptim_v2_state
  *        and 58.7.8 a second CCR1, ARR, RCR or DIER write only after its OK flag. The model keeps
  *        the register for a write outside its rule, inferred, the second write excepted, whose
  *        value replaces the pending one outside strict_peripherals, inferred: each logs one
- *        model_warning and raises model_error under strict_peripherals. CFGR2 is storage: a
- *        firmware write that sets a bit logs one model_warning and raises model_error under
- *        strict_peripherals before it is stored, a write of the reset value 0, as HAL_LPTIM_Init
- *        and DeInit make, passes.
+ *        model_warning and raises model_error under strict_peripherals. CFGR2 IN2SEL, IC1SEL and
+ *        IC2SEL are storage: a firmware write that sets one logs one model_warning and raises
+ *        model_error under strict_peripherals before it is stored, a write that leaves them 0, as
+ *        HAL_LPTIM_Init and DeInit make, passes.
  *        SNGSTRT written while the counter runs in continuous mode makes it stop at a later
  *        update event, and CNTSTRT written in one-shot mode makes it go on counting, RM0456
  *        58.4.8. The new mode reaches the counter 3 kernel clocks after the write, inferred, so
@@ -229,20 +242,50 @@ struct lptim_v2_state
  *        trigger signal `lptim<n>_ch2` with CC2P bit 0 and CC2E, and PRELOAD 1 at the update
  *        event follow channel 1, RM0456 58.4.19 and 58.7.18. CC2IF sets with CC2SEL 0, also with
  *        CC2E 0, RM0456 58.7.2, so the reset CCR2 0 sets it at CNT 1 of every run. WAVE 1
- *        latches each channel on its own, also with its CCxE 0, inferred. The functions below
- *        are logged as not modelled: each logs one model_warning at its first use and
- *        raises model_error under strict_peripherals at every use, after the write has
- *        taken the effect stated. At a counter start: CKSEL or COUNTMODE, ENC on an
- *        encoder instance and CC1SEL or CC2SEL on a capture instance, also at a CCMR1
- *        write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN not 00,
- *        which leaves the counter stopped, and a DIER bit other than CC1IE, ARRMIE,
+ *        latches each channel on its own, also with its CCxE 0, inferred.
+ *        With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on input 1,
+ *        rising, falling or both, instead of the kernel clock, RM0456 58.4.12 and 58.7.10. Input 1
+ *        is the pin signal `lptim<n>_in1` with CFGR2 IN1SEL 00, RM0456 58.4.3 Table 605, and a
+ *        CFGR2 write that changes IN1SEL counts the level change it makes as an edge, inferred.
+ *        With CKSEL 1 the active edges clock the kernel logic, RM0456 58.4.12, so the latencies
+ *        stated in kernel or counter clocks count edges: ENABLE 2 edges, RM0456 58.4.13, COUNTRST 3
+ *        edges, RM0456 58.4.14, and REPOK 3 edges, RM0456 58.4.16, with its 4 APB clocks dropped,
+ *        inferred. The start, CMP1OK, CMP2OK, ARROK, DIEROK and a mode switch count 3 edges,
+ *        inferred, which with the ENABLE latency gives the five lost edges of RM0456 58.4.12 after
+ *        an ENABLE and a CNTSTRT. PRESC divides the edges after the start, RM0456 58.4.6, the phase
+ *        inferred. An edge counts first, then the terms it completes apply, inferred, so a REPOK at
+ *        an update edge reloads the old REP. With COUNTMODE 1 every active edge counts at its
+ *        instant from the start instant on, the sampling on the kernel clock taken as the edge
+ *        itself, an edge with the kernel clock stopped is dropped and a term due at the instant of
+ *        an edge applies before it, inferred. A counted edge moves CNT by one. CC1IF, CC2IF and
+ *        ARRM set at the edge that leaves CCR1, CCR2 and ARR, and the output follows CNT, RM0456
+ *        58.4.19 read with one counted edge as the counter cycle, inferred. The edge that leaves
+ *        ARR or 0xFFFF is the overflow, and with the repetition counter at 0 the update event. UE
+ *        then sets at the next counted edge, or at once when the counter stops, inferred. With
+ *        CKFLT not 00 a level change of input 1 counts once it has held for 2, 4 or 8 clocks of the
+ *        RCC kernel clock, and a shorter pulse is rejected, RM0456 58.4.5 and 58.7.10, the sampling
+ *        phase taken as the change and the rate read at the change, inferred. With that clock
+ *        stopped the filter passes no change and the level it leaves becomes the filtered level,
+ *        inferred. LPTIMxRST takes the input 1 level, inferred. A start with PRESC not 0 and
+ *        COUNTMODE 1, CKPOL 11, CKPOL 10 with CKSEL 1, or CKFLT not 00 with the kernel clock
+ *        stopped logs one model_warning each and raises model_error under strict_peripherals,
+ *        RM0456 58.4.5, 58.4.12 and 58.7.10: every edge then counts, both edges for the two CKPOL
+ *        cases, inferred.
+ *        The functions below are logged as not modelled: each logs one model_warning at its
+ *        first use and raises model_error under strict_peripherals at every use, after the
+ *        write has taken the effect stated. At a counter start and at a CFGR2 write while it
+ *        runs: IN1SEL not 00 with CKSEL 1 or COUNTMODE 1, input 1 then reading 0. At a counter
+ *        start: ENC on an encoder instance and CC1SEL or CC2SEL on a capture instance, also
+ *        at a CCMR1 write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN
+ *        not 00, which leaves the counter stopped, and a DIER bit other than CC1IE, ARRMIE,
  *        CMP1OKIE, ARROKIE, UEIE and REPOKIE, and on a channel instance CC2IE and CMP2OKIE.
  *        Deviation: CNT reads exact, without the double-read rule of RM0456 58.7.14.
  */
 class lptim_v2 final : public dispatch_model<lptim_v2, lptim_v2_state>,
                        public clock_listener,
                        public bus_reset_listener,
-                       public trigger_source
+                       public trigger_source,
+                       public trigger_sink
 {
 public:
   lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_variant const& variant);
@@ -253,8 +296,12 @@ public:
   void               interest_changed() override;
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
-  void               on_clock_change() override;
-  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto takes_pin(std::string_view signal) const -> bool override;
+  void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
+  void on_clock_change() override;
+  void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
       -> std::expected<std::uint32_t, bus_error> override;
   auto on_write(
@@ -272,6 +319,7 @@ public:
   void                       configuration_written(std::uint32_t old, std::uint32_t now);
   void                       control_written(std::uint32_t old, std::uint32_t now);
   void                       channels_written(std::uint32_t old, std::uint32_t now);
+  void                       inputs_written(std::uint32_t old, std::uint32_t now);
   void                       repetition_written(std::uint32_t old, std::uint32_t now);
   template <term Which> void value_written(std::uint32_t old, std::uint32_t now);
 
@@ -322,6 +370,11 @@ private:
   [[nodiscard]] auto drive(bool raw, std::size_t channel) const -> bool;
   [[nodiscard]] auto modelled_interrupts() const -> std::uint32_t;
   [[nodiscard]] auto out_due() const -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto external() const -> bool;
+  [[nodiscard]] auto clocked_by_input() const -> bool;
+  [[nodiscard]] auto kernel_hz() const -> std::uint64_t;
+  [[nodiscard]] auto input_now() const -> bool;
+  [[nodiscard]] auto active(bool rising) const -> bool;
 
   void               set_anchor(wide at);
   void               reanchor(std::uint64_t ps, std::uint64_t ticks);
@@ -343,6 +396,12 @@ private:
   void               reschedule();
   void               rebase(std::uint64_t ps, std::uint64_t hz);
   void               restore_reset_values();
+  void               take_input_level();
+  void               input_changed(std::uint64_t ps, bool level);
+  void               input_edge(std::uint64_t ps, bool rising);
+  void               clock_edge(std::uint64_t ps);
+  void               count_edge();
+  void               refuse_clock();
 
   lptim_v2_variant                          variant_;
   register_file&                            regs_;
@@ -360,6 +419,8 @@ private:
   field_ref                                 prescaler_;
   field_ref                                 clock_select_;
   field_ref                                 count_mode_;
+  field_ref                                 clock_polarity_;
+  field_ref                                 clock_filter_;
   field_ref                                 encoder_;
   field_ref                                 preload_;
   field_ref                                 wave_;
@@ -376,6 +437,8 @@ private:
   std::array<bool, unmodelled_table.size()> unmodelled_logged_{};
   std::array<bool, 6>                       locked_logged_{};
   std::array<bool, 5>                       pending_logged_{};
+  std::array<bool, 4>                       clock_logged_{};
+  std::string                               in1_;
   bool                                      switch_logged_ = false;
   storage_notes                             notes_;
 };
@@ -386,11 +449,13 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
       cfgr_{reg("CFGR")}, cr_{reg("CR")}, ccr1_{reg("CCR1")}, arr_{reg("ARR")}, cnt_{reg("CNT")},
       inputs_{reg("CFGR2")}, rcr_{reg("RCR")}, prescaler_{field("CFGR", "PRESC")},
       clock_select_{field("CFGR", "CKSEL")}, count_mode_{field("CFGR", "COUNTMODE")},
+      clock_polarity_{field("CFGR", "CKPOL")}, clock_filter_{field("CFGR", "CKFLT")},
       encoder_{variant.encoder ? field("CFGR", "ENC") : field_ref{}},
       preload_{field("CFGR", "PRELOAD")}, wave_{field("CFGR", "WAVE")},
       polarity_{variant.channels == 0 ? field("CFGR", "WAVPOL") : field_ref{}},
       trigger_enable_{field("CFGR", "TRIGEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      bus_{ctx.clock.domain(variant.bus_clock)}, line_{&irq(desc.name + "_IRQn")}
+      bus_{ctx.clock.domain(variant.bus_clock)}, line_{&irq(desc.name + "_IRQn")},
+      in1_{lower(desc.name) + "_in1"}
 {
   if(variant.channels == 0)
   {
@@ -409,7 +474,7 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
       {"CCR1",             &lptim_v2::value_written<term::compare_written>},
       {"ARR",              &lptim_v2::value_written<term::reload_written> },
       {"CNT",              &lptim_v2::plain_written                       },
-      {"CFGR2",            nullptr                                        },
+      {"CFGR2",            &lptim_v2::inputs_written                      },
       {"RCR",              &lptim_v2::repetition_written                  },
   });
   bind(writes);
@@ -437,6 +502,36 @@ auto lptim_v2::now_ps() const -> std::uint64_t
 auto lptim_v2::enabled() const -> bool
 {
   return (regs_.peek(cr_.offset) & enable_bit) != 0;
+}
+
+auto lptim_v2::external() const -> bool
+{
+  return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0;
+}
+
+auto lptim_v2::clocked_by_input() const -> bool
+{
+  return get(regs_, clock_select_) != 0;
+}
+
+auto lptim_v2::kernel_hz() const -> std::uint64_t
+{
+  return clocked_by_input() ? 0 : ctx_.clock.hz(kernel_);
+}
+
+auto lptim_v2::input_now() const -> bool
+{
+  return (regs_.peek(inputs_.offset) & input1_select) == 0
+     and std::ranges::any_of(ctx_.peers.all(), [&](model const* peer) {
+           auto const* const port = dynamic_cast<gpio_port const*>(peer);
+           return port != nullptr and port->signal_level(in1_).value_or(false);
+         });
+}
+
+auto lptim_v2::active(bool rising) const -> bool
+{
+  auto const polarity = get(regs_, clock_polarity_);
+  return not((polarity == 0 and not rising) or (polarity == 1 and rising));
 }
 
 auto lptim_v2::anchor() const -> wide
@@ -474,7 +569,7 @@ auto lptim_v2::position(std::uint64_t ticks) const -> std::uint32_t
 auto lptim_v2::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
 {
   auto const at = wide{ps} * state_.hz;
-  if(state_.running == 0 or state_.hz == 0 or at < anchor())
+  if(state_.running == 0 or state_.hz == 0 or external() or at < anchor())
   {
     return std::nullopt;
   }
@@ -502,7 +597,7 @@ auto lptim_v2::ticks_to(std::uint32_t value) const -> std::uint64_t
 
 auto lptim_v2::match_due(std::uint32_t value) const -> std::optional<std::uint64_t>
 {
-  if(state_.running == 0 or state_.hz == 0 or value > state_.reload)
+  if(state_.running == 0 or state_.hz == 0 or external() or value > state_.reload)
   {
     return std::nullopt;
   }
@@ -571,7 +666,7 @@ auto lptim_v2::update_ticks() const -> std::uint64_t
 
 auto lptim_v2::update_due() const -> std::optional<std::uint64_t>
 {
-  if(state_.running == 0 or state_.hz == 0)
+  if(state_.running == 0 or state_.hz == 0 or external())
   {
     return std::nullopt;
   }
@@ -632,6 +727,10 @@ auto lptim_v2::raw_at(std::uint64_t ps, std::size_t channel) const -> bool
   {
     return false;
   }
+  if(external())
+  {
+    return compare_of(channel) < state_.anchor_count and state_.anchor_count <= state_.reload;
+  }
   if(state_.hz == 0)
   {
     return ((state_.raw >> channel) & 1u) != 0;
@@ -647,7 +746,7 @@ auto lptim_v2::raw_at(std::uint64_t ps, std::size_t channel) const -> bool
 
 auto lptim_v2::out_due() const -> std::optional<std::uint64_t>
 {
-  if(state_.running == 0 or state_.hz == 0)
+  if(state_.running == 0 or state_.hz == 0 or external())
   {
     return std::nullopt;
   }
@@ -744,6 +843,10 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
   auto best = std::optional<due_term>{};
   if(state_.hz == 0)
   {
+    if(state_.input_due != 0)
+    {
+      best = due_term{state_.input_due, term::input};
+    }
     return best;
   }
   auto offer = [&](std::optional<std::uint64_t> due, term which) {
@@ -779,6 +882,7 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
   }
   offer(state_.switch_due, term::mode_switch);
   offer(out_due(), term::output);
+  offer(state_.input_due, term::input);
   return best;
 }
 
@@ -847,6 +951,13 @@ void lptim_v2::apply(due_term const& next)
   {
     return;
   }
+  if(next.which == term::input)
+  {
+    state_.input_due      = 0;
+    state_.input_filtered = state_.input_pending;
+    input_edge(next.due, state_.input_pending != 0);
+    return;
+  }
   if(next.which == term::mode_switch)
   {
     state_.switch_due = 0;
@@ -861,6 +972,11 @@ void lptim_v2::apply(due_term const& next)
     else if(state_.hz != 0)
     {
       begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+    }
+    else
+    {
+      start(next.due, state_.switch_single != 0);
+      state_.paused_units = 0;
     }
     return;
   }
@@ -981,6 +1097,7 @@ void lptim_v2::catch_up(std::uint64_t ps)
 
 void lptim_v2::start(std::uint64_t ps, bool single)
 {
+  state_.divided = 0;
   if(state_.hz == 0)
   {
     state_.paused_counting = 0;
@@ -1027,6 +1144,11 @@ void lptim_v2::switch_mode(std::uint64_t ps, bool single)
 
 void lptim_v2::stop()
 {
+  if(state_.update_pending != 0)
+  {
+    state_.update_pending = 0;
+    raise_flag(update_event);
+  }
   transfer_preloaded();
   state_.running      = 0;
   state_.single       = 0;
@@ -1052,6 +1174,12 @@ void lptim_v2::transfer_preloaded()
 
 void lptim_v2::restart_count(std::uint64_t ps)
 {
+  if(external())
+  {
+    state_.anchor_count = 0;
+    state_.divided      = 0;
+    return;
+  }
   auto const ticks = ticks_at(ps);
   if(not ticks)
   {
@@ -1085,17 +1213,48 @@ void lptim_v2::refuse_channels()
   }
 }
 
+void lptim_v2::refuse_clock()
+{
+  if(not external())
+  {
+    return;
+  }
+  auto const polarity = get(regs_, clock_polarity_);
+  auto const refusals = std::to_array<std::pair<bool, std::string_view>>({
+      {get(regs_, prescaler_) != 0 and not clocked_by_input(),
+       "PRESC not 0 with COUNTMODE 1, which RM0456 58.4.12 forbids: every input 1 edge counts"},
+      {polarity == 3, "CKPOL 11, which RM0456 58.7.10 forbids: both input 1 edges count"},
+      {clocked_by_input() and polarity == 2,
+       "CKPOL 10 with CKSEL 1, which RM0456 58.4.12 forbids: both input 1 edges count"},
+      {get(regs_, clock_filter_) != 0 and ctx_.clock.hz(kernel_) == 0,
+       "CKFLT not 0 with the kernel clock stopped, which RM0456 58.4.5 forbids: the filter passes "
+       "no input 1 edge"},
+  });
+  static_assert(
+      std::tuple_size_v<decltype(refusals)> == std::tuple_size_v<decltype(clock_logged_)>);
+  for(std::size_t index = 0; index < refusals.size(); ++index)
+  {
+    if(refusals[index].first)
+    {
+      warn_once_or_refuse(
+          clock_logged_[index], "CFGR", cfgr_.offset,
+          std::format("{} at a counter start", refusals[index].second));
+    }
+  }
+}
+
 void lptim_v2::refuse_at_start()
 {
-  if(get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0)
+  if(external() and (regs_.peek(inputs_.offset) & input1_select) != 0)
   {
-    unmodelled(use::external_clock, "CFGR");
+    unmodelled(use::input_source, "CFGR2");
   }
   if(variant_.encoder and get(regs_, encoder_) != 0)
   {
     unmodelled(use::encoder, "CFGR");
   }
   refuse_channels();
+  refuse_clock();
 }
 
 void lptim_v2::refresh()
@@ -1147,6 +1306,16 @@ void lptim_v2::on_bus_reset()
     }
   }
   restore_reset_values();
+  take_input_level();
+}
+
+void lptim_v2::take_input_level()
+{
+  auto const level      = input_now() ? 1 : 0;
+  state_.input_level    = static_cast<std::uint8_t>(level);
+  state_.input_filtered = static_cast<std::uint8_t>(level);
+  state_.input_pending  = static_cast<std::uint8_t>(level);
+  state_.input_due      = 0;
 }
 
 void lptim_v2::restore_reset_values()
@@ -1159,7 +1328,7 @@ void lptim_v2::restore_reset_values()
   state_                = {};
   state_.generation     = generation;
   state_.reload         = describe("ARR").reset;
-  state_.hz             = ctx_.clock.hz(kernel_);
+  state_.hz             = kernel_hz();
   state_.settled_ps     = now_ps();
   line_->lower();
 }
@@ -1182,7 +1351,11 @@ void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
     }
     state_.paused_counting = 0;
     state_.paused_units    = 0;
-    if(state_.running != 0 and at >= anchor())
+    if(state_.running != 0 and at >= anchor() and external())
+    {
+      state_.paused_counting = 1;
+    }
+    else if(state_.running != 0 and at >= anchor())
     {
       auto const since = at - anchor();
       state_.repetition =
@@ -1224,7 +1397,7 @@ void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
 
 void lptim_v2::on_clock_change()
 {
-  auto const hz = ctx_.clock.hz(kernel_);
+  auto const hz = kernel_hz();
   if(hz == state_.hz)
   {
     return;
@@ -1285,6 +1458,14 @@ void lptim_v2::configuration_written(std::uint32_t old, std::uint32_t now)
   {
     if(old != now)
     {
+      auto const t = now_ps();
+      regs_.poke(cfgr_.offset, old);
+      catch_up(t);
+      regs_.poke(cfgr_.offset, now);
+      if(kernel_hz() != state_.hz)
+      {
+        rebase(t, kernel_hz());
+      }
       refresh();
       reschedule();
     }
@@ -1313,7 +1494,8 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   }
   if(not was_on and is_on)
   {
-    state_.enable_ps = t;
+    state_.enable_ps   = t;
+    state_.enable_left = clocked_by_input() ? enable_edges : 0;
   }
   else if(was_on and not is_on)
   {
@@ -1472,16 +1654,203 @@ auto lptim_v2::on_write(
     access_ctx     access) -> std::expected<void, bus_error>
 {
   if((offset & ~3u) == inputs_.offset
-     and merge_write(regs.peek(inputs_.offset), offset, size, value) != describe("CFGR2").reset)
+     and (merge_write(regs.peek(inputs_.offset), offset, size, value) & stored_inputs) != 0)
   {
     notes_.written(ctx_, desc_, "LPTIM input multiplexer", inputs_.offset, access, {});
   }
   return dispatch_model::on_write(regs, offset, size, old, value, access);
 }
 
-auto lptim_v2::storage_only(std::uint32_t offset) const -> bool
+auto lptim_v2::storage_only(std::uint32_t) const -> bool
 {
-  return offset == inputs_.offset;
+  return false;
+}
+
+void lptim_v2::inputs_written(std::uint32_t old, std::uint32_t now)
+{
+  if(((old ^ now) & input1_select) == 0)
+  {
+    return;
+  }
+  auto const t = now_ps();
+  regs_.poke(inputs_.offset, old);
+  catch_up(t);
+  regs_.poke(inputs_.offset, now);
+  input_changed(t, input_now());
+  catch_up(t);
+  refresh();
+  reschedule();
+  if(state_.running != 0 and external() and (now & input1_select) != 0)
+  {
+    unmodelled(use::input_source, "CFGR2");
+  }
+}
+
+auto lptim_v2::listens(std::string_view) const -> bool
+{
+  return false;
+}
+
+auto lptim_v2::can_listen(std::string_view) const -> bool
+{
+  return false;
+}
+
+auto lptim_v2::takes_pin(std::string_view signal) const -> bool
+{
+  return signal == in1_;
+}
+
+void lptim_v2::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
+{
+  if(signal != in1_ or (regs_.peek(inputs_.offset) & input1_select) != 0)
+  {
+    return;
+  }
+  auto const t  = now_ps();
+  auto const ps = std::min(at.ps, t);
+  catch_up(ps);
+  input_changed(ps, edge == trigger_edge::rising);
+  catch_up(t);
+  refresh();
+  reschedule();
+}
+
+void lptim_v2::input_changed(std::uint64_t ps, bool level)
+{
+  auto const was      = state_.input_level != 0;
+  state_.input_level  = level ? 1 : 0;
+  auto const sampling = ctx_.clock.hz(kernel_);
+  auto const filter   = get(regs_, clock_filter_);
+  if(level == was)
+  {
+    return;
+  }
+  if(not enabled() or not external())
+  {
+    state_.input_filtered = state_.input_level;
+    state_.input_pending  = state_.input_level;
+    state_.input_due      = 0;
+    return;
+  }
+  if(filter == 0)
+  {
+    state_.input_filtered = state_.input_level;
+    input_edge(ps, level);
+    sync_out(ps);
+    return;
+  }
+  state_.input_due     = 0;
+  state_.input_pending = state_.input_level;
+  if(level == (state_.input_filtered != 0) or sampling == 0)
+  {
+    state_.input_filtered = state_.input_level;
+    return;
+  }
+  auto const samples = wide{1u << filter} * ps_per_second;
+  state_.input_due =
+      static_cast<std::uint64_t>((wide{ps} * sampling + samples + sampling - 1) / sampling);
+}
+
+void lptim_v2::input_edge(std::uint64_t ps, bool rising)
+{
+  if(not active(rising))
+  {
+    return;
+  }
+  if(clocked_by_input())
+  {
+    clock_edge(ps);
+    return;
+  }
+  if(state_.hz == 0 or state_.running == 0 or wide{ps} * state_.hz < anchor())
+  {
+    return;
+  }
+  count_edge();
+}
+
+void lptim_v2::clock_edge(std::uint64_t ps)
+{
+  if(state_.enable_left != 0)
+  {
+    --state_.enable_left;
+    return;
+  }
+  auto const dues  = std::to_array<std::pair<std::uint64_t*, term>>({
+      {&state_.compare_due,    term::compare_written   },
+      {&state_.compare2_due,   term::compare2_written  },
+      {&state_.reload_due,     term::reload_written    },
+      {&state_.interrupts_due, term::interrupts_written},
+      {&state_.repetition_due, term::repetition_written},
+      {&state_.reset_due,      term::counter_reset     },
+      {&state_.switch_due,     term::mode_switch       },
+  });
+  auto       ready = std::array<bool, dues.size()>{};
+  for(std::size_t index = 0; index < dues.size(); ++index)
+  {
+    auto& due = *dues[index].first;
+    if(due != 0)
+    {
+      due -= std::min<std::uint64_t>(due, ps_per_second);
+      ready[index] = due == 0;
+    }
+  }
+  if(state_.running != 0 and state_.paused_units != 0)
+  {
+    state_.paused_units -= std::min<std::uint64_t>(state_.paused_units, ps_per_second);
+  }
+  else if(state_.running != 0 and ++state_.divided >= (1u << get(regs_, prescaler_)))
+  {
+    state_.divided = 0;
+    count_edge();
+  }
+  for(std::size_t index = 0; index < dues.size(); ++index)
+  {
+    if(ready[index])
+    {
+      apply(due_term{ps, dues[index].second});
+    }
+  }
+}
+
+void lptim_v2::count_edge()
+{
+  if(state_.update_pending != 0)
+  {
+    state_.update_pending = 0;
+    raise_flag(update_event);
+  }
+  auto const count   = state_.anchor_count;
+  auto const leaving = [&](std::uint32_t value, std::uint32_t flag, bool gate) {
+    if(gate and count == value and value <= state_.reload and (state_.isr & flag) == 0)
+    {
+      raise_flag(flag);
+    }
+  };
+  leaving(state_.compare, compare_match, true);
+  leaving(
+      state_.compare2, compare2_match,
+      variant_.channels != 0 and get(regs_, channel_select_[1]) == 0);
+  leaving(state_.reload, reload_match, true);
+  auto const wrap     = count == state_.reload or count == counter_top;
+  state_.anchor_count = wrap ? 0u : count + 1u;
+  if(not wrap)
+  {
+    return;
+  }
+  if(state_.repetition != 0)
+  {
+    --state_.repetition;
+    return;
+  }
+  state_.repetition     = state_.repetition_reload;
+  state_.update_pending = 1;
+  transfer_preloaded();
+  if(state_.single != 0)
+  {
+    stop();
+  }
 }
 
 void lptim_v2::on_event(std::uint32_t kind, std::uint64_t payload)

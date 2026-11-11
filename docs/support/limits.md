@@ -1453,15 +1453,15 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   start, inferred, counts the overflows down, and an overflow with it at 0 is the update event: it
   transfers the preloaded values and reloads REP, RM0456 58.4.16. One-shot mode stops at 0 at the
   update event, RM0456 58.4.8. An ARR write clears UE, RM0456 58.7.2.
-- CC1IF and ARRM set one counter cycle after the counter reaches CCR1 and ARR, so CC1IF reads
-  CNT CCR1 + 1 and ARRM reads CNT 0, RM0456 58.4.19. A counter cycle is one prescaled tick. UE
-  sets one counter cycle after the update event, inferred from the same note, which lists the
-  update event flag. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with ARRM, and a
-  counter above a lowered ARR counts to 0xFFFF before it wraps, inferred. A CCR1 value the
-  counter holds at the instant the value takes effect matches one counter cycle later, a smaller
-  one in the next period, inferred. A match flag in flight, its match at or before the instant its
-  value takes effect and its flag after, sets at that instant, inferred. A COUNTRST or a RSTARE
-  read restarts the count and loses a flag in flight, inferred.
+- CC1IF and ARRM set one counter cycle after the counter reaches CCR1 and ARR, so CC1IF reads CNT
+  CCR1 + 1 and ARRM reads CNT 0, RM0456 58.4.19. A counter cycle is one prescaled tick. UE sets one
+  counter cycle after the update event, inferred from the same note, which lists the update event
+  flag. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with ARRM, and a counter above a
+  lowered ARR counts to 0xFFFF before it wraps, inferred. A CCR1 value the counter holds at the
+  instant the value takes effect matches one counter cycle later, a smaller one in the next period,
+  inferred. With the kernel clock counting, a match flag in flight, its match at or before the
+  instant its value takes effect and its flag after, sets at that instant, inferred. A COUNTRST or a
+  RSTARE read restarts the count and loses a flag in flight, inferred.
 - CMP1OK and ARROK set 3 kernel clocks after the CCR1 or ARR write, inferred: RM0456 58.4.11
   states a latency with no number. With PRELOAD 0, or with the counter stopped, the value applies
   at the flag, and counter ticks up to it compare with the old values, inferred. With PRELOAD 1
@@ -1504,10 +1504,9 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   flag, RM0456 58.4.11, 58.4.16 and 58.7.8, log one `model_warning` each and raise `ModelError`
   under `strict`. The register keeps its value, inferred, except the second write outside
   `strict`, whose value replaces the pending one, inferred.
-- CFGR2 is storage: a firmware write that sets a bit logs one `model_warning` and raises
-  `ModelError` under `strict` before it is stored, and the coverage report lists it as
-  `storage_only`. A write of the reset value 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make,
-  passes.
+- CFGR2 IN2SEL, IC1SEL and IC2SEL are storage: a firmware write that sets one logs one
+  `model_warning` and raises `ModelError` under `strict` before it is stored. A write that leaves
+  them 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make, passes. IN1SEL selects input 1.
 - The output of channel 1 of LPTIM1 to LPTIM3 drives the trigger signal `lptim1_ch1`, `lptim2_ch1`
   or `lptim3_ch1`, channel 2 `lptim1_ch2` to `lptim3_ch2`, and the output of LPTIM4 `lptim4_out`. No
   LPTIM output drives a pin. OC1REF is high while CNT is above CCR1, so the output rises at CNT CCR1
@@ -1523,18 +1522,49 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
 - Channel 2 of LPTIM1 to LPTIM3 compares CCR2 as channel 1 compares CCR1: CC2IF and the level of
   `lptim<n>_ch2` come at CNT CCR2 + 1, CMP2OK follows a CCR2 write 3 kernel clocks later, and
   PRELOAD 1 applies CCR2 at the update event. The level is the compare result xor CC2P bit 0 with
-  CC2E 1 and CC2SEL 0, and 0 otherwise, inferred. CC2IF sets with CC2SEL 0 whatever CC2E is, RM0456
-  58.7.2, so the reset CCR2 0 sets it at CNT 1 of every run. WAVE 1 latches each channel on its own,
-  also with its CCxE 0, inferred.
+  CC2E 1 and CC2SEL 0, and 0 otherwise, inferred. CC2IF sets also with CC2E 0: RM0456 58.7.2 names
+  CC2SEL 0 as the only condition, so the reset CCR2 0 sets it at CNT 1 of every run. WAVE 1 latches
+  each channel on its own, also with its CCxE 0, inferred.
 - A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
   start latency, and the kernel clocks left before each pending OK flag, COUNTRST and mode
   switch, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
   them until it runs again, inferred.
+- With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on input 1, rising,
+  falling or both, instead of the kernel clock, RM0456 58.4.12 and 58.7.10. Input 1 is the pin
+  signal `lptim1_in1` to `lptim4_in1` with CFGR2 IN1SEL 00, RM0456 58.4.3 Table 605: among the pins
+  the pin data names, PB5 AF1, PB1 AF14, PB13 AF2 and PD13 AF13 on the U575. A CFGR2 write that
+  changes IN1SEL counts the level change it makes as an edge, inferred.
+- With CKSEL 1 the active edges clock the kernel logic, RM0456 58.4.12, so the latencies stated in
+  kernel or counter clocks count edges: ENABLE 2 edges, RM0456 58.4.13, COUNTRST 3 edges, RM0456
+  58.4.14, and REPOK 3 edges, RM0456 58.4.16, with its 4 APB clocks dropped, inferred. The start,
+  CMP1OK, CMP2OK, ARROK, DIEROK and a mode switch count 3 edges, inferred, which with the ENABLE
+  latency gives the five lost edges of RM0456 58.4.12 after an ENABLE and a CNTSTRT. PRESC divides
+  the edges after the start, RM0456 58.4.6, the phase inferred. An edge counts first, then the terms
+  it completes apply, inferred, so a REPOK at an update edge reloads the old REP. With no edge
+  nothing sets and the counter never starts.
+- With COUNTMODE 1 every active edge counts at its instant from the start instant on, the sampling
+  on the kernel clock taken as the edge itself, an edge with the kernel clock stopped is dropped and
+  a term due at the instant of an edge applies before it, inferred.
+- A counted edge moves CNT by one. CC1IF, CC2IF and ARRM set at the edge that leaves CCR1, CCR2 and
+  ARR, and the output follows CNT, RM0456 58.4.19 read with one counted edge as the counter cycle,
+  inferred. The edge that leaves ARR or 0xFFFF is the overflow, and with the repetition counter at 0
+  the update event: PRELOAD, REP and the one-shot stop apply there. UE then sets at the next counted
+  edge, or at once when the counter stops, inferred.
+- With CKFLT 01, 10 or 11 a level change of input 1 counts once it has held for 2, 4 or 8 clocks of
+  the RCC kernel clock, and a shorter pulse is rejected, RM0456 58.4.5 and 58.7.10, the sampling
+  phase taken as the change and the rate read at the change, inferred. With that clock stopped the
+  filter passes no change and the level it leaves becomes the filtered level, inferred. LPTIMxRST
+  takes the input 1 level, inferred.
+- A start with PRESC not 0 and COUNTMODE 1, CKPOL 11, CKPOL 10 with CKSEL 1, or CKFLT not 00 with
+  the kernel clock stopped, which RM0456 58.4.5, 58.4.12 and 58.7.10 forbid, logs one
+  `model_warning` each and raises `ModelError` under `strict`. Every edge then counts, both edges
+  for the two CKPOL cases, inferred.
 - LPTIM1RST to LPTIM4RST reset the registers and the state of their LPTIM.
 - CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
 - These functions are not modelled. Each logs one `model_warning` at its first use and raises
   `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
-  counter start CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2 and CC1SEL or CC2SEL on LPTIM1 to
+  counter start and at a CFGR2 write while it runs IN1SEL not 00 with CKSEL 1 or COUNTMODE 1, input
+  1 then reading 0, at a counter start ENC on LPTIM1 and LPTIM2 and CC1SEL or CC2SEL on LPTIM1 to
   LPTIM3, the CCMR1 ones also at a CCMR1 write while the counter runs. At the write: CNTSTRT or
   SNGSTRT with TRIGEN not 00, which leaves the counter stopped, and a DIER bit other than CC1IE,
   ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, and on LPTIM1 to LPTIM3 CC2IE and CMP2OKIE. A
@@ -1547,10 +1577,11 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   kernel clock, unless {ARR, CMP} >= KER_CLK / (2 * APB_CLK), is probabilistic: the model always
   sets them and logs nothing. ES0499 2.17.4, the over-capture lost
   when CCxOF clears with a capture pulse active, concerns the input capture mode, not modelled.
-- ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, concerns the LPTIM inputs, not
-  modelled. ES0499 2.3.2, TIMICSEL not protected by LPTIM2SEC, is reproduced: the RCC model
-  secures TIMICSEL while TIM16 or TIM17 is Secure, and a Non-secure TIMICSEL write with only
-  LPTIM2 Secure is taken.
+- ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, is outside the model: the GPIO
+  model passes an alternate function input to its peripheral whatever the security of the pin and of
+  the peripheral, so neither the GTZC rule of RM0456 nor the erratum applies. ES0499 2.3.2, TIMICSEL
+  not protected by LPTIM2SEC, is reproduced: the RCC model secures TIMICSEL while TIM16 or TIM17 is
+  Secure, and a Non-secure TIMICSEL write with only LPTIM2 Secure is taken.
 
 ## MDF and ADF
 

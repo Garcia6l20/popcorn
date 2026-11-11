@@ -141,3 +141,51 @@ async def test_a_dac_conversion_triggered_by_lptim1_ch1_comes_at_the_same_virtua
         (due.ps, 0x2A5),
         ((due + CPU_CYCLE).ps, 0x2A5),
     ]
+
+
+async def started_lptim_counting_pb5() -> tuple[popcorn.Machine, VirtualTime]:
+    """An LPTIM1 with COUNTMODE 1, CCR1 3, input 1 on PB5 AF1, whose CNTSTRT was just written."""
+    m = popcorn.MachineDescription(part="STM32U575QGIx", images=[popcorn.Elf(RCC_LL)]).machine()
+    m.reset()
+    m.reg.pc = m.sym("idle")
+    m.periph.RCC.APB3ENR.LPTIM1EN = 1
+    m.periph.RCC.AHB2ENR1.GPIOBEN = 1
+    gpiob = m.periph.GPIOB
+    gpiob.MODER.write(gpiob.MODER.read() & ~(3 << 10) | 2 << 10)
+    gpiob.AFRL.write(gpiob.AFRL.read() & ~(15 << 20) | 1 << 20)
+    timer = m.periph.LPTIM1
+    timer.CFGR.write(1 << 23)
+    timer.CR.write(1)
+    timer.ARR.write(100)
+    await m.run(for_=us(1))
+    timer.CCR1.write(3)
+    await m.run(for_=us(1))
+    timer.ICR_output.write(0x18)
+    started = m.time
+    timer.CR.write(1 | 1 << 2)
+    return m, started
+
+
+@pytest.mark.parametrize("mode", ["parked", "running"])
+async def test_pb5_edges_counted_by_countmode_come_at_the_same_virtual_time(mode: str) -> None:
+    m, started = await started_lptim_counting_pb5()
+    timer = m.periph.LPTIM1
+    rises = [started + us(10) + us(2.5) * index for index in range(5)]
+    edges = [edge for at in rises for edge in ((at, True), (at + us(1.25), False))]
+    await m.periph.GPIOB.pin(5).drive_edges(edges)
+
+    def read() -> tuple[int, int, int]:
+        return m.time.ps, timer.CNT.read(), timer.ISR_output.CC1IF
+
+    samples = [m.sample(read, at=at) for at in (rises[3] - CPU_CYCLE, rises[3], rises[4])]
+    if mode == "parked":
+        await m.run(for_=us(30))
+        seen = [await one for one in samples]
+    else:
+        async with m.running():
+            seen = [await one for one in samples]
+    assert seen == [
+        ((rises[3] - CPU_CYCLE).ps, 3, 0),
+        (rises[3].ps, 4, 1),
+        (rises[4].ps, 5, 1),
+    ]

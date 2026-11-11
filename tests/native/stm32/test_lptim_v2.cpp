@@ -8,6 +8,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
@@ -807,11 +808,10 @@ TEST_CASE(
     bool             logs;
   };
   for(auto const& [text, which, config, channels, logs] : {
-          one{"CKSEL",  units[1], cksel, 0,      true },
-          one{"ENC 1",  units[0], enc,   0,      true },
-          one{"ENC 1",  units[2], enc,   0,      false},
-          one{"CC1SEL", units[1], 0,     cc1sel, true },
-          one{"CC1SEL", units[1], 0,     0,      false},
+          one{"ENC 1",  units[0], enc, 0,      true },
+          one{"ENC 1",  units[2], enc, 0,      false},
+          one{"CC1SEL", units[1], 0,   cc1sel, true },
+          one{"CC1SEL", units[1], 0,   0,      false},
   })
   {
     CAPTURE(text);
@@ -1905,8 +1905,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 43: CFGR2 is storage, a firmware write logs one warning and raises under "
-    "strict_peripherals before the store, a host write is refused")
+    "checklist 43: CFGR2 IN2SEL, IC1SEL and IC2SEL are storage, a firmware write setting one logs "
+    "one warning and raises under strict_peripherals before the store, IN1SEL is modelled")
 {
   auto const store = [](rig const& r, std::uint32_t value,
                         popcorn::initiator by = popcorn::initiator::cpu) {
@@ -1915,28 +1915,33 @@ TEST_CASE(
         regs, static_cast<std::uint32_t>(cfgr2), 4, regs.peek(static_cast<std::uint32_t>(cfgr2)),
         value, {.pc = 0, .now = icount{0}, .by = by});
   };
+  auto const peek = [](rig const& r) {
+    return r.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2));
+  };
   rig r;
-  CHECK(r.f->target->model("LPTIM1")->storage_only(static_cast<std::uint32_t>(cfgr2)));
-  CHECK_FALSE(r.f->target->model("LPTIM1")->storage_only(static_cast<std::uint32_t>(cfgr)));
-  CHECK_THROWS_AS(r.write(cfgr2, 2), popcorn::model_error);
-  CHECK(r.logged.empty());
+  CHECK_FALSE(r.f->target->model("LPTIM1")->storage_only(static_cast<std::uint32_t>(cfgr2)));
   REQUIRE(store(r, 1).has_value());
+  CHECK(r.logged.empty());
   REQUIRE(store(r, 0x10).has_value());
-  CHECK(r.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2)) == 0x10);
+  REQUIRE(store(r, 0x11).has_value());
+  CHECK(peek(r) == 0x11);
   CHECK(r.warnings("is storage") == 1);
   rig strict{units[0], true};
-  REQUIRE(store(strict, 0).has_value());
+  REQUIRE(store(strict, 1).has_value());
   CHECK(strict.logged.empty());
-  CHECK_THROWS_AS(static_cast<void>(store(strict, 1)), popcorn::model_error);
-  CHECK(strict.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2)) == 0);
-  REQUIRE(store(strict, 2, popcorn::initiator::debugger).has_value());
-  CHECK(strict.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2)) == 2);
+  for(auto const value : {0x11u, 1u << 16, 1u << 20})
+  {
+    CAPTURE(value);
+    CHECK_THROWS_AS(static_cast<void>(store(strict, value)), popcorn::model_error);
+    CHECK(peek(strict) == 1);
+  }
+  REQUIRE(store(strict, 0x10, popcorn::initiator::debugger).has_value());
+  CHECK(peek(strict) == 0x10);
   rig   narrow{units[0], true};
   auto& regs = narrow.f->target->peripheral("LPTIM1");
-  regs.poke(static_cast<std::uint32_t>(cfgr2), 1);
   CHECK_THROWS_AS(
       static_cast<void>(narrow.f->target->model("LPTIM1")->on_write(
-          regs, static_cast<std::uint32_t>(cfgr2) + 2, 1, 0, 0,
+          regs, static_cast<std::uint32_t>(cfgr2) + 2, 1, 0, 1,
           {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu})),
       popcorn::model_error);
 }
@@ -2158,4 +2163,574 @@ TEST_CASE(
   rig off;
   off.write(cr, rstare);
   CHECK(off.read(cr) == 0);
+}
+
+namespace
+{
+constexpr std::uint32_t countmode = 1u << 23;
+constexpr std::uint32_t falling   = 1u << 1;
+constexpr std::uint32_t both      = 2u << 1;
+
+constexpr auto ckflt(std::uint32_t value) -> std::uint32_t
+{
+  return value << 3;
+}
+
+auto in1_pin(rig const& r, std::string_view port, std::uint8_t pin, std::uint32_t af)
+    -> stm32::gpio_port&
+{
+  r.rcc("RCC_AHB2ENR1", port == "GPIOB" ? "GPIOBEN" : "GPIODEN", 1);
+  auto const  base  = r.f->target->peripheral(port).description().base;
+  auto* const found = r.f->model_of<stm32::gpio_port>(port);
+  REQUIRE(found != nullptr);
+  found->drive(pin, false);
+  r.write_at(base, (r.read_at(base) & ~(3u << (2 * pin))) | (2u << (2 * pin)));
+  auto const afr   = base + (pin < 8 ? 0x20u : 0x24u);
+  auto const shift = 4u * (pin % 8u);
+  r.write_at(afr, (r.read_at(afr) & ~(15u << shift)) | (af << shift));
+  return *found;
+}
+
+auto lptim1_in1(rig const& r) -> stm32::gpio_port&
+{
+  return in1_pin(r, "GPIOB", 5, 1);
+}
+
+auto pulses(stm32::gpio_port& port, std::uint8_t pin, std::uint64_t from, std::uint32_t count)
+    -> std::vector<std::uint64_t>
+{
+  auto rises = std::vector<std::uint64_t>{};
+  for(std::uint32_t index = 0; index < count; ++index)
+  {
+    auto const at = from + index * 10 * cycle;
+    port.drive_at(pin, true, vtime{at});
+    port.drive_at(pin, false, vtime{at + 5 * cycle});
+    rises.push_back(at);
+  }
+  return rises;
+}
+}
+
+TEST_CASE(
+    "RM0456 58.4.12 CKSEL 1: the first five PB5 edges after ENABLE are lost, PRESC divides the "
+    "edges after them, PRESC 0 to 7, the ENABLE and start split inferred")
+{
+  for(std::uint32_t prescaler = 0; prescaler < 8; ++prescaler)
+  {
+    CAPTURE(prescaler);
+    rig        r;
+    auto&      pins = lptim1_in1(r);
+    auto const k    = 1u << prescaler;
+    r.write(cfgr, cksel | presc(prescaler));
+    r.write(cr, enable);
+    r.write(arr, 1000);
+    r.write(cr, enable | cntstrt);
+    auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 5 + 3 * k);
+    r.idle_to(rises[3] + cycle);
+    CHECK((r.read(isr) & arrok) == 0);
+    r.idle_to(rises[4] + cycle);
+    CHECK((r.read(isr) & arrok) == arrok);
+    CHECK(r.read(cnt) == 0);
+    r.idle_to(rises[4 + k] - cycle);
+    CHECK(r.read(cnt) == 0);
+    r.idle_to(rises[4 + k]);
+    CHECK(r.read(cnt) == 1);
+    r.idle_to(rises.back() + cycle);
+    CHECK(r.read(cnt) == 3);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.12: with CKSEL 1 and no PB5 edge, ARROK never sets and the counter never starts")
+{
+  rig r;
+  r.write(cfgr, cksel);
+  r.write(cr, enable);
+  r.write(arr, 100);
+  r.write(cr, enable | cntstrt);
+  r.idle_to(r.now_ps() + 500 * cycle);
+  CHECK((r.read(isr) & arrok) == 0);
+  CHECK(r.read(cnt) == 0);
+  CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE(
+    "RM0456 58.7.10 CKPOL: COUNTMODE 1 counts rising, falling or both PB5 edges, CKSEL 1 the "
+    "falling ones after the five lost")
+{
+  for(auto const& [config, before, after] : {
+          std::tuple{countmode,           3u, 3u},
+          std::tuple{countmode | falling, 2u, 3u},
+          std::tuple{countmode | both,    5u, 6u},
+          std::tuple{cksel | falling,     2u, 3u},
+  })
+  {
+    CAPTURE(config);
+    rig        r;
+    auto&      pins  = lptim1_in1(r);
+    auto const t     = r.started(60, 100, cntstrt, 0, config);
+    auto const total = (config & cksel) != 0 ? 8u : 3u;
+    auto const rises = pulses(pins, 5, t + 20 * cycle, total);
+    r.idle_to(rises.back() + 2 * cycle);
+    CHECK(r.read(cnt) == before);
+    r.idle_to(rises.back() + 6 * cycle);
+    CHECK(r.read(cnt) == after);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.12 and 58.4.19 COUNTMODE 1: each PB5 edge counts at its instant, CC1IF and ARRM "
+    "at the edge leaving CCR1 and ARR, the update there and UE at the next counted edge, inferred")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(3, 5, cntstrt, cc1if | arrm | ue, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 7);
+  r.idle_to(rises[2]);
+  CHECK(r.read(cnt) == 3);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(rises[3] - cycle);
+  CHECK_FALSE(r.irq_pending());
+  r.idle_to(rises[3]);
+  CHECK(r.irq_pending());
+  CHECK(r.read(cnt) == 4);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  r.write(icr, cc1if);
+  r.idle_to(rises[5] - cycle);
+  CHECK((r.read(isr) & arrm) == 0);
+  r.idle_to(rises[5]);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(isr) & (arrm | ue)) == arrm);
+  r.idle_to(rises[6] - cycle);
+  CHECK((r.read(isr) & ue) == 0);
+  r.idle_to(rises[6]);
+  CHECK(r.read(cnt) == 1);
+  CHECK((r.read(isr) & ue) == ue);
+  CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE(
+    "RM0456 58.4.8: SNGSTRT with COUNTMODE 1 stops at 0 at the update edge, UE set at once there, "
+    "inferred, later edges leave CNT at 0")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 3, sngstrt, 0, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 6);
+  r.idle_to(rises[2]);
+  CHECK(r.read(cnt) == 3);
+  CHECK((r.read(isr) & (arrm | ue)) == 0);
+  r.idle_to(rises[3]);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(isr) & (arrm | ue)) == (arrm | ue));
+  r.idle_to(rises[5] + cycle);
+  CHECK(r.read(cnt) == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.16 with COUNTMODE 1: REP 1 makes every second overflow edge the update, UE at the "
+    "edge after it")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 1, cntstrt, 0, countmode, 1);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 6);
+  r.idle_to(rises[1]);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(isr) & (arrm | ue)) == arrm);
+  r.write(icr, arrm);
+  r.idle_to(rises[2]);
+  CHECK((r.read(isr) & ue) == 0);
+  r.idle_to(rises[3]);
+  CHECK((r.read(isr) & (arrm | ue)) == arrm);
+  r.idle_to(rises[4]);
+  CHECK((r.read(isr) & ue) == ue);
+}
+
+TEST_CASE(
+    "RM0456 58.4.11 with COUNTMODE 1: PRELOAD 1 applies a new ARR at the update edge, and "
+    "PRELOAD 0 at its ARROK")
+{
+  for(auto const config : {countmode | preload, countmode})
+  {
+    CAPTURE(config);
+    rig        r;
+    auto&      pins  = lptim1_in1(r);
+    auto const t     = r.started(60, 3, cntstrt, 0, config);
+    auto const rises = pulses(pins, 5, t + 20 * cycle, 8);
+    r.idle_to(rises[1] + cycle);
+    r.write(arr, 5);
+    r.idle_to(rises[2]);
+    CHECK((r.read(isr) & arrok) == arrok);
+    CHECK(r.read(cnt) == 3);
+    r.idle_to(rises[3]);
+    CHECK(r.read(cnt) == (config == countmode ? 4u : 0u));
+    r.idle_to(rises[5]);
+    CHECK(r.read(cnt) == (config == countmode ? 0u : 2u));
+    r.idle_to(rises[7]);
+    CHECK(r.read(cnt) == (config == countmode ? 2u : 4u));
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.19 with COUNTMODE 1: lptim1_ch1 rises at the edge to CNT CCR1 + 1 and falls at "
+    "the edge to CNT 0, inferred")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(2, 4, cntstrt, 0, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 6);
+  r.idle_to(rises[5] + cycle);
+  CHECK(r.probe->pulses == std::vector{rises[2]});
+  CHECK(r.probe->falls == std::vector{rises[4]});
+  CHECK(r.out_level("lptim1_ch1") == false);
+}
+
+TEST_CASE(
+    "RM0456 58.7.10 CKFLT: with COUNTMODE 1 a PB5 level change counts once held 2, 4 or 8 kernel "
+    "clocks, a shorter pulse is rejected, the sampling phase taken as the edge, inferred")
+{
+  for(std::uint32_t code = 1; code < 4; ++code)
+  {
+    CAPTURE(code);
+    rig        r;
+    auto&      pins     = lptim1_in1(r);
+    auto const n        = std::uint64_t{1} << code;
+    auto const t        = r.started(60, 100, cntstrt, 0, countmode | ckflt(code));
+    auto const short_at = t + 20 * cycle;
+    pins.drive_at(5, true, vtime{short_at});
+    pins.drive_at(5, false, vtime{short_at + (n - 1) * cycle});
+    r.idle_to(short_at + 20 * cycle);
+    CHECK(r.read(cnt) == 0);
+    auto const e = r.now_ps() + 2 * cycle;
+    pins.drive_at(5, true, vtime{e});
+    pins.drive_at(5, false, vtime{e + (n + 1) * cycle});
+    r.idle_to(e);
+    CHECK(r.pending() == e + n * cycle);
+    r.idle_to(e + n * cycle - cycle);
+    CHECK(r.read(cnt) == 0);
+    r.idle_to(e + n * cycle);
+    CHECK(r.read(cnt) == 1);
+    r.idle_to(e + 40 * cycle);
+    CHECK(r.read(cnt) == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.3 Table 605: IN1SEL 01, comp1_out, logs one warning at the counter start and "
+    "raises under strict_peripherals, PB5 edges then count nothing, IN1SEL 00 written with PB5 "
+    "high counts the edge at the write")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr2, 1);
+  auto const t = r.started(60, 100, cntstrt, 0, countmode);
+  CHECK(r.warnings("IN1SEL") == 1);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 3);
+  r.idle_to(rises.back() + 6 * cycle);
+  CHECK(r.read(cnt) == 0);
+  pins.drive(5, true);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  CHECK(r.read(cnt) == 0);
+  r.write(cfgr2, 0);
+  CHECK(r.read(cnt) == 1);
+  rig strict{units[0], true};
+  strict.write(cfgr2, 1);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.started(60, 100, cntstrt, 0, countmode)), popcorn::model_error);
+  rig internal;
+  internal.write(cfgr2, 1);
+  static_cast<void>(internal.started(60, 100));
+  CHECK(internal.warnings("IN1SEL") == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.5, 58.4.12 and 58.7.10: PRESC with COUNTMODE 1, CKPOL 11, CKPOL 10 with CKSEL 1 "
+    "and CKFLT with the kernel clock stopped log one warning each at a start and raise under "
+    "strict_peripherals")
+{
+  for(auto const& [config, stopped, text] : {
+          std::tuple{countmode | presc(1), false, std::string_view{"PRESC not 0 with COUNTMODE"}},
+          std::tuple{countmode | 3u << 1,  false, std::string_view{"CKPOL 11"}                  },
+          std::tuple{cksel | both,         false, std::string_view{"CKPOL 10 with CKSEL 1"}     },
+          std::tuple{countmode | ckflt(1), true,  std::string_view{"CKFLT not 0"}               },
+  })
+  {
+    CAPTURE(text);
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(strict);
+      rig r{units[0], strict};
+      if(stopped)
+      {
+        r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+      }
+      r.write(cfgr, config);
+      r.write(cr, enable);
+      if(strict)
+      {
+        CHECK_THROWS_AS(r.write(cr, enable | cntstrt), popcorn::model_error);
+        continue;
+      }
+      r.write(cr, enable | cntstrt);
+      r.write(cr, 0);
+      r.write(cr, enable);
+      r.write(cr, enable | cntstrt);
+      CHECK(r.warnings(text) == 1);
+    }
+  }
+}
+
+TEST_CASE("PRESC 2 with COUNTMODE 1 counts every PB5 edge")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, 0, countmode | presc(2));
+  auto const rises = pulses(pins, 5, t + 40 * cycle, 3);
+  r.idle_to(rises.back() + cycle);
+  CHECK(r.read(cnt) == 3);
+}
+
+TEST_CASE(
+    "checklist 31: an LPTIM1RST pulse with PB5 high takes the level, a falling edge after the "
+    "start then counts")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  pins.drive(5, true);
+  rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
+  auto const t = r.started(60, 100, cntstrt, 0, countmode | falling);
+  pins.drive_at(5, false, vtime{t + 20 * cycle});
+  r.idle_to(t + 30 * cycle);
+  CHECK(r.read(cnt) == 1);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot of a CKSEL 1 count mid prescaler and mid OK restores into a "
+    "machine with no reset, the state and the next counts equal")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr, cksel | presc(1));
+  r.write(cr, enable);
+  r.write(arr, 100);
+  r.write(cr, enable | cntstrt);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 8);
+  r.idle_to(rises.back() + 6 * cycle);
+  REQUIRE(r.read(cnt) == 1);
+  r.write(ccr1, 2);
+  auto const saved = r.f->target->snapshot();
+  rig        other{no_reset};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.saved() == r.saved());
+  for(auto const* one : {&r, &other})
+  {
+    auto* const port = one->f->model_of<stm32::gpio_port>("GPIOB");
+    REQUIRE(port != nullptr);
+    auto const more = pulses(*port, 5, one->now_ps() + 2 * cycle, 4);
+    one->idle_to(more[0] + cycle);
+    CHECK(one->read(cnt) == 2);
+    one->idle_to(more[1] + cycle);
+    CHECK((one->read(isr) & cmp1ok) == 0);
+    one->idle_to(more[2] + cycle);
+    CHECK((one->read(isr) & cmp1ok) == cmp1ok);
+    CHECK(one->read(cnt) == 3);
+    one->idle_to(more[3] + cycle);
+    CHECK(one->read(cnt) == 3);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.14 with CKSEL 1: COUNTRST resets CNT at the third PB5 edge after the write, "
+    "the edge counting first, inferred")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr, cksel);
+  r.write(cr, enable);
+  r.write(arr, 100);
+  r.write(cr, enable | cntstrt);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 9);
+  r.idle_to(rises[8] + cycle);
+  REQUIRE(r.read(cnt) == 4);
+  r.write(cr, enable | countrst);
+  auto const more = pulses(pins, 5, r.now_ps() + 10 * cycle, 4);
+  r.idle_to(more[1] + cycle);
+  CHECK(r.read(cnt) == 6);
+  CHECK((r.read(cr) & countrst) == countrst);
+  r.idle_to(more[2] + cycle);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(cr) & countrst) == 0);
+  r.idle_to(more[3] + cycle);
+  CHECK(r.read(cnt) == 1);
+}
+
+TEST_CASE(
+    "RM0456 58.4.2 and the U575 datasheet: each LPTIM counts its own IN1 pin, PB5 AF1, PB1 AF14, "
+    "PB13 AF2 and PD13 AF13")
+{
+  struct pin_of
+  {
+    unit             which;
+    std::string_view port;
+    std::uint8_t     pin;
+    std::uint32_t    af;
+  };
+  for(auto const& [which, port, pin, af] : {
+          pin_of{units[0], "GPIOB", 5,  1 },
+          pin_of{units[1], "GPIOB", 1,  14},
+          pin_of{units[2], "GPIOB", 13, 2 },
+          pin_of{units[3], "GPIOD", 13, 13},
+  })
+  {
+    CAPTURE(which.name);
+    rig        r{which};
+    auto&      pins  = in1_pin(r, port, pin, af);
+    auto const t     = r.started(60, 100, cntstrt, 0, countmode);
+    auto const rises = pulses(pins, pin, t + 20 * cycle, 3);
+    r.idle_to(rises.back() + cycle);
+    CHECK(r.read(cnt) == 3);
+  }
+}
+
+TEST_CASE(
+    "inferred: with COUNTMODE 1 a stopped kernel clock drops the PB5 edges and keeps CNT, the "
+    "count goes on when it runs again")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, 0, countmode);
+  auto const first = pulses(pins, 5, t + 20 * cycle, 2);
+  r.idle_to(first.back() + 6 * cycle);
+  REQUIRE(r.read(cnt) == 2);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+  auto const held = pulses(pins, 5, r.now_ps() + 2 * cycle, 2);
+  r.idle_to(held.back() + 6 * cycle);
+  CHECK(r.read(cnt) == 2);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 0);
+  auto const more = pulses(pins, 5, r.now_ps() + 2 * cycle, 2);
+  r.idle_to(more.back() + 6 * cycle);
+  CHECK(r.read(cnt) == 4);
+}
+
+TEST_CASE(
+    "RM0456 58.4.8 with CKSEL 1: a CNTSTRT written in one-shot mode reaches the counter at the "
+    "third PB5 edge, after the update edge stopped it, and starts it, inferred")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr, cksel);
+  r.write(cr, enable);
+  r.write(arr, 2);
+  r.write(cr, enable | sngstrt);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 7);
+  r.idle_to(rises.back() + cycle);
+  REQUIRE(r.read(cnt) == 2);
+  r.write(cr, enable | cntstrt);
+  auto const more = pulses(pins, 5, r.now_ps() + 10 * cycle, 5);
+  r.idle_to(more[0] + cycle);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(isr) & (arrm | ue)) == (arrm | ue));
+  r.idle_to(more[2] + cycle);
+  CHECK(r.read(cnt) == 0);
+  r.idle_to(more[3] + cycle);
+  CHECK(r.read(cnt) == 1);
+  r.idle_to(more[4] + cycle);
+  CHECK(r.read(cnt) == 2);
+}
+
+TEST_CASE(
+    "checklist 53: IN1SEL written to 01 while the counter counts input 1 edges logs one warning "
+    "and raises under strict_peripherals")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{units[0], strict};
+    static_cast<void>(lptim1_in1(r));
+    static_cast<void>(r.started(60, 100, cntstrt, 0, countmode));
+    if(strict)
+    {
+      CHECK_THROWS_AS(r.write(cfgr2, 1), popcorn::model_error);
+      continue;
+    }
+    r.write(cfgr2, 1);
+    r.write(cfgr2, 2);
+    CHECK(r.warnings("IN1SEL") == 1);
+  }
+  rig internal;
+  static_cast<void>(internal.started(60, 100));
+  internal.write(cfgr2, 1);
+  CHECK(internal.warnings("IN1SEL") == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.12 with CKSEL 1: DIEROK and REPOK set at the third PB5 edge after the DIER or "
+    "RCR write, REPOK with its APB clocks dropped, inferred")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr, cksel);
+  r.write(cr, enable);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 10);
+  r.idle_to(rises[3] + cycle);
+  r.write(dier, cc1if);
+  r.idle_to(rises[5] + cycle);
+  CHECK((r.read(isr) & dierok) == 0);
+  r.idle_to(rises[6] + cycle);
+  CHECK((r.read(isr) & dierok) == dierok);
+  r.write(rcr, 1);
+  r.idle_to(rises[8] + cycle);
+  CHECK((r.read(isr) & repok) == 0);
+  r.idle_to(rises[9] + cycle);
+  CHECK((r.read(isr) & repok) == repok);
+}
+
+TEST_CASE(
+    "inferred: with CKSEL 1 a REPOK at an update edge applies after that edge's update, which "
+    "reloads the old REP, the new one taking effect at the next update")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  r.write(cfgr, cksel);
+  r.write(cr, enable);
+  r.write(arr, 2);
+  r.write(cr, enable | cntstrt);
+  auto const rises = pulses(pins, 5, r.now_ps() + 20 * cycle, 18);
+  r.idle_to(rises[4] + cycle);
+  REQUIRE(r.read(cnt) == 0);
+  r.write(rcr, 1);
+  r.idle_to(rises[7] + cycle);
+  CHECK((r.read(isr) & repok) == repok);
+  CHECK(r.read(cnt) == 0);
+  r.idle_to(rises[8] + cycle);
+  CHECK((r.read(isr) & ue) == ue);
+  r.write(icr, ue);
+  r.idle_to(rises[11] + cycle);
+  CHECK((r.read(isr) & ue) == ue);
+  r.write(icr, ue);
+  r.idle_to(rises[16] + cycle);
+  CHECK((r.read(isr) & ue) == 0);
+  r.idle_to(rises[17] + cycle);
+  CHECK((r.read(isr) & ue) == ue);
+}
+
+TEST_CASE(
+    "inferred: with COUNTMODE 1 an ARROK due at the instant of a PB5 edge applies before the "
+    "edge counts, so the edge leaving the new ARR overflows")
+{
+  rig        r;
+  auto&      pins  = lptim1_in1(r);
+  auto const t     = r.started(60, 100, cntstrt, 0, countmode);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 4);
+  r.idle_to(rises[2] - 3 * cycle);
+  REQUIRE(r.read(cnt) == 2);
+  r.write(arr, 2);
+  r.idle_to(rises[2]);
+  CHECK(r.read(cnt) == 0);
+  CHECK((r.read(isr) & (arrok | arrm)) == (arrok | arrm));
+  r.idle_to(rises[3]);
+  CHECK(r.read(cnt) == 1);
 }
