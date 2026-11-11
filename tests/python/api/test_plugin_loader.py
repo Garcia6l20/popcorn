@@ -7,6 +7,8 @@ import popcorn
 import pytest
 from popcorn import _core
 
+from popcorn_build.version import release_version
+
 FIXTURES = (
     Path(_core.__file__).resolve().parent.parent / "tests" / "native" / "plugin" / "plugin-fixtures"
 )
@@ -34,7 +36,7 @@ def test_a_declared_plugin_loads_with_the_host_tag(tmp_path: Path) -> None:
 
 def test_the_host_tag_names_this_popcorn() -> None:
     tag = _core._host_abi_tag()  # pyright: ignore[reportPrivateUsage]
-    assert tag.startswith(f"popcorn {popcorn.version().split()[0]};gcc ")
+    assert tag.startswith(f"popcorn {release_version(popcorn.version().split()[0])};gcc ")
     assert ";sdk " in tag
 
 

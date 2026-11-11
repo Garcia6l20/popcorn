@@ -137,12 +137,16 @@ def sdk_digest(
     return digest.hexdigest()
 
 
-def build_info(version: str, nanobind_version: str, variant: str, digest: str) -> str:
-    """The text of `popcorn/plugin/build_info.hpp`."""
+def build_info(abi_version: str, nanobind_version: str, variant: str, digest: str) -> str:
+    """The text of `popcorn/plugin/build_info.hpp`.
+
+    @p abi_version is the release segment of the popcorn version,
+    `popcorn_build.version.release_version`, so the text stays the same across dev commits.
+    """
     major, minor, patch = (int(part) for part in nanobind_version.split("."))
     return (
         "#pragma once\n\n"
-        f'#define POPCORN_VERSION_STRING "{version}"\n'
+        f'#define POPCORN_ABI_VERSION "{abi_version}"\n'
         f'#define POPCORN_NANOBIND_VERSION "{nanobind_version}"\n'
         f"#define POPCORN_NANOBIND_VERSION_MAJOR {major}\n"
         f"#define POPCORN_NANOBIND_VERSION_MINOR {minor}\n"
@@ -156,15 +160,15 @@ def build_info(version: str, nanobind_version: str, variant: str, digest: str) -
 def main(argv: Sequence[str]) -> int:
     """Write build_info.hpp, the build edge behind it.
 
-    Arguments: output, version, nanobind version, variant, native include root, reflex root and
-    optionally the compiler, `g++` when absent.
+    Arguments: output, ABI version, nanobind version, variant, native include root, reflex root
+    and optionally the compiler, `g++` when absent.
     The file is rewritten only when its text changes, so its includers rebuild only then.
     """
-    output, version, nanobind_version, variant, include_root, reflex_root, *rest = argv
+    output, abi_version, nanobind_version, variant, include_root, reflex_root, *rest = argv
     compiler = rest[0] if rest else "g++"
     root = Path(reflex_root)
     text = build_info(
-        version,
+        abi_version,
         nanobind_version,
         variant,
         sdk_digest(Path(include_root), root, reflex_include_dirs(root), compiler),

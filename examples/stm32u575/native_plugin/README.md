@@ -204,13 +204,14 @@ extension module. A model-only plugin works in dev mode only.
 
 ### The ABI tag
 
-There is no ABI stability across popcorn builds. Each plugin embeds the tag of the popcorn it
-was built against, and the loader refuses any other, before the plugin's static constructors
-run. A dev plugin rebuilds under a new key when popcorn changes. A mismatch reads:
+Each plugin embeds the tag of the popcorn it was built against: the release, the compiler and
+its ABI flags, and the digest of the SDK headers. The loader refuses any other tag, before the
+plugin's static constructors run. Dev builds toward one release share the tag while the SDK
+headers stay the same. A dev plugin rebuilds under a new key when popcorn changes. A mismatch reads:
 
 ```text
 config error: .../lib/libmy_plugin.so:0: abi_tag, expected the tag of this popcorn
-"popcorn 0.1.0.dev0;gcc 16.2.1 20260810;gxx-abi 1021;reflection 202603L;contracts 202502L;
+"popcorn 0.1.0;gcc 16.2.1 20260810;gxx-abi 1021;reflection 202603L;contracts 202502L;
 cxx11-abi 1;glibcxx-debug 0;nanobind 2.13.0;nb-domain ;variant release;sdk 2b69e2f7...",
 not "popcorn 0.0.0;gcc edited"
 ```

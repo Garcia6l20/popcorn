@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from popcorn_build import backend
-from popcorn_build.version import PROJECT_DIR, popcorn_version
+from popcorn_build.version import (
+    PROJECT_DIR,
+    main,
+    popcorn_version,
+    release_version,
+    version_header,
+)
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t",
@@ -141,3 +147,42 @@ def test_the_backend_leaves_another_projects_static_version_alone(
 def test_the_project_counts_only_v_prefixed_tags() -> None:
     table = tomllib.loads((PROJECT_DIR / "pyproject.toml").read_text())["tool"]["setuptools_scm"]
     assert table["tag"] == {"prefix": "v", "strict": True}
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("0.4.1.dev26", "0.4.1"),
+        ("0.4.1", "0.4.1"),
+        ("0.4.1.dev0", "0.4.1"),
+        ("1.0rc1.dev3", "1.0rc1"),
+        ("1.0.post2.dev4", "1.0.post2"),
+        ("0.4.1-DEV7", "0.4.1"),
+        ("0.4.2.dev26+gabc1234.d20261111", "0.4.2"),
+        ("1!2.0.dev1", "1!2.0"),
+    ],
+)
+def test_the_release_version_drops_only_the_dev_segment(version: str, release: str) -> None:
+    assert release_version(version) == release
+
+
+def test_the_release_version_refuses_a_non_pep_440_version() -> None:
+    with pytest.raises(ValueError):
+        release_version("not a version")
+
+
+def test_main_rewrites_the_version_header_only_when_its_text_changes(tmp_path: Path) -> None:
+    output = tmp_path / "out" / "popcorn_version_string.hpp"
+    assert main([str(output), "0.4.1.dev26"]) == 0
+    assert output.read_text() == version_header("0.4.1.dev26")
+    assert '#define POPCORN_VERSION_STRING "0.4.1.dev26"' in output.read_text()
+    stamp = output.stat().st_mtime_ns
+    assert main([str(output), "0.4.1.dev26"]) == 0
+    assert output.stat().st_mtime_ns == stamp
+    assert main([str(output), "0.4.1.dev27"]) == 0
+    assert '"0.4.1.dev27"' in output.read_text()
+
+
+def test_main_without_arguments_prints_the_version(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([]) == 0
+    assert capsys.readouterr().out.strip() == popcorn_version()

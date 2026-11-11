@@ -5,7 +5,7 @@
 /** @brief The layout of POPCORN_ABI_TAG_LITERAL with the compiler field @p GCC and the SDK
  * digest @p SDK in place of this unit's. */
 #define EDITED_ABI_TAG(GCC, SDK)                                                                                                      \
-  "popcorn " POPCORN_VERSION_STRING ";gcc " GCC                                                                                       \
+  "popcorn " POPCORN_ABI_VERSION ";gcc " GCC                                                                                          \
   ";gxx-abi " POPCORN_ABI_STR(__GXX_ABI_VERSION) ";reflection " POPCORN_ABI_STR(__cpp_impl_reflection) ";contracts " POPCORN_ABI_STR( \
       __cpp_contracts) ";cxx11-abi " POPCORN_ABI_STR(_GLIBCXX_USE_CXX11_ABI) ";glibcxx-"                                              \
                                                                              "debug"                                                  \

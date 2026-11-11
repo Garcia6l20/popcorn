@@ -3,7 +3,7 @@
 /**
  * @file
  * @brief The ABI tag of the translation unit that includes this header. It names the popcorn
- *        version and SDK digest the unit compiled against, and how the unit itself was compiled:
+ *        release and SDK digest the unit compiled against, and how the unit itself was compiled:
  *        compiler, C++ ABI version, reflection, contracts, libstdc++ string ABI, libstdc++ debug
  *        mode, nanobind, variant and sanitizer. A plugin embeds it, the loader compares it with
  *        popcorn::plugin::host_abi_tag() by string equality.
@@ -62,7 +62,7 @@
 
 /** @brief The ABI tag as one string literal. */
 #define POPCORN_ABI_TAG_LITERAL                                                                                                       \
-  "popcorn " POPCORN_VERSION_STRING ";gcc " __VERSION__                                                                               \
+  "popcorn " POPCORN_ABI_VERSION ";gcc " __VERSION__                                                                                  \
   ";gxx-abi " POPCORN_ABI_STR(__GXX_ABI_VERSION) ";reflection " POPCORN_ABI_STR(__cpp_impl_reflection) ";contracts " POPCORN_ABI_STR( \
       __cpp_contracts) ";cxx11-abi " POPCORN_ABI_STR(_GLIBCXX_USE_CXX11_ABI) ";glibcxx-"                                              \
                                                                              "debug"                                                  \

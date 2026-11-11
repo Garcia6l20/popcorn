@@ -37,10 +37,10 @@ wheel is accepted by an index. Only tags of the form `v<version>` count, so tags
 modified tracked file gives the next dev version, `0.1.1.dev0`. Untracked files leave the version
 unchanged.
 
-`popcorn_build.version.popcorn_version` computes it for the wheel and sdist metadata, the SDK
-header `POPCORN_VERSION_STRING`, the build info and `pcons-build.py`. `python -m
-popcorn_build.version` prints it. The build backend `popcorn_build.backend` hands it to
-`pcons.pyproject`, which reads a static `[project].version`.
+`popcorn_build.version.popcorn_version` computes it for the wheel and sdist metadata, `sdk.json`,
+`popcorn.version()` and `pcons-build.py`. `python -m popcorn_build.version` prints it. The build
+backend `popcorn_build.backend` hands it to `pcons.pyproject`, which reads a static
+`[project].version`.
 
 - `SETUPTOOLS_SCM_PRETEND_VERSION` sets the version for a tree without git metadata. The Docker
   build passes the version the workflow derived from the tags this way.
@@ -49,8 +49,14 @@ popcorn_build.version` prints it. The build backend `popcorn_build.backend` hand
 - `uv sync` rebuilds the editable install after a new commit or tag, through `cache-keys` in
   `[tool.uv]`.
 
-A new commit changes the version string and so the plugin ABI tag: a plugin built before it is
-rebuilt or refused, like one built against other headers.
+The version reaches the native code through the generated header `popcorn_version_string.hpp`,
+which only `native/src/core/version.cpp` includes. The plugin ABI tag carries the release segment,
+`popcorn_build.version.release_version`: `0.4.1` for `0.4.1.dev26` and for the release `0.4.1`.
+The generated SDK header `build_info.hpp` defines it as `POPCORN_ABI_VERSION`. A new commit
+recompiles `version.cpp` and relinks what links it, the plugins and the tag stay the same. The
+next release, or the next base version after a tag, changes the tag: a plugin built before it is
+rebuilt or refused, like one built against other headers. pcons reads the version when it
+generates the build, so a commit reaches `popcorn_version_string.hpp` at the next regeneration.
 
 ## What gets built
 

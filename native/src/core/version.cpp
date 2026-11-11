@@ -1,5 +1,5 @@
 #include <popcorn/core/version.hpp>
-#include <popcorn/plugin/build_info.hpp>
+#include <popcorn_version_string.hpp>
 
 namespace popcorn::core
 {

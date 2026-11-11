@@ -23,6 +23,7 @@ from popcorn_build.python import (
 from popcorn_build.requirements import package, prefixes, unicorn_archive, unicorn_commit
 from popcorn_build.sdk import reflex_include_dirs, sdk_inputs
 from popcorn_build.testing import add_header_check, check_core_links
+from popcorn_build.version import release_version
 
 WARNINGS = [
     "-Wall",
@@ -95,7 +96,7 @@ build_info = project.Command(
         "-m",
         "popcorn_build.sdk",
         str(build_info_path),
-        POPCORN_VERSION,
+        release_version(POPCORN_VERSION),
         nanobind_version,
         VARIANT,
         str(native_include),
@@ -180,6 +181,25 @@ core_objects, core, core_static = area_library(
     ],
 )
 core_objects.private.defines.append(f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"')
+version_include = build_dir / "generated" / "version"
+version_header_path = version_include / "popcorn_version_string.hpp"
+version_header = project.Command(
+    env,
+    name="popcorn-version-header",
+    target=version_header_path,
+    source=[project_dir / "popcorn_build" / "version.py"],
+    command=[
+        interpreter,
+        "-m",
+        "popcorn_build.version",
+        str(version_header_path),
+        POPCORN_VERSION,
+    ],
+    cwd=project_dir,
+    restat=True,
+)
+core_objects.private.include_dirs.append(version_include)
+core_objects.depends(version_header)
 core.link_private(package("unicorn")).depends(unicorn_archive)
 core_version_script = project_dir / "native" / "src" / "core" / "popcorn_core.map"
 core.private.link_flags.append(f"-Wl,--version-script={core_version_script}")

@@ -14,6 +14,7 @@ from popcorn_build.sdk import (
     sdk_digest,
     sdk_inputs,
 )
+from popcorn_build.version import release_version
 
 
 def write(root: Path, relative: str, text: str = "") -> Path:
@@ -75,8 +76,9 @@ def test_a_new_public_header_changes_the_digest(tree: Path) -> None:
 
 
 def test_build_info_spells_every_tag_field() -> None:
-    text = build_info("0.1.0.dev0", "2.13.0", "release", "ab" * 32)
-    assert '#define POPCORN_VERSION_STRING "0.1.0.dev0"' in text
+    text = build_info("0.1.0", "2.13.0", "release", "ab" * 32)
+    assert '#define POPCORN_ABI_VERSION "0.1.0"' in text
+    assert "POPCORN_VERSION_STRING" not in text
     assert '#define POPCORN_NANOBIND_VERSION "2.13.0"' in text
     assert "#define POPCORN_NANOBIND_VERSION_PATCH 0" in text
     assert '#define POPCORN_NB_DOMAIN ""' in text
@@ -84,11 +86,24 @@ def test_build_info_spells_every_tag_field() -> None:
     assert f'#define POPCORN_SDK_DIGEST "{"ab" * 32}"' in text
 
 
+def test_build_info_is_the_same_for_every_dev_commit_toward_one_release(tree: Path) -> None:
+    output = tree / "out" / "build_info.hpp"
+    rest = ["2.13.0", "release", str(tree / "native" / "include"), str(tree / "reflex")]
+    assert main([str(output), release_version("0.4.1.dev26"), *rest]) == 0
+    first = output.read_text()
+    stamp = output.stat().st_mtime_ns
+    assert main([str(output), release_version("0.4.1.dev27"), *rest]) == 0
+    assert output.stat().st_mtime_ns == stamp
+    assert '#define POPCORN_ABI_VERSION "0.4.1"' in first
+    assert main([str(output), release_version("0.4.2.dev1"), *rest]) == 0
+    assert '#define POPCORN_ABI_VERSION "0.4.2"' in output.read_text()
+
+
 def test_main_rewrites_build_info_only_when_its_text_changes(tree: Path) -> None:
     output = tree / "out" / "build_info.hpp"
     arguments = [
         str(output),
-        "0.1.0.dev0",
+        "0.1.0",
         "2.13.0",
         "release",
         str(tree / "native" / "include"),
