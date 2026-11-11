@@ -338,7 +338,7 @@ TEST_CASE(
   for(std::uint32_t select = 1; select <= 15; ++select)
   {
     auto const name = r.triggers[select - 1];
-    if(name.empty() or name.starts_with("lptim"))
+    if(name.empty() or std::ranges::contains(r.variant->unproduced, name))
     {
       continue;
     }
@@ -391,7 +391,7 @@ TEST_CASE(
   for(std::uint32_t select = 1; select <= 15; ++select)
   {
     auto const name = r.triggers[select - 1];
-    if(not name.empty() and not name.starts_with("lptim"))
+    if(not name.empty() and not std::ranges::contains(r.variant->unproduced, name))
     {
       continue;
     }

@@ -639,8 +639,8 @@ not change the load timing.
   `tim8_trgo`, `tim15_trgo`, trg9 and trg10 reserved, trg11 `lptim1_ch1`, trg12 `lptim3_ch1` on the
   STM32U5 and `lptim2_ch1` on the STM32H5, trg13 `exti9`, trg14 and trg15 reserved. The STM32H5
   trg14 and trg15 are `play_out11` and `play_out12` of the STM32H533 and STM32H543 only. A
-  reserved TSELx, or an LPTIM source that no model produces, with TENx set logs one `model_warning`
-  and loads on no source. Under strict_peripherals it raises `ModelError` and leaves `DAC_CR` as
+  reserved TSELx, or on the STM32H5 an LPTIM source, with TENx set logs one `model_warning`
+  and loads on no source. The STM32U5 LPTIM1 and LPTIM3 produce their sources. Under strict_peripherals it raises `ModelError` and leaves `DAC_CR` as
   before the write.
 - DACxRDY sets the typical `tWAKEUP` of the datasheet after ENx rises and clears with ENx, RM0456
   35.4.4: 4.2 us with the output buffer on and 2 us with it off on the STM32U5, 5 us and 2 us on the
@@ -1508,18 +1508,24 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   `ModelError` under `strict` before it is stored, and the coverage report lists it as
   `storage_only`. A write of the reset value 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make,
   passes.
-- The output of channel 1 of LPTIM1 to LPTIM3 drives the trigger signal `lptim1_ch1`,
-  `lptim2_ch1` or `lptim3_ch1`, and the output of LPTIM4 `lptim4_out`. No LPTIM output drives a
-  pin. OC1REF is high while CNT is above CCR1, so the output rises at CNT CCR1 + 1 with CC1IF,
-  CCR1 0 at CNT 1, and falls at CNT 0 with ARRM, RM0456 58.4.19 and Figures 747 and 748. A signal
-  edge carries the whole ps at or after its instant, so a kernel clock that is not a whole ps puts
-  it up to 1 ps late. CCR1 at or above ARR keeps it inactive, RM0456 58.4.10. A CCR1 value that
-  takes effect moves the level at its CMP1OK, inferred. A one-pulse run gives one pulse. With WAVE 1 it rises once and keeps its level until
-  ENABLE is written to 0, and a CNTSTRT or SNGSTRT after the first start is discarded until
-  then, the software restart inferred. The level is the compare result xor CC1P bit 0 with CC1E 1
-  and CC1SEL 0, and 0 otherwise, inferred. LPTIM4 uses WAVPOL. A polarity or CC1E change
-  takes effect at the register write, also with ENABLE 0, RM0456 58.4.10. ENABLE written to 0
-  and LPTIMxRST drop the level to inactive at the write, inferred.
+- The output of channel 1 of LPTIM1 to LPTIM3 drives the trigger signal `lptim1_ch1`, `lptim2_ch1`
+  or `lptim3_ch1`, channel 2 `lptim1_ch2` to `lptim3_ch2`, and the output of LPTIM4 `lptim4_out`. No
+  LPTIM output drives a pin. OC1REF is high while CNT is above CCR1, so the output rises at CNT CCR1
+  + 1 with CC1IF, CCR1 0 at CNT 1, and falls at CNT 0 with ARRM, RM0456 58.4.19 and Figures 747 and
+  748. A signal edge carries the whole ps at or after its instant, so a kernel clock that is not a
+  whole ps puts it up to 1 ps late. CCR1 at or above ARR keeps it inactive, RM0456 58.4.10. A CCR1
+  value that takes effect moves the level at its CMP1OK, inferred. A one-pulse run gives one pulse.
+  With WAVE 1 it rises once and keeps its level until ENABLE is written to 0, and a CNTSTRT or
+  SNGSTRT after the first start is discarded until then, the software restart inferred. The level is
+  the compare result xor CC1P bit 0 with CC1E 1 and CC1SEL 0, and 0 otherwise, inferred. LPTIM4 uses
+  WAVPOL. A polarity or CC1E change takes effect at the register write, also with ENABLE 0, RM0456
+  58.4.10. ENABLE written to 0 and LPTIMxRST drop the level to inactive at the write, inferred.
+- Channel 2 of LPTIM1 to LPTIM3 compares CCR2 as channel 1 compares CCR1: CC2IF and the level of
+  `lptim<n>_ch2` come at CNT CCR2 + 1, CMP2OK follows a CCR2 write 3 kernel clocks later, and
+  PRELOAD 1 applies CCR2 at the update event. The level is the compare result xor CC2P bit 0 with
+  CC2E 1 and CC2SEL 0, and 0 otherwise, inferred. CC2IF sets with CC2SEL 0 whatever CC2E is, RM0456
+  58.7.2, so the reset CCR2 0 sets it at CNT 1 of every run. WAVE 1 latches each channel on its own,
+  also with its CCxE 0, inferred.
 - A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
   start latency, and the kernel clocks left before each pending OK flag, COUNTRST and mode
   switch, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
@@ -1528,12 +1534,11 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
 - CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
 - These functions are not modelled. Each logs one `model_warning` at its first use and raises
   `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
-  counter start CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2, CC2E with channel 2 as output
-  and CC1SEL or CC2SEL on LPTIM1 to LPTIM3, the CCMR1 ones also at a CCMR1
-  write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN not 00, which leaves
-  the counter stopped, any CCR2 write, so CMP2OK and CC2IF never set, and a DIER bit other than
-  CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE. A function the model lacks otherwise
-  counts the kernel clock with channel 1 comparing CCR1.
+  counter start CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2 and CC1SEL or CC2SEL on LPTIM1 to
+  LPTIM3, the CCMR1 ones also at a CCMR1 write while the counter runs. At the write: CNTSTRT or
+  SNGSTRT with TRIGEN not 00, which leaves the counter stopped, and a DIER bit other than CC1IE,
+  ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, and on LPTIM1 to LPTIM3 CC2IE and CMP2OKIE. A
+  function the model lacks otherwise counts the kernel clock with channel 1 comparing CCR1.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
 - ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, is

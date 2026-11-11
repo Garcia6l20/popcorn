@@ -39,9 +39,10 @@ inline constexpr auto h5_dac_triggers = std::to_array<std::string_view>(
     {"tim1_trgo", "tim2_trgo", "tim4_trgo", "tim5_trgo", "tim6_trgo", "tim7_trgo", "tim8_trgo",
      "tim15_trgo", "", "", "lptim1_ch1", "lptim2_ch1", "exti9", "", ""});
 
-/** @brief Trigger sources the model knows by name and no model produces. */
-inline constexpr auto unproduced_triggers =
-    std::to_array<std::string_view>({"lptim1_ch1", "lptim2_ch1", "lptim3_ch1"});
+/** @brief STM32H5 trigger sources the model knows by name and no model produces, until the H5
+ *         LPTIM rows exist. */
+inline constexpr auto h5_unproduced_triggers =
+    std::to_array<std::string_view>({"lptim1_ch1", "lptim2_ch1"});
 
 /** @brief Differences between the DAC peripherals the model rows serve. */
 struct dac_variant
@@ -155,7 +156,6 @@ inline constexpr dac_variant u5_dac{
     .software_trigger    = 0,
     .first_hardware      = 1,
     .hardware_triggers   = u5_dac_triggers,
-    .unproduced          = unproduced_triggers,
     .bus_clock           = "hclk",
     .dma_prefix          = "dac1",
     .ready_flags         = true,
@@ -175,7 +175,7 @@ inline constexpr dac_variant h5_dac{
     .software_trigger    = 0,
     .first_hardware      = 1,
     .hardware_triggers   = h5_dac_triggers,
-    .unproduced          = unproduced_triggers,
+    .unproduced          = h5_unproduced_triggers,
     .bus_clock           = "hclk",
     .dma_prefix          = "dac1",
     .ready_flags         = true,

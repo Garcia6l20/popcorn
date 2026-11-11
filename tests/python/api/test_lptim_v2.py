@@ -10,11 +10,12 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn.stm32 import mcu, support
-from popcorn.units import ms, us
+from popcorn.units import VirtualTime, ms, ns, us
 
 from .conftest import run_bounded
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "lptim_ll.elf"
+RCC_LL = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
 U5_PARTS = ("STM32U575QGIx", "STM32U585AIIx")
 INSTANCES = ("LPTIM1", "LPTIM2", "LPTIM3", "LPTIM4")
 PERIODS = 10
@@ -88,3 +89,55 @@ async def test_ue_sets_at_every_third_overflow_with_rep_2() -> None:
     await m.run(for_=us(0.5))
     assert timer.ISR_output.UE == 1
     assert timer.ISR_output.REPOK == 1
+
+
+CONVERSION = us(1.5) + us(0.75)
+CPU_CYCLE = ns(250)
+
+
+async def started_lptim_with_a_listening_dac() -> tuple[popcorn.Machine, VirtualTime]:
+    """A DAC1 channel 1 listening to `lptim1_ch1` and an LPTIM1 whose CNTSTRT was just written."""
+    m = popcorn.MachineDescription(part="STM32U575QGIx", images=[popcorn.Elf(RCC_LL)]).machine()
+    m.reset()
+    m.reg.pc = m.sym("idle")
+    m.periph.RCC.APB3ENR.LPTIM1EN = 1
+    m.periph.RCC.AHB3ENR.DAC1EN = 1
+    timer = m.periph.LPTIM1
+    timer.CCMR1.write(1 << 1)
+    timer.CR.write(1)
+    timer.ARR.write(5)
+    await m.run(for_=us(1))
+    timer.CCR1.write(2)
+    await m.run(for_=us(1))
+    timer.ICR_output.write(0x18)
+    dac = m.periph.DAC1
+    dac.CR.write(1 << 1 | 11 << 2)
+    dac.DHR12R1.write(0x2A5)
+    started = m.time
+    timer.CR.write(1 | 1 << 2)
+    return m, started
+
+
+@pytest.mark.parametrize("mode", ["parked", "running"])
+async def test_a_dac_conversion_triggered_by_lptim1_ch1_comes_at_the_same_virtual_time(
+    mode: str,
+) -> None:
+    m, started = await started_lptim_with_a_listening_dac()
+    dac = m.periph.DAC1
+
+    def read() -> tuple[int, int]:
+        return m.time.ps, dac.DOR1.read() & 0xFFF
+
+    due = started + CONVERSION
+    samples = [m.sample(read, at=at) for at in (due - CPU_CYCLE, due, due + CPU_CYCLE)]
+    if mode == "parked":
+        await m.run(for_=us(10))
+        seen = [await one for one in samples]
+    else:
+        async with m.running():
+            seen = [await one for one in samples]
+    assert seen == [
+        ((due - CPU_CYCLE).ps, 0),
+        (due.ps, 0x2A5),
+        ((due + CPU_CYCLE).ps, 0x2A5),
+    ]
