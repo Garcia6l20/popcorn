@@ -235,6 +235,115 @@ struct unmodelled_entry
  *        flag with TAMPIE or its TAMPxIE drives the tamper EXTI line. ES0250 2.19.1: clearing
  *        TAMPxE of an enabled falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1, while its input is
  *        high is an event, with the TAMPxNOERASE of the previous write.
+ *
+ * @limits rtc
+ *
+ * @group all rule "The STM32L1 RTC"
+ * - INITF sets at the second RTCCLK edge after INIT, and the calendar restarts at the fourth edge
+ *   after INIT clears, the upper bounds of RM0038 20.3.5.
+ * - RSF sets at the second RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+ *   system reset, inferred from the copy every two RTCCLK periods of RM0038 20.3.2.
+ * - TR, DR and SSR read the calendar at the time of the read. A read of SSR or TR holds TR and DR
+ *   until DR is read, and after a system reset they read their reset values until RSF sets.
+ * - TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, RM0038 20.3.5 and the note under
+ *   20.6.4, which exempt `RTC_ISR[13:8]`.
+ * - `RTC_TSTR`, `RTC_TSDR`, `RTC_TSSSR`, `RTC_CALIBR`, `RTC_CALR`, `RTC_SHIFTR` and `RTC_TAFCR` are
+ *   storage: coverage reports them `storage_only`, and `m.mem` and the register views refuse them
+ *   as they refuse a peripheral without a model.
+ * - ADD1H and SUB1H move the calendar at the write.
+ * - RTC writes land whatever `PWR_CR.DBP` holds.
+ * - On Cat.1 a PREDIV_A of 0 divides by 1.
+ * - The alarm interrupt, ALRxF with ALRxIE, drives EXTI line 17 and RTC_Alarm, and WUTF with WUTIE
+ *   drives EXTI line 20 and RTC_WKUP, RM0038 20.5. The flag gated by its interrupt enable is
+ *   inferred from RM0038 Table 90. A flag set while its enable is 0 raises the line when the enable
+ *   sets.
+ * - On Cat.1 ALRAWF and ALRBWF clear when their alarm is enabled and in init mode, and set at the
+ *   second RTCCLK edge after the alarm is disabled, inferred from RM0038 20.3.5. On Cat.2 to Cat.6
+ *   they read 1, so `RTC_ALRMxR` takes writes while its alarm is enabled, inferred.
+ * - The wakeup timer counts from the write that sets WUTE, inferred. WUTWF clears and sets at the
+ *   second RTCCLK edge after WUTE changes, the upper bound of RM0038 20.6.4.
+ * - A system reset keeps a pending set of WUTWF, ALRAWF or ALRBWF, inferred from the bit text of
+ *   RM0038 20.6.4. A system reset in init mode restarts the calendar as the end of init mode does,
+ *   inferred: on Cat.1 ALRxWF reads 1 at once for an alarm with ALRxE clear, and a ck_spre wakeup
+ *   counts its period from the restart. The U5 and H5 RTC rebase a ck_spre wakeup the same way,
+ *   inferred.
+ * - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them, before the
+ *   store: timestamps, tamper detection, coarse and smooth calibration, the shift control, the
+ *   RTC_CALIB and RTC_ALARM outputs and the reference clock detection. A debugger write stores them
+ *   with neither.
+ *
+ * @group l4 rule "The STM32L4 RTC, RM0351 section 38, runs the STM32L1 rules above on its own
+ *       register set"
+ * - `RTC_TAMPCR` at 0x40 in place of `RTC_TAFCR`, `RTC_OR` at 0x4C, no `RTC_CALIBR` and no
+ *   `CR.DCE`.
+ * - RSF sets at the first RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+ *   system reset, inferred from the copy every RTCCLK period of RM0351 38.3.4 and 38.3.8, where the
+ *   BYPSHAD text of 38.6.3 says every two RTCCLK cycles.
+ * - The `RTC_WPR` key leaves `RTC_ISR[31:8]`, `RTC_TAMPCR`, `RTC_OR` and the backup registers open,
+ *   RM0351 38.3.7: ALRAF to TAMP3F clear by a 0 without it.
+ * - `RTC_TAMPCR` and `RTC_OR` are storage: coverage reports them `storage_only`. `RTC_ISR.ITSF`,
+ *   bit 17 in RM0351 38.6.4, is not in the description and reads 0.
+ * - A brown-out keeps the calendar and the backup registers, RM0351 6.1.3.
+ * - The alarm interrupt, ALRxF with ALRxIE, drives EXTI line 18 and RTC_Alarm, RM0351 Table 62, and
+ *   WUTF with WUTIE drives EXTI line 20 and RTC_WKUP. The flag gated by its interrupt enable is
+ *   inferred from RM0351 Table 230.
+ * - ALRAWF and ALRBWF read 1, so `RTC_ALRMxR` takes writes while its alarm is enabled, inferred:
+ *   RM0351 38.3.7 programs the alarm with no ALRxWF poll, where RM0038 20.3.5 skips the poll on the
+ *   STM32L1 Cat.2 to Cat.6, whose flags are always set. `RTC_ALRMxSSR` takes writes with ALRxE
+ *   clear or in init mode, RM0351 38.6.17 and 38.6.18.
+ * - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them: the
+ *   internal timestamp `CR.ITSE`, smooth calibration, the shift control, the outputs and the
+ *   reference clock detection.
+ * - Tampers, RM0351 38.3.14: RTC_TAMP1 on PC13, RTC_TAMP2 on PA0 and RTC_TAMP3 on PE6, DS10198
+ *   Table 16. A pin the package does not bond, such as PE6 on the 64-pin parts, is never active.
+ *   With TAMPFLT 0 an edge of the TAMPxTRG polarity is an event. With TAMPFLT 1 to 3 the input is
+ *   sampled every 2^(15 - TAMPFREQ) RTCCLK cycles, on multiples of that period counted from the
+ *   calendar's RTCCLK origin, and 2, 4 or 8 consecutive samples at the TAMPxTRG level make an
+ *   event. The sample phase, and the count restarting after each event, are inferred.
+ * - A sample of an undriven tamper input reads high with TAMPPUDIS 0, the precharge, and its PUPDR
+ *   pull-up with TAMPPUDIS 1. TAMPPRCH sets no timing: the board drive is ideal.
+ * - TAMPxF sets at the event with TAMPFLT 0 and TAMPTS 0, else 3 ck_apre cycles later, RM0351
+ *   38.3.14, counted from the event, inferred. The backup registers are erased when TAMPxF sets,
+ *   unless TAMPxNOERASE, inferred: RM0351 38.3.14 erases at the tamper event and gives the latency
+ *   for TAMPxF only. An event while TAMPxF is set, or while one is pending, is lost.
+ * - TAMPxMF masks TAMPxF and the erase. The tamper trigger to the LPTIM is not connected. A TAMPIE
+ *   or TAMPxIE write with a TAMPxMF set is stored as written. With TAMPxMF an event is lost during
+ *   the latency only, where RM0351 38.3.14 adds 2.5 ck_rtc cycles to that window.
+ * - TAMPTS stamps the calendar of the tamper event as a timestamp does, at the board time of an
+ *   edge. TSF sets with TAMPxF, and TSOVF at once when a stamp is set or pending, RM0351 38.3.13.
+ *   TAMPIE, or TAMPxIE, with TAMPxF drives EXTI line 19.
+ * - ES0250 2.19.1 is modelled: clearing TAMPxE of a falling-edge tamper, TAMPFLT 0 and TAMPxTRG 1,
+ *   while its input is high is a tamper event. It erases unless TAMPxNOERASE was set by an earlier
+ *   write.
+ * - ES0250 2.19.5: with DBG_RTC_STOP a held core stops the alarms, the subsecond alarm included,
+ *   and no flag repeats during the hold.
+ * - ES0250 2.19.6: a tamper event right after a TSF clear stamps as any other event, with no APB
+ *   cycle window.
+ * - ES0250 2.19.7: Stop 2 is not modelled, and RTC_REFIN and RTC_OUT on PB2 are outputs and inputs
+ *   the model does not drive.
+ * - Timestamps, RM0351 38.3.13: with `CR.TSE` an edge of RTC_TS on PC13, rising with TSEDGE 0 and
+ *   falling with 1, captures the calendar at the board time of the edge, also when the GPIO applies
+ *   it at a later block boundary, into `RTC_TSTR`, `RTC_TSDR` and `RTC_TSSSR` and sets TSF 2 x
+ *   (PREDIV_A + 1) RTCCLK cycles later, the "2 ck_apre cycles" of 38.3.13 counted from the edge,
+ *   inferred. An edge while TSF is set or still pending sets TSOVF at once and keeps the stamp, the
+ *   38.3.13 note "TSOVF can be seen as '1' while TSF is still '0'". A TSF clear zeroes the three
+ *   registers. TSF with TSIE drives EXTI line 19 and TAMP_STAMP_IRQn.
+ * - An edge right after a TSF clear records a new stamp with TSF set and TSOVF 0, where the 38.3.13
+ *   Caution sets both TSF and TSOVF for an event immediately after the clear.
+ * - RTC_TS reads PC13 whatever its GPIO mode, RM0351 38.3.2: the board drive, else the PUPDR
+ *   pull-up, inferred for an undriven pin. A PUPDR write and a TSEDGE write make no timestamp edge.
+ * - The 32 backup registers keep their value through a system reset. `RCC_BDCR.BDRST`, a power-on
+ *   and a read protection regression from level 1 to level 0 clear them, RM0351 38.6.20, 6.1.3 and
+ *   3.5.1.
+ * - The model holds no VDD or VBAT supply level, so the missed backup domain power-on reset of
+ *   ES0250 2.2.13 has no trigger.
+ * - ES0250 2.19.2: an SSR or TR read always holds TR and DR until DR is read, whatever the APB
+ *   clock phase against the shadow copy.
+ * - ES0250 2.19.3: alarm A and alarm B drive one level on EXTI line 18, so a request that sets
+ *   while the other is still set makes no new edge. An `EXTI_PR1` clear takes effect at the write,
+ *   with no delay window.
+ * - ES0250 2.19.4: INITF sets at the second RTCCLK edge after INIT for every INIT entry, a
+ *   consecutive one included.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,

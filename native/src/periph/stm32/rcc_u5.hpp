@@ -418,6 +418,8 @@ constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
 /**
  * @brief Clock tree of the STM32U5 RCC, RM0456 section 11: its sources and signals, the node
  *        tables the RCC model evaluates, and the TrustZone tables of RM0456 Table 117.
+ *
+ * @limits rcc
  */
 struct u5_rcc
 {

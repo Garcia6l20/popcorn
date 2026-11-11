@@ -393,6 +393,189 @@ template <typename Signal> struct bus_gate
  * @tparam Traits Family clock tree, u5_rcc, h5_rcc, l1_rcc or l4_rcc: the sources and signals,
  *         the oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and
  *         RTC, the names of the single fields, and the TrustZone tables.
+ *
+ * @limits rcc RCC
+ *
+ * @group all rule "Clock gates"
+ * - A peripheral's bus clock enable, `<instance>EN` or its RM spelling in an `RCC_xxxENR` register,
+ *   gates its register access: while the bit is 0 a CPU or DMA read gives 0 and a write is lost, no
+ *   model handler runs, one `model_warning` per peripheral per machine life names the first such
+ *   access, and under `strict_peripherals` the access raises `model_error`. Debugger accesses are
+ *   served. Read 0 and write lost are inferred: RM0456, RM0481, RM0351 and RM0038 say only that the
+ *   access is not supported. The enable gates no activity of the peripheral: its timers, transfers
+ *   and events run on. A gated write reaches no model check, such as an illegal-access event of a
+ *   TrustZone-aware model, inferred.
+ * - The STM32L1 and STM32L4 RTC is gated on `RTCEN` of `RCC_CSR` or `RCC_BDCR`, which a system
+ *   reset keeps, as RM0038 5.1.3 and RM0351 5.1.5 list it among the steps of RTC register access.
+ *   The STM32U5 and STM32H5 RTC and TAMP are gated on `RTCAPBEN`.
+ * - Instances whose clock the reference manual names only through their host block are gated on the
+ *   host's bit, inferred: the GTZC TZIC and MPCBB blocks on the GTZC or TZSC enable, the OCTOSPI
+ *   delay blocks on the OCTOSPI enable, the STM32U5 SDMMC delay blocks on the SDMMC enable, STM32U5
+ *   FDCAN1_RAM on `FDCAN1EN`, STM32L1 OPAMP on `COMPEN` and STM32L1 USB_SRAM on `USBEN`. The
+ *   STM32H563 and STM32H573 ETH is gated on `ETHEN` alone, `ETHTXEN` and `ETHRXEN` are storage,
+ *   inferred.
+ * - RCC, EXTI, IWDG and DBGMCU, the STM32H5 PWR and the STM32U5 and STM32H5 ICACHE have no enable
+ *   and are never gated. FLASH and the STM32U5 and STM32H5 DCACHE enables reset to 1.
+ * - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
+ *   apply to them.
+ *
+ * @group all rule "Peripheral resets"
+ * - A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets every register
+ *   of that instance that no model claims, for any instance, modelled or not, such as LPTIM1. It
+ *   also resets the instance's model when the model supports it: RNG, CRC, HASH, SYSCFG, ADC1 and
+ *   ADC12 through ADC12RST on the STM32U5, ADC1, ADC2 and ADCC on the STM32H5, GPDMA1, LPDMA1, the
+ *   timers, GPIOA to GPIOI, SPI, I2C, SAI, MDF1 and ADF1 on the STM32U5, the USARTs, UARTs, LPUART1
+ *   on the STM32U5 and LPUART on the STM32H5, OTG_FS on the STM32U5 and USB on the STM32H5. A
+ *   native plugin model that derives from `periph::bus_reset_listener`, and every Python model,
+ *   hears it through `on_bus_reset()`. Any other model gets `reset()` with
+ *   `reset_kind::peripheral`. A peripheral reset leaves the flags of RCC_CSR, and of RCC_RSR on the
+ *   STM32H5, as they are.
+ * - Board state survives such a reset: a pin's board drive, SPI devices and I2C targets, which an
+ *   RCC reset of their controller does not reset, PDM sources, SAI external clocks and the frames a
+ *   test queued for a USART receiver.
+ * - A USART reset mid-frame aborts the frame on its UartLink, as clearing UE does. Frames the host
+ *   queued wait until firmware enables the receiver again.
+ * - An OTG_FS reset releases the pull-up, so the board's USB host sees a detach and enumerates the
+ *   device again once firmware reconnects. The cable stays plugged or unplugged as it was.
+ * - A GPIO reset returns its pins to their reset modes, analog except PA13 to PA15, PB3 and PB4, so
+ *   outputs drop and listeners see the edges. A pin in analog mode reads low whatever the board
+ *   drives, so an active-low SPI chip select on a reset port selects its device until firmware
+ *   configures the pin again.
+ * - SYSCFGRST keeps `SYSCFG_CSLCKR`, `SYSCFG_CNSLCKR` and `SYSCFG_CFGR2`, whose bits RM0456 15.3
+ *   clears only on a system reset.
+ * - While a reset bit is 1, bus writes to that peripheral are ignored, from the CPU, DMA and
+ *   debugger alike. The TrustZone filter still runs first, so an illegal access still raises its
+ *   event. Reads are not blocked. RM0456 gives no access rule for a peripheral held in reset.
+ *
+ * @group u5,h5 rule "TrustZone"
+ * - TrustZone: an RCC bit shared by several peripherals is Secure while any of them is, on the
+ *   STM32U5 and the STM32H5 alike. RM0456 11.5.1 and RM0481 11.5.1 secure "its related clock source
+ *   selection" for each Secure peripheral and name no rule for a shared one. The shared bits are
+ *   `ADCDACSEL`, `LPTIM34SEL`, `OCTOSPISEL`, `SDMMCSEL` and `TIMICSEL` on the STM32U5, `ADCDACSEL`,
+ *   `TIMICSEL` and the `FDCAN12` bits on the STM32H5. The STM32U5 `TIMICSEL` follows TIM16 and
+ *   TIM17 only: a Secure LPTIM2 leaves it Non-secure, ES0499 2.3.2.
+ * - STM32H5 TrustZone: `RCC_CR.HSIDIV`, `HSIDIVF` and the `RCC_CFGR2` `AHBxDIS` and `APBxDIS` bits
+ *   take Non-secure writes, RM0481 Table 122 lists them under no security bit.
+ *
+ * @group all rule "Clock selection and PLL"
+ * - SWS follows SW in the store that selects a ready source. On an STM32H573, the first one or two
+ *   reads of `RCC_CFGR1` after that store return the old SWS. Firmware that polls SWS ends in the
+ *   same state.
+ * - RCC holds each write RM0456 11.8 and RM0481 11.8 say the hardware ignores, with no log record,
+ *   on the STM32U5 and the STM32H5 alike: a clear of the ON bit of the SYSCLK source and of the
+ *   PLL1 input while PLL1 drives SYSCLK, on the STM32H5 a clear of HSEON, HSION or CSION while that
+ *   oscillator feeds PLL1 and the same write leaves PLL1ON set, RM0481 11.8.1, a write of
+ *   `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output dividers while the PLL is on or ready, on
+ *   the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too, RM0481 11.8.7, and a clear of the PLL1 output
+ *   enable that feeds SYSCLK. The STM32U5 `PLL1MBOOST` is storage. ST's CMSIS `SystemInit` run with
+ *   PLL1 as SYSCLK logs nothing.
+ * - A switch to a SYSCLK source that runs at 0 Hz, such as a PLL1 output whose enable is clear,
+ *   keeps the core clock at its last rate and logs one `model_warning` per machine.
+ * - A PLL loads `PLLxFRACN` as its fraction when `PLLxON` sets with `PLLxFRACEN` 1, and runs in
+ *   integer mode with `PLLxFRACEN` 0, whatever order firmware wrote them in, as measured on an
+ *   STM32H573. While the PLL runs, it takes a new `PLLxFRACN` only on a `PLLxFRACEN` write from 0
+ *   to 1 and keeps the loaded fraction across a `PLLxFRACEN` clear. That running rule follows
+ *   RM0456 11.4.6 and RM0481 11.4.5, unmeasured. The new fraction applies at once, where silicon
+ *   takes it three reference clock periods later.
+ *
+ * @group h5 rule "STM32H5 HSIDIV"
+ * - STM32H5: `RCC_CR.HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI and takes a write in
+ *   every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
+ *   for PLL1. For PLL2 and PLL3 fed by HSI the model applies the same rule, inferred from PLL1. One
+ *   write that clears PLL1ON of a PLL1 off SYSCLK and changes `HSIDIV` takes both.
+ * - STM32H5: after an `HSIDIV` change, `HSIDIV` reads the new value at once. `HSIDIVF` clears and
+ *   sets again after the cycles of the running HSI rate measured on an STM32H573: /2 to /4 or /8
+ *   clear at 3 and set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8, /4 to /1 2 and 14, /8 to /1 2 and
+ *   8. The other transitions are inferred: from /1 they take the /2 row, /4 to /8 and /8 to /2 and
+ *   /4 the /4 to /2 timing. The new HSI rate applies when `HSIDIVF` sets, a point the board run did
+ *   not measure. On an STM32H573 ST's HAL reads `HSIDIVF` about 24 cycles after the store and reads
+ *   1 for every transition. The model runs one cycle per instruction, so the same load lands 13
+ *   cycles after the store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL
+ *   takes `HSI_VALUE` either way.
+ *
+ * @group all rule "Oscillators and interrupt flags"
+ * - STM32U5 and STM32H5: `HSEBYP` in `RCC_CR` and `LSEBYP` in `RCC_BDCR` take writes while their
+ *   oscillator runs, where RM0456 and RM0481 allow a write with the oscillator off only.
+ * - An oscillator whose ON bit a system reset keeps and whose ready bit is 0, such as an LSE still
+ *   starting when the reset comes, starts again at the reset and is ready after the board's
+ *   `ready_delay`.
+ * - Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
+ *   RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
+ *
+ * @group l1 rule "STM32L1"
+ * - STM32L1: every category runs one clock tree, RM0038 section 6, with the enable, reset and
+ *   low-power bits of a peripheral the category lacks absent from its description. The RCC sets the
+ *   `RCC_CIR` ready flags its enables select, a `xxxRDYC` write clears them, and no ready interrupt
+ *   is raised. A system reset keeps the RTC domain bits of `RCC_CSR`, `RTCPRE` and `HSEBYP`, a
+ *   power on reset and a BOR reset them, RM0038 6.1.2 and 6.3.14. A BOR sets PORRSTF and PINRSTF,
+ *   inferred. `RTCRST` resets the RTC domain bits of `RCC_CSR` while it is 1. The LSE CSS bits
+ *   exist on the L100, L151 and L162 from Cat.2, and OBLRSTF on every line but the L152, RM0038
+ *   6.3.4 and 6.3.14 against the SVDs, inferred. A software reset sets SFTRSTF only, the PINRSTF of
+ *   the NRST pulse is not set, an inferred rule. The reset flags of `RCC_CSR` keep their value on a
+ *   write, only RMVF and a power reset clear them, inferred from RM0038 6.3.14.
+ * - STM32L1: `RTCPRE` and `HSEBYP` keep their value on a write while `HSEON` is 1 and `LSEBYP`
+ *   while `LSEON` is 1, RM0038 6.3.1 and 6.3.14. The ON bit is the one before the write, so one
+ *   store that clears `HSEON` and changes `RTCPRE` keeps `RTCPRE`, an inferred order. `RTCRST`
+ *   clears `LSEBYP` while the LSE runs, RM0038 6.3.14.
+ * - STM32L1: `MSIRANGE` 7 and the PLLMUL and PLLDIV codes RM0038 6.3.2 and 6.3.3 do not allow run
+ *   their output at 0 Hz, an inferred rule. The PLL VCO and SYSCLK limits of each voltage range are
+ *   not checked. The CSS on HSE and on LSE is storage, and `LSECSSON` can be cleared by firmware.
+ *   The USB and SDIO 48 MHz clock, PLLVCO / 2, is not a clock domain.
+ *
+ * @group l4 rule "STM32L47x/L48x"
+ * - STM32L47x/L48x: one clock tree, RM0351 section 6. The RCC sets the `RCC_CIFR` ready flags that
+ *   `RCC_CIER` enables, a `RCC_CICR` write clears them, and no ready interrupt is raised. Each MSI
+ *   range runs at its nominal rate, with or without `MSIPLLEN`, and HSI16 at 16 MHz: the
+ *   `RCC_ICSCR` trim fields are storage. A ready flag clears in the write that clears its ON bit,
+ *   where RM0351 6.4.1 and 6.4.30 give 6 oscillator cycles, 3 for the LSI.
+ * - STM32L47x/L48x: a write of `MSIRANGE` while `MSION` is 1 and `MSIRDY` is 0, which RM0351 6.4.1
+ *   forbids, takes the new range. `LSEBYP` takes every write, RM0351 6.4.29 states no rule for it.
+ *   `HSIKERON`, `HSIASFS` and `STOPWUCK` are storage, they act on Stop mode entry and exit. The CSS
+ *   on HSE and on LSE and `LSEDRV` are storage, `CSSF`, `LSECSSF` and `LSECSSD` stay 0. `RCC_BDCR`
+ *   takes writes whatever `PWR_CR1.DBP` holds.
+ * - STM32L47x/L48x: the main PLL, PLLSAI1 and PLLSAI2 run at the rate their PLLSRC, PLLM, N and
+ *   output dividers give, RM0351 6.4.4 to 6.4.6, for any VCO input and output: the 4 to 16 MHz
+ *   input and 64 to 344 MHz output ranges and the 80 MHz output limits are the firmware's to keep.
+ *   A PLL is ready after the board's `ready_delay`. The PLLSAI1 and PLLSAI2 outputs reach no kernel
+ *   clock until the `RCC_CCIPR` muxes select them.
+ * - STM32L47x/L48x: `ADCRST` holds ADC1, ADC2, ADC3 and ADC_Common in reset together, RM0351
+ *   6.4.11. The enable bits gate the register access of their peripherals, the timer clocks and the
+ *   kernel clocks `RCC_CCIPR` selects. `MCOSEL` and `MCOPRE` are storage, no clock reaches the MCO
+ *   pin. The sleep and stop enables of `RCC_xxxSMENR` are storage.
+ * - STM32L47x/L48x: `SAIxSEL` 11 selects `SAIx_EXTCLK`, which runs the SAI kernel clock at 0 Hz.
+ *   `LSCOSEL` and `LSCOEN` keep their value through `BDRST`, RM0351 6.4.29. `FWRSTF` stays 0, the
+ *   firewall raises no reset.
+ *
+ * @group u5 rule "STM32U5 LSE"
+ * - STM32U5 LSE system clock, RM0456 11.4.7 and 11.8.49: the LSE reaches the RTC and TAMP at
+ *   `LSERDY`. It reaches the USART, UART, LPUART and LPTIM kernel clock muxes and the LSCO output
+ *   only after `LSESYSEN` is set and `LSESYSRDY` follows, two LSE periods after `LSESYSEN` with
+ *   `LSERDY` set. A kernel clock that selects the LSE before `LSESYSRDY` runs at 0 Hz. `LSESYSRDY`
+ *   clears with `LSESYSEN`, `LSEON` and `LSERDY`, and `BDRST` keeps `LSESYSEN`. `LSERDY` clears at
+ *   once when `LSEON` clears, where RM0456 gives six LSE cycles.
+ * - STM32U5 `MSIPLLEN` reads 0 while `LSERDY` is 0 and clears when the LSE stops, RM0456 11.8.1.
+ *   The clear on a CSS-on-LSE failure is not modelled, `LSECSSON` is storage.
+ *
+ * @group all rule "LSCO and the LSI rate"
+ * - LSCO: `LSCOEN` drives the LSI, or the LSE with `LSCOSEL`, onto PA2 on the STM32U5 and STM32L4
+ *   and onto PB2 on the STM32H5, RM0456 11.4.22, RM0351 6.2.17 and RM0481 11.4.11. A board device
+ *   reads the rate with `DeviceBoard.pin_clock` and follows its changes with
+ *   `DeviceBoard.watch_pin_clock`. The rate is 0 while the source is off. The rate does not depend
+ *   on the GPIO mode of the pin, inferred: RM0351 6.2.17 and RM0481 11.4.11 only say the LSCO pin
+ *   is left in its reset state, and RM0456 is silent. A low-power mode entry does not change the
+ *   rate, where RM0456 11.4.22 and RM0351 6.2.17 keep the LSCO running in Standby and RM0481
+ *   11.4.11 does not. The STM32L1 has no LSCO.
+ * - `RccOptions.lsi_hz` sets the LSI rate in Hz before the STM32U5 `LSIPREDIV` division, the family
+ *   nominal when unset: 32 kHz on the STM32U5, STM32H5 and STM32L4, 37 kHz on the STM32L1. The
+ *   datasheet full-range limits bound it, 30.4 to 33.6 kHz on the STM32U5, 29.4 to 33.6 kHz on the
+ *   STM32H5, 29.5 to 34 kHz on the STM32L4 and 26 to 56 kHz on the STM32L1.
+ *
+ * @group l4 note "STM32L47x/L48x clock errata"
+ * - STM32L47x/L48x clock errata, ES0250 2.2: `MSIRDY` clears whenever the MSI stops, 2.2.1. The MSI
+ *   runs at its range rate from the first cycle after a wakeup, 2.2.3 and 2.2.24. The LSI runs at
+ *   32 kHz with a 50 % duty, 2.2.8. The HSE is ready after the board's `ready_delay` at any VDD,
+ *   2.2.10. The HSI16 user trim is storage, 2.2.22. A PLL locks at any VCO rate and temperature,
+ *   2.2.25. The LSE runs at the board rate whatever PC13 does, 2.2.11.
  */
 template <typename Traits>
 class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Traits>>,

@@ -397,6 +397,164 @@ struct interrupt_source
  *        are looked up by their bare names, `CR1` and so on, and by `TIM1_CR1` and the other
  *        `TIM1_` names only on a description that has no `CR1`, as one written by an older popcorn
  *        before TIM1 and TIM8 registers got bare names.
+ *
+ * @limits tim TIM
+ *
+ * @group all unmodelled "Not modelled, logged"
+ * - The encoder index, `ECR.IE`.
+ * - Internal input sources of `TIxSEL` and internal ETR sources of `ETRSEL`. They read low.
+ * - Master modes above 011 and TRGO2. Under `strict` the CR2 write that selects one raises
+ *   `ModelError` before the store.
+ * - A slave mode trigger input that no pin and no routed timer drives. No trigger reaches the slave
+ *   mode controller. Under `strict` the SMCR or OR write that selects it raises `ModelError` before
+ *   the store.
+ * - The trigger DMA request, TDE, and COM and trigger burst requests. Under `strict` the DIER write
+ *   that sets TDE raises `ModelError` before the store.
+ * - The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
+ *   SMSPE set logs once. Dithering, `CR1.DITHEN`, logs the same way.
+ * - A capture on TRC, `CCxS` 11. CCxIF never sets. Under `strict` the CCMR1 or CCMR2 write that
+ *   selects it raises `ModelError` before the store.
+ * - The reserved `CC1S` 10 and 11 of a one-channel timer, RM0038 18.5.6 and RM0481 TIMx_CCMR1:
+ *   TIM10 and TIM11 of the L1, TIM13, TIM14, TIM16 and TIM17. CC1IF never sets. Under `strict` the
+ *   CCMR1 write that selects one raises `ModelError` before the store.
+ * - The CCx DMA requests at the update event, `CR2.CCDS` 1. They follow the CCx events. Under
+ *   `strict` the CR2 write that sets CCDS raises `ModelError` before the store.
+ * - Gated mode on TI1F_ED, TS 00100. The edge detector gives pulses and the counter holds. Under
+ *   `strict` the SMCR write that selects it raises `ModelError` before the store.
+ * - OC1 as an ITR source in OC1M values other than 0000, 0100, 0101, 0110 and 0111, or with OC1CE
+ *   set. OC1 holds low. Under `strict` the CCMR1 write that selects one while a slave listens, and
+ *   the slave's SMCR or OR write that selects the OC1 output then, raise `ModelError` before the
+ *   store.
+ * - Offset 0x08 of a timer whose description has no SMCR, TIM6 and TIM7 among them. A read gives 0
+ *   and logs nothing, inferred: RM0351 Table 215 marks it reserved and gives no read value.
+ *   `HAL_TIMEx_MasterConfigSynchronization` reads it on every timer. A write is dropped with one
+ *   `model_warning`, and under `strict` it raises `ModelError` before the store.
+ *
+ * @group all rule
+ * A debugger write raises none of the `strict` errors of this model.
+ *
+ * A slave mode reset, trigger start or gate opening at a timer edge counts from the edge's exact
+ * instant, which can lie between two ps, on any pair of master and slave clocks.
+ *
+ * While UIFREMAP is 1 a CNT read gives UIF in `CNT.UIFCPY`, and in bit 31 of a 32-bit count with no
+ * UIFCPY field, the STM32U5 TIM2 to TIM5 and the STM32H5 TIM2 and TIM5, RM0456 55.4.20 and RM0481
+ * 44.4.20. A byte or halfword write of the low half keeps the count's bit 31.
+ *
+ * On every timer with `BDTR.MOE`, `EGR.BG` and `B2G` clear MOE, and with `BDTR.AOE` 1 each update
+ * event sets it again, RM0351 30.4.6 and 30.4.20, RM0456 and RM0481 TIMx_EGR and TIMx_BDTR. The
+ * break inputs have no model, so no break input holds MOE at 0. MOE drives no pin. A BDTR read or
+ * write first brings the counter up to the access, so an update that sets MOE shows in a BDTR read
+ * alone and a MOE 0 write holds until the next update. The other BDTR fields read back as written,
+ * with no warning under strict_peripherals, and the coverage report counts BDTR as served.
+ *
+ * @group all deviation "Differs from RM0456"
+ * - An ARR written below the count lets the counter run to its maximum and wrap with no update. A
+ *   count written above ARR in center-aligned mode does the same.
+ *
+ * @group all rule "Capture/compare event outputs, the ADC triggers"
+ * - Each channel x drives `<instance>_ccx`, a pulse one timer clock wide at each CCxIF set by a
+ *   match, a capture or `EGR.CCxG`, at the event's exact instant, the width and the capture and
+ *   CCxG events inferred. RM0038 Tables 61 and 62 name it TIMx_CCx.
+ * - The STM32U5 and STM32H5 ADC tables select `tim_ocx`, the channel output in the RM0456 TIM
+ *   chapter. The ADC takes the CC event for it, as ST's LL driver describes the selection,
+ *   inferred.
+ *
+ * @group h5,l1 rule "OC1 as an ITR source, TIM13, TIM14, TIM16 and TIM17 OC1 by RM0481, TIM10 and
+ *       TIM11 OC1 by RM0038"
+ * - The ITR carries OC1, OC1REF with CC1P inverting it, RM0038 18.5.6 and RM0481 TIMx_CCMR1. The
+ *   ITR follows OC1 whatever CC1E, and on TIM16 and TIM17 whatever BDTR.MOE and OSSI, inferred.
+ *   With CC1S other than 00 the ITR reads low, inferred.
+ * - OC1REF holds low in frozen mode, OC1M 0000, where silicon keeps the level it had.
+ * - RM0038 takes the comparison of CNT with CCR1 at a PWM mode entry only from frozen, RM0481 from
+ *   frozen and from the forced modes. The model takes it from every mode, so it differs at a PWM 1
+ *   to PWM 2 switch, and on the L1 at a forced to PWM switch.
+ * - Every OC1 edge reaches the slave whatever the pulse width. RM0481 asks for at least two clock
+ *   cycles of the destination timer.
+ * - A timer that drives OC1 counts up only. Its CR1 with DIR or CMS throws `ConfigError` at
+ *   construction.
+ *
+ * @group l1 rule "STM32L1 TIM2 to TIM7 and TIM9 to TIM11"
+ * - TIM5 has no row in RM0038 Table 80, so every TS value of TIM5 reaches nothing and logs once,
+ *   inferred.
+ * - The touch sensing I/O that TIM9_OR.ITR1_RMP gives TIM9 ITR1 has no model. The ITR reaches
+ *   nothing and logs once.
+ * - TIM10_OR and TIM11_OR TI1_RMP values other than 00, and 11 on TIM11, connect LSI, LSE, the RTC
+ *   wakeup interrupt, MSI or HSE_RTC to tim_ti1, and TI1_RMP_RI 1 the routing interface. tim_ti1
+ *   then reads low and the OR write logs once. TIM10 and TIM11 external clock mode 2 counts nothing
+ *   whatever ETR_RMP, LSE or TIM9 TRGO, and the SMCR write logs once. Under `strict` each write
+ *   raises `ModelError` before the store.
+ * - TIM9_OR.TI1_RMP 01 connects the LSE to tim_ti1, which then reads low. TIM9 external clock mode
+ *   2 takes the internal ETR and counts nothing, inferred: RM0038 18.3.3 names no ETR source. Each
+ *   logs once. Under `strict` the write that selects it raises `ModelError` before the store.
+ * - TIM6, TIM7, TIM10, TIM11 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to
+ *   011 are reserved: no encoder edge counts and the SMCR write logs once. Under `strict` it raises
+ *   `ModelError` before the store.
+ * - TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.
+ *   TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
+ *   tim_etr_in stays low.
+ *
+ * @group l4 rule "Every STM32L4 timer, RM0351 sections 30 to 33"
+ * Every STM32L4 timer, RM0351 sections 30 to 33, follows RM0351 where ES0250 2.17.1, 2.17.2 and
+ * 2.17.3 give the silicon behaviour. SMCR.MSM is storage, so a trigger at CNT = ARR starts the
+ * one-pulse in combined reset + trigger mode. Every compare match sets CCxIF, also the second of
+ * two matches on consecutive counts after a CCR change. The OCREF clear input has no model.
+ *
+ * @group l4 rule "STM32L4 TIM2 to TIM5, RM0351 section 31"
+ * - OTG_FS_SOF, the RM0351 Table 207 source of TIM2 ITR1 at TIM2_OR1.ITR1_RMP 1, has no model. TS
+ *   001 on TIM2 then reaches nothing and logs once. Under `strict` the SMCR or TIM2_OR1 write that
+ *   selects it raises `ModelError` before the store.
+ * - TIM2_OR1.ITR1_RMP is a field on every line. RM0351 31.4.22 marks the bit reserved on the
+ *   STM32L471, which has no OTG_FS. Its value 1 reaches nothing there as on the other lines.
+ * - The comparator outputs that TIM2_OR1.TI4_RMP, TIM3_OR1.TI1_RMP and the TIM2 and TIM3
+ *   `OR2.ETRSEL` select, and the LSE of TIM2_OR1.ETR_RMP 1, have no model: the input reads low and
+ *   the OR write logs once. Reserved ETRSEL values read low the same way. Under `strict` each write
+ *   raises `ModelError` before the store.
+ * - TIM2_ETR is PA0 at AF14, PA5 or PA15 at AF2, TIM3_ETR is PD2 or PE2 at AF2, DS10198 Tables 17
+ *   and 18. PE2, TIM4_ETR on PE0 and TIM5_ETR on PF6 are pads the shipped 64-pin package lacks, so
+ *   TIM4 and TIM5 tim_etr_in stays low.
+ * - TIM3 and TIM4 `ARR` bits 31:16 read 1, their reset value in the RM0351 31.4.26 register map,
+ *   and keep it after a write, inferred. RM0351 states no write rule for the reserved half.
+ * - UIFREMAP puts UIFCPY in bit 31 of TIM3 and TIM4. On the 32-bit TIM2 and TIM5, while UIFREMAP is
+ *   1, a read gives UIF in bit 31 in place of the count's bit 31, RM0351 31.3.16. A write reaches
+ *   the count's bit 31 only through the byte that holds it, so a byte or halfword write of the low
+ *   half keeps it.
+ * - SMCR.OCCS is storage: the OCREF clear input is not modelled.
+ *
+ * @group l4 rule "STM32L4 TIM1 and TIM8, RM0351 section 30"
+ * - TIM1 and TIM8 run the counter, the repetition counter, channels 1 to 4, the slave mode
+ *   controller and TRGO as TIM2 to TIM5 do. Their ITR0 to ITR3 follow RM0351 Table 202.
+ * - No timer drives an output pin. BDTR, the complementary outputs CCxNE and CCxNP, the dead time,
+ *   CCR5, CCR6, CCMR3 and the OR2 and OR3 break sources are registers only. EGR.BG and B2G set BIF
+ *   and B2IF, raise the break interrupt and clear BDTR.MOE, which AOE 1 sets again at the next
+ *   update event.
+ * - TIM1_ETR is PA12 or PE7 at AF1 and TIM8_ETR is PA0 at AF3, DS10198 Tables 17 and 18. PE7 is a
+ *   pad the shipped 64-pin package lacks. ETRSEL 001 and 010, COMP1 and COMP2, read low.
+ *   ETR_ADC1_RMP, ETR_ADC2_RMP and ETR_ADC3_RMP 01 to 11 OR an ADC analog watchdog into the ETR:
+ *   the watchdog has no model, tim_etr_in follows the pin. Each such write logs once, and under
+ *   `strict` raises `ModelError` before the store.
+ * - TIM1_OR1.TI1_RMP 1 and TIM8_OR1.TI1_RMP 1, COMP1 and COMP2 into tim_ti1, read low, log once and
+ *   raise under `strict`.
+ * - TIM1 raises the NVIC lines it shares with TIM15, TIM16 and TIM17, RM0351 Table 61.
+ *
+ * @group l4 rule "STM32L4 TIM15, TIM16 and TIM17, RM0351 section 32"
+ * - TIM15 counts up with channels 1 and 2, the slave mode controller and TRGO from MMS 000 to 011.
+ *   Its ITR0 to ITR3 follow RM0351 Table 210: TIM1, TIM3 and the OC1 outputs of TIM16 and TIM17.
+ *   TIM16 and TIM17 count up with one channel, no slave mode and no master mode.
+ * - TIM15, TIM16 and TIM17 raise NVIC lines 24, 25 and 26, the lines they share with TIM1, RM0351
+ *   Table 61.
+ * - No timer drives an output pin. BDTR, the complementary outputs, the dead time and the OR2 break
+ *   sources are registers only, as on TIM1. BDTR has no BKF field, RM0351 32.6.16 and 32.7.14.
+ * - TIM15_OR1.TI1_RMP 1, the LSE, and ENCODER_MODE 01 to 11, the TIM2, TIM3 or TIM4 inputs, read
+ *   low on tim_ti1 and tim_ti2. TIM16_OR1.TI1_RMP 01 to 11, the LSI, LSE and RTC wakeup, and
+ *   TIM17_OR1.TI1_RMP 01 to 11, the MSI, HSE/32 and MCO, read low on tim_ti1. Each such write logs
+ *   once, and under `strict` raises `ModelError` before the store. TIM16_OR1.TI1_RMP has two bits,
+ *   RM0351 32.4: the extended remap is absent from the STM32L47x and STM32L48x.
+ *
+ * @group l4 rule "STM32L4 TIM6 and TIM7, RM0351 section 33"
+ * - TIM6 and TIM7 count up only and have no slave mode controller. UIFREMAP puts UIFCPY in CNT bit
+ *   31, RM0351 33.4.6.
+ * - CR2.MMS 000 to 010 drives `tim6_trgo` and `tim7_trgo`, RM0351 33.4.2, the DAC1 and ADC trigger
+ *   sources. No timer takes them as an ITR, RM0351 Table 207.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,

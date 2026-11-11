@@ -217,6 +217,8 @@ constexpr auto held_while_on = std::to_array<held_field<source>>({
  *        6.3.1 and 6.3.14, and a BOR is a power reset, RM0038 6.1.2. RTCPRE and HSEBYP keep
  *        their value on a write while HSEON is 1, LSEBYP while LSEON is 1, RM0038 6.3.1 and
  *        6.3.14.
+ *
+ * @limits rcc
  */
 struct l1_rcc
 {

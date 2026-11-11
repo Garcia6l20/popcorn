@@ -130,6 +130,18 @@ struct alarm_refs
  *        first write to either logs one warning, the security and privilege they select are not
  *        modelled. Under TrustZone a security bit set in `RTC_SECCFGR` is a secure function of
  *        the RTC, RM0456 11.5.1: it makes `RCC_BDCR.BDRST` and the RTC's RCC bits Secure.
+ *
+ * @limits rtc RTC and TAMP
+ *
+ * @group u5,h5 unmodelled "Not modelled, logged"
+ * - Binary and mixed modes. The calendar counts in BCD.
+ * - Smooth calibration and the shift register.
+ * - Timestamps, the RTC outputs, ALRxFCLR and SSRUIE.
+ * - WUTOCLR. WUTF stays set until SCR clears it.
+ * - The backup domain write protection. `PWR_DBPR.DBP` does not gate RTC writes.
+ * - Subsecond alarm comparison. MASKSS reads as 0.
+ * - The security and privilege `RTC_SECCFGR`, `RTC_PRIVCR`, `TAMP_SECCFGR` and `TAMP_PRIVCR`
+ *   select. They are storage.
  */
 class rtc final : public dispatch_model<rtc, rtc_state>,
                   public clock_listener,

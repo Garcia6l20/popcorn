@@ -133,7 +133,8 @@ loses its writes:
 - The enable gates register access only. Timers keep counting, transfers keep running and
   events stay queued while the clock is off.
 - Read 0 and write lost are inferred, the reference manuals say only that access is not
-  supported. [Limits](../support/limits_legacy.md#rcc) lists the instances gated on a host block's bit.
+  supported. The [RCC limits](../support/generated/limits/rcc.md#clock-gates) list the instances
+  gated on a host block's bit.
 
 ## Errors
 
