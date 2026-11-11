@@ -12,16 +12,16 @@
 namespace popcorn::periph::stm32
 {
 /** @brief Differences between the RTC and TAMP peripherals the model rows serve. */
-struct rtc_variant
+struct rtc_u5h5_variant
 {
   /** @brief Name of the privilege register the security write handler binds. */
   std::string_view privilege_register = "PRIVCR";
 };
 
 /** @brief STM32U5 RTC and TAMP, RM0456 63.6.14 and 64.6.7. */
-inline constexpr rtc_variant u5_rtc{};
+inline constexpr rtc_u5h5_variant u5_rtc{};
 /** @brief STM32H5 RTC and TAMP, RM0481 51.6.8 and 52.7.10. */
-inline constexpr rtc_variant h5_rtc{.privilege_register = "PRIVCFGR"};
+inline constexpr rtc_u5h5_variant h5_rtc{.privilege_register = "PRIVCFGR"};
 
 /** @brief Differences between the classic RTC peripherals the model rows serve, RM0038 20. */
 struct rtc_l1l4_variant
@@ -116,8 +116,9 @@ inline constexpr rtc_l1l4_variant l4_rtc{
  * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
  * @param variant What differs between the RTC of the family the row serves.
  */
-[[nodiscard]] auto rtc_factory(std::optional<std::chrono::sys_seconds> initial, rtc_variant variant)
-    -> model_factory;
+[[nodiscard]] auto
+    rtc_u5h5_factory(std::optional<std::chrono::sys_seconds> initial, rtc_u5h5_variant variant)
+        -> model_factory;
 
 /**
  * @brief Factory of the classic RTC model, RM0038 section 20.
@@ -132,7 +133,7 @@ inline constexpr rtc_l1l4_variant l4_rtc{
  * @brief Factory of the TAMP backup register model, RM0456 section 64.
  * @param variant What differs between the TAMP of the family the row serves.
  */
-[[nodiscard]] auto tamp_factory(rtc_variant variant) -> model_factory;
+[[nodiscard]] auto tamp_u5h5_factory(rtc_u5h5_variant variant) -> model_factory;
 
 /** @brief The STM32U5 and STM32H5 RTC and TAMP model rows. */
 [[nodiscard]] auto rtc_u5h5_rows() -> std::span<builtin const>;

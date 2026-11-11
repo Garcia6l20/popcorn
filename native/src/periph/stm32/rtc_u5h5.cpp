@@ -46,7 +46,7 @@ enum event_kind : std::uint8_t
   event_kinds,
 };
 
-struct rtc_state
+struct rtc_u5h5_state
 {
   std::uint64_t                          anchor_ps{};
   std::uint64_t                          anchor_frac{};
@@ -70,7 +70,7 @@ struct rtc_state
   std::uint8_t                           held{};
   std::uint64_t                          held_ps{};
 
-  friend auto operator==(rtc_state const&, rtc_state const&) -> bool = default;
+  friend auto operator==(rtc_u5h5_state const&, rtc_u5h5_state const&) -> bool = default;
 };
 
 struct alarm_fields
@@ -143,22 +143,23 @@ struct alarm_refs
  * - The security and privilege `RTC_SECCFGR`, `RTC_PRIVCR`, `TAMP_SECCFGR` and `TAMP_PRIVCR`
  *   select. They are storage.
  */
-class rtc final : public dispatch_model<rtc, rtc_state>,
-                  public clock_listener,
-                  public backup_domain,
-                  public core_hold_listener,
-                  public trustzone_aware,
-                  public rtc_core
+class rtc_u5h5 final : public dispatch_model<rtc_u5h5, rtc_u5h5_state>,
+                       public clock_listener,
+                       public backup_domain,
+                       public core_hold_listener,
+                       public trustzone_aware,
+                       public rtc_core
 {
   friend rtc_core;
 
   static constexpr std::uint32_t wakeup_event = wakeup;
 
 public:
-  rtc(model_context&                          ctx,
+  rtc_u5h5(
+      model_context&                          ctx,
       peripheral_desc const&                  desc,
       std::optional<std::chrono::sys_seconds> initial,
-      rtc_variant const&                      variant);
+      rtc_u5h5_variant const&                 variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -247,7 +248,7 @@ private:
   std::vector<field_ref>                       outputs_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<std::pair<field_ref, field_ref>> masks_;
-  rtc_calendar::counter<rtc_state>             count_;
+  rtc_calendar::counter<rtc_u5h5_state>        count_;
   core::clock_domain                           domain_;
   irq_line&                                    line_;
   std::array<bool, 6>                          logged_{};
@@ -257,29 +258,29 @@ private:
   std::uint32_t                                security_bits_{};
 };
 
-constexpr std::array<write_entry<rtc>, 23> rtc_writes{
+constexpr std::array<write_entry<rtc_u5h5>, 23> rtc_u5h5_writes{
     {
-     {"TR", &rtc::time_written},          {"DR", &rtc::date_written},
-     {"SSR", &rtc::plain_written},        {"ICSR", &rtc::status_written},
-     {"PRER", &rtc::prescaler_written},   {"WUTR", &rtc::wakeup_written},
-     {"CR", &rtc::control_written},       {"WPR", &rtc::key_written},
-     {"CALR", &rtc::calibration_written}, {"SHIFTR", &rtc::shift_written},
-     {"ALRMAR", &rtc::alarm_written},     {"ALRMASSR", &rtc::alarm_written},
-     {"ALRMBR", &rtc::alarm_written},     {"ALRMBSSR", &rtc::alarm_written},
-     {"SR", &rtc::plain_written},         {"MISR", &rtc::plain_written},
-     {"SCR", &rtc::clear_written},        {"SECCFGR", &rtc::security_written},
-     {"ALRABINR", &rtc::plain_written},   {"ALRBBINR", &rtc::plain_written},
-     {"TSTR", &rtc::plain_written},       {"TSDR", &rtc::plain_written},
-     {"TSSSR", &rtc::plain_written},
+     {"TR", &rtc_u5h5::time_written},          {"DR", &rtc_u5h5::date_written},
+     {"SSR", &rtc_u5h5::plain_written},        {"ICSR", &rtc_u5h5::status_written},
+     {"PRER", &rtc_u5h5::prescaler_written},   {"WUTR", &rtc_u5h5::wakeup_written},
+     {"CR", &rtc_u5h5::control_written},       {"WPR", &rtc_u5h5::key_written},
+     {"CALR", &rtc_u5h5::calibration_written}, {"SHIFTR", &rtc_u5h5::shift_written},
+     {"ALRMAR", &rtc_u5h5::alarm_written},     {"ALRMASSR", &rtc_u5h5::alarm_written},
+     {"ALRMBR", &rtc_u5h5::alarm_written},     {"ALRMBSSR", &rtc_u5h5::alarm_written},
+     {"SR", &rtc_u5h5::plain_written},         {"MISR", &rtc_u5h5::plain_written},
+     {"SCR", &rtc_u5h5::clear_written},        {"SECCFGR", &rtc_u5h5::security_written},
+     {"ALRABINR", &rtc_u5h5::plain_written},   {"ALRBBINR", &rtc_u5h5::plain_written},
+     {"TSTR", &rtc_u5h5::plain_written},       {"TSDR", &rtc_u5h5::plain_written},
+     {"TSSSR", &rtc_u5h5::plain_written},
      }
 };
 
-rtc::rtc(
+rtc_u5h5::rtc_u5h5(
     model_context&                          ctx,
     peripheral_desc const&                  desc,
     std::optional<std::chrono::sys_seconds> initial,
-    rtc_variant const&                      variant)
-    : dispatch_model{ctx, desc, "RTC", rtc_writes}, initial_{initial}, regs_{ctx.regs},
+    rtc_u5h5_variant const&                 variant)
+    : dispatch_model{ctx, desc, "RTC", rtc_u5h5_writes}, initial_{initial}, regs_{ctx.regs},
       time_{reg("TR")}, date_{reg("DR")}, subsecond_{reg("SSR")}, status_{reg("SR")},
       masked_{reg("MISR")}, clear_{reg("SCR")}, key_{reg("WPR")}, shift_{reg("SHIFTR")},
       init_{field("ICSR", "INIT")}, init_flag_{field("ICSR", "INITF")},
@@ -296,7 +297,9 @@ rtc::rtc(
           state_, ctx.regs, [this](std::string_view r, std::string_view f) { return field(r, f); }},
       domain_{ctx.clock.domain("rtc")}, line_{irq("RTC_IRQn")}, security_{reg("SECCFGR")}
 {
-  bind(std::array<write_entry<rtc>, 1>{{{variant.privilege_register, &rtc::security_written}}});
+  bind(
+      std::array<write_entry<rtc_u5h5>, 1>{
+          {{variant.privilege_register, &rtc_u5h5::security_written}}});
   for(auto const& bits : describe("SECCFGR").fields)
   {
     security_bits_ |= field("SECCFGR", bits.name).mask();
@@ -347,7 +350,7 @@ rtc::rtc(
   }
 }
 
-void rtc::plan_alarm(std::size_t which)
+void rtc_u5h5::plan_alarm(std::size_t which)
 {
   auto const kind    = static_cast<event_kind>(alarm_a + which);
   state_.armed[kind] = 0;
@@ -364,7 +367,7 @@ void rtc::plan_alarm(std::size_t which)
   }
 }
 
-void rtc::settle(std::uint64_t cycle)
+void rtc_u5h5::settle(std::uint64_t cycle)
 {
   auto const position = count_.position_at(cycle);
   regs_.poke(time_.offset, count_.time_register(position));
@@ -392,7 +395,7 @@ void rtc::settle(std::uint64_t cycle)
   }
 }
 
-void rtc::warn_once(std::size_t index, std::string_view reg, std::string_view message)
+void rtc_u5h5::warn_once(std::size_t index, std::string_view reg, std::string_view message)
 {
   if(not std::exchange(logged_[index], true))
   {
@@ -400,7 +403,7 @@ void rtc::warn_once(std::size_t index, std::string_view reg, std::string_view me
   }
 }
 
-void rtc::unsupported()
+void rtc_u5h5::unsupported()
 {
   if(get(regs_, binary_) != 0)
   {
@@ -428,7 +431,7 @@ void rtc::unsupported()
   }
 }
 
-void rtc::clear_backup(register_file& regs, bool board_calendar)
+void rtc_u5h5::clear_backup(register_file& regs, bool board_calendar)
 {
   for(auto const& name : claims())
   {
@@ -450,7 +453,7 @@ void rtc::clear_backup(register_file& regs, bool board_calendar)
   state_.generation = generation;
 }
 
-void rtc::restart_timers(std::uint64_t cycle)
+void rtc_u5h5::restart_timers(std::uint64_t cycle)
 {
   state_.armed[shadow_ready] = 1;
   state_.due[shadow_ready]   = cycle + 1;
@@ -461,7 +464,7 @@ void rtc::restart_timers(std::uint64_t cycle)
   settle(cycle);
 }
 
-void rtc::reset(register_file& regs, reset_kind kind)
+void rtc_u5h5::reset(register_file& regs, reset_kind kind)
 {
   if(kind == reset_kind::power_on)
   {
@@ -498,7 +501,7 @@ void rtc::reset(register_file& regs, reset_kind kind)
   restart_timers(cycle);
 }
 
-void rtc::backup_reset()
+void rtc_u5h5::backup_reset()
 {
   auto const held_ps = state_.held_ps;
   auto const frozen  = state_.held != 0 and debug_frozen(freeze_logged_);
@@ -513,8 +516,11 @@ void rtc::backup_reset()
   restart_timers(state_.cycle0);
 }
 
-auto rtc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
-    -> std::expected<std::uint32_t, bus_error>
+auto rtc_u5h5::on_read(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    access_ctx     access) -> std::expected<std::uint32_t, bus_error>
 {
   auto const cycle = count_.cycle_at(now_ps());
   settle(cycle);
@@ -547,7 +553,7 @@ auto rtc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return read_lanes(value, offset, size);
 }
 
-auto rtc::on_write(
+auto rtc_u5h5::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -563,7 +569,7 @@ auto rtc::on_write(
   return result;
 }
 
-void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
+void rtc_u5h5::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind >= event_kinds or payload != state_.generation[kind] or state_.armed[kind] == 0)
   {
@@ -604,17 +610,17 @@ void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
   settle(cycle);
 }
 
-void rtc::on_core_hold(bool held)
+void rtc_u5h5::on_core_hold(bool held)
 {
   hold_core(held);
 }
 
-void rtc::on_clock_change()
+void rtc_u5h5::on_clock_change()
 {
   clock_changed();
 }
 
-void rtc::status_written(std::uint32_t old, std::uint32_t now)
+void rtc_u5h5::status_written(std::uint32_t old, std::uint32_t now)
 {
   auto word = old;
   if(unlocked())
@@ -661,7 +667,7 @@ void rtc::status_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void rtc::wakeup_written(std::uint32_t old, std::uint32_t)
+void rtc_u5h5::wakeup_written(std::uint32_t old, std::uint32_t)
 {
   if(get(regs_, wakeup_flag_write_) == 0)
   {
@@ -669,7 +675,7 @@ void rtc::wakeup_written(std::uint32_t old, std::uint32_t)
   }
 }
 
-void rtc::control_written(std::uint32_t old, std::uint32_t now)
+void rtc_u5h5::control_written(std::uint32_t old, std::uint32_t now)
 {
   auto word = now;
   if(not unlocked())
@@ -712,7 +718,7 @@ void rtc::control_written(std::uint32_t old, std::uint32_t now)
   plan_alarm(1);
 }
 
-void rtc::calibration_written(std::uint32_t old, std::uint32_t)
+void rtc_u5h5::calibration_written(std::uint32_t old, std::uint32_t)
 {
   if(not unlocked())
   {
@@ -720,7 +726,7 @@ void rtc::calibration_written(std::uint32_t old, std::uint32_t)
   }
 }
 
-void rtc::shift_written(std::uint32_t, std::uint32_t now)
+void rtc_u5h5::shift_written(std::uint32_t, std::uint32_t now)
 {
   regs_.poke(shift_.offset, 0);
   if(unlocked() and now != 0)
@@ -729,13 +735,13 @@ void rtc::shift_written(std::uint32_t, std::uint32_t now)
   }
 }
 
-void rtc::alarm_written(std::uint32_t, std::uint32_t)
+void rtc_u5h5::alarm_written(std::uint32_t, std::uint32_t)
 {
   plan_alarm(0);
   plan_alarm(1);
 }
 
-void rtc::clear_written(std::uint32_t, std::uint32_t now)
+void rtc_u5h5::clear_written(std::uint32_t, std::uint32_t now)
 {
   for(auto const& [clear, flag] : clears_)
   {
@@ -747,20 +753,20 @@ void rtc::clear_written(std::uint32_t, std::uint32_t now)
   regs_.poke(clear_.offset, 0);
 }
 
-void rtc::plain_written(std::uint32_t, std::uint32_t)
+void rtc_u5h5::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-auto rtc::secure_word() const -> std::uint32_t
+auto rtc_u5h5::secure_word() const -> std::uint32_t
 {
   return ctx_.trustzone ? regs_.peek(security_.offset) & security_bits_ : 0;
 }
 
-auto rtc::secure_function() const -> bool
+auto rtc_u5h5::secure_function() const -> bool
 {
   return secure_word() != 0;
 }
 
-void rtc::security_written(std::uint32_t, std::uint32_t)
+void rtc_u5h5::security_written(std::uint32_t, std::uint32_t)
 {
   if(ctx_.trustzone and not std::exchange(security_logged_, true))
   {
@@ -781,19 +787,19 @@ void rtc::security_written(std::uint32_t, std::uint32_t)
  *        backup register zone, is a secure function of the TAMP, RM0456 11.5.1 and 64.7.9: it
  *        makes `RCC_BDCR.BDRST` Secure.
  */
-struct tamp_state
+struct tamp_u5h5_state
 {
   std::uint8_t unused{};
 
-  friend auto operator==(tamp_state const&, tamp_state const&) -> bool = default;
+  friend auto operator==(tamp_u5h5_state const&, tamp_u5h5_state const&) -> bool = default;
 };
 
-class tamp final : public dispatch_model<tamp, tamp_state>,
-                   public backup_domain,
-                   public trustzone_aware
+class tamp_u5h5 final : public dispatch_model<tamp_u5h5, tamp_u5h5_state>,
+                        public backup_domain,
+                        public trustzone_aware
 {
 public:
-  tamp(model_context& ctx, peripheral_desc const& desc, rtc_variant const& variant);
+  tamp_u5h5(model_context& ctx, peripheral_desc const& desc, rtc_u5h5_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -815,33 +821,37 @@ private:
   field_ref write_;
 };
 
-auto tamp_writes(peripheral_desc const& desc, rtc_variant const& variant)
-    -> std::vector<write_entry<tamp>>
+auto tamp_u5h5_writes(peripheral_desc const& desc, rtc_u5h5_variant const& variant)
+    -> std::vector<write_entry<tamp_u5h5>>
 {
-  std::vector<write_entry<tamp>> out;
+  std::vector<write_entry<tamp_u5h5>> out;
   for(auto const& described : desc.registers)
   {
     auto const security =
         described.name == "SECCFGR" or described.name == variant.privilege_register;
-    out.push_back({described.name, security ? &tamp::security_written : &tamp::plain_written});
+    out.push_back(
+        {described.name, security ? &tamp_u5h5::security_written : &tamp_u5h5::plain_written});
   }
   return out;
 }
 
-tamp::tamp(model_context& ctx, peripheral_desc const& desc, rtc_variant const& variant)
-    : dispatch_model{ctx, desc, "TAMP", tamp_writes(desc, variant)}, security_{reg("SECCFGR")},
+tamp_u5h5::tamp_u5h5(
+    model_context&          ctx,
+    peripheral_desc const&  desc,
+    rtc_u5h5_variant const& variant)
+    : dispatch_model{ctx, desc, "TAMP", tamp_u5h5_writes(desc, variant)}, security_{reg("SECCFGR")},
       tamper_{field("SECCFGR", "TAMPSEC")}, counter_{field("SECCFGR", "CNT1SEC")},
       read_write_{field("SECCFGR", "BKPRWSEC")}, write_{field("SECCFGR", "BKPWSEC")}
 {
   expect_register(variant.privilege_register, true);
 }
 
-auto tamp::secure_word() const -> std::uint32_t
+auto tamp_u5h5::secure_word() const -> std::uint32_t
 {
   return ctx_.trustzone ? ctx_.regs.peek(security_.offset) : 0;
 }
 
-auto tamp::secure_function() const -> bool
+auto tamp_u5h5::secure_function() const -> bool
 {
   auto const word = secure_word();
   if(word == 0)
@@ -854,7 +864,7 @@ auto tamp::secure_function() const -> bool
       or write_.of(word) > read_write_.of(word);
 }
 
-void tamp::clear(register_file& regs)
+void tamp_u5h5::clear(register_file& regs)
 {
   for(auto const& name : claims())
   {
@@ -862,7 +872,7 @@ void tamp::clear(register_file& regs)
   }
 }
 
-void tamp::reset(register_file& regs, reset_kind kind)
+void tamp_u5h5::reset(register_file& regs, reset_kind kind)
 {
   if(kind == reset_kind::power_on)
   {
@@ -870,18 +880,18 @@ void tamp::reset(register_file& regs, reset_kind kind)
   }
 }
 
-void tamp::backup_reset()
+void tamp_u5h5::backup_reset()
 {
   clear(ctx_.regs);
 }
 
-void tamp::on_event(std::uint32_t, std::uint64_t)
+void tamp_u5h5::on_event(std::uint32_t, std::uint64_t)
 {}
 
-void tamp::plain_written(std::uint32_t, std::uint32_t)
+void tamp_u5h5::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-void tamp::security_written(std::uint32_t, std::uint32_t)
+void tamp_u5h5::security_written(std::uint32_t, std::uint32_t)
 {
   if(ctx_.trustzone and not std::exchange(security_logged_, true))
   {
@@ -892,32 +902,32 @@ void tamp::security_written(std::uint32_t, std::uint32_t)
 }
 }
 
-auto rtc_factory(std::optional<std::chrono::sys_seconds> initial, rtc_variant variant)
+auto rtc_u5h5_factory(std::optional<std::chrono::sys_seconds> initial, rtc_u5h5_variant variant)
     -> model_factory
 {
   return [initial,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<rtc>(ctx, desc, initial, variant);
+    return std::make_shared<rtc_u5h5>(ctx, desc, initial, variant);
   };
 }
 
-auto tamp_factory(rtc_variant variant) -> model_factory
+auto tamp_u5h5_factory(rtc_u5h5_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<tamp>(ctx, desc, variant);
+    return std::make_shared<tamp_u5h5>(ctx, desc, variant);
   };
 }
 
 namespace
 {
 constexpr auto rtc_u5h5_row_table = std::to_array<builtin>({
-    row_of<^^rtc_factory, ^^u5_rtc, ^^board::rtc_initial>(
+    row_of<^^rtc_u5h5_factory, ^^u5_rtc, ^^board::rtc_initial>(
         {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .families = family::u5}),
-    row_of<^^rtc_factory, ^^h5_rtc, ^^board::rtc_initial>(
+    row_of<^^rtc_u5h5_factory, ^^h5_rtc, ^^board::rtc_initial>(
         {.ip = "RTC", .ip_version_glob = "rtc2_v2_U5*", .families = family::h5}),
-    row_of<^^tamp_factory, ^^u5_rtc>(
+    row_of<^^tamp_u5h5_factory, ^^u5_rtc>(
         {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .families = family::u5}),
-    row_of<^^tamp_factory, ^^h5_rtc>(
+    row_of<^^tamp_u5h5_factory, ^^h5_rtc>(
         {.ip = "TAMP", .ip_version_glob = "STM32L5_rtc2_v2_8*", .families = family::h5}),
 });
 }
