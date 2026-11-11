@@ -196,6 +196,10 @@ flowchart TD
     E --> G[rebase trace and sinks, count the reset]
 ```
 
+- The register layer holds the words no model claims. In a register that declares fields, the
+  bits no field covers are constant: they read their reset value and ignore writes. A model
+  keeps such a word, its bits and its write-once lock, over a reset kind by answering
+  `keeps_over_reset`.
 - Layer reset and model reset run per peripheral in one loop, so a model that reads a peer
   during its reset sees a peer that is not reset yet when the peer comes later in the order.
 - A model that must finish work due before a reset implements `periph::reset_listener`. The

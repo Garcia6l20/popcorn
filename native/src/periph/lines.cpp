@@ -2,6 +2,7 @@
 
 #include <popcorn/periph/bus_reset.hpp>
 #include <popcorn/periph/core_hold.hpp>
+#include <popcorn/periph/layer_keeper.hpp>
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/reset_listener.hpp>
 #include <popcorn/periph/snapshot_listener.hpp>
@@ -9,6 +10,7 @@
 namespace popcorn::periph
 {
 core_hold_listener::~core_hold_listener() = default;
+layer_keeper::~layer_keeper()             = default;
 bus_reset_listener::~bus_reset_listener() = default;
 
 void bus_reset_listener::on_held_write(std::uint32_t, access_ctx)

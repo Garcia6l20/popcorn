@@ -8,6 +8,8 @@
 #include "secure_config.hpp"
 #include "voltage_range.hpp"
 
+#include <popcorn/periph/layer_keeper.hpp>
+
 #include <reflex/enum.hpp>
 
 #include <algorithm>
@@ -206,6 +208,9 @@ struct pwr_variant
   std::span<field_name const> system_reset_kept{};
   /** @brief Fields of the backup domain, every reset but a power-on reset leaves at their value. */
   std::span<field_name const> backup_reset_kept{};
+  /** @brief Registers a system reset leaves as they are, the write-once lock included, when no
+   *         TrustZone makes the model claim them. */
+  std::span<std::string_view const> system_reset_words{};
   /** @brief Enables of functions the model does not run. A firmware write that sets one from 0
    *         logs one warning per field per machine life and stores it. Under strict_peripherals
    *         it raises model_error and the register keeps its value before the write. */
@@ -309,6 +314,11 @@ struct pwr_variant
  * - STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
  *   part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
  *   read-only. The supply the model runs is the board's.
+ * - STM32H5: a pin, software, watchdog, window watchdog, low-power or option-load reset keeps
+ *   `PWR_SCCR.BYPASS`, RM0481 10.11.11, and without TrustZone the write-once lock of the
+ *   register stays closed. A power-on or brown-out reset clears BYPASS and opens the lock. With
+ *   TrustZone BYPASS stays writable after its first write, a deviation from RM0481 10.11.11, the
+ *   model claims the register and a claimed register has no write-once lock.
  * - STM32H5: every reset but a power-on one keeps the fields of `PWR_BDCR`, RM0481 10.11.7. A
  *   `RCC_BDCR.VSWRST` reset clears them.
  *
@@ -367,6 +377,7 @@ class pwr final : public dispatch_model<pwr, pwr_state>,
                   public io_supply_source,
                   public usb_supply_source,
                   public backup_domain,
+                  public layer_keeper,
                   public trustzone_aware
 {
 public:
@@ -388,13 +399,14 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
-  void vosr_written(std::uint32_t old, std::uint32_t now);
-  void backup_reset() override;
-  void tell_usb_supply(bool before);
-  void cr1_written(std::uint32_t old, std::uint32_t now);
-  void control_written(std::uint32_t old, std::uint32_t now);
-  void cr3_written(std::uint32_t old, std::uint32_t now);
-  void functions_written(std::uint32_t old, std::uint32_t now);
+  void               vosr_written(std::uint32_t old, std::uint32_t now);
+  void               backup_reset() override;
+  [[nodiscard]] auto keeps_over_reset(std::uint32_t offset, reset_kind kind) const -> bool override;
+  void               tell_usb_supply(bool before);
+  void               cr1_written(std::uint32_t old, std::uint32_t now);
+  void               control_written(std::uint32_t old, std::uint32_t now);
+  void               cr3_written(std::uint32_t old, std::uint32_t now);
+  void               functions_written(std::uint32_t old, std::uint32_t now);
 
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
@@ -428,6 +440,7 @@ private:
   std::vector<field_ref>     system_kept_;
   std::vector<field_ref>     backup_kept_;
   std::vector<std::uint32_t> backup_defaults_;
+  std::vector<std::uint32_t> system_words_;
 };
 
 constexpr std::array<write_entry<pwr>, 8> u5_writes{
@@ -729,6 +742,12 @@ constexpr auto h5_unmodelled = std::to_array<field_name>({
     {"PWR_BDCR", "VBE"  },
 });
 
+constexpr auto h5_system_reset_kept = std::to_array<field_name>({
+    {"PWR_SCCR", "BYPASS"},
+});
+
+constexpr auto h5_system_reset_words = std::to_array<std::string_view>({"PWR_SCCR"});
+
 constexpr auto h5_backup_reset_kept = std::to_array<field_name>({
     {"PWR_BDCR", "BREN" },
     {"PWR_BDCR", "MONEN"},
@@ -754,7 +773,9 @@ constexpr pwr_variant h5_pwr{
     .wakeup_fields         = h5_wakeup_fields,
     .system_clock_fields   = h5_system_clock_fields,
     .peripheral_reset_kept = {                                         },
+    .system_reset_kept     = h5_system_reset_kept,
     .backup_reset_kept     = h5_backup_reset_kept,
+    .system_reset_words    = h5_system_reset_words,
     .unmodelled            = h5_unmodelled,
 };
 
@@ -830,6 +851,10 @@ pwr::pwr(
   {
     backup_kept_.push_back(field(kept.reg, kept.field));
     backup_defaults_.push_back(backup_kept_.back().of(describe(kept.reg).reset));
+  }
+  for(auto const name : variant.system_reset_words)
+  {
+    system_words_.push_back(reg(name).offset);
   }
   for(auto const& function : variant.unmodelled)
   {
@@ -1077,6 +1102,12 @@ void pwr::reset(register_file& regs, reset_kind kind)
   {
     tell_usb_supply(supplied);
   }
+}
+
+auto pwr::keeps_over_reset(std::uint32_t offset, reset_kind kind) const -> bool
+{
+  return std::ranges::contains(kept_by_system_reset, kind)
+     and std::ranges::contains(system_words_, offset);
 }
 
 void pwr::backup_reset()

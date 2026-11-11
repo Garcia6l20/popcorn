@@ -261,7 +261,7 @@ void machine::do_hold_in_reset(std::string_view peripheral, bool held)
   {
     return;
   }
-  periph::layer_reset(slot.layout, slot.regs, slot.layer, slot.claimed);
+  slot.reset_layer(reset_kind::peripheral);
   if(auto* const listener = dynamic_cast<periph::bus_reset_listener*>(slot.model.get()))
   {
     listener->on_bus_reset();

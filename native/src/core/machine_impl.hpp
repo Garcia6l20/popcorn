@@ -249,6 +249,25 @@ struct machine::peripheral_slot
     }
   }
 
+  /** @brief Resets the register layer for a reset of @p kind, leaving the unclaimed words the
+   * model keeps over that kind, keeps_over_reset(). */
+  void reset_layer(reset_kind kind)
+  {
+    std::vector<std::uint8_t> kept;
+    if(auto const* const keeper = dynamic_cast<periph::layer_keeper const*>(model.get()))
+    {
+      for(std::uint32_t word = 0; word < layout.words(); ++word)
+      {
+        if(claimed[word] == 0 and keeper->keeps_over_reset(word * 4, kind))
+        {
+          kept.resize(layout.words(), 0);
+          kept[word] = 1;
+        }
+      }
+    }
+    periph::layer_reset(layout, regs, layer, claimed, kept);
+  }
+
   /** @brief Why a CPU access to the word at @p word is unmodelled, no_register past the
    * layout. */
   [[nodiscard]] auto unmodelled_at(std::uint32_t word) const noexcept -> unmodelled_reason

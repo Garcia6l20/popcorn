@@ -301,7 +301,7 @@ void machine::run_state::reset_notified(reset_kind kind)
       {
         line.level_ = false;
       }
-      periph::layer_reset(slot->layout, slot->regs, slot->layer, slot->claimed);
+      slot->reset_layer(kind);
       slot->held_in_reset = false;
       slot->clock_gated   = false;
     }

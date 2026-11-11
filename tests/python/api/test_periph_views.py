@@ -21,9 +21,9 @@ def test_fields_read_and_write_as_bit_slices(machines: Machines) -> None:
     assert register.value == 0x5A
     register.value = 0x1234_5600 | 0x7F
     assert register.F == 0x7F
-    assert m.periph["TESTDEV"]["W_MODIFY"].value == 0x1234_567F
+    assert m.periph["TESTDEV"]["W_MODIFY"].value == 0x7F
     register.F = 0x11
-    assert register.value == 0x1234_5611
+    assert register.value == 0x11
 
 
 def test_writes_land_in_the_register_file(machines: Machines) -> None:

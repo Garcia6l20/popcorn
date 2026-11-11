@@ -43,6 +43,7 @@ FRAMEWORK_HEADERS = {
     "register_file.hpp",
     "bus_reset.hpp",
     "core_hold.hpp",
+    "layer_keeper.hpp",
     "reset_listener.hpp",
     "snapshot_listener.hpp",
     "spi.hpp",

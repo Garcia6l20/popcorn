@@ -1217,7 +1217,7 @@ TEST_CASE("RM0456 5.6.4 and the layout: one SEC bit secures each block it covers
     std::string_view flag;
   };
   for(auto const& one : std::initializer_list<tie>{
-          {"SECCFGR3", "DCMISEC",         "PSSI",       "CR",   0x4000'0001, "SR3", "DCMIF"    },
+          {"SECCFGR3", "DCMISEC",         "PSSI",       "CR",   0x4000'0020, "SR3", "DCMIF"    },
           {"SECCFGR3", "ADC1SEC",         "ADC12",      "CCR",  0x0040'0000, "SR3", "ADC1F"    },
           {"SECCFGR1", "FDCAN1SEC",       "FDCAN1_RAM", "DBTP", 0x0000'0a34, "SR1", "FDCAN1F"  },
           {"SECCFGR3", "SDMMC1SEC",       "DLYBSD1",    "CR",   0x1,         "SR3", "SDMMC1F"  },

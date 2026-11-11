@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/periph/layer_keeper.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
@@ -70,7 +71,9 @@ struct cross_target
 
 /**
  * @brief Register semantics of one peripheral compiled to per-word masks, the storage words
- *        without a register sharing no rules.
+ *        without a register sharing no rules. In a register that declares fields, the bits no
+ *        field covers are constant: they read their reset value and ignore writes. A register
+ *        that declares no field has the access of the register over its whole width.
  */
 class register_layout
 {
@@ -223,12 +226,16 @@ void layer_write(
  * @param regs Storage.
  * @param state Write-once locks.
  * @param claimed Non-zero for each word a model serves, left to the model's reset.
+ * @param kept Non-zero for each word the reset leaves as it is, its bits and its lock, or empty
+ *        for none.
  */
 void layer_reset(
     register_layout const&        layout,
     register_file&                regs,
     layer_state&                  state,
-    std::span<std::uint8_t const> claimed) pre(claimed.size() == layout.words());
+    std::span<std::uint8_t const> claimed,
+    std::span<std::uint8_t const> kept = {}) pre(claimed.size() == layout.words())
+    pre(kept.empty() or kept.size() == layout.words());
 
 /**
  * @brief Factory the model registry holds for a peripheral: the latest registration whose IP

@@ -207,6 +207,63 @@ TEST_CASE("access kinds gate reads and writes, write-once locks until reset")
   CHECK(periph::layer_read(b.layout, b.regs, 12, 4) == 5);
 }
 
+TEST_CASE("bits no field covers read their reset value and ignore writes")
+{
+  auto mixed =
+      reg("MIX", 8, access::read_write,
+          {field("RO", 0, 4, access::read_only),
+           field("W1C", 4, 4, access::read_write, write_effect::one_to_clear),
+           field("RW", 8, 4, access::read_write)},
+          0x0000'00a5);
+  bench b{unit(
+      {reg("FIELDS", 0, access::read_write, {field("A", 8, 8, access::read_write)}, 0x0000'0080),
+       reg("NONE", 4, access::read_write, {}, 0x0000'0003), mixed})};
+  periph::layer_write(b.layout, b.regs, b.state, 0, 4, 0xffff'ffff);
+  CHECK(periph::layer_read(b.layout, b.regs, 0, 4) == 0x0000'ff80);
+  periph::layer_write(b.layout, b.regs, b.state, 0, 4, 0);
+  CHECK(periph::layer_read(b.layout, b.regs, 0, 4) == 0x0000'0080);
+  periph::layer_write(b.layout, b.regs, b.state, 4, 4, 0xffff'ffff);
+  CHECK(periph::layer_read(b.layout, b.regs, 4, 4) == 0xffff'ffff);
+  periph::layer_write(b.layout, b.regs, b.state, 8, 4, 0xffff'ffff);
+  CHECK(periph::layer_read(b.layout, b.regs, 8, 4) == 0x0000'0f05);
+  periph::layer_write(b.layout, b.regs, b.state, 8, 4, 0);
+  CHECK(periph::layer_read(b.layout, b.regs, 8, 4) == 0x0000'0005);
+}
+
+TEST_CASE("an alternate view leaves the bits of its primary writable")
+{
+  auto alternate = reg("ALT", 0, access::read_write, {field("LOW", 0, 16, access::read_write)});
+  alternate.alternate_of = "MAIN";
+  bench b{unit(
+      {reg("MAIN", 0, access::read_write, {field("HIGH", 16, 16, access::read_write)}),
+       alternate})};
+  periph::layer_write(b.layout, b.regs, b.state, 0, 4, 0xffff'ffff);
+  CHECK(periph::layer_read(b.layout, b.regs, 0, 4) == 0xffff'ffff);
+}
+
+TEST_CASE("a reset leaves the words it is told to keep, their bits and their write-once lock")
+{
+  bench b{unit(
+      {reg("KEPT", 0, access::read_write_once, {}, 0x10),
+       reg("OTHER", 4, access::read_write_once, {}, 0x20)})};
+  periph::layer_write(b.layout, b.regs, b.state, 0, 4, 0x1);
+  periph::layer_write(b.layout, b.regs, b.state, 4, 4, 0x2);
+  std::vector<std::uint8_t> const none(b.layout.words(), 0);
+  std::vector<std::uint8_t>       kept(b.layout.words(), 0);
+  kept[0] = 1;
+  periph::layer_reset(b.layout, b.regs, b.state, none, kept);
+  CHECK(b.regs.peek(0) == 0x1);
+  CHECK(b.regs.peek(4) == 0x20);
+  CHECK(b.state.write_locked.front() == 0b01);
+  periph::layer_write(b.layout, b.regs, b.state, 0, 4, 0x7);
+  CHECK(b.regs.peek(0) == 0x1);
+  periph::layer_write(b.layout, b.regs, b.state, 4, 4, 0x7);
+  CHECK(b.regs.peek(4) == 0x7);
+  periph::layer_reset(b.layout, b.regs, b.state, none);
+  CHECK(b.regs.peek(0) == 0x10);
+  CHECK(b.state.write_locked.front() == 0);
+}
+
 TEST_CASE("sub-word accesses touch their lane only")
 {
   bench b{unit({reg("W", 0, access::read_write, {}), reg("V", 4, access::read_write, {})})};

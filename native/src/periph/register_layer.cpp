@@ -228,8 +228,8 @@ register_layout::register_layout(peripheral_desc const& desc) : desc_{&desc}
       add_bits(own, mask, field.acc, field.on_write, field.on_read);
     }
     add_bits(
-        own, (low_bits(reg.width) << at.shift) & ~covered, reg.acc, write_effect::modify,
-        read_effect::none);
+        own, (low_bits(reg.width) << at.shift) & ~covered,
+        reg.fields.empty() ? reg.acc : access::read_only, write_effect::modify, read_effect::none);
 
     auto&      rules   = rules_for(word);
     auto const overlap = rules.writable & own.writable;
@@ -460,18 +460,28 @@ void layer_reset(
     register_layout const&        layout,
     register_file&                regs,
     layer_state&                  state,
-    std::span<std::uint8_t const> claimed)
+    std::span<std::uint8_t const> claimed,
+    std::span<std::uint8_t const> kept)
 {
+  auto const is_kept = [&](std::uint32_t word) { return not kept.empty() and kept[word] != 0; };
   for(std::uint32_t word = 0; word < layout.words(); ++word)
   {
-    if(claimed[word] == 0)
+    if(claimed[word] == 0 and not is_kept(word))
     {
       regs.poke(word * 4, layout.rules(word).reset);
     }
   }
   if(layout.has_write_once())
   {
+    layer_state const before{.write_locked = std::move(state.write_locked)};
     state.write_locked.assign((layout.words() + 31) / 32, 0);
+    for(std::uint32_t word = 0; word < layout.words(); ++word)
+    {
+      if(is_kept(word) and locked(before, word))
+      {
+        state.write_locked[word / 32] |= 1u << (word % 32);
+      }
+    }
   }
   else
   {

@@ -384,6 +384,44 @@ TEST_CASE("RM0481 10.11.7: RCC_BDCR.VSWRST clears every field of PWR_BDCR")
   CHECK(r.get("PWR_BDCR", "BREN") == 1);
 }
 
+TEST_CASE("RM0481 10.11.11: PWR_SCCR keeps BYPASS and its write-once lock over a system reset")
+{
+  using popcorn::reset_kind;
+  struct row
+  {
+    reset_kind kind;
+    bool       kept;
+  };
+  constexpr std::array rows{
+      row{reset_kind::pin,             true },
+      row{reset_kind::software,        true },
+      row{reset_kind::watchdog,        true },
+      row{reset_kind::window_watchdog, true },
+      row{reset_kind::low_power,       true },
+      row{reset_kind::option_load,     true },
+      row{reset_kind::brown_out,       false},
+      row{reset_kind::power_on,        false},
+  };
+  for(auto const [tzen, one] : std::views::cartesian_product(std::array{false, true}, rows))
+  {
+    CAPTURE(tzen);
+    CAPTURE(static_cast<int>(one.kind));
+    rig r{
+        "h573_pwr_ll", tzen ? popcorn::testing::h573_secure_rig::options({.tzen = true})
+                            : popcorn::testing::stm32_options()};
+    r.write("PWR_SCCR", 1);
+    REQUIRE(r.get("PWR_SCCR", "BYPASS") == 1);
+    r.f.target->reset(one.kind);
+    CHECK(r.get("PWR_SCCR", "BYPASS") == (one.kept ? 1u : 0u));
+    if(tzen)
+    {
+      continue;
+    }
+    r.write("PWR_SCCR", one.kept ? 0 : 1);
+    CHECK(r.get("PWR_SCCR", "BYPASS") == 1);
+  }
+}
+
 TEST_CASE("RM0481 10.11.1: the first PWR_PMCR write logs its LPMS mode, 1 is standby")
 {
   rig                           r;
