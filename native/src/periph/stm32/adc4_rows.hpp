@@ -53,6 +53,8 @@ struct adc4_variant
   std::array<std::string_view, 8> trigger_signals{"tim1_trgo2", "tim1_cc4",  "tim2_trgo",
                                                   "tim15_trgo", "tim6_trgo", "lptim1_ch1",
                                                   "lptim3_ch2", "exti15"};
+  /** @brief Largest ADC_CFGR2.OVSS shift, RM0456 34.7.5. */
+  std::uint32_t max_oversampling_shift = 8;
   /** @brief Lowest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */
   std::uint64_t min_hz = 140'000;
   /** @brief Highest ADC clock in Hz, fADC of DS13737 Table 106 and DS13086 Table 108. */

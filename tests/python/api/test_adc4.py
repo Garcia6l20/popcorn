@@ -40,7 +40,7 @@ def idle(
     m.reg.pc = m.sym("Default_Handler")
     rcc = m.periph.RCC
     rcc.RCC_CR.write(rcc.RCC_CR.value | HSION)
-    settle(m, 200)
+    settle(m, 260)
     assert rcc.RCC_CR.HSIRDY == 1
     rcc.RCC_AHB3ENR.write(rcc.RCC_AHB3ENR.value | ADC4EN)
     rcc.RCC_CCIPR3.write(ADCDACSEL_HSI16)
@@ -209,3 +209,32 @@ def test_a_drive_out_of_the_window_sets_awd1_the_same_parked_and_running(
     parked = watched_scan(enabled(u575), running=False)
     assert parked == (int(2.0 * 4096 / 3.0), 1)
     assert watched_scan(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+def oversampled_scan(m: popcorn.Machine, running: bool) -> tuple[int, int]:
+    adc = m.periph.ADC4
+    adc.SMPR.write(7)
+    adc.CFGR2.write(1)
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.input(9).volts = 1.0
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    driven = m.write((m.ref.periph.ADC4.input(9).volts, 2.0), at=m.time + VirtualDuration(1))
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await driven
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 260)
+    return adc.DR.value, adc.ISR.EOS
+
+
+def test_an_oversampled_scan_converts_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = oversampled_scan(enabled(u575), running=False)
+    assert parked == (2 * int(2.0 * 4096 / 3.0), 1)
+    assert oversampled_scan(enabled(u575, slice_instructions=1_000), running=True) == parked

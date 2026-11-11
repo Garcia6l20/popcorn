@@ -1319,15 +1319,15 @@ TEST_CASE(
     std::string_view phrase;
   };
   for(auto const& [reg, value, selection, phrase] : {
-          function{"CFGR1", (1u << 10) | (5u << 6),                1u << pa4, "EXTSEL 5"        },
-          function{"CFGR1", 1u << 14,                              1u << pa4, "WAIT"            },
-          function{"CFGR2", 1u << 0,                               1u << pa4, "OVSE"            },
-          function{"CFGR2", 1u << 29,                              1u << pa4, "LFTRIG"          },
+          function{"CFGR1", (1u << 10) | (5u << 6),                1u << pa4, "EXTSEL 5"                },
+          function{"CFGR1", 1u << 14,                              1u << pa4, "WAIT"                    },
+          function{"CFGR2", (1u << 0) | (9u << 5),                 1u << pa4, "OVSS 9 to 15"            },
+          function{"CFGR2", 1u << 29,                              1u << pa4, "LFTRIG"                  },
           function{
                    "CFGR1", (1u << 23) | (1u << 22) | (24u << 26), 1u << pa4,
-                   "AWD1CH 18 to 21 and 24 to 31"                                               },
-          function{"CFGR1", cont | discen,                         1u << pa4, "DISCEN with CONT"},
-          function{"CFGR1", 0,                                     1u << 13,  "internal channel"}
+                   "AWD1CH 18 to 21 and 24 to 31"                                                       },
+          function{"CFGR1", cont | discen,                         1u << pa4, "DISCEN or TOVS with CONT"},
+          function{"CFGR1", 0,                                     1u << 13,  "internal channel"        }
   })
   {
     CAPTURE(reg);
@@ -1584,10 +1584,11 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.7.4 to 34.7.15: ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_AWD2CR or ADC_AWD3CR "
-    "written with ADSTART 1 keeps the old register, logs once, a model_error when strict")
+    "RM0456 34.7.4 to 34.7.15: ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, "
+    "ADC_AWD2CR or ADC_AWD3CR written with ADSTART 1 keeps the old register, logs once, a "
+    "model_error when strict")
 {
-  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0", "AWD2CR", "AWD3CR"})
+  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0", "CFGR2", "AWD2CR", "AWD3CR"})
   {
     CAPTURE(std::string_view{reg});
     {
@@ -1690,7 +1691,7 @@ TEST_CASE("ADSTART with DISCEN after CHSELR shrank below the rank restarts at th
 }
 
 TEST_CASE(
-    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSE, LFTRIG, AWD1CH 24, "
+    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSS 9, LFTRIG, AWD1CH 24, "
     "VREFPROT and an internal channel logs nine times, one model_error when "
     "strict that keeps ADC_CR")
 {
@@ -1708,7 +1709,7 @@ TEST_CASE(
                      | (24u << 26)
                      | cont
                      | discen);
-    f.write("CFGR2", (1u << 0) | (1u << 29));
+    f.write("CFGR2", (1u << 0) | (9u << 5) | (1u << 29));
     f.write("CHSELRMOD0", (1u << pa4) | (1u << 13));
   };
   {
@@ -2734,7 +2735,7 @@ TEST_CASE(
   adc4_fixture const f;
   static_cast<void>(f.enable());
   f.port().drive(pa4, level_of(0x800));
-  f.write("AWD2TR", window(0xA00, 0x100));
+  f.write("AWD2TR", window(0x700, 0x100));
   f.write("AWD3TR", window(0xA00, 0x100));
   f.write("CFGR1", cont);
   f.write("AWD2CR", 1u << pa4);
@@ -2743,14 +2744,12 @@ TEST_CASE(
   auto const begin = f.start();
   f.run_until(begin + halves(1));
   f.write("AWD3TR", window(0x200, 0x100));
-  f.write("AWD2TR", window(0xA00, 0x100));
   f.run_until(begin + halves(28));
   CHECK(f.isr("EOC") == 1);
   CHECK(f.isr("AWD3") == 0);
-  CHECK(f.isr("AWD2") == 0);
+  CHECK(f.isr("AWD2") == 1);
   f.run_until(begin + 2 * halves(28));
   CHECK(f.isr("AWD3") == 1);
-  CHECK(f.isr("AWD2") == 0);
 }
 
 TEST_CASE(
@@ -2804,4 +2803,523 @@ TEST_CASE(
   adc4_fixture const fresh{no_reset};
   fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   check(fresh);
+}
+
+namespace
+{
+constexpr std::uint64_t conversion = 28 * cycle / 2;
+
+[[nodiscard]] constexpr auto
+    oversampling(std::uint32_t ratio, std::uint32_t shift, std::uint32_t extra = 0) -> std::uint32_t
+{
+  return 1u | ratio << 2 | shift << 5 | extra;
+}
+
+constexpr std::uint32_t tovs = 1u << 9;
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: OVSR 000 to 111 sum 2 to 256 conversions, EOC sets with the Nth, each "
+    "conversion chained from the stored end of the previous one")
+{
+  for(std::uint32_t ratio = 0; ratio < 8; ++ratio)
+  {
+    CAPTURE(ratio);
+    auto const         count = 2u << ratio;
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x123));
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR2", oversampling(ratio, 0));
+    auto const begin = f.start();
+    if(count > 2)
+    {
+      f.run_until(begin + conversion + conversion / 2);
+      CHECK(f.dues() == std::vector<std::uint64_t>{begin + 2 * conversion});
+    }
+    f.run_until(begin + count * conversion - early);
+    CHECK(f.isr("EOC") == 0);
+    CHECK(f.isr("EOS") == 0);
+    f.run_until(begin + count * conversion);
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("EOS") == 1);
+    CHECK(f.read("DR") == ((count * 0x123u) & 0xFFFFu));
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.26 Table 335: the sum is shifted right by OVSS with rounding to the nearest, "
+    "then truncated to 16 bits")
+{
+  struct row
+  {
+    std::uint32_t                ratio;
+    std::array<std::uint32_t, 9> expected;
+  };
+  for(auto const& [ratio, expected] : {
+          row{0, {0x1FFE, 0x0FFF, 0x0800, 0x0400, 0x0200, 0x0100, 0x0080, 0x0040, 0x0020}},
+          row{3, {0xFFF0, 0x7FF8, 0x3FFC, 0x1FFE, 0x0FFF, 0x0800, 0x0400, 0x0200, 0x0100}},
+          row{7, {0xFF00, 0xFF80, 0xFFC0, 0xFFE0, 0xFFF0, 0x7FF8, 0x3FFC, 0x1FFE, 0x0FFF}}
+  })
+  {
+    for(std::uint32_t shift = 0; shift < 9; ++shift)
+    {
+      CAPTURE(ratio);
+      CAPTURE(shift);
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.port().drive(pa4, level_of(0xFFF));
+      f.write("CHSELRMOD0", 1u << pa4);
+      f.write("CFGR2", oversampling(ratio, shift));
+      auto const begin = f.start();
+      f.run_until(begin + (2u << ratio) * conversion);
+      CHECK(f.read("DR") == expected[shift]);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: ALIGN is ignored with the oversampler, RES applies to every conversion "
+    "before the sum")
+{
+  struct row
+  {
+    std::uint32_t config;
+    std::uint64_t halves_per_conversion;
+    std::uint32_t expected;
+  };
+  for(auto const& [config, per, expected] : {
+          row{0,                 28, 2 * 0xABCu       },
+          row{align,             28, 2 * 0xABCu       },
+          row{1u << 2,           24, 2 * (0xABCu >> 2)},
+          row{align | (3u << 2), 16, 2 * (0xABCu >> 6)}
+  })
+  {
+    CAPTURE(config);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0xABC));
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR1", config);
+    f.write("CFGR2", oversampling(0, 0));
+    auto const begin = f.start();
+    f.run_until(begin + 2 * halves(per));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.read("DR") == expected);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: EOSMP sets after every sampling, EOC after the Nth conversion of a channel "
+    "and EOS after N conversions of every channel, intermediate conversions set no OVR")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.port().drive(pa5, level_of(0x500));
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR2", oversampling(0, 0));
+  auto const begin = f.start();
+  f.run_until(begin + halves(3) + early);
+  CHECK(f.isr("EOSMP") == 1);
+  f.write("ISR", eosmp);
+  f.run_until(begin + conversion - early);
+  CHECK(f.isr("EOSMP") == 0);
+  f.run_until(begin + conversion + halves(3) + early);
+  CHECK(f.isr("EOSMP") == 1);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(begin + 2 * conversion);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("EOS") == 0);
+  CHECK(f.read("DR") == 2 * 0x300u);
+  f.run_until(begin + 3 * conversion + early);
+  CHECK(f.isr("OVR") == 0);
+  f.run_until(begin + 4 * conversion);
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.read("DR") == 2 * 0x300u);
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: with DISCEN one ADSTART converts the N conversions of one channel, EOC "
+    "clears ADSTART")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x200));
+  f.port().drive(pa5, level_of(0x400));
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR1", discen);
+  f.write("CFGR2", oversampling(1, 0));
+  auto const first = f.start();
+  f.run_until(first + 4 * conversion - early);
+  CHECK(f.cr("ADSTART") == 1);
+  f.run_until(first + 4 * conversion);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.isr("EOS") == 0);
+  CHECK(f.cpu_read("DR") == 4 * 0x200u);
+  auto const second = f.start();
+  f.run_until(second + 4 * conversion);
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.read("DR") == 4 * 0x400u);
+}
+
+namespace
+{
+void fire(adc4_fixture const& f, std::uint64_t at)
+{
+  sink_of(f).triggered(trgo, stm32::trigger_edge::rising, at);
+}
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: without TOVS one trigger starts the N conversions of a channel, with TOVS "
+    "each trigger starts one, a trigger during a conversion is ignored and ADSTART stays set")
+{
+  for(auto const per_trigger : {false, true})
+  {
+    CAPTURE(per_trigger);
+    adc4_fixture const f;
+    arm(f, exten_rising, 3, 0, false);
+    f.port().drive(pa4, level_of(0x180));
+    f.write("CFGR2", oversampling(0, 0, per_trigger ? tovs : 0));
+    f.write("CR", advregen | aden | adstart);
+    auto const conv   = slow_halves(28);
+    auto const origin = f.now();
+    fire(f, origin);
+    f.run_until(origin + slow_latency + conv / 2);
+    fire(f, f.now());
+    f.run_until(origin + slow_latency + conv + conv / 2);
+    CHECK(f.isr("EOC") == 0);
+    f.run_until(origin + slow_latency + 2 * conv + us);
+    CHECK(f.isr("EOC") == (per_trigger ? 0u : 1u));
+    CHECK(f.cr("ADSTART") == 1);
+    if(not per_trigger)
+    {
+      CHECK(f.read("DR") == 2 * 0x180u);
+      continue;
+    }
+    f.run_until(origin + slow_latency + 6 * conv);
+    CHECK(f.isr("EOC") == 0);
+    auto const second = f.now();
+    fire(f, second);
+    f.run_until(second + slow_latency + conv + us);
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.read("DR") == 2 * 0x180u);
+    CHECK(f.cr("ADSTART") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: with TOVS the series moves to the next channel after the Nth trigger of "
+    "each, EOS sets with the last")
+{
+  adc4_fixture const f;
+  arm(f, exten_rising, 3, 0, false);
+  f.port().drive(pa4, level_of(0x100));
+  f.port().drive(pa5, level_of(0x700));
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  f.write("CFGR2", oversampling(0, 0, tovs));
+  f.write("CR", advregen | aden | adstart);
+  auto const conv = slow_halves(28);
+  for(auto count = 0; count < 4; ++count)
+  {
+    CAPTURE(count);
+    auto const at = f.now();
+    fire(f, at);
+    f.run_until(at + slow_latency + conv + us);
+    if(count == 1)
+    {
+      CHECK(f.isr("EOC") == 1);
+      CHECK(f.read("DR") == 2 * 0x100u);
+      f.write("ISR", eoc | eosmp);
+      f.run_until(f.now() + 6 * conv);
+      CHECK(f.isr("EOSMP") == 0);
+    }
+    CHECK(f.isr("EOS") == (count == 3 ? 1u : 0u));
+  }
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == 2 * 0x700u);
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: with TOVS and a software trigger each ADSTART starts one conversion and "
+    "ADSTART clears at its end, inferred")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x240));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR2", oversampling(0, 0, tovs));
+  auto const first = f.start();
+  f.run_until(first + conversion);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.isr("EOC") == 0);
+  auto const second = f.start();
+  f.run_until(second + conversion);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == 2 * 0x240u);
+}
+
+TEST_CASE(
+    "RM0456 34.4.26: the watchdogs compare ADC_DR[15:4] of the oversampled result and ignore RES")
+{
+  struct row
+  {
+    std::uint32_t resolution;
+    std::uint32_t code;
+    bool          oversampled;
+    bool          flagged;
+  };
+  for(auto const& [resolution, code, oversampled, flagged] : {
+          row{0, 0x800, true,  false},
+          row{0, 0x801, true,  true },
+          row{1, 0x3FF, true,  true },
+          row{1, 0x3FF, false, false}
+  })
+  {
+    CAPTURE(resolution);
+    CAPTURE(code);
+    CAPTURE(oversampled);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(code));
+    f.write("AWD1TR", window(0x800, resolution == 0 ? 0x100 : 0x100));
+    f.write("CFGR1", awd1en | (resolution << 2));
+    f.write("CHSELRMOD0", 1u << pa4);
+    if(oversampled)
+    {
+      f.write("CFGR2", oversampling(3, 0));
+    }
+    auto const begin = f.start();
+    f.run_until(begin + 16 * halves(oversampled ? (resolution == 0 ? 28 : 24) : 24));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("AWD1") == (flagged ? 1u : 0u));
+  }
+}
+
+TEST_CASE("RM0456 34.4.26: the watchdogs compare the result truncated to 16 bits")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0xFFF));
+  f.write("AWD1TR", window(0xFF8, 0x100));
+  f.write("CFGR1", awd1en);
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR2", oversampling(7, 0));
+  auto const begin = f.start();
+  f.run_until(begin + 256 * conversion);
+  CHECK(f.read("DR") == 0xFF00);
+  CHECK(f.isr("AWD1") == 0);
+}
+
+TEST_CASE("ADSTP during a series drops the sum, the next ADSTART starts a new series")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR2", oversampling(1, 0));
+  auto const first = f.start();
+  f.run_until(first + 2 * conversion + early);
+  f.write("CR", advregen | aden | adstart | adstp);
+  f.port().drive(pa4, level_of(0x100));
+  auto const second = f.start();
+  f.run_until(second + 4 * conversion);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == 4 * 0x100u);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot in the middle of a series restored into a machine never "
+    "reset keeps the sum and the count")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x300));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR2", oversampling(1, 0));
+  auto const begin = f.start();
+  f.run_until(begin + 2 * conversion + early);
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc4_fixture const& g) {
+    g.port().drive(pa4, level_of(0x500));
+    g.run_until(begin + 4 * conversion - early);
+    CHECK(g.isr("EOC") == 0);
+    g.run_until(begin + 4 * conversion);
+    CHECK(g.isr("EOC") == 1);
+    CHECK(g.read("DR") == 3 * 0x300u + 0x500u);
+  };
+  f.target->restore(saved);
+  check(f);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(fresh);
+}
+
+TEST_CASE(
+    "RM0456 34.7.5: an OVSS of 9 to 15 shifts by 8 and logs once at ADSTART, a TOVS with CONT "
+    "logs as DISCEN with CONT")
+{
+  {
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0xFFF));
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR2", oversampling(0, 12));
+    std::vector<core::log_record> logged;
+    auto const                    sink  = recorder(f, logged);
+    auto const                    begin = f.start();
+    f.run_until(begin + 2 * conversion);
+    CHECK(f.read("DR") == 0x20);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("OVSS 9 to 15"));
+  }
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", cont);
+  f.write("CFGR2", tovs);
+  std::vector<core::log_record> logged;
+  auto const                    sink = recorder(f, logged);
+  static_cast<void>(f.start());
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("DISCEN or TOVS with CONT"));
+}
+
+TEST_CASE(
+    "inferred: a threshold write during any conversion of an oversampled series masks the "
+    "watchdog for the result of the series, a write before the series or after it does not")
+{
+  for(auto const& [write_at, flagged] : {
+          std::pair{halves(1),              false},
+          std::pair{conversion + halves(1), false},
+          std::pair{std::uint64_t{0},       true }
+  })
+  {
+    CAPTURE(write_at);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x900));
+    f.write("AWD1TR", window(0x100, 0x080));
+    f.write("CFGR1", awd1en);
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR2", oversampling(0, 0));
+    if(write_at == 0)
+    {
+      f.write("AWD1TR", window(0x100, 0x080));
+    }
+    auto const begin = f.start();
+    if(write_at != 0)
+    {
+      f.run_until(begin + write_at);
+      f.write("AWD1TR", window(0x100, 0x080));
+    }
+    f.run_until(begin + 2 * conversion);
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("AWD1") == (flagged ? 1u : 0u));
+    if(not flagged)
+    {
+      static_cast<void>(f.cpu_read("DR"));
+      auto const again = f.start();
+      f.run_until(again + 2 * conversion);
+      CHECK(f.isr("AWD1") == 1);
+    }
+  }
+}
+
+TEST_CASE(
+    "inferred: ADDIS and an RCC reset in the middle of a series drop the sum and the count, the "
+    "next series needs its own N conversions")
+{
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x300));
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR2", oversampling(1, 0, tovs));
+    auto const first = f.start();
+    f.run_until(first + conversion + early);
+    CHECK(f.isr("EOC") == 0);
+    if(reset)
+    {
+      f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 1);
+      f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 0);
+    }
+    else
+    {
+      f.write("CR", advregen | addis);
+      f.run_until(f.now() + tdis + early);
+      REQUIRE(f.cr("ADEN") == 0);
+    }
+    static_cast<void>(f.enable());
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR2", oversampling(1, 0, tovs));
+    for(auto count = 0; count < 4; ++count)
+    {
+      CAPTURE(count);
+      auto const at = f.start();
+      f.run_until(at + conversion + early);
+      CHECK(f.isr("EOC") == (count == 3 ? 1u : 0u));
+    }
+    CHECK(f.read("DR") == 4 * 0x300u);
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.17 and 34.4.26: TOVS with CONT converts one conversion per ADSTART with CONT "
+    "ignored and logs once")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x240));
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", cont);
+  f.write("CFGR2", oversampling(0, 0, tovs));
+  std::vector<core::log_record> logged;
+  auto const                    sink  = recorder(f, logged);
+  auto const                    first = f.start();
+  f.run_until(first + conversion);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.isr("EOC") == 0);
+  auto const second = f.start();
+  f.run_until(second + conversion);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("DR") == 2 * 0x240u);
+  f.run_until(second + 4 * conversion);
+  CHECK(f.dues().empty());
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("CONT ignored"));
+}
+
+TEST_CASE("RM0456 34.4.26: with the oversampler DMAEN raises adc4_dma with the Nth conversion only")
+{
+  for(auto const mode : {0u, cont})
+  {
+    CAPTURE(mode);
+    adc4_fixture const f;
+    slow_enable(f);
+    f.port().drive(pa4, 600'000);
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("CFGR1", mode | dmaen);
+    f.write("CFGR2", oversampling(0, 0));
+    dma_channel(f, 12);
+    auto const begin = f.now();
+    f.write("CR", advregen | aden | adstart);
+    f.run_until(begin + slow_latency + slow_halves(28) + 5 * us);
+    CHECK(buffer_words(f, 2) == std::vector<std::uint32_t>{0, 0});
+    f.run_until(begin + slow_latency + 2 * slow_halves(28) + 5 * us);
+    CHECK(buffer_words(f, 2) == std::vector<std::uint32_t>{2 * code_of(600'000), 0});
+    if(mode == 0)
+    {
+      CHECK(f.cr("ADSTART") == 0);
+      f.run_until(f.now() + 6 * slow_halves(28));
+      CHECK(buffer_words(f, 2) == std::vector<std::uint32_t>{2 * code_of(600'000), 0});
+      CHECK(f.dues().empty());
+    }
+  }
 }

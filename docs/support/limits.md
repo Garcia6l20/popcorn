@@ -474,8 +474,8 @@ strict_peripherals that keeps `ADC_CR`:
 
 - The triggers `tim1_trgo2`, `lptim1_ch1`, `lptim3_ch2` and `exti15`, `EXTSEL` 0, 5, 6 and 7: no
   model produces them, `ADSTART` stays set and nothing converts.
-- The wait mode `WAIT`, the auto-off mode `AUTOFF`, the oversampler `OVSE` and the low-frequency
-  trigger mode `LFTRIG`: the conversions run without them.
+- The wait mode `WAIT`, the auto-off mode `AUTOFF` and the low-frequency trigger mode `LFTRIG`:
+  the conversions run without them.
 - The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
 - `VREFPROT` and `VREFSECSMP` of `ADC_PWRR`: tCONV stays at tSMPL + tSAR, the DS13737 Table 106
   minimum.
@@ -488,14 +488,31 @@ Analog watchdogs, RM0456 34.4.25:
   gives a delay.
 - AWD1 guards every channel of the sequence with `AWD1EN` and `AWD1SGL` 0, the channel `AWD1CH`
   names with `AWD1SGL` 1. An `AWD1CH` of 18 to 21 or 24 to 31, reserved, guards no channel and
-  is logged once at `ADSTART`, a model_error under strict_peripherals. AWD2 and AWD3 guard the channels
-  set in `ADC_AWD2CR` and `ADC_AWD3CR`.
+  is logged once at `ADSTART`, a model_error under strict_peripherals. AWD2 and AWD3 guard the
+  channels set in `ADC_AWD2CR` and `ADC_AWD3CR`.
 - A threshold write while a conversion samples or converts masks that watchdog for that
   conversion. The conversion starts with its sampling, inferred. The new thresholds apply from
-  the next one. A threshold write at the exact end instant of a conversion masks the next one,
+  the next one. With the oversampler the mask lasts for the whole series of N conversions,
+  inferred. A threshold write at the exact end instant of a conversion masks the next one,
   inferred. A result arriving while `ADC_DR` is frozen after a one-shot DMA end is compared,
   inferred.
 - The `ADC_AWDx_OUT` signals to the timers' ETR inputs are not produced.
+
+Oversampler, RM0456 34.4.26:
+
+- With `OVSE` each result is the sum of N conversions of the channel, N = 2 << `OVSR`, 2 to 256,
+  shifted right by `OVSS` with rounding to the nearest, then truncated to 16 bits, Table 335. It
+  lands right aligned whatever `ALIGN` says. RES applies to each conversion before the sum.
+- The conversions of a series follow each other, each with its own sampling: EOSMP sets after
+  every sampling, EOC after the Nth conversion, EOS after N conversions of every channel. ADSTP
+  and ADDIS drop the sum, ADDIS inferred.
+- An `OVSS` of 9 to 15, reserved, shifts by 8 and is logged once at `ADSTART`, a model_error under
+  strict_peripherals, the shift inferred.
+- The watchdogs compare `ADC_DR[15:4]` of the result and ignore RES, RM0456 34.4.26.
+- With `DISCEN` one trigger starts the N conversions of a channel. With `TOVS`, `DISCEN` taken as
+  1, each trigger starts one conversion and the series goes on at the next trigger. A software
+  `ADSTART` clears at the end of each conversion with `TOVS`, and the oversampler fields of
+  `ADC_CFGR2` are then writable between the conversions, both inferred.
 
 Triggers and DMA:
 
@@ -534,17 +551,16 @@ Timing and values:
   the result land at the end of tSAR, the `ADC_DR` write latency taken as 0, inferred. The next
   conversion samples from the end of the previous one.
 - An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
-  strict_peripherals, inferred. `DISCEN` with `CONT`, forbidden by RM0456 34.4.17, converts as
-  `DISCEN` alone and is logged once, a model_error under strict_peripherals.
-- A write changing `ADC_CFGR1`, `ADC_SMPR`, `ADC_CHSELR`, `ADC_AWD2CR` or `ADC_AWD3CR` with
-  `ADSTART` set keeps the old register, RM0456 34.7.4 to 34.7.15, logged once for the five, a
-  model_error under strict_peripherals.
+  strict_peripherals, inferred. `DISCEN` or `TOVS` with `CONT`, forbidden by RM0456 34.4.17,
+  converts with `CONT` ignored and is logged once, a model_error under strict_peripherals.
+- A write changing `ADC_CFGR1`, `ADC_SMPR`, `ADC_CHSELR`, `ADC_CFGR2`, `ADC_AWD2CR` or
+  `ADC_AWD3CR` with `ADSTART` set keeps the old register, RM0456 34.7.4 to 34.7.15, logged once
+  for the six, a model_error under strict_peripherals.
 - With `OVRMOD` 0 every result is discarded while EOC or OVR is set, RM0456 34.4.23: `ADC_DR`
   and EOC keep their values and OVR is set. A rank past the end of a shortened sequence starts
   over at the first channel.
-- `ADC_IER`, `ADC_CFGR2`, `ADC_AWD1TR` to `ADC_AWD3TR` and `ADC_CCR` accept writes while
-  `ADSTART` is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for
-  ADEN 0.
+- `ADC_IER`, `ADC_AWD1TR` to `ADC_AWD3TR` and `ADC_CCR` accept writes while `ADSTART` is set.
+  RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for ADEN 0.
 - ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, as ES0499 2.9.2 states for its startup
   sequence, inferred for every other use.
 - A reserved `ADC_CCR.PRESC`, 1100 to 1111, divides by 256, inferred, and is logged once, a
