@@ -10,7 +10,7 @@
 namespace popcorn::periph::stm32
 {
 /** @brief Differences between the LPTIM peripherals the model rows serve. */
-struct lptim_variant
+struct lptim_l4_variant
 {
   /** @brief The instance has the encoder mode: CFGR.ENC, ISR.UP and DOWN, IER.UPIE and DOWNIE,
    *         ICR.UPCF and DOWNCF. */
@@ -28,16 +28,16 @@ struct lptim_variant
 
 /** @brief STM32L4 LPTIM1, RM0351 section 34, with the ES0250 2.18.3 delay of one kernel clock
  *         on CMPM and ARRM. CMPOK and ARROK after 3 kernel clocks, inferred. */
-inline constexpr lptim_variant l4_lptim1{.event_delay_cycles = 1};
+inline constexpr lptim_l4_variant l4_lptim1{.event_delay_cycles = 1};
 /** @brief STM32L4 LPTIM2: LPTIM1 without the encoder mode, RM0351 34.3 Table 216. */
-inline constexpr lptim_variant l4_lptim2{.encoder = false, .event_delay_cycles = 1};
+inline constexpr lptim_l4_variant l4_lptim2{.encoder = false, .event_delay_cycles = 1};
 
 /**
  * @brief Factory of the LPTIM model, RM0351 section 34.
  * @param variant What differs between the LPTIM instances the row serves.
  */
-[[nodiscard]] auto lptim_factory(lptim_variant variant) -> model_factory;
+[[nodiscard]] auto lptim_l4_factory(lptim_l4_variant variant) -> model_factory;
 
 /** @brief The LPTIM model rows. */
-[[nodiscard]] auto lptim_rows() -> std::span<builtin const>;
+[[nodiscard]] auto lptim_l4_rows() -> std::span<builtin const>;
 }

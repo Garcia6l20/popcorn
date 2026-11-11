@@ -60,7 +60,7 @@ enum class term : std::uint8_t
   trigger,
 };
 
-struct lptim_state
+struct lptim_l4_state
 {
   std::uint64_t anchor_ps{};
   std::uint64_t anchor_frac{};
@@ -107,7 +107,7 @@ struct lptim_state
   std::uint8_t  in2_level{};
   std::uint8_t  down{};
 
-  friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
+  friend auto operator==(lptim_l4_state const&, lptim_l4_state const&) -> bool = default;
 };
 
 struct unmodelled_use
@@ -337,7 +337,7 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
  *   stuck at Stop entry or at a flag clear racing a new event, are outside the model.
  */
-class lptim final : public dispatch_model<lptim, lptim_state>,
+class lptim final : public dispatch_model<lptim, lptim_l4_state>,
                     public clock_listener,
                     public bus_reset_listener,
                     public core_hold_listener,
@@ -345,7 +345,7 @@ class lptim final : public dispatch_model<lptim, lptim_state>,
                     public trigger_sink
 {
 public:
-  lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant const& variant);
+  lptim(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               load(std::span<std::byte const> in) override;
@@ -425,7 +425,7 @@ private:
   void               restore_reset_values();
   void               sync_out(std::uint64_t ps);
 
-  lptim_variant                     variant_;
+  lptim_l4_variant                  variant_;
   register_file&                    regs_;
   reg_ref                           isr_;
   reg_ref                           ier_;
@@ -465,7 +465,7 @@ private:
   std::optional<bool>               listened_;
 };
 
-constexpr std::array<write_entry<lptim>, 8> lptim_writes{
+constexpr std::array<write_entry<lptim>, 8> lptim_l4_writes{
     {
      {"ISR", &lptim::plain_written},
      {"ICR", &lptim::clear_written},
@@ -478,11 +478,11 @@ constexpr std::array<write_entry<lptim>, 8> lptim_writes{
      }
 };
 
-constexpr std::array<write_entry<lptim>, 1> lptim_option_writes{
+constexpr std::array<write_entry<lptim>, 1> lptim_l4_option_writes{
     {{"OR", &lptim::locked_written<locked::option>}}};
 
-lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant const& variant)
-    : dispatch_model{ctx, desc, "LPTIM", lptim_writes}, variant_{variant}, regs_{ctx.regs},
+lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant)
+    : dispatch_model{ctx, desc, "LPTIM", lptim_l4_writes}, variant_{variant}, regs_{ctx.regs},
       isr_{reg("ISR")}, ier_{reg("IER")}, cfgr_{reg("CFGR")}, cr_{reg("CR")}, cmp_{reg("CMP")},
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
       clock_select_{field("CFGR", "CKSEL")}, count_mode_{field("CFGR", "COUNTMODE")},
@@ -506,7 +506,7 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
   expect_field("ICR", "DOWNCF", variant.encoder);
   if(variant.option_register)
   {
-    bind(lptim_option_writes);
+    bind(lptim_l4_option_writes);
   }
   state_.reload = describe("ARR").reset;
   state_.hz     = ctx.clock.hz(kernel_);
@@ -1678,7 +1678,7 @@ void lptim::on_event(std::uint32_t kind, std::uint64_t payload)
 }
 }
 
-auto lptim_factory(lptim_variant variant) -> model_factory
+auto lptim_l4_factory(lptim_l4_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<lptim>(ctx, desc, variant);
@@ -1689,13 +1689,13 @@ namespace
 {
 constexpr auto lptim1_instances = std::to_array<std::string_view>({"LPTIM1"});
 constexpr auto lptim2_instances = std::to_array<std::string_view>({"LPTIM2"});
-constexpr auto lptim_table      = std::to_array<builtin>({
-    row_of<^^lptim_factory, ^^l4_lptim1>(
+constexpr auto lptim_l4_table   = std::to_array<builtin>({
+    row_of<^^lptim_l4_factory, ^^l4_lptim1>(
         {.ip              = "LPTIM",
          .ip_version_glob = "L4_lptimer1_v1*",
          .instance_globs  = lptim1_instances,
          .families        = family::l4}),
-    row_of<^^lptim_factory, ^^l4_lptim2>(
+    row_of<^^lptim_l4_factory, ^^l4_lptim2>(
         {.ip              = "LPTIM",
          .ip_version_glob = "L4_lptimer1_v1*",
          .instance_globs  = lptim2_instances,
@@ -1703,8 +1703,8 @@ constexpr auto lptim_table      = std::to_array<builtin>({
 });
 }
 
-auto lptim_rows() -> std::span<builtin const>
+auto lptim_l4_rows() -> std::span<builtin const>
 {
-  return lptim_table;
+  return lptim_l4_table;
 }
 }

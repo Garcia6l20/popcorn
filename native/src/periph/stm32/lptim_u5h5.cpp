@@ -115,7 +115,7 @@ constexpr auto unmodelled_table = std::to_array<std::string_view>({
 });
 static_assert(unmodelled_table.size() == static_cast<std::size_t>(use::count));
 
-struct lptim_v2_state
+struct lptim_u5h5_state
 {
   std::uint64_t                             anchor_ps{};
   std::uint64_t                             anchor_frac{};
@@ -194,7 +194,7 @@ struct lptim_v2_state
   std::uint8_t                              source_level{};
   std::uint8_t                              source_live{};
 
-  friend auto operator==(lptim_v2_state const&, lptim_v2_state const&) -> bool = default;
+  friend auto operator==(lptim_u5h5_state const&, lptim_u5h5_state const&) -> bool = default;
 };
 
 /**
@@ -712,16 +712,16 @@ struct lptim_v2_state
  *   kernel clock of LPTIMxSEL 001 is delivered as selected. ES0565 2.2.32, LPTIM2_CH1 holding off
  *   the low-power modes through EXTI input 49, is outside the model.
  */
-class lptim_v2 final : public dispatch_model<lptim_v2, lptim_v2_state>,
-                       public clock_listener,
-                       public bus_reset_listener,
-                       public core_hold_listener,
-                       public dma_requester,
-                       public trigger_source,
-                       public trigger_sink
+class lptim_u5h5 final : public dispatch_model<lptim_u5h5, lptim_u5h5_state>,
+                         public clock_listener,
+                         public bus_reset_listener,
+                         public core_hold_listener,
+                         public dma_requester,
+                         public trigger_source,
+                         public trigger_sink
 {
 public:
-  lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_variant const& variant);
+  lptim_u5h5(model_context& ctx, peripheral_desc const& desc, lptim_u5h5_variant const& variant);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               load(std::span<std::byte const> in) override;
@@ -871,7 +871,7 @@ private:
   void               overcapture_cleared(std::size_t channel, std::uint64_t ps);
   void               capture_enable_changed(std::size_t channel, bool on, std::uint64_t ps);
 
-  lptim_v2_variant                          variant_;
+  lptim_u5h5_variant                        variant_;
   register_file&                            regs_;
   reg_ref                                   isr_;
   reg_ref                                   icr_;
@@ -925,7 +925,10 @@ private:
   bool                                      single_logged_  = false;
 };
 
-lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_variant const& variant)
+lptim_u5h5::lptim_u5h5(
+    model_context&            ctx,
+    peripheral_desc const&    desc,
+    lptim_u5h5_variant const& variant)
     : dispatch_model{
           ctx,
           desc,
@@ -961,17 +964,17 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
   {
     out_.emplace_back(ctx.peers, std::format("{}_ch{}", lower(desc.name), channel + 1));
   }
-  auto const writes = std::to_array<write_entry<lptim_v2>>({
-      {variant.status,     &lptim_v2::plain_written                       },
-      {variant.clear,      &lptim_v2::clear_written                       },
-      {variant.interrupts, &lptim_v2::interrupts_written                  },
-      {"CFGR",             &lptim_v2::configuration_written               },
-      {"CR",               &lptim_v2::control_written                     },
-      {"CCR1",             &lptim_v2::value_written<term::compare_written>},
-      {"ARR",              &lptim_v2::value_written<term::reload_written> },
-      {"CNT",              &lptim_v2::plain_written                       },
-      {"CFGR2",            &lptim_v2::inputs_written                      },
-      {"RCR",              &lptim_v2::repetition_written                  },
+  auto const writes = std::to_array<write_entry<lptim_u5h5>>({
+      {variant.status,     &lptim_u5h5::plain_written                       },
+      {variant.clear,      &lptim_u5h5::clear_written                       },
+      {variant.interrupts, &lptim_u5h5::interrupts_written                  },
+      {"CFGR",             &lptim_u5h5::configuration_written               },
+      {"CR",               &lptim_u5h5::control_written                     },
+      {"CCR1",             &lptim_u5h5::value_written<term::compare_written>},
+      {"ARR",              &lptim_u5h5::value_written<term::reload_written> },
+      {"CNT",              &lptim_u5h5::plain_written                       },
+      {"CFGR2",            &lptim_u5h5::inputs_written                      },
+      {"RCR",              &lptim_u5h5::repetition_written                  },
   });
   bind(writes);
   if(variant.encoder)
@@ -985,9 +988,9 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
   }
   if(variant.channels != 0)
   {
-    auto const channel_writes = std::to_array<write_entry<lptim_v2>>({
-        {"CCMR1", &lptim_v2::channels_written                     },
-        {"CCR2",  &lptim_v2::value_written<term::compare2_written>},
+    auto const channel_writes = std::to_array<write_entry<lptim_u5h5>>({
+        {"CCMR1", &lptim_u5h5::channels_written                     },
+        {"CCR2",  &lptim_u5h5::value_written<term::compare2_written>},
     });
     bind(channel_writes);
     channel_enable_   = {field("CCMR1", "CC1E"), field("CCMR1", "CC2E")};
@@ -1012,37 +1015,37 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
   state_.hz     = ctx.clock.hz(kernel_);
 }
 
-auto lptim_v2::now_ps() const -> std::uint64_t
+auto lptim_u5h5::now_ps() const -> std::uint64_t
 {
   return ctx_.clock.time().ps;
 }
 
-auto lptim_v2::enabled() const -> bool
+auto lptim_u5h5::enabled() const -> bool
 {
   return (regs_.peek(cr_.offset) & enable_bit) != 0;
 }
 
-auto lptim_v2::external() const -> bool
+auto lptim_u5h5::external() const -> bool
 {
   return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0 or encoder();
 }
 
-auto lptim_v2::encoder() const -> bool
+auto lptim_u5h5::encoder() const -> bool
 {
   return variant_.encoder and get(regs_, encoder_) != 0 and get(regs_, clock_select_) == 0;
 }
 
-auto lptim_v2::clocked_by_input() const -> bool
+auto lptim_u5h5::clocked_by_input() const -> bool
 {
   return get(regs_, clock_select_) != 0;
 }
 
-auto lptim_v2::kernel_hz() const -> std::uint64_t
+auto lptim_u5h5::kernel_hz() const -> std::uint64_t
 {
   return state_.held != 0 or clocked_by_input() ? 0 : ctx_.clock.hz(kernel_);
 }
 
-auto lptim_v2::input_now(bool second) const -> bool
+auto lptim_u5h5::input_now(bool second) const -> bool
 {
   auto const& signal = second ? in2_ : in1_;
   return (regs_.peek(inputs_.offset) & (second ? input2_select : input1_select)) == 0
@@ -1053,7 +1056,7 @@ auto lptim_v2::input_now(bool second) const -> bool
          });
 }
 
-auto lptim_v2::selects_unmodelled_input() const -> bool
+auto lptim_u5h5::selects_unmodelled_input() const -> bool
 {
   auto const select = regs_.peek(inputs_.offset);
   return (external() and (select & input1_select) != 0)
@@ -1064,7 +1067,7 @@ auto lptim_v2::selects_unmodelled_input() const -> bool
           and variant_.capture2_inputs[(select & capture2_select) >> 20].domain.empty());
 }
 
-auto lptim_v2::line_of(bool second) -> filter_line
+auto lptim_u5h5::line_of(bool second) -> filter_line
 {
   if(second)
   {
@@ -1073,18 +1076,18 @@ auto lptim_v2::line_of(bool second) -> filter_line
   return {state_.input_level, state_.input_filtered, state_.input_pending, state_.input_due};
 }
 
-auto lptim_v2::active(bool rising) const -> bool
+auto lptim_u5h5::active(bool rising) const -> bool
 {
   auto const polarity = get(regs_, clock_polarity_);
   return not((polarity == 0 and not rising) or (polarity == 1 and rising));
 }
 
-auto lptim_v2::capturing(std::size_t channel) const -> bool
+auto lptim_u5h5::capturing(std::size_t channel) const -> bool
 {
   return variant_.capture and variant_.channels != 0 and get(regs_, channel_select_[channel]) != 0;
 }
 
-auto lptim_v2::capture_input_now(std::size_t channel) const -> bool
+auto lptim_u5h5::capture_input_now(std::size_t channel) const -> bool
 {
   auto const& signal = capture_inputs_[channel];
   return (regs_.peek(inputs_.offset) & (channel == 0 ? capture1_select : capture2_select)) == 0
@@ -1095,14 +1098,14 @@ auto lptim_v2::capture_input_now(std::size_t channel) const -> bool
          });
 }
 
-auto lptim_v2::capture_line(std::size_t channel) -> filter_line
+auto lptim_u5h5::capture_line(std::size_t channel) -> filter_line
 {
   return {
       state_.capture_level[channel], state_.capture_filtered[channel],
       state_.capture_pending[channel], state_.capture_filter_due[channel]};
 }
 
-auto lptim_v2::capture_due(std::uint64_t edge_ps, std::size_t channel) const -> std::uint64_t
+auto lptim_u5h5::capture_due(std::uint64_t edge_ps, std::size_t channel) const -> std::uint64_t
 {
   if(state_.hz == 0)
   {
@@ -1116,29 +1119,29 @@ auto lptim_v2::capture_due(std::uint64_t edge_ps, std::size_t channel) const -> 
   return ceil_ps(base + (ticks + offset) * tick_unit());
 }
 
-auto lptim_v2::anchor() const -> wide
+auto lptim_u5h5::anchor() const -> wide
 {
   return wide{state_.anchor_ps} * state_.hz + state_.anchor_frac;
 }
 
-auto lptim_v2::tick_unit() const -> wide
+auto lptim_u5h5::tick_unit() const -> wide
 {
   return (wide{1} << get(regs_, prescaler_)) * ps_per_second;
 }
 
-void lptim_v2::set_anchor(wide at)
+void lptim_u5h5::set_anchor(wide at)
 {
   state_.anchor_ps   = static_cast<std::uint64_t>(at / state_.hz);
   state_.anchor_frac = static_cast<std::uint64_t>(at % state_.hz);
 }
 
-auto lptim_v2::first_wrap() const -> std::uint64_t
+auto lptim_u5h5::first_wrap() const -> std::uint64_t
 {
   auto const from = state_.anchor_count;
   return from <= state_.reload ? state_.reload + 1u - from : counter_top + 1u - from;
 }
 
-auto lptim_v2::position(std::uint64_t ticks) const -> std::uint32_t
+auto lptim_u5h5::position(std::uint64_t ticks) const -> std::uint32_t
 {
   auto const wrap = first_wrap();
   if(ticks < wrap)
@@ -1148,7 +1151,7 @@ auto lptim_v2::position(std::uint64_t ticks) const -> std::uint32_t
   return static_cast<std::uint32_t>((ticks - wrap) % (std::uint64_t{state_.reload} + 1u));
 }
 
-auto lptim_v2::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
+auto lptim_u5h5::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
 {
   auto const at = wide{ps} * state_.hz;
   if(state_.running == 0 or state_.hz == 0 or external() or at < anchor())
@@ -1158,18 +1161,18 @@ auto lptim_v2::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
   return static_cast<std::uint64_t>((at - anchor()) / tick_unit());
 }
 
-auto lptim_v2::count_at(std::uint64_t ps) const -> std::uint32_t
+auto lptim_u5h5::count_at(std::uint64_t ps) const -> std::uint32_t
 {
   auto const ticks = ticks_at(ps);
   return ticks ? position(*ticks) : state_.anchor_count;
 }
 
-auto lptim_v2::ceil_ps(wide at) const -> std::uint64_t
+auto lptim_u5h5::ceil_ps(wide at) const -> std::uint64_t
 {
   return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
 }
 
-auto lptim_v2::ticks_to(std::uint32_t value) const -> std::uint64_t
+auto lptim_u5h5::ticks_to(std::uint32_t value) const -> std::uint64_t
 {
   auto const from   = state_.anchor_count;
   auto const period = std::uint64_t{state_.reload} + 1u;
@@ -1177,7 +1180,7 @@ auto lptim_v2::ticks_to(std::uint32_t value) const -> std::uint64_t
                                : first_wrap() + value;
 }
 
-auto lptim_v2::match_due(std::uint32_t value) const -> std::optional<std::uint64_t>
+auto lptim_u5h5::match_due(std::uint32_t value) const -> std::optional<std::uint64_t>
 {
   if(state_.running == 0 or state_.hz == 0 or external() or value > state_.reload)
   {
@@ -1198,13 +1201,13 @@ auto lptim_v2::match_due(std::uint32_t value) const -> std::optional<std::uint64
   return ceil_ps(at);
 }
 
-auto lptim_v2::kernel_due(std::uint64_t ps, std::uint64_t cycles) const -> std::uint64_t
+auto lptim_u5h5::kernel_due(std::uint64_t ps, std::uint64_t cycles) const -> std::uint64_t
 {
   auto const units = wide{cycles} * ps_per_second;
   return state_.hz == 0 ? static_cast<std::uint64_t>(units) : ceil_ps(wide{ps} * state_.hz + units);
 }
 
-auto lptim_v2::repetition_ok_due(std::uint64_t ps) const -> std::uint64_t
+auto lptim_u5h5::repetition_ok_due(std::uint64_t ps) const -> std::uint64_t
 {
   auto const cycles = wide{ok_cycles} * ps_per_second;
   if(state_.hz == 0)
@@ -1219,18 +1222,18 @@ auto lptim_v2::repetition_ok_due(std::uint64_t ps) const -> std::uint64_t
   return ceil_ps(wide{crossed} * state_.hz + cycles);
 }
 
-auto lptim_v2::period() const -> std::uint64_t
+auto lptim_u5h5::period() const -> std::uint64_t
 {
   return std::uint64_t{state_.reload} + 1u;
 }
 
-auto lptim_v2::overflows(std::uint64_t ticks) const -> std::uint64_t
+auto lptim_u5h5::overflows(std::uint64_t ticks) const -> std::uint64_t
 {
   auto const wrap = first_wrap();
   return ticks < wrap ? 0 : 1 + (ticks - wrap) / period();
 }
 
-auto lptim_v2::repetition_after(std::uint64_t count) const -> std::uint32_t
+auto lptim_u5h5::repetition_after(std::uint64_t count) const -> std::uint32_t
 {
   if(count <= state_.repetition)
   {
@@ -1241,12 +1244,12 @@ auto lptim_v2::repetition_after(std::uint64_t count) const -> std::uint32_t
       state_.repetition_reload - (count - state_.repetition - 1u) % cycle);
 }
 
-auto lptim_v2::update_ticks() const -> std::uint64_t
+auto lptim_u5h5::update_ticks() const -> std::uint64_t
 {
   return first_wrap() + std::uint64_t{state_.repetition} * period();
 }
 
-auto lptim_v2::update_due() const -> std::optional<std::uint64_t>
+auto lptim_u5h5::update_due() const -> std::optional<std::uint64_t>
 {
   if(state_.running == 0 or state_.hz == 0 or external())
   {
@@ -1263,27 +1266,27 @@ auto lptim_v2::update_due() const -> std::optional<std::uint64_t>
   return ceil_ps(at);
 }
 
-auto lptim_v2::preload() const -> bool
+auto lptim_u5h5::preload() const -> bool
 {
   return get(regs_, preload_) != 0;
 }
 
-auto lptim_v2::wave() const -> bool
+auto lptim_u5h5::wave() const -> bool
 {
   return get(regs_, wave_) != 0;
 }
 
-auto lptim_v2::outputs() const -> std::size_t
+auto lptim_u5h5::outputs() const -> std::size_t
 {
   return out_.size();
 }
 
-auto lptim_v2::compare_of(std::size_t channel) const -> std::uint32_t
+auto lptim_u5h5::compare_of(std::size_t channel) const -> std::uint32_t
 {
   return channel == 0 ? state_.compare : state_.compare2;
 }
 
-auto lptim_v2::drive(bool raw, std::size_t channel) const -> bool
+auto lptim_u5h5::drive(bool raw, std::size_t channel) const -> bool
 {
   if(variant_.channels == 0)
   {
@@ -1294,7 +1297,7 @@ auto lptim_v2::drive(bool raw, std::size_t channel) const -> bool
      and raw != ((get(regs_, channel_polarity_[channel]) & 1u) != 0);
 }
 
-auto lptim_v2::raw_at(std::uint64_t ps, std::size_t channel) const -> bool
+auto lptim_u5h5::raw_at(std::uint64_t ps, std::size_t channel) const -> bool
 {
   if(((state_.latched >> channel) & 1u) != 0)
   {
@@ -1321,7 +1324,7 @@ auto lptim_v2::raw_at(std::uint64_t ps, std::size_t channel) const -> bool
   return compare_of(channel) < count and count <= state_.reload;
 }
 
-auto lptim_v2::out_due() const -> std::optional<std::uint64_t>
+auto lptim_u5h5::out_due() const -> std::optional<std::uint64_t>
 {
   if(state_.running == 0 or state_.hz == 0 or external())
   {
@@ -1358,7 +1361,7 @@ auto lptim_v2::out_due() const -> std::optional<std::uint64_t>
   return best;
 }
 
-void lptim_v2::sync_out(std::uint64_t ps)
+void lptim_u5h5::sync_out(std::uint64_t ps)
 {
   for(std::size_t channel = 0; channel < outputs(); ++channel)
   {
@@ -1382,13 +1385,13 @@ void lptim_v2::sync_out(std::uint64_t ps)
   state_.out_ps = std::max(state_.out_ps, ps);
 }
 
-void lptim_v2::load(std::span<std::byte const> in)
+void lptim_u5h5::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
   listened_ = {};
 }
 
-void lptim_v2::interest_changed()
+void lptim_u5h5::interest_changed()
 {
   catch_up(now_ps());
   refresh();
@@ -1399,12 +1402,12 @@ void lptim_v2::interest_changed()
   reschedule();
 }
 
-auto lptim_v2::produces(std::string_view signal) const -> bool
+auto lptim_u5h5::produces(std::string_view signal) const -> bool
 {
   return std::ranges::any_of(out_, [&](auto const& out) { return out.signal() == signal; });
 }
 
-auto lptim_v2::level(std::string_view signal) const -> std::optional<bool>
+auto lptim_u5h5::level(std::string_view signal) const -> std::optional<bool>
 {
   for(std::size_t channel = 0; channel < outputs(); ++channel)
   {
@@ -1416,7 +1419,7 @@ auto lptim_v2::level(std::string_view signal) const -> std::optional<bool>
   return std::nullopt;
 }
 
-auto lptim_v2::next_term() const -> std::optional<due_term>
+auto lptim_u5h5::next_term() const -> std::optional<due_term>
 {
   auto best = std::optional<due_term>{};
   if(state_.hz == 0)
@@ -1476,7 +1479,7 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
   return best;
 }
 
-void lptim_v2::offer_captures(std::optional<due_term>& best) const
+void lptim_u5h5::offer_captures(std::optional<due_term>& best) const
 {
   auto const offer = [&](std::uint64_t due, term which) {
     if(due != 0 and (not best or due < best->due))
@@ -1500,7 +1503,7 @@ void lptim_v2::offer_captures(std::optional<due_term>& best) const
   }
 }
 
-void lptim_v2::raise_flag(std::uint32_t flag)
+void lptim_u5h5::raise_flag(std::uint32_t flag)
 {
   state_.isr |= flag;
   if((state_.interrupts & flag) != 0)
@@ -1513,7 +1516,7 @@ void lptim_v2::raise_flag(std::uint32_t flag)
   }
 }
 
-auto lptim_v2::request_wanted(std::size_t request) const -> bool
+auto lptim_u5h5::request_wanted(std::size_t request) const -> bool
 {
   if(variant_.channels == 0 or not enabled())
   {
@@ -1528,13 +1531,13 @@ auto lptim_v2::request_wanted(std::size_t request) const -> bool
      and get(regs_, channel_enable_[request]) != 0;
 }
 
-auto lptim_v2::wants_update_events() const -> bool
+auto lptim_u5h5::wants_update_events() const -> bool
 {
   return (state_.isr & update_event) == 0
       or (state_.requested[update_request] == 0 and request_wanted(update_request));
 }
 
-void lptim_v2::raise_request(std::size_t request)
+void lptim_u5h5::raise_request(std::size_t request)
 {
   if(state_.requested[request] != 0 or not request_wanted(request))
   {
@@ -1544,7 +1547,7 @@ void lptim_v2::raise_request(std::size_t request)
   requests_[request].set(true);
 }
 
-void lptim_v2::drop_request(std::size_t request)
+void lptim_u5h5::drop_request(std::size_t request)
 {
   if(std::exchange(state_.requested[request], std::uint8_t{0}) != 0)
   {
@@ -1552,7 +1555,7 @@ void lptim_v2::drop_request(std::size_t request)
   }
 }
 
-void lptim_v2::sync_requests()
+void lptim_u5h5::sync_requests()
 {
   for(std::size_t request = 0; request < state_.requested.size(); ++request)
   {
@@ -1563,7 +1566,7 @@ void lptim_v2::sync_requests()
   }
 }
 
-void lptim_v2::acknowledged(dma_controller const& by, std::uint32_t request)
+void lptim_u5h5::acknowledged(dma_controller const& by, std::uint32_t request)
 {
   catch_up(now_ps());
   for(std::size_t index = 0; index < requests_.size(); ++index)
@@ -1577,10 +1580,10 @@ void lptim_v2::acknowledged(dma_controller const& by, std::uint32_t request)
   reschedule();
 }
 
-void lptim_v2::transfer_completed(dma_controller const&, std::uint32_t)
+void lptim_u5h5::transfer_completed(dma_controller const&, std::uint32_t)
 {}
 
-void lptim_v2::on_core_hold(bool held)
+void lptim_u5h5::on_core_hold(bool held)
 {
   if(held)
   {
@@ -1601,7 +1604,7 @@ void lptim_v2::on_core_hold(bool held)
   reschedule();
 }
 
-void lptim_v2::apply(due_term const& next)
+void lptim_u5h5::apply(due_term const& next)
 {
   if(next.which == term::compare or next.which == term::compare2 or next.which == term::reload)
   {
@@ -1762,7 +1765,7 @@ void lptim_v2::apply(due_term const& next)
   target.due   = 0;
 }
 
-auto lptim_v2::slot(term which) -> value_slot
+auto lptim_u5h5::slot(term which) -> value_slot
 {
   switch(which)
   {
@@ -1791,13 +1794,13 @@ auto lptim_v2::slot(term which) -> value_slot
   }
 }
 
-auto lptim_v2::in_flight(std::uint32_t value, std::uint64_t ps) const -> bool
+auto lptim_u5h5::in_flight(std::uint32_t value, std::uint64_t ps) const -> bool
 {
   auto const due = match_due(value);
   return due and *due > ps and wide{*due} * state_.hz - tick_unit() <= wide{ps} * state_.hz;
 }
 
-auto lptim_v2::settle_to(std::uint64_t ps) -> bool
+auto lptim_u5h5::settle_to(std::uint64_t ps) -> bool
 {
   if(update_due() == ps)
   {
@@ -1811,7 +1814,7 @@ auto lptim_v2::settle_to(std::uint64_t ps) -> bool
   return false;
 }
 
-void lptim_v2::reanchor(std::uint64_t ps, std::uint64_t ticks)
+void lptim_u5h5::reanchor(std::uint64_t ps, std::uint64_t ticks)
 {
   state_.repetition   = repetition_after(overflows(ticks));
   state_.anchor_count = position(ticks);
@@ -1819,7 +1822,7 @@ void lptim_v2::reanchor(std::uint64_t ps, std::uint64_t ticks)
   set_anchor(anchor() + wide{ticks} * tick_unit());
 }
 
-void lptim_v2::catch_up(std::uint64_t ps)
+void lptim_u5h5::catch_up(std::uint64_t ps)
 {
   std::array<bool, 2> wanted{};
   for(std::size_t channel = 0; channel < outputs(); ++channel)
@@ -1844,7 +1847,7 @@ void lptim_v2::catch_up(std::uint64_t ps)
   }
 }
 
-void lptim_v2::start(std::uint64_t ps, bool single)
+void lptim_u5h5::start(std::uint64_t ps, bool single)
 {
   state_.divided = 0;
   if(state_.hz == 0)
@@ -1862,7 +1865,7 @@ void lptim_v2::start(std::uint64_t ps, bool single)
   begin(wide{ps} * state_.hz + wide{start_cycles} * ps_per_second, ps, single);
 }
 
-void lptim_v2::begin(wide at, std::uint64_t ps, bool single)
+void lptim_u5h5::begin(wide at, std::uint64_t ps, bool single)
 {
   auto const ready = wide{state_.enable_ps} * state_.hz + 2 * tick_unit();
   set_anchor(std::max(at, ready));
@@ -1874,7 +1877,7 @@ void lptim_v2::begin(wide at, std::uint64_t ps, bool single)
   state_.down         = 0;
 }
 
-void lptim_v2::switch_mode(std::uint64_t ps, bool single)
+void lptim_u5h5::switch_mode(std::uint64_t ps, bool single)
 {
   if(state_.switch_due != 0)
   {
@@ -1893,7 +1896,7 @@ void lptim_v2::switch_mode(std::uint64_t ps, bool single)
   state_.switch_single = single ? 1 : 0;
 }
 
-void lptim_v2::stop()
+void lptim_u5h5::stop()
 {
   if(state_.update_pending != 0)
   {
@@ -1906,7 +1909,7 @@ void lptim_v2::stop()
   state_.anchor_count = 0;
 }
 
-void lptim_v2::transfer_preloaded()
+void lptim_u5h5::transfer_preloaded()
 {
   if((state_.preloaded & 1u) != 0)
   {
@@ -1923,7 +1926,7 @@ void lptim_v2::transfer_preloaded()
   state_.preloaded = 0;
 }
 
-void lptim_v2::restart_count(std::uint64_t ps)
+void lptim_u5h5::restart_count(std::uint64_t ps)
 {
   if(external())
   {
@@ -1941,7 +1944,7 @@ void lptim_v2::restart_count(std::uint64_t ps)
   state_.anchor_count = 0;
 }
 
-void lptim_v2::unmodelled(use which, std::string_view reg_name)
+void lptim_u5h5::unmodelled(use which, std::string_view reg_name)
 {
   auto const index = static_cast<std::size_t>(which);
   warn_once_or_refuse(
@@ -1949,7 +1952,7 @@ void lptim_v2::unmodelled(use which, std::string_view reg_name)
       std::string{unmodelled_table[index]});
 }
 
-void lptim_v2::refuse_channels()
+void lptim_u5h5::refuse_channels()
 {
   if(variant_.channels == 0)
   {
@@ -1972,7 +1975,7 @@ void lptim_v2::refuse_channels()
   }
 }
 
-void lptim_v2::refuse_clock()
+void lptim_u5h5::refuse_clock()
 {
   auto const polarity = get(regs_, clock_polarity_);
   auto const stopped  = ctx_.clock.hz(kernel_) == 0;
@@ -2006,7 +2009,7 @@ void lptim_v2::refuse_clock()
   }
 }
 
-void lptim_v2::refuse_at_start()
+void lptim_u5h5::refuse_at_start()
 {
   if(selects_unmodelled_input())
   {
@@ -2016,7 +2019,7 @@ void lptim_v2::refuse_at_start()
   refuse_clock();
 }
 
-void lptim_v2::refresh()
+void lptim_u5h5::refresh()
 {
   sync_out(now_ps());
   sync_requests();
@@ -2032,7 +2035,7 @@ void lptim_v2::refresh()
   }
 }
 
-void lptim_v2::reschedule()
+void lptim_u5h5::reschedule()
 {
   sync_source(now_ps());
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
@@ -2048,12 +2051,12 @@ void lptim_v2::reschedule()
       ctx_.events.schedule_at(vtime{next->due}, tick_event, ++state_.generation, ctx_.clock) + 1;
 }
 
-void lptim_v2::reset(register_file&, reset_kind)
+void lptim_u5h5::reset(register_file&, reset_kind)
 {
   restore_reset_values();
 }
 
-void lptim_v2::on_bus_reset()
+void lptim_u5h5::on_bus_reset()
 {
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
   {
@@ -2077,7 +2080,7 @@ void lptim_v2::on_bus_reset()
   take_input_level();
 }
 
-void lptim_v2::take_input_level()
+void lptim_u5h5::take_input_level()
 {
   auto const level       = input_now() ? 1 : 0;
   state_.input_level     = static_cast<std::uint8_t>(level);
@@ -2107,12 +2110,12 @@ void lptim_v2::take_input_level()
   state_.trigger_due      = 0;
 }
 
-void lptim_v2::arm(bool single)
+void lptim_u5h5::arm(bool single)
 {
   state_.armed_mode = single ? 2 : 1;
 }
 
-auto lptim_v2::filtered_change(
+auto lptim_u5h5::filtered_change(
     filter_line   line,
     std::uint64_t ps,
     bool          level,
@@ -2150,7 +2153,7 @@ auto lptim_v2::filtered_change(
   return false;
 }
 
-void lptim_v2::trigger_changed(std::uint64_t ps, bool level)
+void lptim_u5h5::trigger_changed(std::uint64_t ps, bool level)
 {
   auto const live =
       enabled() and get(regs_, trigger_enable_) != 0 and get(regs_, trigger_select_) == 0;
@@ -2164,7 +2167,7 @@ void lptim_v2::trigger_changed(std::uint64_t ps, bool level)
   }
 }
 
-void lptim_v2::trigger_fired(std::uint64_t ps, bool rising)
+void lptim_u5h5::trigger_fired(std::uint64_t ps, bool rising)
 {
   auto const polarity = get(regs_, trigger_enable_);
   if((polarity == 1 and not rising) or (polarity == 2 and rising))
@@ -2194,7 +2197,7 @@ void lptim_v2::trigger_fired(std::uint64_t ps, bool rising)
   state_.started_once = 1;
 }
 
-void lptim_v2::restart_on_trigger(std::uint64_t ps, bool single)
+void lptim_u5h5::restart_on_trigger(std::uint64_t ps, bool single)
 {
   if(state_.hz == 0)
   {
@@ -2206,7 +2209,7 @@ void lptim_v2::restart_on_trigger(std::uint64_t ps, bool single)
   state_.divided = 0;
 }
 
-void lptim_v2::restore_reset_values()
+void lptim_u5h5::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -2221,7 +2224,7 @@ void lptim_v2::restore_reset_values()
   line_->lower();
 }
 
-void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
+void lptim_u5h5::rebase(std::uint64_t ps, std::uint64_t hz)
 {
   auto       dues = std::array{&state_.compare_due,    &state_.compare2_due,   &state_.reload_due,
                                &state_.interrupts_due, &state_.repetition_due, &state_.reset_due,
@@ -2283,7 +2286,7 @@ void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
   state_.paused_units    = 0;
 }
 
-void lptim_v2::on_clock_change()
+void lptim_u5h5::on_clock_change()
 {
   auto const hz = kernel_hz();
   if(hz == state_.hz)
@@ -2303,10 +2306,10 @@ void lptim_v2::on_clock_change()
   reschedule();
 }
 
-void lptim_v2::plain_written(std::uint32_t, std::uint32_t)
+void lptim_u5h5::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-void lptim_v2::clear_written(std::uint32_t, std::uint32_t now)
+void lptim_u5h5::clear_written(std::uint32_t, std::uint32_t now)
 {
   catch_up(now_ps());
   for(std::size_t channel = 0; channel < 2 and variant_.capture and variant_.channels != 0;
@@ -2324,7 +2327,7 @@ void lptim_v2::clear_written(std::uint32_t, std::uint32_t now)
   reschedule();
 }
 
-void lptim_v2::interrupts_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::interrupts_written(std::uint32_t old, std::uint32_t now)
 {
   if(auto const kept = now & variant_.interrupt_mask; kept != now)
   {
@@ -2366,7 +2369,7 @@ void lptim_v2::interrupts_written(std::uint32_t old, std::uint32_t now)
   reschedule();
 }
 
-void lptim_v2::configuration_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::configuration_written(std::uint32_t old, std::uint32_t now)
 {
   if(not enabled())
   {
@@ -2395,7 +2398,7 @@ void lptim_v2::configuration_written(std::uint32_t old, std::uint32_t now)
       "a CFGR write with CR.ENABLE 1: the register keeps its value");
 }
 
-void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::control_written(std::uint32_t old, std::uint32_t now)
 {
   auto const t = now_ps();
   catch_up(t);
@@ -2473,7 +2476,7 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void lptim_v2::channels_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::channels_written(std::uint32_t old, std::uint32_t now)
 {
   auto const at = reg("CCMR1").offset;
   regs_.poke(at, old);
@@ -2514,7 +2517,7 @@ void lptim_v2::channels_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void lptim_v2::repetition_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::repetition_written(std::uint32_t old, std::uint32_t now)
 {
   if(not enabled())
   {
@@ -2540,7 +2543,7 @@ void lptim_v2::repetition_written(std::uint32_t old, std::uint32_t now)
   reschedule();
 }
 
-template <term Which> void lptim_v2::value_written(std::uint32_t old, std::uint32_t now)
+template <term Which> void lptim_u5h5::value_written(std::uint32_t old, std::uint32_t now)
 {
   constexpr auto reload     = Which == term::reload_written;
   constexpr auto second     = Which == term::compare2_written;
@@ -2587,7 +2590,7 @@ template <term Which> void lptim_v2::value_written(std::uint32_t old, std::uint3
   reschedule();
 }
 
-auto lptim_v2::on_read(
+auto lptim_u5h5::on_read(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -2621,12 +2624,12 @@ auto lptim_v2::on_read(
   return value;
 }
 
-auto lptim_v2::storage_only(std::uint32_t) const -> bool
+auto lptim_u5h5::storage_only(std::uint32_t) const -> bool
 {
   return false;
 }
 
-void lptim_v2::inputs_written(std::uint32_t old, std::uint32_t now)
+void lptim_u5h5::inputs_written(std::uint32_t old, std::uint32_t now)
 {
   auto const changed = old ^ now;
   if((changed & (input1_select | input2_select | capture1_select | capture2_select)) == 0)
@@ -2662,17 +2665,17 @@ void lptim_v2::inputs_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-auto lptim_v2::listens(std::string_view) const -> bool
+auto lptim_u5h5::listens(std::string_view) const -> bool
 {
   return false;
 }
 
-auto lptim_v2::can_listen(std::string_view) const -> bool
+auto lptim_u5h5::can_listen(std::string_view) const -> bool
 {
   return false;
 }
 
-auto lptim_v2::takes_pin(std::string_view signal) const -> bool
+auto lptim_u5h5::takes_pin(std::string_view signal) const -> bool
 {
   return signal == in1_
       or signal == etr_
@@ -2681,7 +2684,7 @@ auto lptim_v2::takes_pin(std::string_view signal) const -> bool
              capture_inputs_, [&](auto const& one) { return not one.empty() and one == signal; });
 }
 
-void lptim_v2::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
+void lptim_u5h5::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
   for(std::size_t channel = 0; channel < 2; ++channel)
   {
@@ -2728,7 +2731,7 @@ void lptim_v2::triggered(std::string_view signal, trigger_edge edge, trigger_tim
   reschedule();
 }
 
-void lptim_v2::capture_changed(std::size_t channel, std::uint64_t ps, bool level)
+void lptim_u5h5::capture_changed(std::size_t channel, std::uint64_t ps, bool level)
 {
   if(level != (state_.capture_level[channel] != 0))
   {
@@ -2741,7 +2744,7 @@ void lptim_v2::capture_changed(std::size_t channel, std::uint64_t ps, bool level
   }
 }
 
-void lptim_v2::capture_edge(std::size_t channel, std::uint64_t ps, bool rising)
+void lptim_u5h5::capture_edge(std::size_t channel, std::uint64_t ps, bool rising)
 {
   auto const polarity = get(regs_, channel_polarity_[channel]);
   if((polarity == 0 and not rising) or (polarity == 1 and rising))
@@ -2771,7 +2774,7 @@ void lptim_v2::capture_edge(std::size_t channel, std::uint64_t ps, bool rising)
   }
 }
 
-void lptim_v2::apply_capture(std::size_t channel, std::uint64_t due)
+void lptim_u5h5::apply_capture(std::size_t channel, std::uint64_t due)
 {
   auto& queue = state_.captures[channel];
   queue.erase(queue.begin());
@@ -2788,13 +2791,13 @@ void lptim_v2::apply_capture(std::size_t channel, std::uint64_t due)
   state_.capture_last_ps[channel] = due;
 }
 
-void lptim_v2::drop_captures(std::size_t channel)
+void lptim_u5h5::drop_captures(std::size_t channel)
 {
   state_.captures[channel].clear();
   state_.capture_divided[channel] = 0;
 }
 
-auto lptim_v2::source_hz() const -> std::uint64_t
+auto lptim_u5h5::source_hz() const -> std::uint64_t
 {
   auto const select = (regs_.peek(inputs_.offset) & capture2_select) >> 20;
   if(select == 0 or variant_.capture2_inputs[select].domain.empty())
@@ -2804,12 +2807,12 @@ auto lptim_v2::source_hz() const -> std::uint64_t
   return ctx_.clock.hz(source_domains_[select - 1]);
 }
 
-auto lptim_v2::source_wanted() const -> bool
+auto lptim_u5h5::source_wanted() const -> bool
 {
   return enabled() and capturing(1) and get(regs_, channel_enable_[1]) != 0 and source_hz() != 0;
 }
 
-auto lptim_v2::source_due() const -> std::optional<std::uint64_t>
+auto lptim_u5h5::source_due() const -> std::optional<std::uint64_t>
 {
   if(state_.source_live == 0)
   {
@@ -2826,7 +2829,7 @@ auto lptim_v2::source_due() const -> std::optional<std::uint64_t>
   return state_.source_ps + static_cast<std::uint64_t>(half);
 }
 
-void lptim_v2::sync_source(std::uint64_t ps)
+void lptim_u5h5::sync_source(std::uint64_t ps)
 {
   auto const wanted = variant_.capture and variant_.channels != 0 and source_wanted();
   if(wanted and state_.source_live == 0)
@@ -2837,7 +2840,7 @@ void lptim_v2::sync_source(std::uint64_t ps)
   state_.source_live = wanted ? 1 : 0;
 }
 
-auto lptim_v2::in_capture_pulse(std::size_t channel, std::uint64_t ps) const -> bool
+auto lptim_u5h5::in_capture_pulse(std::size_t channel, std::uint64_t ps) const -> bool
 {
   auto const near = [&](std::uint64_t due) {
     return state_.hz != 0 and wide{due} * state_.hz <= wide{ps} * state_.hz + tick_unit();
@@ -2847,7 +2850,7 @@ auto lptim_v2::in_capture_pulse(std::size_t channel, std::uint64_t ps) const -> 
       or (not queue.empty() and near(queue.front()));
 }
 
-void lptim_v2::overcapture_cleared(std::size_t channel, std::uint64_t ps)
+void lptim_u5h5::overcapture_cleared(std::size_t channel, std::uint64_t ps)
 {
   if(in_capture_pulse(channel, ps))
   {
@@ -2855,7 +2858,7 @@ void lptim_v2::overcapture_cleared(std::size_t channel, std::uint64_t ps)
   }
 }
 
-void lptim_v2::capture_enable_changed(std::size_t channel, bool on, std::uint64_t ps)
+void lptim_u5h5::capture_enable_changed(std::size_t channel, bool on, std::uint64_t ps)
 {
   if(not on)
   {
@@ -2875,7 +2878,7 @@ void lptim_v2::capture_enable_changed(std::size_t channel, bool on, std::uint64_
   }
 }
 
-void lptim_v2::input_changed(std::uint64_t ps, bool level, bool second)
+void lptim_u5h5::input_changed(std::uint64_t ps, bool level, bool second)
 {
   auto const live = enabled() and (second ? encoder() : external());
   if(filtered_change(line_of(second), ps, level, get(regs_, clock_filter_), live))
@@ -2885,7 +2888,7 @@ void lptim_v2::input_changed(std::uint64_t ps, bool level, bool second)
   }
 }
 
-void lptim_v2::input_edge(std::uint64_t ps, bool rising, bool second)
+void lptim_u5h5::input_edge(std::uint64_t ps, bool rising, bool second)
 {
   if(state_.held != 0 or not active(rising))
   {
@@ -2908,7 +2911,7 @@ void lptim_v2::input_edge(std::uint64_t ps, bool rising, bool second)
   count_edge();
 }
 
-void lptim_v2::encoder_edge(bool second, bool rising)
+void lptim_u5h5::encoder_edge(bool second, bool rising)
 {
   auto const opposite = (second ? state_.input_filtered : state_.input2_filtered) != 0;
   auto const up       = second ? rising == opposite : rising != opposite;
@@ -2920,7 +2923,7 @@ void lptim_v2::encoder_edge(bool second, bool rising)
   count_edge(up);
 }
 
-void lptim_v2::clock_edge(std::uint64_t ps)
+void lptim_u5h5::clock_edge(std::uint64_t ps)
 {
   if(state_.enable_left != 0)
   {
@@ -2964,7 +2967,7 @@ void lptim_v2::clock_edge(std::uint64_t ps)
   }
 }
 
-void lptim_v2::count_edge(bool up)
+void lptim_u5h5::count_edge(bool up)
 {
   if(state_.update_pending != 0)
   {
@@ -3007,7 +3010,7 @@ void lptim_v2::count_edge(bool up)
   }
 }
 
-void lptim_v2::on_event(std::uint32_t kind, std::uint64_t payload)
+void lptim_u5h5::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind != tick_event or payload != state_.generation)
   {
@@ -3020,10 +3023,10 @@ void lptim_v2::on_event(std::uint32_t kind, std::uint64_t payload)
 }
 }
 
-auto lptim_v2_factory(lptim_v2_variant variant) -> model_factory
+auto lptim_u5h5_factory(lptim_u5h5_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<lptim_v2>(ctx, desc, variant);
+    return std::make_shared<lptim_u5h5>(ctx, desc, variant);
   };
 }
 
@@ -3034,43 +3037,43 @@ constexpr auto lptim2_instance    = std::to_array<std::string_view>({"LPTIM2"});
 constexpr auto lptim3_instance    = std::to_array<std::string_view>({"LPTIM3"});
 constexpr auto lptim4_instance    = std::to_array<std::string_view>({"LPTIM4"});
 constexpr auto lptim356_instances = std::to_array<std::string_view>({"LPTIM3", "LPTIM5", "LPTIM6"});
-constexpr auto lptim_v2_table     = std::to_array<builtin>({
-    row_of<^^lptim_v2_factory, ^^u5_lptim1>(
+constexpr auto lptim_u5h5_table   = std::to_array<builtin>({
+    row_of<^^lptim_u5h5_factory, ^^u5_lptim1>(
         {.ip              = "LPTIM",
          .ip_version_glob = "U5_lptimer1_v2*",
          .instance_globs  = lptim1_instance,
          .families        = family::u5}),
-    row_of<^^lptim_v2_factory, ^^u5_lptim2>(
+    row_of<^^lptim_u5h5_factory, ^^u5_lptim2>(
         {.ip              = "LPTIM",
          .ip_version_glob = "U5_lptimer1_v2*",
          .instance_globs  = lptim2_instance,
          .families        = family::u5}),
-    row_of<^^lptim_v2_factory, ^^u5_lptim3>(
+    row_of<^^lptim_u5h5_factory, ^^u5_lptim3>(
         {.ip              = "LPTIM",
          .ip_version_glob = "U5_lptimer1_v2*",
          .instance_globs  = lptim3_instance,
          .families        = family::u5}),
-    row_of<^^lptim_v2_factory, ^^u5_lptim4>(
+    row_of<^^lptim_u5h5_factory, ^^u5_lptim4>(
         {.ip              = "LPTIM",
          .ip_version_glob = "U5_lptimer1_v2*",
          .instance_globs  = lptim4_instance,
          .families        = family::u5}),
-    row_of<^^lptim_v2_factory, ^^h5_lptim1>(
+    row_of<^^lptim_u5h5_factory, ^^h5_lptim1>(
         {.ip              = "LPTIM",
          .ip_version_glob = "H5_lptimer1_v2*",
          .instance_globs  = lptim1_instance,
          .families        = family::h5}),
-    row_of<^^lptim_v2_factory, ^^h5_lptim2>(
+    row_of<^^lptim_u5h5_factory, ^^h5_lptim2>(
         {.ip              = "LPTIM",
          .ip_version_glob = "H5_lptimer1_v2*",
          .instance_globs  = lptim2_instance,
          .families        = family::h5}),
-    row_of<^^lptim_v2_factory, ^^h5_lptim_full>(
+    row_of<^^lptim_u5h5_factory, ^^h5_lptim_full>(
         {.ip              = "LPTIM",
          .ip_version_glob = "H5_lptimer1_v2*",
          .instance_globs  = lptim356_instances,
          .families        = family::h5}),
-    row_of<^^lptim_v2_factory, ^^h5_lptim4>(
+    row_of<^^lptim_u5h5_factory, ^^h5_lptim4>(
         {.ip              = "LPTIM",
          .ip_version_glob = "H5_lptimer1_v2*",
          .instance_globs  = lptim4_instance,
@@ -3078,8 +3081,8 @@ constexpr auto lptim_v2_table     = std::to_array<builtin>({
 });
 }
 
-auto lptim_v2_rows() -> std::span<builtin const>
+auto lptim_u5h5_rows() -> std::span<builtin const>
 {
-  return lptim_v2_table;
+  return lptim_u5h5_table;
 }
 }
