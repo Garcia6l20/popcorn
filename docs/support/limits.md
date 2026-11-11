@@ -1636,10 +1636,29 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   reading 0. At a counter start and at a CCMR1 write while it runs CC1SEL or CC2SEL 1 with CKSEL 1,
   COUNTMODE 1 or ENC 1, a capture then latching CNT at the filtered edge. At a CNTSTRT or SNGSTRT
   write with TRIGEN not 00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, named in
-  the warning, which leaves the counter stopped. At the write: a DIER bit other than CC1IE, ARRMIE,
-  EXTTRIGIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, on LPTIM1 and LPTIM2 UPIE and DOWNIE, and on
-  LPTIM1 to LPTIM3 CC2IE, CMP2OKIE, CC1OIE and CC2OIE. A function the model lacks otherwise counts
-  the kernel clock with channel 1 comparing CCR1.
+  the warning, which leaves the counter stopped. A function the model lacks otherwise counts the
+  kernel clock with channel 1 comparing CCR1.
+- DMA requests, RM0456 58.4.21. With UEDE 1 a UE flag sets `lptimN_ue_dma` at each update event,
+  and with CC1DE or CC2DE 1 a capture sets `lptimN_ic1_dma` or `lptimN_ic2_dma` with its CCxIF.
+  A request stays high until a controller burst acknowledges it, and an event before the
+  acknowledge is absorbed, inferred. A request raises only with its DIER enable in effect, at
+  DIEROK. Writing 0 to UEDE, CC1DE or CC2DE resets its request at the write, RM0456 58.7.8. The ic
+  requests also drop with CCxE 0 or ENABLE 0, the ue request with ENABLE 0 or every CCxE 0, RM0456
+  58.4.21, the instant inferred. The ue request raises only while a CCxE is set, following the
+  RM0456 58.4.21 Note literally, inferred. A CPU read of CCRx clears CCxIF and leaves the request,
+  inferred. LPTIMxRST drops a raised request,
+  inferred. LPTIM4 has no channel and no DMA request, and its UEDE bit is reserved, RM0456 58.3
+  Table 599.
+- While the machine holds its core with DBG_LPTIM1_STOP to DBG_LPTIM4_STOP set, RM0456 58.4.22, the
+  instance freezes as a stopped kernel clock: CNT, the kernel clocks spent in the current tick and
+  those left before each pending term are kept and resume at the release, the latencies inferred.
+  A capture in flight keeps its instant and latches the frozen CNT there, and an edge on a pin
+  input, a trigger or a capture input during the hold is dropped while the glitch filters keep
+  sampling, inferred. A kernel rate change during the hold applies from the
+  release. The hold is kept across LPTIMxRST. At a machine reset the model reads DBG_LPTIMx_STOP
+  again, which a system reset keeps and a power-on reset clears.
+- A pin edge driven between two instructions applies at the next instruction instant, after the
+  model events of that instant, because the scheduler orders by instruction count.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
 - ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, is

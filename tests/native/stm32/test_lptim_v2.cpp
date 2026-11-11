@@ -1,3 +1,5 @@
+#include "../support/inert_model.hpp"
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"
 
@@ -63,6 +65,9 @@ constexpr std::uint32_t    ue       = 1u << 7;
 constexpr std::uint32_t    repok    = 1u << 8;
 constexpr std::uint32_t    exttrig  = 1u << 2;
 constexpr std::uint32_t    dierok   = 1u << 24;
+constexpr std::uint32_t    uede     = 1u << 23;
+constexpr std::uint32_t    cc1de    = 1u << 16;
+constexpr std::uint32_t    cc2de    = 1u << 25;
 constexpr std::uint32_t    enable   = 1u << 0;
 constexpr std::uint32_t    sngstrt  = 1u << 1;
 constexpr std::uint32_t    cntstrt  = 1u << 2;
@@ -122,6 +127,39 @@ auto field_of(
   return {desc.base + found->offset, *bits};
 }
 
+class dma_recorder final : public popcorn::testing::inert_model, public stm32::dma_controller
+{
+public:
+  explicit dma_recorder(bool knows) : knows_{knows}
+  {}
+
+  std::vector<std::pair<std::uint32_t, bool>> levels;
+
+  void on_request(std::uint32_t request, bool level) override
+  {
+    levels.emplace_back(request, level);
+  }
+
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(not knows_ or not signal.starts_with("lptim") or not signal.ends_with("_dma"))
+    {
+      return std::nullopt;
+    }
+    auto const number = static_cast<std::uint32_t>(signal[5] - '0');
+    auto const kind   = signal.substr(7, signal.size() - 11);
+    return 10 * number + (kind == "ic1" ? 1u : kind == "ic2" ? 2u : 3u);
+  }
+
+private:
+  bool knows_;
+};
+
+constexpr std::uint32_t ic1_request = 11;
+constexpr std::uint32_t ic2_request = 12;
+constexpr std::uint32_t ue_request  = 13;
+
 struct rig
 {
   std::unique_ptr<stm32_fixture> f;
@@ -130,6 +168,7 @@ struct rig
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
   trigger_probe*                 probe{};
+  dma_recorder*                  dma{};
   mutable std::uint64_t          enabled_at{};
   std::uint32_t                  cc2{};
 
@@ -140,12 +179,24 @@ struct rig
       unit                             which  = units[0],
       bool                             strict = false,
       popcorn::part_description const& desc   = u575(),
-      std::string_view                 watch  = {})
+      std::string_view                 watch  = {},
+      bool                             record = false)
       : u{which}, cc2{which.name == "LPTIM4" ? 0u : cc2if}
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(stm32::board{}, desc);
     options.strict_peripherals = strict;
+    if(record)
+    {
+      options.models.insert_or_assign(
+          "GPDMA1", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+            return std::make_shared<dma_recorder>(true);
+          });
+      options.models.insert_or_assign(
+          "LPDMA1", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+            return std::make_shared<dma_recorder>(false);
+          });
+    }
     if(not watch.empty())
     {
       options.models.insert_or_assign(
@@ -161,6 +212,7 @@ struct rig
       probe->watched = watch;
       probe->listen(true);
     }
+    dma  = record ? f->model_of<dma_recorder>("GPDMA1") : nullptr;
     base = f->target->peripheral(u.name).description().base;
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
@@ -234,6 +286,14 @@ struct rig
     return std::ranges::count_if(logged, [&](core::log_record const& record) {
       return record.message.find(text) != std::string::npos;
     });
+  }
+
+  void ack(std::uint32_t request) const
+  {
+    auto* const requester = f->model_of<stm32::dma_requester>(u.name);
+    REQUIRE(requester != nullptr);
+    REQUIRE(dma != nullptr);
+    requester->acknowledged(*dma, request);
   }
 
   [[nodiscard]] auto irq_pending() const -> bool
@@ -849,22 +909,14 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the register writes the model lacks log one warning each and raise under "
-    "strict_peripherals, TRIGSEL 1 leaving the counter stopped")
+    "RM0456 58.7.7: the DIER bits LPTIM4 reserves, UEDE included, are not stored, and TRIGSEL 1 "
+    "logs one warning, raises under strict_peripherals and leaves the counter stopped")
 {
-  for(auto const& [reg, value, text] : {
-          std::tuple{dier, 1u << 23, std::string_view{"DIER enable of a DMA request"}},
-  })
   {
-    CAPTURE(text);
-    rig r;
-    r.write(cr, enable);
-    r.write(reg, value);
-    r.write(reg, value);
-    CHECK(r.warnings(text) == 1);
-    rig strict{units[0], true};
-    strict.write(cr, enable);
-    CHECK_THROWS_AS(strict.write(reg, value), popcorn::model_error);
+    rig four{units[3]};
+    four.write(cr, enable);
+    four.write(dier, 1u << 23);
+    CHECK(four.read(dier) == 0);
   }
   rig r;
   r.enable_with(0, rising | 1u << 13);
@@ -4469,4 +4521,493 @@ TEST_CASE(
   CHECK((r.read(isr) & cc2if) == 0);
   r.idle_to(again + 6 * cycle);
   CHECK((r.read(isr) & cc2if) == cc2if);
+}
+
+namespace
+{
+using requests = std::vector<std::pair<std::uint32_t, bool>>;
+
+void run_to_flag(rig const& r, std::uint32_t flag)
+{
+  for(auto round = 0; round < 40 and (r.read(isr) & flag) == 0; ++round)
+  {
+    REQUIRE(r.pending().has_value());
+    r.idle_to(*r.pending());
+  }
+  REQUIRE((r.read(isr) & flag) == flag);
+}
+}
+
+TEST_CASE(
+    "RM0456 58.4.21: UEDE raises lptim1_ue_dma at the instant UE sets, an update event before the "
+    "ack is absorbed, the ack drops it and the next update event raises it again, inferred")
+{
+  rig r{units[0], false, u575(), {}, true};
+  r.write(ccmr1, cc1e);
+  auto const t = r.started(6, 10, cntstrt, uede);
+  for(auto round = 0; round < 40 and (r.read(isr) & ue) == 0; ++round)
+  {
+    CHECK(r.dma->levels.empty());
+    REQUIRE(r.pending().has_value());
+    r.idle_to(*r.pending());
+  }
+  REQUIRE((r.read(isr) & ue) == ue);
+  auto const first = r.now_ps();
+  CHECK(
+      r.dma->levels
+      == requests{
+          {ue_request, true}
+  });
+  r.idle_to(first + 25 * cycle);
+  CHECK(
+      r.dma->levels
+      == requests{
+          {ue_request, true}
+  });
+  r.ack(ue_request);
+  CHECK(
+      r.dma->levels
+      == requests{
+          {ue_request, true },
+          {ue_request, false}
+  });
+  REQUIRE(r.pending().has_value());
+  for(auto round = 0; round < 40 and r.dma->levels.size() < 3; ++round)
+  {
+    REQUIRE(r.pending().has_value());
+    r.idle_to(*r.pending());
+  }
+  REQUIRE(r.dma->levels.size() == 3);
+  CHECK(r.dma->levels.back() == std::pair{ue_request, true});
+  CHECK((r.now_ps() - t) % (11 * cycle) == (first - t) % (11 * cycle));
+}
+
+TEST_CASE(
+    "RM0456 58.7.8: lptim1_ue_dma drops at the DIER write that clears UEDE, with ENABLE 0 and with "
+    "every CCxE 0, and a channel left on keeps it")
+{
+  for(auto leg = 0; leg < 4; ++leg)
+  {
+    CAPTURE(leg);
+    rig r{units[0], false, u575(), {}, true};
+    r.write(ccmr1, cc1e | (leg == 3 ? cc2e : 0u));
+    static_cast<void>(r.started(6, 10, cntstrt, uede));
+    run_to_flag(r, ue);
+    REQUIRE(
+        r.dma->levels
+        == requests{
+            {ue_request, true}
+    });
+    if(leg == 0)
+    {
+      r.write(dier, 0);
+    }
+    else if(leg == 1)
+    {
+      r.write(cr, 0);
+    }
+    else
+    {
+      r.write(ccmr1, leg == 3 ? cc2e : 0u);
+    }
+    if(leg == 3)
+    {
+      CHECK(r.dma->levels.size() == 1);
+    }
+    else
+    {
+      CHECK(
+          r.dma->levels
+          == requests{
+              {ue_request, true },
+              {ue_request, false}
+      });
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.21: CC1DE and CC2DE raise lptim1_ic1_dma and lptim1_ic2_dma when the capture sets "
+    "CCxIF, a capture before the ack and a CCR read leave the request, the ack drops it, and "
+    "CCxDE 0, CCxE 0 and ENABLE 0 reset it, inferred")
+{
+  for(auto leg = 0; leg < 4; ++leg)
+  {
+    CAPTURE(leg);
+    rig   r{units[0], false, u575(), {}, true};
+    auto& pins = capture_input(r, 0);
+    r.write(ccmr1, cc1sel | cc1e);
+    auto const t = r.started(60, 1000, cntstrt, cc1de);
+    pins.drive_at(2, true, vtime{t + 20 * cycle + cycle / 2});
+    pins.drive_at(2, false, vtime{t + 30 * cycle + cycle / 2});
+    pins.drive_at(2, true, vtime{t + 40 * cycle + cycle / 2});
+    r.idle_to(t + 21 * cycle);
+    CHECK(r.dma->levels.empty());
+    r.idle_to(t + 22 * cycle);
+    CHECK(
+        r.dma->levels
+        == requests{
+            {ic1_request, true}
+    });
+    r.idle_to(t + 43 * cycle);
+    CHECK((r.read(isr) & cc1if) == cc1if);
+    CHECK(r.read(ccr1) == 42);
+    CHECK(
+        r.dma->levels
+        == requests{
+            {ic1_request, true}
+    });
+    if(leg == 0)
+    {
+      r.ack(ic1_request);
+      CHECK(
+          r.dma->levels
+          == requests{
+              {ic1_request, true },
+              {ic1_request, false}
+      });
+      continue;
+    }
+    if(leg == 1)
+    {
+      r.write(dier, 0);
+    }
+    else if(leg == 2)
+    {
+      r.write(ccmr1, cc1sel);
+    }
+    else
+    {
+      r.write(cr, 0);
+    }
+    CHECK(
+        r.dma->levels
+        == requests{
+            {ic1_request, true },
+            {ic1_request, false}
+    });
+  }
+}
+
+TEST_CASE("RM0456 58.4.21: channel 2 raises lptim1_ic2_dma alone with CC2DE")
+{
+  rig   r{units[0], false, u575(), {}, true};
+  auto& pins = capture_input(r, 1);
+  r.write(ccmr1, cc2sel | cc2e);
+  auto const t = r.started(60, 1000, cntstrt, cc2de);
+  pins.drive_at(capture_pin_of(r, 1), true, vtime{t + 20 * cycle + cycle / 2});
+  r.idle_to(t + 22 * cycle);
+  CHECK(
+      r.dma->levels
+      == requests{
+          {ic2_request, true}
+  });
+}
+
+TEST_CASE("RM0456 58.3 Table 599: LPTIM4 has no channel and raises no DMA request")
+{
+  rig r{units[3], false, u575(), {}, true};
+  static_cast<void>(r.started(6, 10, cntstrt, 0));
+  r.idle_to(r.now_ps() + 40 * cycle);
+  CHECK((r.read(isr) & ue) == ue);
+  CHECK(r.dma->levels.empty());
+}
+
+TEST_CASE("checklist 31: an LPTIMxRST pulse drops a raised DMA request and the next run raises it")
+{
+  rig r{units[0], false, u575(), {}, true};
+  r.write(ccmr1, cc1e);
+  static_cast<void>(r.started(6, 10, cntstrt, uede));
+  run_to_flag(r, ue);
+  REQUIRE(
+      r.dma->levels
+      == requests{
+          {ue_request, true}
+  });
+  rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
+  CHECK(
+      r.dma->levels
+      == requests{
+          {ue_request, true },
+          {ue_request, false}
+  });
+  r.idle_to(r.now_ps() + 40 * cycle);
+  CHECK(r.dma->levels.size() == 2);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot with a raised DMA request restores into a machine with no "
+    "reset, the request state equal")
+{
+  rig r{units[0]};
+  r.write(ccmr1, cc1e);
+  static_cast<void>(r.started(6, 10, cntstrt, uede));
+  run_to_flag(r, ue);
+  auto const saved = r.f->target->snapshot();
+  rig        other{no_reset, units[0]};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.saved() == r.saved());
+  r.write(cr, 0);
+  other.write(cr, 0);
+  CHECK(other.saved() == r.saved());
+}
+
+TEST_CASE("RM0456 58.4.21: lptim1_ue_dma with no controller that knows it is ignored")
+{
+  rig r{units[0]};
+  r.write(ccmr1, cc1e);
+  static_cast<void>(r.started(6, 10, cntstrt, uede));
+  run_to_flag(r, ue);
+  CHECK(r.logged.empty());
+}
+
+namespace
+{
+using popcorn::testing::set_debug_freeze;
+
+void hold(rig const& r, std::string_view field = "DBG_LPTIM1_STOP", bool on = true)
+{
+  set_debug_freeze(*r.f, field, on);
+  r.f->target->hold_core(true);
+}
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: DBG_LPTIM1_STOP freezes CNT and the pending CC1IF due while the core is "
+    "held, both resume at the release, the pending latencies inferred")
+{
+  rig        r;
+  auto const t = r.started(50, 100);
+  auto const x = t + 10 * cycle;
+  r.idle_to(x);
+  REQUIRE(r.read(cnt) == 10);
+  auto const due = r.pending();
+  REQUIRE(due.has_value());
+  hold(r);
+  CHECK(r.pending() == std::nullopt);
+  r.idle_to(x + 40 * cycle);
+  CHECK(r.read(cnt) == 10);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.f->target->hold_core(false);
+  auto const span = r.now_ps() - x;
+  CHECK(r.pending() == *due + span);
+  r.idle_to(x + span + 3 * cycle);
+  CHECK(r.read(cnt) == 13);
+  r.idle_to(*due + span);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: DBG_LPTIM2_STOP leaves LPTIM1 counting while the core is held, and "
+    "DBG_LPTIM1_STOP 0 does too")
+{
+  for(auto const& [field, on] : {
+          std::pair{std::string_view{"DBG_LPTIM2_STOP"}, true },
+          std::pair{std::string_view{"DBG_LPTIM1_STOP"}, false},
+  })
+  {
+    CAPTURE(field);
+    rig        r;
+    auto const t = r.started(50, 100);
+    r.idle_to(t + 10 * cycle);
+    hold(r, field, on);
+    r.idle_to(t + 30 * cycle);
+    CHECK(r.read(cnt) == 30);
+    r.f->target->hold_core(false);
+    r.idle_to(t + 35 * cycle);
+    CHECK(r.read(cnt) == 35);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: DBG_LPTIMx_STOP freezes LPTIMx alone, on each of the four instances")
+{
+  for(auto const& which : units)
+  {
+    CAPTURE(which.name);
+    rig        r{which};
+    auto const t = r.started(50, 100);
+    r.idle_to(t + 10 * cycle);
+    hold(r, std::format("DBG_{}_STOP", which.name));
+    r.idle_to(t + 30 * cycle);
+    CHECK(r.read(cnt) == 10);
+    r.f->target->hold_core(false);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: an edge during the hold does not count or capture, the counter counts and "
+    "captures edges after the release, inferred")
+{
+  {
+    rig   r;
+    auto& pins = lptim1_in1(r);
+    pins.drive(5, true);
+    auto const t = r.started(60, 100, cntstrt, 0, countmode | falling);
+    r.idle_to(t + 10 * cycle);
+    hold(r);
+    pins.drive_at(5, false, vtime{t + 20 * cycle});
+    pins.drive_at(5, true, vtime{t + 25 * cycle});
+    r.idle_to(t + 30 * cycle);
+    r.f->target->hold_core(false);
+    r.idle_to(t + 35 * cycle);
+    CHECK(r.read(cnt) == 0);
+    pins.drive_at(5, false, vtime{t + 50 * cycle});
+    r.idle_to(t + 55 * cycle);
+    CHECK(r.read(cnt) == 1);
+  }
+  rig   r;
+  auto& pins = capture_input(r, 0);
+  r.write(ccmr1, cc1sel | cc1e);
+  auto const t = r.started(60, 1000);
+  r.idle_to(t + 10 * cycle);
+  hold(r);
+  pins.drive_at(2, true, vtime{t + 20 * cycle + cycle / 2});
+  pins.drive_at(2, false, vtime{t + 25 * cycle + cycle / 2});
+  r.idle_to(t + 30 * cycle);
+  r.f->target->hold_core(false);
+  r.idle_to(t + 40 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  auto const again = r.now_ps() + 10 * cycle + cycle / 2;
+  pins.drive_at(2, true, vtime{again});
+  r.idle_to(again + 4 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: a held LPTIM keeps its hold across an LPTIM1RST pulse, a system reset keeps "
+    "DBG_LPTIM1_STOP and a power-on reset clears it")
+{
+  for(auto const kind : {0, 1, 2})
+  {
+    CAPTURE(kind);
+    rig r;
+    hold(r);
+    if(kind == 0)
+    {
+      rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
+    }
+    else
+    {
+      r.f->target->reset(kind == 1 ? popcorn::reset_kind::software : popcorn::reset_kind::power_on);
+      r.rcc(r.u.clock_reg, r.u.clock_bit, 1);
+    }
+    r.write(cr, enable);
+    r.write(arr, 10);
+    r.idle_to(r.now_ps() + 50 * cycle);
+    CHECK(((r.read(isr) & arrok) == arrok) == (kind == 2));
+    if(kind != 2)
+    {
+      CHECK(r.pending() == std::nullopt);
+      r.f->target->hold_core(false);
+      auto const x = r.now_ps();
+      CHECK(r.pending() == x + 3 * cycle);
+    }
+    else
+    {
+      r.f->target->hold_core(false);
+    }
+  }
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot taken while the core is held restores into a machine with no "
+    "reset, the model state equal")
+{
+  rig        r;
+  auto const t = r.started(50, 100);
+  r.idle_to(t + 10 * cycle);
+  hold(r);
+  r.idle_to(t + 20 * cycle);
+  auto const saved = r.f->target->snapshot();
+  rig        other{no_reset};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.saved() == r.saved());
+  r.f->target->hold_core(false);
+}
+
+TEST_CASE(
+    "inferred: a TIMOUT restart while the counter runs moves the capture grid, a capture in "
+    "flight on the old grid and a later edge on the ENABLE grid apply in instant order")
+{
+  rig   r;
+  auto& etr  = lptim1_etr(r);
+  auto& pins = capture_input(r, 0);
+  r.write(ccmr1, cc1sel | cc1e | both_edges);
+  static_cast<void>(r.started(60, 1000, cntstrt, 0, rising | timout));
+  auto const base = r.enabled_at;
+  etr.drive_at(6, true, vtime{base + 80 * cycle + cycle / 2});
+  etr.drive_at(6, false, vtime{base + 85 * cycle});
+  pins.drive_at(2, true, vtime{base + 100 * cycle + 7 * cycle / 10});
+  etr.drive_at(6, true, vtime{base + 100 * cycle + 8 * cycle / 10});
+  pins.drive_at(2, false, vtime{base + 100 * cycle + 9 * cycle / 10});
+  r.idle_to(base + 101 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  CHECK(r.pending() == base + 102 * cycle);
+  r.idle_to(base + 102 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  r.idle_to(base + 103 * cycle);
+  CHECK((r.read(isr) & cc1of) == cc1of);
+}
+
+TEST_CASE(
+    "RM0456 58.4.22: with CKSEL 1 an input 1 edge, a trigger edge and a COUNTMODE capture edge "
+    "during the hold are dropped, and count, trigger and capture after the release, inferred")
+{
+  {
+    rig   r;
+    auto& pins = lptim1_in1(r);
+    pins.drive(5, true);
+    auto const t = r.started(60, 100, cntstrt, 0, cksel | falling);
+    pulses(pins, 5, t + 10 * cycle, 8);
+    r.idle_to(t + 100 * cycle);
+    auto const before = r.read(cnt);
+    REQUIRE(before >= 1);
+    hold(r);
+    pulses(pins, 5, t + 110 * cycle, 2);
+    r.idle_to(t + 140 * cycle);
+    r.f->target->hold_core(false);
+    r.idle_to(t + 145 * cycle);
+    CHECK(r.read(cnt) == before);
+    pulses(pins, 5, t + 150 * cycle, 1);
+    r.idle_to(t + 165 * cycle);
+    CHECK(r.read(cnt) == before + 1);
+  }
+  {
+    rig   r;
+    auto& etr = lptim1_etr(r);
+    r.enable_with(0, cksel | rising);
+    r.settle_values(60, 100);
+    r.write(cr, enable | cntstrt);
+    r.idle_to(r.now_ps() + 20 * cycle);
+    hold(r);
+    etr.drive_at(6, true, vtime{r.now_ps() + 5 * cycle});
+    etr.drive_at(6, false, vtime{r.now_ps() + 8 * cycle});
+    r.idle_to(r.now_ps() + 20 * cycle);
+    CHECK((r.read(isr) & exttrig) == 0);
+    r.f->target->hold_core(false);
+    etr.drive_at(6, true, vtime{r.now_ps() + 5 * cycle});
+    r.idle_to(r.now_ps() + 10 * cycle);
+    CHECK((r.read(isr) & exttrig) == exttrig);
+  }
+  {
+    rig   r;
+    auto& pins = capture_input(r, 0);
+    r.write(ccmr1, cc1sel | cc1e);
+    auto const t = r.started(60, 1000, cntstrt, 0, countmode);
+    r.idle_to(t + 10 * cycle);
+    hold(r);
+    pins.drive_at(2, true, vtime{t + 20 * cycle + cycle / 2});
+    pins.drive_at(2, false, vtime{t + 25 * cycle + cycle / 2});
+    r.idle_to(t + 30 * cycle);
+    r.f->target->hold_core(false);
+    r.idle_to(t + 40 * cycle);
+    CHECK((r.read(isr) & cc1if) == 0);
+    auto const again = r.now_ps() + 10 * cycle + cycle / 2;
+    pins.drive_at(2, true, vtime{again});
+    r.idle_to(again + 4 * cycle);
+    CHECK((r.read(isr) & cc1if) == cc1if);
+  }
 }
