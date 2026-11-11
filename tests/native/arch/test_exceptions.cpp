@@ -733,6 +733,29 @@ TEST_CASE("a handler returning another EXC_RETURN counts once per switch and lea
   CHECK(in_flight(f) == 0);
 }
 
+TEST_CASE(
+    "a return from the NMI handler with a forged IPSR clears NMI, DeActivate lines 10-14, and "
+    "lets a pended IRQ run")
+{
+  auto f = booted(with_line_model());
+  REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+  nmi_mode(f);
+  auto const hook = f.target->add_intercept(
+      fn("nmi_handler"),
+      [](core::intercept_call const&) { return core::intercept_result::stop(stop_reason::user); },
+      core::intercept_mode::once);
+  REQUIRE(run_to(f, "latch_pulse").reason == stop_reason::user);
+  REQUIRE((f.reg("xpsr") & 0x1ff) == armv8m::exc_nmi);
+  REQUIRE(f.module->is_active(armv8m::exc_nmi));
+  pend(f, 1u << 3);
+  f.set("xpsr", (f.reg("xpsr") & ~std::uint64_t{0x1ff}) | (16 + 11));
+  REQUIRE((f.reg("xpsr") & 0x1ff) == 16 + 11);
+  auto const before = log_of(f).size();
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK_FALSE(f.module->is_active(armv8m::exc_nmi));
+  CHECK(std::ranges::count(log_of(f) | std::views::drop(before), 0x330u) == 1);
+}
+
 TEST_CASE("only an exception exit in handler mode between valid EXC_RETURN values is a return")
 {
   constexpr std::uint32_t exception_exit = 8;

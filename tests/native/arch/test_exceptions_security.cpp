@@ -1330,6 +1330,7 @@ TEST_CASE("the NMI line runs the Non-secure NMI with BFHFNMINS=1 and pends again
   REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
   CHECK(ipsr(f) == armv8m::exc_nmi);
   CHECK_FALSE(secure_now(f));
+  CHECK(armv8m::test_bit(saved(f).exceptions.active, armv8m::exc_nmi));
   REQUIRE(resume(f, 2).reason == stop_reason::user);
   CHECK(ipsr(f) == armv8m::exc_nmi);
   CHECK_FALSE(secure_now(f));
@@ -1339,6 +1340,9 @@ TEST_CASE("the NMI line runs the Non-secure NMI with BFHFNMINS=1 and pends again
   CHECK(ipsr(f) == 0);
   CHECK(secure_now(f));
   CHECK(f.reg("pc") == secure_code + 2);
+  auto const state = saved(f).exceptions;
+  CHECK_FALSE(armv8m::test_bit(state.active, armv8m::exc_nmi));
+  CHECK(state.nonsecure_active == 0);
 }
 
 TEST_CASE("sleep-on-exit reads the SCR of the state returned to, B3.22 ExceptionReturn line 66")
@@ -2530,4 +2534,145 @@ TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, 
   CHECK(stopped.fault->status == f.word(cfsr));
   CHECK((stopped.fault->status & sfsr_lserr) == 0);
   CHECK((f.word(sfsr) & sfsr_lserr) != 0);
+}
+
+namespace
+{
+enum class held_bank
+{
+  none,
+  secure_active,
+  nonsecure_active,
+  both
+};
+
+struct deactivate_row
+{
+  char const*   title;
+  bool          bfhfnmins;
+  std::uint32_t number;
+  held_bank     bank;
+  bool          cleared_secure;
+  bool          cleared_nonsecure;
+};
+
+auto deactivating(deactivate_row const& row, std::uint32_t returning, fault_policy policy)
+    -> arch_fixture
+{
+  auto f = booted(policy);
+  if(row.bfhfnmins)
+  {
+    poke(f, aircr, bfhfnmins);
+  }
+  tables(f, 16);
+  tables(f, armv8m::exc_usagefault);
+  poke(f, shcsr, usagefault_ena);
+  poke(f, ipr0, 0x40);
+  put(f, secure_handler, {bkpt, bx_lr});
+  put(f, secure_code, {bkpt});
+  poke(f, iser0, 1);
+  poke(f, ispr0, 1);
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  REQUIRE(ipsr(f) == 16);
+  seed(f, [&](armv8m::state& s) {
+    armv8m::put_bit(s.exceptions.active, 17, true);
+    s.exceptions.priority[17] = 0x40;
+    if(row.bank == held_bank::secure_active or row.bank == held_bank::both)
+    {
+      armv8m::put_bit(s.exceptions.active, row.number, true);
+    }
+    if(row.bank == held_bank::nonsecure_active or row.bank == held_bank::both)
+    {
+      s.exceptions.nonsecure_active |= 1u << row.number;
+    }
+  });
+  f.set("xpsr", (f.reg("xpsr") & ~std::uint64_t{0x1ff}) | returning);
+  REQUIRE(ipsr(f) == returning);
+  return f;
+}
+
+constexpr std::array deactivate_rows{
+    deactivate_row{
+                   "no negative priority active clears the returning bit",                     false, 0,                     held_bank::none,          false,
+                   false                                                                                                                                           },
+    deactivate_row{
+                   "HardFault with BFHFNMINS 0, raw -1",                                       false, armv8m::exc_hardfault,
+                   held_bank::secure_active,                                                                                                           true,  false},
+    deactivate_row{
+                   "NMI with BFHFNMINS 0, raw -2",                                             false, armv8m::exc_nmi,       held_bank::secure_active, true,
+                   false                                                                                                                                           },
+    deactivate_row{
+                   "HardFault_S with BFHFNMINS 1, raw -3",                                     true,  armv8m::exc_hardfault,
+                   held_bank::secure_active,                                                                                                           true,  false},
+    deactivate_row{
+                   "HardFault_NS with BFHFNMINS 1, raw -1",                                    true,  armv8m::exc_hardfault,
+                   held_bank::nonsecure_active,                                                                                                        false, true },
+    deactivate_row{
+                   "HardFault_S over HardFault_NS with BFHFNMINS 1, raw -3 leaves the NS bit", true,
+                   armv8m::exc_hardfault,                                                                                    held_bank::both,          true,  false},
+    deactivate_row{
+                   "NMI with BFHFNMINS 1, raw -2",                                             true,  armv8m::exc_nmi,       held_bank::secure_active, true,
+                   false                                                                                                                                           },
+};
+}
+
+TEST_CASE(
+    "a banked return with a forged IPSR clears the active bit of the negative raw priority, "
+    "DeActivate lines 10-19")
+{
+  for(auto const& row : deactivate_rows)
+  {
+    CAPTURE(std::string_view{row.title});
+    auto f = deactivating(row, 17, fault_policy::enter_handler);
+    REQUIRE(resume(f, 3).reason == stop_reason::user);
+    auto const state = saved(f);
+    auto const held  = row.number != 0;
+    CHECK(armv8m::test_bit(state.exceptions.active, 16));
+    CHECK(
+        armv8m::test_bit(state.exceptions.active, row.number)
+        == (held and row.bank != held_bank::nonsecure_active and not row.cleared_secure));
+    CHECK(
+        ((state.exceptions.nonsecure_active >> row.number) & 1u)
+        == ((row.bank == held_bank::nonsecure_active or row.bank == held_bank::both)
+            and not row.cleared_nonsecure));
+    CHECK(armv8m::test_bit(state.exceptions.active, 17) == held);
+  }
+}
+
+TEST_CASE(
+    "a return fault from a forged IPSR clears the active bit of the negative raw priority, and "
+    "the stop policy restores the active words")
+{
+  for(auto const& row : deactivate_rows)
+  {
+    if(row.number == 0)
+    {
+      continue;
+    }
+    CAPTURE(std::string_view{row.title});
+    if(row.bank != held_bank::both)
+    {
+      auto f = deactivating(row, 27, fault_policy::enter_handler);
+      REQUIRE(resume(f, 3).reason == stop_reason::user);
+      REQUIRE(ipsr(f) == armv8m::exc_usagefault);
+      auto const state = saved(f);
+      CHECK((f.word(cfsr) & ufsr_invpc) != 0);
+      CHECK(
+          armv8m::test_bit(state.exceptions.active, row.number)
+          == (row.bank != held_bank::nonsecure_active and not row.cleared_secure));
+      CHECK(
+          ((state.exceptions.nonsecure_active >> row.number) & 1u)
+          == ((row.bank == held_bank::nonsecure_active or row.bank == held_bank::both)
+              and not row.cleared_nonsecure));
+    }
+    {
+      auto       f       = deactivating(row, 27, fault_policy::stop);
+      auto const before  = saved(f).exceptions;
+      auto const stopped = resume(f, 3);
+      REQUIRE(stopped.reason == stop_reason::fault);
+      auto const state = saved(f).exceptions;
+      CHECK(state.active == before.active);
+      CHECK(state.nonsecure_active == before.nonsecure_active);
+    }
+  }
 }

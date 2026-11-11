@@ -167,6 +167,33 @@ TEST_CASE("under enter_handler each fault enters its handler with the architectu
   }
 }
 
+TEST_CASE(
+    "a return from the HardFault handler with a forged IPSR clears HardFault, "
+    "DeActivate lines 10-12")
+{
+  auto m = booted(fault_policy::enter_handler);
+  REQUIRE(run_entry(m, "udf_forced").reason == stop_reason::user);
+  REQUIRE((m.f->reg("xpsr") & 0x1ff) == armv8m::exc_hardfault);
+  REQUIRE(m.f->module->is_active(armv8m::exc_hardfault));
+  auto const             stacked_pc = fn("udf_forced_at") & ~address{1};
+  auto const             sp         = m.f->reg("sp");
+  std::optional<address> slot;
+  for(address at = sp; at < sp + 80 and not slot; at += 4)
+  {
+    auto const word = m.f->target->mem().read(at, 4);
+    if(word and *word == stacked_pc)
+    {
+      slot = at;
+    }
+  }
+  REQUIRE(slot.has_value());
+  REQUIRE(m.f->target->mem().write(*slot, 4, fn("faults_setup") | 1u));
+  m.f->set("xpsr", (m.f->reg("xpsr") & ~std::uint64_t{0x1ff}) | (16 + 11));
+  REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+  CHECK((m.f->reg("xpsr") & 0x1ff) == 0);
+  CHECK_FALSE(m.f->module->is_active(armv8m::exc_hardfault));
+}
+
 TEST_CASE("lockup and the entry and return errors stop under both policies")
 {
   std::vector<stopped_case> const cases{

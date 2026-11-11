@@ -281,11 +281,9 @@ auto exception_priority(
   return nonsecure and config.pris ? (result >> 1) + restricted_nonsecure : result;
 }
 
-auto execution_priority(
+auto raw_execution_priority(
     exception_state const& exceptions,
-    security_config const& config,
-    masks                  secure,
-    masks                  nonsecure) noexcept -> int
+    security_config const& config) noexcept -> int
 {
   auto raw = 256;
   for_each_active(exceptions, [&](std::uint32_t number) {
@@ -294,7 +292,6 @@ auto execution_priority(
                          : exception_target(exceptions, config, number, security::secure);
     raw              = std::min(raw, exception_priority(exceptions, config, number, state, true));
   });
-  auto boosted = 256;
   if(config.trustzone)
   {
     for(auto bits = exceptions.nonsecure_active & banked_exceptions; bits != 0; bits &= bits - 1)
@@ -303,6 +300,20 @@ auto execution_priority(
       raw =
           std::min(raw, exception_priority(exceptions, config, number, security::nonsecure, true));
     }
+  }
+  return raw;
+}
+
+auto execution_priority(
+    exception_state const& exceptions,
+    security_config const& config,
+    masks                  secure,
+    masks                  nonsecure) noexcept -> int
+{
+  auto const raw     = raw_execution_priority(exceptions, config);
+  auto       boosted = 256;
+  if(config.trustzone)
+  {
     if(nonsecure.basepri != 0)
     {
       auto const group = group_priority(nonsecure.basepri, config.prigroup_nonsecure);
@@ -929,6 +940,49 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
   return trustzone() ? (exc_return & 0xff00'0000u) == 0xff00'0000u : valid_exc_return(exc_return);
 }
 
+[[gnu::noinline]] void cortex_m::deactivate(std::uint32_t number, security domain)
+{
+  auto&      exceptions   = state_.exceptions;
+  auto const config       = priority_config();
+  auto const clear_secure = [&](std::uint32_t exception) {
+    put_bit(exceptions.active, exception, false);
+  };
+  if(v7())
+  {
+    clear_secure(number);
+    return;
+  }
+  switch(raw_execution_priority(exceptions, config))
+  {
+    case -1:
+      if(config.trustzone and config.bfhfnmins)
+      {
+        exceptions.nonsecure_active &= ~(1u << exc_hardfault);
+      }
+      else
+      {
+        clear_secure(exc_hardfault);
+      }
+      return;
+    case -2:
+      clear_secure(exc_nmi);
+      return;
+    case -3:
+      clear_secure(exc_hardfault);
+      return;
+    default:
+      break;
+  }
+  if(domain == security::nonsecure and banked(number))
+  {
+    exceptions.nonsecure_active &= ~(1u << number);
+  }
+  else
+  {
+    clear_secure(number);
+  }
+}
+
 [[gnu::always_inline]] inline void cortex_m::repend_level(std::uint32_t number) noexcept
 {
   if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
@@ -1037,14 +1091,9 @@ auto cortex_m::exception_return() -> trap_result
          .status        = state_.scs.cfsr,
          .detail        = state_.scs.hfsr});
   }
-  if(trustzone() and not decode_exc_security(value).secure_exception and banked(number))
-  {
-    state_.exceptions.nonsecure_active &= ~(1u << number);
-  }
-  else
-  {
-    put_bit(state_.exceptions.active, number, false);
-  }
+  deactivate(
+      number, trustzone() and not decode_exc_security(value).secure_exception ? security::nonsecure
+                                                                              : security::secure);
   if(number != exc_nmi)
   {
     special.faultmask = 0;
@@ -1218,14 +1267,7 @@ auto cortex_m::exception_return() -> trap_result
          .reported  = value,
          .origin    = security::secure});
   }
-  if(banked_number)
-  {
-    state_.exceptions.nonsecure_active &= ~(1u << number);
-  }
-  else
-  {
-    put_bit(state_.exceptions.active, number, false);
-  }
+  deactivate(number, exception);
   auto const& exception_ids = ids_of(exception);
   if(number != exc_nmi)
   {
@@ -1366,14 +1408,7 @@ auto cortex_m::return_fault(
   auto const  control          = read(ids.control);
   auto const  faultmask        = read(ids.faultmask);
   auto const  current          = read_security(engine);
-  if(exception == security::nonsecure and banked(number))
-  {
-    state_.exceptions.nonsecure_active &= ~(1u << number);
-  }
-  else
-  {
-    put_bit(state_.exceptions.active, number, false);
-  }
+  deactivate(number, exception);
   if(number != exc_nmi)
   {
     write(ids.faultmask, 0);

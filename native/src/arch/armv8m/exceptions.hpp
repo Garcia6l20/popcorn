@@ -246,6 +246,14 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     bool                   group) noexcept -> int;
 
 /**
+ * @brief RawExecutionPriority() of the ARMv8-M ARM: the lowest priority value of the active
+ *        exceptions of both banks, 256 with none, before PRIMASK, BASEPRI and FAULTMASK.
+ */
+[[nodiscard]] auto raw_execution_priority(
+    exception_state const& exceptions,
+    security_config const& config) noexcept -> int;
+
+/**
  * @brief ExecutionPriority() of the ARMv8-M ARM with both security states: the active
  *        exceptions of both banks and each bank's masks. Without TrustZone it equals
  *        execution_priority() over the Secure bank and @p secure.

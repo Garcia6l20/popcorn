@@ -301,6 +301,37 @@ TEST_CASE("M4 faults enter their handlers, and a Thread return to the reset LR i
   CHECK(stopped.fault->status == 0x00000001);
 }
 
+TEST_CASE(
+    "M4 clears the active bit of the returning IPSR, so a HardFault return with a forged IPSR "
+    "leaves HardFault active, DDI0403E ExceptionReturn")
+{
+  auto const            firmware = name_of("faults", cm4);
+  core::machine_options enter;
+  enter.faults = arch::fault_policy::enter_handler;
+  auto f       = booted("faults", cm4, enter);
+  REQUIRE(run_to(f, sym(firmware, "faults_setup")).reason == stop_reason::user);
+  REQUIRE(run_to(f, sym(firmware, "udf_forced")).reason == stop_reason::user);
+  REQUIRE((f.reg("xpsr") & 0x1ff) == armv8m::exc_hardfault);
+  REQUIRE(f.module->is_active(armv8m::exc_hardfault));
+  auto const             stacked_pc = sym(firmware, "udf_forced_at") & ~address{1};
+  auto const             sp         = f.reg("sp");
+  std::optional<address> slot;
+  for(address at = sp; at < sp + 80 and not slot; at += 4)
+  {
+    auto const word = f.target->mem().read(at, 4);
+    if(word and *word == stacked_pc)
+    {
+      slot = at;
+    }
+  }
+  REQUIRE(slot.has_value());
+  REQUIRE(f.target->mem().write(*slot, 4, sym(firmware, "faults_setup") | 1u));
+  f.set("xpsr", (f.reg("xpsr") & ~std::uint64_t{0x1ff}) | (16 + 11));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK((f.reg("xpsr") & 0x1ff) == 0);
+  CHECK(f.module->is_active(armv8m::exc_hardfault));
+}
+
 TEST_CASE("M4 runs the SVC and PendSV logs, and SysTick ticks 1000 times a virtual second")
 {
   auto const svc = name_of("svc", cm4);

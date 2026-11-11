@@ -249,6 +249,7 @@ private:
       -> trap_result;
   auto                           engine_fault(std::uint32_t intno) -> trap_result;
   template <bool extension> auto enter_as(std::uint32_t number, security state) -> trap_result;
+  void                           deactivate(std::uint32_t number, security domain);
   auto                           exception_return() -> trap_result;
   auto                           banked_return() -> trap_result;
   void                           repend_level(std::uint32_t number) noexcept;
