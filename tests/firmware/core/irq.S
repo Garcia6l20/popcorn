@@ -89,6 +89,45 @@ it_fault:
     .endr
     bkpt #0
 
+    .global it_store_first
+    .type it_store_first, %function
+it_store_first:
+    cmp r0, r0
+    itt eq
+    streq r1, [r8]
+    moveq r4, #1
+    .rept 10
+    nop
+    .endr
+    bkpt #0
+
+    .global it_load
+    .type it_load, %function
+it_load:
+    cmp r0, r0
+    itt eq
+    ldreq r5, [r8]
+    moveq r4, #1
+    .rept 10
+    nop
+    .endr
+    bkpt #0
+
+    .global it_store_branch
+    .type it_store_branch, %function
+it_store_branch:
+    cmp r0, r0
+    itt eq
+    streq r1, [r8]
+    beq it_store_branch_target
+    bkpt #1
+it_store_branch_target:
+    movs r4, #1
+    .rept 10
+    nop
+    .endr
+    bkpt #0
+
     .global jump_back
     .type jump_back, %function
 jump_back:

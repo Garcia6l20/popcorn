@@ -232,6 +232,12 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     so later stores write the host memory. The fork's per-page write hooks
     of 2026-10 gave every page outside a hook that entry.
   - tests/unit/test_mem.c: added test_mem_write_prot_data_page_every_store.
+  2026-11-11, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/target/arm/op_helper.c: helper_uc_exit_after_insn leaves the TB when
+    no exit after an instruction is armed but an access recorded an
+    invalid_error and an exit is pending. A store to unmapped memory inside a
+    Thumb IT block, which the engine runs as one instruction, recorded its
+    error and let the guest run on.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.

@@ -523,3 +523,95 @@ TEST_CASE("a call made at a precise exit stop returns, and the run then takes th
   CHECK(f.reg("r5") == 0);
   CHECK(f.data_writes() == std::vector<std::uint32_t>{handler_value, 1});
 }
+
+TEST_CASE("an unmapped store inside an IT block ends the run with a fault, as outside one")
+{
+  constexpr address unmapped_store_at = 0x30000000;
+  auto const        silent            = [](std::string_view entry) {
+    auto f = quiet();
+    f.enter(entry);
+    f.set("r8", 0x2000'0000);
+    auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    return std::pair{result.stopped->reason, result.executed.value};
+  };
+  auto const mapped = silent("it_fault");
+  REQUIRE(mapped.first == stop_reason::user);
+
+  auto f = quiet();
+  f.enter("it_fault");
+  auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+  REQUIRE(result.stopped.has_value());
+  CHECK(result.stopped->reason == stop_reason::fault);
+  REQUIRE(result.stopped->fault.has_value());
+  CHECK(result.stopped->fault->fault_address == unmapped_store_at);
+  CHECK(result.stopped->where.pc == sym("irq", "it_fault") + 6);
+  CHECK(result.executed.value == mapped.second);
+
+  auto const outside = silent("store_raise");
+  REQUIRE(outside.first == stop_reason::user);
+  auto plain = quiet();
+  plain.enter("store_raise");
+  plain.set("r2", unmapped_store_at - 0x5c);
+  auto const plain_result = plain.run({.wall_budget = std::chrono::seconds{60}});
+  REQUIRE(plain_result.stopped.has_value());
+  CHECK(plain_result.stopped->reason == stop_reason::fault);
+  CHECK(plain_result.executed.value == outside.second);
+}
+
+TEST_CASE("an unmapped load or a store before the last instruction of an IT block ends the run")
+{
+  struct leg
+  {
+    std::string_view entry;
+    address          stop_offset;
+    std::uint32_t    r4_after;
+  };
+  for(auto const [entry, stop_offset, r4_after] : {
+          leg{"it_load",        4, 0},
+          leg{"it_store_first", 8, 1}
+  })
+  {
+    CAPTURE(entry);
+    auto mapped = quiet();
+    mapped.enter(entry);
+    mapped.set("r8", 0x2000'0000);
+    auto const through = mapped.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(through.stopped.has_value());
+    REQUIRE(through.stopped->reason == stop_reason::user);
+    CHECK(mapped.reg("r4") == 1);
+
+    auto f = quiet();
+    f.enter(entry);
+    auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    CHECK(result.stopped->reason == stop_reason::fault);
+    REQUIRE(result.stopped->fault.has_value());
+    CHECK(result.stopped->fault->fault_address == unmapped_page);
+    CHECK(result.executed.value == through.executed.value);
+    CHECK(result.stopped->where.pc == sym("irq", entry) + stop_offset);
+    CHECK(f.reg("r4") == r4_after);
+  }
+}
+
+TEST_CASE("an unmapped store before a branch ending an IT block faults at the branch")
+{
+  auto f = quiet();
+  f.enter("it_store_branch");
+  auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+  REQUIRE(result.stopped.has_value());
+  CHECK(result.stopped->reason == stop_reason::fault);
+  REQUIRE(result.stopped->fault.has_value());
+  CHECK(result.stopped->fault->fault_address == unmapped_page);
+  CHECK(result.stopped->where.pc == sym("irq", "it_store_branch") + 8);
+  CHECK(result.executed.value == 4);
+  CHECK(f.reg("r4") == 0);
+
+  auto mapped = quiet();
+  mapped.enter("it_store_branch");
+  mapped.set("r8", 0x2000'0000);
+  auto const through = mapped.run({.wall_budget = std::chrono::seconds{60}});
+  REQUIRE(through.stopped.has_value());
+  CHECK(through.stopped->reason == stop_reason::user);
+  CHECK(mapped.reg("r4") == 1);
+}

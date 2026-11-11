@@ -21,6 +21,12 @@ decoding the block from its first instruction, keeps the full charge: the engine
 inside an IT block, so a stop there lands after the block, and `returns` there raises
 `EmulationError`.
 
+An access error recorded inside an IT block ends the run by one of two paths, and the block is
+counted in full either way. A faulting load leaves at the load: the engine cannot give the
+instruction a value, so `load_helper` exits and restores the state to the load. A faulting store
+records the error and returns, the block runs on, and the exit-after-instruction helper the
+translator emits after the block's last instruction leaves with the state at that instruction.
+
 A core asleep in WFI executes nothing. When nothing is deliverable the loop jumps the clock to
 the next deadline, which is why a sleeping firmware runs fast. The slice keeps two counters,
 `executed` and `jumped`. A run's `budget` counts `executed` only, and `max_instructions`

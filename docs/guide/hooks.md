@@ -35,6 +35,10 @@ raises `EmulationError` once the handler has returned, its side effects stay: th
 block to its end, so the return cannot take effect at the site. The IT instruction itself and the
 instruction after the block are ordinary sites.
 
+An access to unmapped memory inside an IT block stops the run as a fault with the block counted in
+full. The engine runs the block as one instruction: a faulting load stops at the load, while after
+a faulting store the rest of the block runs and the stop lands on its last instruction.
+
 `machine.intercept_log(fn)` lists every call the intercepts of `fn` saw, with its arguments and the
 value it returned.
 
