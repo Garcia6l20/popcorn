@@ -5,7 +5,6 @@ from __future__ import annotations
 import atexit
 import contextlib
 import contextvars
-import dataclasses
 import functools
 import os
 import sys
@@ -21,13 +20,12 @@ from typing import (
     override,
 )
 
-from popcorn import _core, _machine_call, _machine_hooks, _machine_snapshot
+from popcorn import _core, _machine_call, _machine_hooks, _machine_run, _machine_snapshot
 from popcorn._arena import Arena
 from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
     CallResult,
     Stack,
-    decode,
 )
 from popcorn._devices import (
     BusDevice,
@@ -37,10 +35,9 @@ from popcorn._devices import (
     attach,
 )
 from popcorn._dwarf_views import Var
-from popcorn._enums import FloatAbi, PinMode, ResetKind, StopReason, ValueKind
+from popcorn._enums import FloatAbi, PinMode, ResetKind, ValueKind
 from popcorn._errors import (
     ConfigError,
-    EmulationError,
     MachineBusy,
     MachineRunning,
     ModelError,
@@ -64,7 +61,7 @@ from popcorn._hooks import (
     WatchHit,
     WatchKind,
 )
-from popcorn._host import awaited, watch_logs
+from popcorn._host import watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._image_view import ImageView, debug_infos, find_variable, selected_images
 from popcorn._machine_checks import (
@@ -75,7 +72,6 @@ from popcorn._machine_checks import (
     chosen_plugin_models,
     clock_wiring,
     free_sentinel,
-    masked_stop,
     model_makers,
     option_bytes_config,
     pty_opener,
@@ -91,20 +87,13 @@ from popcorn._machine_events import (
     Event,
     InterceptHandler,
     Linked,
-    Native,
     Reached,
-    Ready,
-    Resolver,
     ReturnHandler,
-    Returning,
     WatchHandler,
-    check_duration,
     check_image_names,
     check_machine_name,
-    check_wait_args,
     error_prefix,
     probe_state,
-    ps_of,
     stack_access,
     stop_error,
 )
@@ -122,28 +111,21 @@ from popcorn._part_description import PartDescription, load_description
 from popcorn._pdm import PdmPorts
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
-    Condition,
-    Conditions,
     Pending,
     Readout,
     Ref,
     Refs,
-    any_of,
-    native_set,
-    owner_of,
 )
 from popcorn._rng import RngOptions
 from popcorn._snapshot import Snapshot
-from popcorn._stop import FrameReturn, Stop, stop_of
+from popcorn._stop import FrameReturn, Stop
 from popcorn._streams import (
     Board,
     Gated,
     UartPorts,
     Waited,
-    deadline_ps,
 )
 from popcorn._supply import SupplyOptions
-from popcorn._unwind import return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn._virtual_loop import VirtualLoop
@@ -2040,17 +2022,8 @@ class Machine:
                 function running now returns. Nothing ran, a pending reset was applied.
             Exception: A kept log filter or handler error, as for `read`.
         """
-        check_duration(for_)
-        returning = Resolver(self._frame_return) if isinstance(until, FrameReturn) else None
-        target = None if until is None or isinstance(until, FrameReturn) else self.address_of(until)
-        return await self._goal(
-            until=target,
-            budget=self._default_budget if budget is None else budget,
-            for_=for_,
-            stop_when=stop_when,
-            exact=None,
-            run=True,
-            returning=returning,
+        return await _machine_run.run(
+            self, until=until, budget=budget, for_=for_, stop_when=stop_when
         )
 
     async def step_return(self, *, budget: int | None = None) -> int | float | None:
@@ -2079,69 +2052,7 @@ class Machine:
             BudgetExceeded: The budget ran out first.
             FaultError: The function faulted.
         """
-        returning = Resolver(self._frame_return, self._check_returns)
-        stop = await self._goal(
-            until=None,
-            budget=self._default_budget if budget is None else budget,
-            for_=None,
-            stop_when=None,
-            exact=None,
-            run=True,
-            returning=returning,
-        )
-        target = returning.target
-        if target is None:
-            raise EmulationError(f"{error_prefix(self)}the step out resolved no return point")
-        if stop.reason is not StopReason.RETURNED:
-            raise stop_error(stop, f"the step out of {target.name}", error_prefix(self))
-        if target.exception:
-            return None
-        signature = _machine_call.call_signature(self, target.name, target.start)
-        if signature.void:
-            return None
-        slot = signature.returns
-        abi = _core.FloatAbi(_machine_call.abi_at(self, target.start).value)
-        return decode(slot, self._handle.result_bits(slot.kind, abi))
-
-    def _check_returns(self, target: Returning) -> None:
-        if target.exception:
-            return
-        unsupported = _machine_call.call_signature(
-            self, target.name, target.start
-        ).returns_unsupported
-        if unsupported is not None:
-            raise NotImplementedError(unsupported)
-
-    def _frame_return(self) -> Returning:
-        regs = self.reg
-        pc, lr, sp = int(regs.pc), int(regs.lr), int(regs.sp)
-        read32, functions = stack_access(self)
-        function = functions.at(pc)
-        name = f"{pc:#x}" if function is None else function.name
-        point = return_point(read32, functions, pc, lr, sp)
-        if point is None:
-            raise EmulationError(
-                f"{error_prefix(self)}{name}: cannot find where the function at {pc:#x} returns"
-            )
-        start = pc if function is None else function.start
-        return Returning(point.ret, point.sp, name, start, pc)
-
-    async def _bounded_run(
-        self,
-        *,
-        until: int | str | Symbol | None = None,
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None,
-        stop_when: Callable[[Machine], bool] | None = None,
-    ) -> Stop:
-        return await self._goal(
-            until=None if until is None else self.address_of(until),
-            budget=self._default_budget,
-            for_=for_,
-            deadline=deadline,
-            stop_when=stop_when,
-            exact=None,
-        )
+        return await _machine_run.step_return(self, budget=budget)
 
     async def step(self, n: int = 1) -> Stop:
         """Execute exactly `n` instructions, a BUDGET stop, or an earlier stop.
@@ -2153,65 +2064,7 @@ class Machine:
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active.
         """
-        if n <= 0:
-            raise ValueError("step count must be above 0")
-        return await self._goal(
-            until=None, budget=None, for_=None, stop_when=None, exact=n, deadline=None
-        )
-
-    async def _goal(
-        self,
-        *,
-        until: int | None,
-        budget: int | None,
-        for_: VirtualDuration | None,
-        stop_when: Callable[[Machine], bool] | None,
-        exact: int | None,
-        deadline: VirtualTime | None = None,
-        run: bool = False,
-        returning: Resolver | None = None,
-    ) -> Stop:
-        self._refuse_in_step()
-        self._last_stop = None
-        system = self._linked()
-        if system is not None:
-            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
-                self,
-                until=until,
-                budget=budget,
-                exact=exact,
-                for_=for_,
-                deadline=deadline,
-                stop_when=None if stop_when is None else self._handler(stop_when),
-                run=run,
-                returning=returning,
-            )
-            if returning is not None:
-                stop = returning.named(stop)
-            self._last_stop = stop
-            return stop
-        until_return: tuple[int, int] | None = None
-        if returning is not None:
-            if self.busy:
-                raise MachineBusy("the machine already runs a goal or a free run")
-            self._handle.apply_pending_reset()
-            until_return = returning()
-        stop = await awaited(
-            self._handle.run_goal(
-                until=until,
-                budget=budget,
-                exact=exact,
-                for_ps=ps_of(for_),
-                deadline_ps=deadline_ps(deadline),
-                stop_when=None if stop_when is None else self._handler(stop_when),
-                until_return=until_return,
-            ),
-            lambda raw: stop_of(cast(_core.StopInfo, raw)),
-        )
-        if returning is not None:
-            stop = returning.named(stop)
-        self._last_stop = stop
-        return stop
+        return await _machine_run.step(self, n)
 
     async def _wait_until(
         self,
@@ -2219,49 +2072,7 @@ class Machine:
         for_: VirtualDuration | None,
         deadline: VirtualTime | None = None,
     ) -> Waited:
-        if isinstance(ready, Gated):
-            return await self._wait_gated(ready, for_, deadline)
-        if not self.busy:
-            with contextlib.suppress(MachineRunning):
-                if ready.holds():
-                    return Waited(self.time, None)
-        if self._handle.session_open():
-            raw, ended = cast(
-                tuple[_core.StopInfo, bool],
-                await awaited(
-                    self._handle.wait_predicate_ended(ready, ps_of(for_), deadline_ps(deadline)),
-                    lambda got: got,
-                ),
-            )
-            stop = stop_of(raw)
-            if ended:
-                raise stop_error(
-                    stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
-                )
-            return Waited(stop.time, stop.resets)
-        stop = await self.wait_for(Native(ready), for_=for_, deadline=deadline)
-        if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
-        return Waited(stop.time, stop.resets)
-
-    async def _wait_gated(
-        self,
-        gated: Gated,
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None,
-    ) -> Waited:
-        ready = gated.ready
-        event = Ready(lambda _: ready(), gate=gated.gate)
-        if not self.busy and self._handler(event.ready)():
-            return Waited(self.time, None)
-        stop = await self.wait_for(event, for_=for_, deadline=deadline)
-        if stop.reason is StopReason.USER and not event.fired:
-            raise stop_error(
-                stop, "the free run, while waiting for a Python predicate", error_prefix(self)
-            )
-        if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
-        return Waited(stop.time, stop.resets)
+        return await _machine_run.wait_ready(self, ready, for_, deadline)
 
     async def wait_until(
         self,
@@ -2309,17 +2120,7 @@ class Machine:
                 that ended it.
             BaseException: What `predicate` raised, or what a handler of the free run raised.
         """
-        self._refuse_on_host()
-        check_wait_args(for_, deadline)
-        event = Ready(predicate)
-        if not self.busy and self._handler(event.ready)():
-            return self.time
-        stop = await self.wait_for(event, for_=for_, deadline=deadline)
-        if stop.reason is StopReason.USER and event.fired:
-            return stop.time
-        if stop.reason in (StopReason.TIME, StopReason.IDLE):
-            return None
-        raise stop_error(stop, "the run waiting for the predicate", error_prefix(self))
+        return await _machine_run.wait_until(self, predicate, for_=for_, deadline=deadline)
 
     async def wait_for(
         self,
@@ -2364,64 +2165,10 @@ class Machine:
             ValueError: `for_` is negative, or a `Condition` or `Conditions` of another machine.
             MachineBusy: A run, step, call or wait is active outside a free run.
         """
-        check_wait_args(for_, deadline)
-        if isinstance(event, Condition | Conditions):
-            return await self._wait_condition(event, for_, deadline)
-        if self._handle.session_open():
-            if isinstance(event, Reached) and not self._on_host():
-                return await self._reached_free(self.address_of(event.target), for_, deadline)
-            return await self._waited(event, for_, deadline)
-        if isinstance(event, Reached):
-            return await self._bounded_run(until=event.target, for_=for_, deadline=deadline)
-        if isinstance(event, Native):
-            return await self._run_native(event.predicate, for_, deadline)
-        if isinstance(event, Ready) and event.gate is not None:
-            return await self._run_gated(event.gate, event.ready, for_, deadline)
-        return await self._bounded_run(for_=for_, deadline=deadline, stop_when=event.ready)
+        return await _machine_run.wait_for(self, event, for_=for_, deadline=deadline)
 
     def _on_host(self) -> bool:
         return _core.on_host_thread() or _core.host_locks_held() > 0
-
-    async def _reached_free(
-        self, address: int, for_: VirtualDuration | None, deadline: VirtualTime | None
-    ) -> Stop:
-        hook = self._handle.add_probe(address, None)
-        try:
-            return await self._waited(
-                Native(self._handle.predicate_probe_hit(hook)), for_, deadline
-            )
-        finally:
-            self._handle.remove_probe(hook)
-
-    async def _waited(
-        self,
-        event: Event | None,
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None = None,
-    ) -> Stop:
-        try:
-            stop = await awaited(
-                self._wait_future(event, ps_of(for_), deadline_ps(deadline)),
-                lambda raw: stop_of(cast(_core.StopInfo, raw)),
-            )
-        except BaseException as error:
-            self._surfaced = error
-            raise
-        self._surfaced = stop
-        return stop
-
-    def _wait_future(
-        self, event: Event | None, for_ps: int | None, deadline_ps: int | None
-    ) -> _core.HostFuture:
-        if event is None:
-            return self._handle.wait(None, for_ps, deadline_ps)
-        if isinstance(event, Native):
-            return self._handle.wait_predicate(event.predicate, for_ps, deadline_ps)
-        if isinstance(event, Ready) and event.gate is not None:
-            return self._handle.wait_gated(
-                event.gate, self._handler(event.ready), for_ps, deadline_ps
-            )
-        return self._handle.wait(self._handler(event.ready), for_ps, deadline_ps)
 
     async def elapse(self, duration: VirtualDuration) -> VirtualTime:
         """Let `duration` of virtual time pass, parked or running, and return the time it ended
@@ -2451,21 +2198,7 @@ class Machine:
             BaseException: The exception a handler of the free run raised.
             Exception: A kept log filter or handler error, as for `read`.
         """
-        self._refuse_on_host()
-        check_duration(duration)
-        if self._handle.session_open():
-            stop = await self._waited(None, duration)
-        else:
-            stop = await self._goal(
-                until=None,
-                budget=self._default_budget,
-                for_=duration,
-                stop_when=None,
-                exact=None,
-            )
-        if stop.reason is not StopReason.TIME:
-            raise stop_error(stop, "the run letting time pass", error_prefix(self))
-        return stop.time
+        return await _machine_run.elapse(self, duration)
 
     def now(self) -> Pending[VirtualTime]:
         """The virtual time of the next block boundary, posted at the call as one command: at
@@ -2483,101 +2216,6 @@ class Machine:
         return self._submit_ops(
             [], [], None, lambda raw: VirtualTime(cast(tuple[int, Any], raw)[0])
         )
-
-    async def _run_native(
-        self,
-        ready: _core.Predicate,
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None = None,
-    ) -> Stop:
-        self._refuse_in_step()
-        self._last_stop = None
-        system = self._linked()
-        if system is not None:
-            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
-                self, budget=self._default_budget, for_=for_, deadline=deadline, gate=ready
-            )
-            self._last_stop = stop
-            return stop
-        stop = await awaited(
-            self._handle.run_predicate(
-                ready, self._default_budget, ps_of(for_), deadline_ps(deadline)
-            ),
-            lambda raw: stop_of(cast(_core.StopInfo, raw)),
-        )
-        self._last_stop = stop
-        return stop
-
-    async def _run_gated(
-        self,
-        gate: _core.Predicate,
-        ready: Callable[[Machine], bool],
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None,
-    ) -> Stop:
-        self._last_stop = None
-        system = self._linked()
-        if system is not None:
-            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
-                self,
-                budget=self._default_budget,
-                for_=for_,
-                deadline=deadline,
-                stop_when=self._handler(ready),
-                gate=gate,
-            )
-            self._last_stop = stop
-            return stop
-        stop = await awaited(
-            self._handle.run_gated(
-                gate,
-                self._handler(ready),
-                self._default_budget,
-                ps_of(for_),
-                deadline_ps(deadline),
-            ),
-            lambda raw: stop_of(cast(_core.StopInfo, raw)),
-        )
-        self._last_stop = stop
-        return stop
-
-    async def _wait_condition(
-        self,
-        event: Condition | Conditions,
-        for_: VirtualDuration | None,
-        deadline: VirtualTime | None = None,
-    ) -> Stop:
-        if owner_of(event) is not self._handle:
-            raise ValueError(f"{event!r} reads another machine")
-        conditions = event if isinstance(event, Conditions) else any_of(event)
-        members = conditions.members
-        if not self._handle.session_open():
-            stopped: list[tuple[Condition, ...]] = []
-
-            def stop_when(machine: Machine) -> bool:
-                held = event.ready(machine)
-                if held:
-                    stopped.append(tuple(member for member in members if member.ready(machine)))
-                return held
-
-            stop = await self._bounded_run(for_=for_, deadline=deadline, stop_when=stop_when)
-            held = stop.reason is StopReason.USER and bool(stopped)
-            fired = stopped[-1] if held else ()
-            stop = dataclasses.replace(stop, fired=fired)
-            self._last_stop = stop
-            return stop
-        try:
-            stop, mask = await awaited(
-                self._handle.wait_when(native_set(conditions), ps_of(for_), deadline_ps(deadline)),
-                masked_stop,
-            )
-        except BaseException as error:
-            self._surfaced = error
-            raise
-        fired = tuple(member for index, member in enumerate(members) if mask >> index & 1)
-        stop = dataclasses.replace(stop, fired=fired)
-        self._surfaced = stop
-        return stop
 
     def start(self) -> None:
         """Run the machine on its own thread until `halt()`, a free run.
@@ -2607,14 +2245,7 @@ class Machine:
             MachineBusy: A run, step, call, wait or free run is active.
             RuntimeError: Called from a handler, which runs on a machine's thread.
         """
-        self._refuse_on_host()
-        if self._linked() is not None:
-            raise MachineBusy(
-                f"{self._name} is a member of a linked system: use the member's running()"
-            )
-        self._handle.start()
-        self._last_stop = None
-        self._surfaced = None
+        return _machine_run.start(self)
 
     def halt(self) -> None:
         """Stop the free run `start()` started, at its next block boundary, and return once the
@@ -2636,18 +2267,7 @@ class Machine:
                 BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.
             BaseException: The exception a handler raised during the free run.
         """
-        system = self._linked()
-        if system is not None:
-            self._refuse_on_host()
-            system._halt_member(self)  # pyright: ignore[reportPrivateUsage]
-            return
-        ended = self._halted()
-        if isinstance(ended, BaseException):
-            raise ended
-        if ended is not None:
-            raise stop_error(ended, prefix=error_prefix(self))
-        if self._parked_ends:
-            raise self._parked_ends.pop(0)
+        return _machine_run.halt(self)
 
     def _park(self) -> BaseException | None:
         """Bring the machine to parked whatever runs: cancel a goal, halt a free run.
@@ -2662,20 +2282,7 @@ class Machine:
             KeyboardInterrupt: Ctrl-C while the park waits.
             RuntimeError: Called from a handler.
         """
-        self._refuse_on_host()
-        try:
-            raw = self._handle.park()
-        except Exception as kept:
-            self._parked_ends.append(kept)
-            return kept
-        ended = self._ended(raw)
-        surfaced, self._surfaced = self._surfaced, None
-        if ended is None or ended is surfaced:
-            return None
-        if isinstance(ended, Stop):
-            ended = stop_error(ended, prefix=error_prefix(self))
-        self._parked_ends.append(ended)
-        return ended
+        return _machine_run.park(self)
 
     def _take_parked_ends(self) -> list[BaseException]:
         """The ends `_park` returned and no `halt()` raised since, oldest first. Clears them."""
@@ -2686,21 +2293,6 @@ class Machine:
         """Forward the machine's queued log records to `logging`, in order, keeping a filter or
         handler error for the next await, `halt` or park."""
         self._handle.flush_logs()
-
-    def _halted(self) -> Stop | BaseException | None:
-        self._refuse_on_host()
-        ended = self._ended(self._handle.halt())
-        self._surfaced = None
-        return ended
-
-    def _ended(self, ended: object) -> Stop | BaseException | None:
-        if isinstance(ended, BaseException):
-            return ended
-        if ended is None:
-            return None
-        stop = stop_of(cast(_core.StopInfo, ended))
-        self._last_stop = stop
-        return stop
 
     @contextlib.asynccontextmanager
     async def running(self) -> AsyncGenerator[None]:
@@ -2753,7 +2345,7 @@ class Machine:
             halting: Exception | None = None
             ended: Stop | BaseException | None = None
             try:
-                ended = self._halted()
+                ended = _machine_run.halted(self)
             except Exception as failed:
                 halting = failed
             if halting is not None:
