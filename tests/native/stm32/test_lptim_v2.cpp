@@ -242,12 +242,22 @@ struct rig
     write(icr, repok);
   }
 
-  [[nodiscard]] auto cpu_read(address offset) const -> std::uint32_t
+  void hsi_on() const
+  {
+    rcc("RCC_CR", "HSION", 1);
+    for(auto round = 0; round < 100 and f->field("RCC", "RCC_CR", "HSIRDY") == 0; ++round)
+    {
+      idle_to(now_ps() + 100 * cycle);
+    }
+    REQUIRE(f->field("RCC", "RCC_CR", "HSIRDY") == 1);
+  }
+
+  [[nodiscard]] auto cpu_read(address offset, popcorn::initiator by = popcorn::initiator::cpu) const
+      -> std::uint32_t
   {
     auto& regs  = f->target->peripheral(u.name);
     auto  value = f->target->model(u.name)->on_read(
-        regs, static_cast<std::uint32_t>(offset), 4,
-        {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+        regs, static_cast<std::uint32_t>(offset), 4, {.pc = 0, .now = icount{0}, .by = by});
     REQUIRE(value.has_value());
     return *value;
   }
@@ -510,13 +520,14 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 58.7.8, 58.7.12, 58.7.13 and 58.7.10: a write outside its ENABLE rule keeps the "
-    "register, inferred, logs one warning and raises under strict_peripherals")
+    "RM0456 58.7.8, 58.7.12, 58.7.13, 58.7.16 and 58.7.10: a write outside its ENABLE rule "
+    "keeps the register, inferred, logs one warning and raises under strict_peripherals")
 {
   for(auto const& [reg, value, on] : {
           std::tuple{dier, cc1if,    false},
           std::tuple{ccr1, 5u,       false},
           std::tuple{arr,  5u,       false},
+          std::tuple{rcr,  3u,       false},
           std::tuple{cfgr, presc(1), true },
   })
   {
@@ -542,13 +553,14 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 58.4.11 and 58.7.8, inferred: a second CCR1, ARR or DIER write before its OK flag "
+    "RM0456 58.4.11 and 58.7.8, inferred: a second CCR1, ARR, RCR or DIER write before its OK flag "
     "replaces the pending value and logs one warning")
 {
-  for(auto const& [reg, flag] : {
-          std::pair{ccr1, cmp1ok},
-          std::pair{arr,  arrok },
-          std::pair{dier, dierok}
+  for(auto const& [reg, flag, latency] : {
+          std::tuple{ccr1, cmp1ok, 3 * cycle},
+          std::tuple{arr,  arrok,  3 * cycle},
+          std::tuple{dier, dierok, 3 * cycle},
+          std::tuple{rcr,  repok,  7 * cycle},
   })
   {
     CAPTURE(reg);
@@ -560,10 +572,10 @@ TEST_CASE(
     r.write(reg, 9);
     CHECK(r.read(reg) == 9);
     CHECK(r.warnings("before") == 1);
-    CHECK(r.pending() == at + 4 * cycle);
-    r.idle_to(at + 4 * cycle - cycle);
+    CHECK(r.pending() == at + cycle + latency);
+    r.idle_to(at + latency);
     CHECK((r.read(isr) & flag) == 0);
-    r.idle_to(at + 4 * cycle);
+    r.idle_to(at + cycle + latency);
     CHECK((r.read(isr) & flag) == flag);
     rig strict{units[0], true};
     static_cast<void>(strict.started(30, 40));
@@ -762,13 +774,11 @@ TEST_CASE(
 
 TEST_CASE(
     "the register writes the model lacks log one warning each and raise under "
-    "strict_peripherals, COUNTRST reading 0 and TRIGEN leaving the counter stopped")
+    "strict_peripherals, TRIGEN leaving the counter stopped")
 {
   for(auto const& [reg, value, text] : {
-          std::tuple{ccr2, 3u,                std::string_view{"CCR2"}                  },
-          std::tuple{dier, exttrig,           std::string_view{"DIER enable of EXTTRIG"}},
-          std::tuple{cr,   enable | countrst, std::string_view{"COUNTRST"}              },
-          std::tuple{cr,   enable | rstare,   std::string_view{"RSTARE"}                },
+          std::tuple{ccr2, 3u,      std::string_view{"CCR2"}                  },
+          std::tuple{dier, exttrig, std::string_view{"DIER enable of EXTTRIG"}},
   })
   {
     CAPTURE(text);
@@ -777,11 +787,9 @@ TEST_CASE(
     r.write(reg, value);
     r.write(reg, value);
     CHECK(r.warnings(text) == 1);
-    CHECK((r.read(cr) & countrst) == 0);
     rig strict{units[0], true};
     strict.write(cr, enable);
     CHECK_THROWS_AS(strict.write(reg, value), popcorn::model_error);
-    CHECK((strict.read(cr) & countrst) == 0);
   }
   rig r;
   r.enable_with(0, rising);
@@ -921,8 +929,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 58.4.16: a new REP reaches the repetition counter at the first underflow at or "
-    "after REPOK, PRELOAD 0 and 1, inferred at the underflow instant")
+    "inferred: a new REP reaches the repetition counter at the first underflow at or after "
+    "REPOK, PRELOAD 0 and 1, RM0456 58.4.16 and 58.4.11")
 {
   struct shot
   {
@@ -1041,6 +1049,113 @@ TEST_CASE(
     CHECK((one->read(isr) & ue) == ue);
     one->write(icr, ue);
     CHECK(one->pending() == start + (44 + 4 * 21) * cycle);
+  }
+}
+
+TEST_CASE("RM0456 58.4.16: REPOKIE raises the IRQ at REPOK, and only with its DIER bit")
+{
+  for(auto const irqs : {repok, 0u})
+  {
+    CAPTURE(irqs);
+    rig r;
+    r.enable_with(irqs);
+    r.write(rcr, 2);
+    auto const at = r.now_ps();
+    r.idle_to(at + 7 * cycle - cycle);
+    CHECK_FALSE(r.irq_pending());
+    r.idle_to(at + 7 * cycle);
+    CHECK(r.read(isr) == repok);
+    CHECK(r.irq_pending() == (irqs != 0));
+  }
+}
+
+TEST_CASE(
+    "inferred: ENABLE written to 0 applies an ARR value preloaded for the next update, the next "
+    "run counts to it")
+{
+  rig        r;
+  auto const start = r.started(30, 10, cntstrt, 0, preload);
+  r.idle_to(start + 2 * cycle);
+  r.write(arr, 20);
+  r.idle_to(start + 7 * cycle);
+  CHECK((r.read(isr) & arrok) == arrok);
+  r.write(cr, 0);
+  r.write(icr, arrok);
+  r.write(cr, enable);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const again = r.now_ps() + 3 * cycle;
+  r.write(cr, enable | cntstrt);
+  CHECK(r.pending() == again + 20 * cycle);
+}
+
+TEST_CASE(
+    "inferred: ENABLE written to 0 keeps a pending RCR write, its REPOK sets at the due and the "
+    "next start loads the new REP")
+{
+  rig r;
+  r.enable_with();
+  r.settle_values(5, 10);
+  r.write(rcr, 2);
+  r.write(cr, 0);
+  auto const at = r.now_ps();
+  CHECK(r.pending() == at + 7 * cycle);
+  r.idle_to(at + 7 * cycle);
+  CHECK(r.read(isr) == repok);
+  CHECK(r.read(rcr) == 2);
+  r.write(icr, repok);
+  r.write(cr, enable);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const again = r.now_ps() + 3 * cycle;
+  r.write(cr, enable | cntstrt);
+  r.idle_to(again + 32 * cycle);
+  CHECK((r.read(isr) & ue) == 0);
+  r.idle_to(again + 33 * cycle);
+  CHECK((r.read(isr) & ue) == ue);
+}
+
+TEST_CASE(
+    "inferred: REPOK with the kernel clock stopped waits for the clock and then 3 kernel clocks, "
+    "the APB part dropped")
+{
+  rig r;
+  r.write(cr, enable);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+  r.write(rcr, 2);
+  CHECK_FALSE(r.pending().has_value());
+  r.idle_to(r.now_ps() + 50 * cycle);
+  CHECK(r.read(isr) == 0);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 0);
+  auto const resumed = r.now_ps();
+  CHECK(r.pending() == resumed + 3 * cycle);
+  r.idle_to(resumed + 3 * cycle);
+  CHECK(r.read(isr) == repok);
+}
+
+TEST_CASE(
+    "inferred: a kernel rate change moves the repetition counter, the update follows the rate")
+{
+  for(auto const& [at, remaining] : {
+          std::pair{std::uint64_t{5},  std::uint64_t{39}},
+          std::pair{std::uint64_t{22}, std::uint64_t{22}},
+          std::pair{std::uint64_t{25}, std::uint64_t{19}},
+          std::pair{std::uint64_t{30}, std::uint64_t{14}},
+  })
+  {
+    CAPTURE(at);
+    rig r;
+    r.hsi_on();
+    auto const start = r.started(30, 10, cntstrt, ue, 0, 3);
+    r.idle_to(start + at * cycle);
+    r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
+    auto const due = start + at * cycle + remaining * hsi;
+    if(at > 11)
+    {
+      CHECK(r.pending() == due);
+    }
+    r.idle_to(due - cycle);
+    CHECK((r.read(isr) & ue) == 0);
+    r.idle_to(due);
+    CHECK((r.read(isr) & ue) == ue);
   }
 }
 
@@ -1199,4 +1314,176 @@ TEST_CASE(
   CHECK(r.read(isr) == (arrm | arrok | ue));
   CHECK(r.read(cnt) == 0);
   CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE(
+    "RM0456 58.4.14: COUNTRST resets CNT 3 kernel clocks after the write and reads 1 until then, "
+    "the count restarting at that instant, inferred")
+{
+  for(auto const& [written, first] : {
+          std::pair{std::uint64_t{4},  std::uint64_t{6} },
+          std::pair{std::uint64_t{26}, std::uint64_t{28}},
+          std::pair{std::uint64_t{8},  std::uint64_t{10}},
+  })
+  {
+    CAPTURE(written);
+    rig        r;
+    auto const start = r.started(6, 10);
+    r.idle_to(start + written * cycle);
+    r.write(icr, cc1if | arrm | ue);
+    r.write(cr, enable | countrst);
+    CHECK(r.read(cr) == (enable | countrst));
+    auto const reset = start + (written + 3) * cycle;
+    CHECK(r.pending() == start + first * cycle);
+    r.idle_to(reset - cycle);
+    CHECK(r.read(cr) == (enable | countrst));
+    r.idle_to(reset);
+    CHECK(r.read(cr) == enable);
+    CHECK(r.read(cnt) == 0);
+    CHECK((r.read(isr) & ue) == 0);
+    r.write(icr, cc1if | arrm | ue);
+    CHECK(r.pending() == reset + 6 * cycle);
+    r.idle_to(reset + 6 * cycle);
+    CHECK(r.read(isr) == cc1if);
+    CHECK(r.read(cnt) == 6);
+  }
+  rig r;
+  r.write(cr, countrst);
+  CHECK(r.read(cr) == 0);
+}
+
+TEST_CASE(
+    "inferred: a COUNTRST at the one-shot update instant drops the stop, the counter runs on to "
+    "the next update")
+{
+  rig        r;
+  auto const start = r.started(30, 10, sngstrt);
+  r.idle_to(start + 8 * cycle);
+  r.write(cr, enable | countrst);
+  r.idle_to(start + 11 * cycle);
+  CHECK(r.read(cr) == enable);
+  CHECK(r.read(isr) == arrm);
+  CHECK(r.pending() == start + 22 * cycle);
+  r.idle_to(start + 22 * cycle);
+  CHECK(r.read(isr) == (arrm | ue));
+  CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE("RM0456 58.7.11: a second COUNTRST while one is pending is ignored")
+{
+  rig        r;
+  auto const start = r.started(6, 10);
+  r.idle_to(start + 12 * cycle);
+  r.write(cr, enable | countrst);
+  r.idle_to(start + 13 * cycle);
+  r.write(cr, enable | countrst);
+  CHECK(r.read(cr) == (enable | countrst));
+  CHECK(r.pending() == start + 15 * cycle);
+  r.idle_to(start + 15 * cycle);
+  CHECK(r.read(cr) == enable);
+  CHECK(r.read(cnt) == 0);
+}
+
+TEST_CASE("inferred: ENABLE written to 0 drops a pending COUNTRST")
+{
+  rig        r;
+  auto const start = r.started(6, 10);
+  r.idle_to(start + 12 * cycle);
+  r.write(cr, enable | countrst);
+  r.idle_to(start + 13 * cycle);
+  r.write(cr, 0);
+  CHECK(r.read(cr) == 0);
+  r.idle_to(start + 20 * cycle);
+  CHECK(r.read(cr) == 0);
+  CHECK(r.read(cnt) == 0);
+}
+
+TEST_CASE("inferred: a kernel rate change keeps the kernel clocks left before a pending COUNTRST")
+{
+  rig r;
+  r.hsi_on();
+  auto const start = r.started(6, 10);
+  r.idle_to(start + 12 * cycle);
+  r.write(cr, enable | countrst);
+  r.idle_to(start + 13 * cycle);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
+  auto const reset = start + 13 * cycle + 2 * hsi;
+  CHECK(r.pending() == reset);
+  CHECK(r.read(cr) == (enable | countrst));
+  r.idle_to(reset);
+  CHECK(r.read(cr) == enable);
+}
+
+TEST_CASE("inferred: a COUNTRST written with CNTSTRT clears its bit at the due, CNT stays 0")
+{
+  rig r;
+  r.enable_with();
+  r.settle_values(6, 10);
+  r.write(cr, enable | cntstrt);
+  auto const at = r.now_ps();
+  r.write(cr, enable | countrst);
+  CHECK(r.read(cr) == (enable | countrst));
+  r.idle_to(at + 3 * cycle);
+  CHECK(r.read(cr) == enable);
+  CHECK(r.read(cnt) == 0);
+  CHECK(r.pending() == at + 9 * cycle);
+}
+
+TEST_CASE(
+    "inferred: COUNTRST and an RSTARE read before the counter leaves the start latency keep the "
+    "start instant")
+{
+  for(auto const by_read : {false, true})
+  {
+    CAPTURE(by_read);
+    rig r;
+    r.write(cfgr, presc(3));
+    r.write(cr, enable);
+    auto const enabled = r.now_ps();
+    r.write(arr, 10);
+    r.write(ccr1, 6);
+    r.idle_to(enabled + 4 * cycle);
+    r.write(icr, cmp1ok | arrok);
+    r.write(cr, enable | cntstrt | (by_read ? rstare : 0u));
+    r.idle_to(enabled + 8 * cycle);
+    if(by_read)
+    {
+      CHECK(r.cpu_read(cnt) == 0);
+    }
+    else
+    {
+      r.write(cr, enable | countrst);
+    }
+    r.idle_to(enabled + 12 * cycle);
+    CHECK((r.read(cr) & countrst) == 0);
+    CHECK(r.read(cnt) == 0);
+    CHECK(r.pending() == enabled + 16 * cycle + 6 * 8 * cycle);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.14 and 58.7.11: with RSTARE a CPU read of CNT returns the count and resets it, "
+    "a debugger read leaves it, inferred")
+{
+  rig        r;
+  auto const start = r.started(30, 10);
+  r.write(cr, enable | rstare);
+  CHECK(r.read(cr) == (enable | rstare));
+  r.idle_to(start + 5 * cycle);
+  CHECK(r.read(cnt) == 5);
+  CHECK(r.read(cnt) == 5);
+  CHECK(r.cpu_read(cnt) == 5);
+  CHECK(r.read(cnt) == 0);
+  r.idle_to(start + 8 * cycle);
+  CHECK(r.read(cnt) == 3);
+  r.write(cr, enable);
+  CHECK(r.cpu_read(cnt) == 3);
+  CHECK(r.read(cnt) == 3);
+  r.write(cr, enable | rstare);
+  r.idle_to(start + 10 * cycle);
+  CHECK(r.cpu_read(cnt, popcorn::initiator::dma) == 5);
+  CHECK(r.read(cnt) == 0);
+  rig off;
+  off.write(cr, rstare);
+  CHECK(off.read(cr) == 0);
 }

@@ -42,6 +42,7 @@ constexpr std::uint32_t tick_event       = 0;
 constexpr std::uint64_t start_cycles     = 3;
 constexpr std::uint64_t ok_cycles        = 3;
 constexpr std::uint64_t bus_cycles       = 4;
+constexpr std::uint64_t reset_cycles     = 3;
 
 enum class term : std::uint8_t
 {
@@ -49,6 +50,7 @@ enum class term : std::uint8_t
   reload_written,
   interrupts_written,
   repetition_written,
+  counter_reset,
   compare,
   reload,
   update,
@@ -65,8 +67,6 @@ enum class use : std::uint8_t
   capture,
   compare2,
   interrupts,
-  counter_reset,
-  reset_after_read,
   count,
 };
 
@@ -85,9 +85,6 @@ constexpr auto unmodelled_table = std::to_array<std::string_view>({
     "a CCR2 write, the channel 2 compare: not modelled, CMP2OK and CC2IF never set",
     "a DIER enable of EXTTRIG, UP, DOWN, CC2IF, an over-capture flag or a DMA request: not "
     "modelled, the model never sets these flags or requests",
-    "COUNTRST, the synchronous counter reset: not modelled, the bit clears at once and the "
-    "counter goes on",
-    "RSTARE, the reset of CNT at its read: not modelled, a CNT read leaves the counter",
 });
 static_assert(unmodelled_table.size() == static_cast<std::size_t>(use::count));
 
@@ -103,6 +100,7 @@ struct lptim_v2_state
   std::uint64_t reload_due{};
   std::uint64_t interrupts_due{};
   std::uint64_t repetition_due{};
+  std::uint64_t reset_due{};
   std::uint64_t switch_due{};
   std::uint64_t paused_units{};
   std::uint64_t generation{};
@@ -153,18 +151,26 @@ struct lptim_v2_state
  *        written to 0 and the one-shot stop apply such a value at once, inferred. An RCR write
  *        with ENABLE 1 sets REPOK 4 APB clocks plus 3 kernel clocks later, RM0456 58.4.16, the
  *        APB clock taken at the write, inferred. The repetition counter takes the new REP at the
- *        first update event at or after REPOK, PRELOAD 0 or 1, RM0456 58.4.16. A flag due at the
- *        instant of an update event applies before it: the update and a one-shot stop use the
- *        old value and the new one counts from then, and a REPOK at that instant reloads the new
- *        REP, inferred. An ARR write clears UE, RM0456 58.7.2. A DIER write with ENABLE 1 sets
- *        DIEROK, and takes effect, 3 kernel clocks later, inferred: RM0456 58.7.8 states the flag
- *        with no latency. Each DIER bit the write changes then clears its ISR flag, ES0499
- *        2.17.3, at that instant, inferred. Terms due at the same time apply in the order
- *        CMP1OK, ARROK, DIEROK, REPOK, CC1IF, ARRM, update event, mode switch, inferred.
+ *        first update event at or after REPOK, PRELOAD 0 or 1, RM0456 58.4.16, inferred
+ *        for PRELOAD 0, where RM0456 58.4.11 states an immediate RCR update. A flag due
+ *        at the instant of an update event applies before it: the update and a one-shot
+ *        stop use the old value and the new one counts from then, and a REPOK at that
+ *        instant reloads the new REP, inferred. An ARR write clears UE, RM0456 58.7.2.
+ *        A DIER write with ENABLE 1 sets DIEROK, and takes effect, 3 kernel clocks
+ *        later, inferred: RM0456 58.7.8 states the flag with no latency. Each DIER bit
+ *        the write changes then clears its ISR flag, ES0499 2.17.3, at that instant,
+ *        inferred. Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK,
+ *        REPOK, COUNTRST, CC1IF, ARRM, update event, mode switch, inferred.
+ *        COUNTRST written with ENABLE 1 resets CNT 3 kernel clocks later and reads 1 until then,
+ *        RM0456 58.4.14 and 58.7.11, the count restarting at that instant with the update event
+ *        due then dropped, inferred. A COUNTRST write with ENABLE 0 is discarded, RM0456 58.7.11.
+ *        With RSTARE 1 a CPU or DMA read of CNT returns the count and resets CNT, RM0456 58.4.14,
+ *        the count restarting at the read, inferred. A debugger read leaves CNT, inferred.
+ *        RSTARE written with ENABLE 0 is discarded, RM0456 58.7.11.
  *        A flag that sets while its DIER bit is in effect arms the LPTIM IRQ until ICR clears
  *        it, so a DIER bit set after its flag raises nothing, RM0456 58.6. ENABLE written to 0
  *        stops the counter at 0, keeps the flags and a pending CCR1, ARR, RCR or DIER write and
- *        drops the repetition count, inferred.
+ *        drops a pending COUNTRST and the repetition count, inferred.
  *        RM0456 58.7.10 allows CFGR writes only with ENABLE 0, and 58.7.8, 58.7.12, 58.7.13 and
  *        58.7.16 DIER, CCR1, ARR and RCR writes only with ENABLE 1, and RM0456 58.4.11, 58.4.16
  *        and 58.7.8 a second CCR1, ARR, RCR or DIER write only after its OK flag. The model keeps
@@ -183,17 +189,16 @@ struct lptim_v2_state
  *        replaces it, logs one model_warning and raises model_error under strict_peripherals,
  *        inferred.
  *        A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or
- *        the start latency, and the kernel clocks left before each pending OK flag and mode
- *        switch, inferred. A stopped kernel clock freezes all of them until it runs again,
+ *        the start latency, and the kernel clocks left before each pending OK flag, COUNTRST and
+ *        mode switch, inferred. A stopped kernel clock freezes all of them until it runs again,
  *        inferred. LPTIMxRST resets the registers and the state and withdraws the pending event.
  *        The functions below are logged as not modelled: each logs one model_warning at its
  *        first use and raises model_error under strict_peripherals at every use, after the
  *        write has taken the effect stated. At a counter start: WAVE, CKSEL or COUNTMODE, ENC on
  *        an encoder instance, CC1E or CC2E with the channel as output and CC1SEL or CC2SEL on a
  *        capture instance, also at a CCMR1 write while the counter runs. At the write: CNTSTRT
- *        or SNGSTRT with TRIGEN not 00, which leaves the counter stopped, CCR2, a DIER bit
- *        other than CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, COUNTRST, which clears
- *        at once, and RSTARE.
+ *        or SNGSTRT with TRIGEN not 00, which leaves the counter stopped, CCR2 and a DIER bit
+ *        other than CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE.
  *        Deviation: CNT reads exact, without the double-read rule of RM0456 58.7.14.
  */
 class lptim_v2 final : public dispatch_model<lptim_v2, lptim_v2_state>,
@@ -267,6 +272,7 @@ private:
   void               switch_mode(std::uint64_t ps, bool single);
   void               stop();
   void               transfer_preloaded();
+  void               restart_count(std::uint64_t ps);
   void               unmodelled(use which, std::string_view reg);
   void               refuse_at_start();
   void               refuse_channels();
@@ -523,6 +529,7 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
   offer(state_.reload_due, term::reload_written);
   offer(state_.interrupts_due, term::interrupts_written);
   offer(state_.repetition_due, term::repetition_written);
+  offer(state_.reset_due, term::counter_reset);
   if((state_.isr & compare_match) == 0)
   {
     offer(match_due(state_.compare), term::compare);
@@ -567,6 +574,13 @@ void lptim_v2::apply(due_term const& next)
     {
       stop();
     }
+    return;
+  }
+  if(next.which == term::counter_reset)
+  {
+    state_.reset_due = 0;
+    regs_.poke(cr_.offset, regs_.peek(cr_.offset) & ~counter_reset);
+    restart_count(next.due);
     return;
   }
   if(next.which == term::repetition_written)
@@ -733,6 +747,18 @@ void lptim_v2::transfer_preloaded()
   state_.preloaded = 0;
 }
 
+void lptim_v2::restart_count(std::uint64_t ps)
+{
+  auto const ticks = ticks_at(ps);
+  if(not ticks)
+  {
+    return;
+  }
+  reanchor(ps, *ticks);
+  set_anchor(wide{ps} * state_.hz);
+  state_.anchor_count = 0;
+}
+
 void lptim_v2::unmodelled(use which, std::string_view reg_name)
 {
   auto const index = static_cast<std::size_t>(which);
@@ -839,10 +865,9 @@ void lptim_v2::restore_reset_values()
 
 void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
 {
-  auto dues = std::array{
-      &state_.compare_due, &state_.reload_due, &state_.interrupts_due, &state_.repetition_due,
-      &state_.switch_due};
-  auto const old = state_.hz;
+  auto       dues = std::array{&state_.compare_due,    &state_.reload_due, &state_.interrupts_due,
+                               &state_.repetition_due, &state_.reset_due,  &state_.switch_due};
+  auto const old  = state_.hz;
   if(old != 0)
   {
     auto const at = wide{ps} * old;
@@ -857,7 +882,9 @@ void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
     state_.paused_units    = 0;
     if(state_.running != 0 and at >= anchor())
     {
-      auto const since       = at - anchor();
+      auto const since = at - anchor();
+      state_.repetition =
+          repetition_after(overflows(static_cast<std::uint64_t>(since / tick_unit())));
       state_.anchor_count    = position(static_cast<std::uint64_t>(since / tick_unit()));
       state_.paused_counting = 1;
       state_.paused_units    = static_cast<std::uint64_t>(since % tick_unit());
@@ -966,9 +993,13 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
 {
   auto const t = now_ps();
   catch_up(t);
-  regs_.poke(cr_.offset, now & (enable_bit | reset_after_read));
-  auto const was_on = (old & enable_bit) != 0;
-  auto const is_on  = (now & enable_bit) != 0;
+  auto const was_on         = (old & enable_bit) != 0;
+  auto const is_on          = (now & enable_bit) != 0;
+  auto const rstare_allowed = was_on ? reset_after_read : (old & reset_after_read);
+  if(was_on and is_on and (now & counter_reset) != 0 and state_.reset_due == 0)
+  {
+    state_.reset_due = kernel_due(t, reset_cycles);
+  }
   if(not was_on and is_on)
   {
     state_.enable_ps = t;
@@ -976,8 +1007,12 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   else if(was_on and not is_on)
   {
     state_.switch_due = 0;
+    state_.reset_due  = 0;
     stop();
   }
+  regs_.poke(
+      cr_.offset,
+      (now & (enable_bit | rstare_allowed)) | (state_.reset_due != 0 ? counter_reset : 0u));
   auto const starting = now & (single_start | continuous_run);
   auto       started  = false;
   auto       armed    = false;
@@ -1007,14 +1042,6 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   if(started)
   {
     refuse_at_start();
-  }
-  if((now & counter_reset) != 0)
-  {
-    unmodelled(use::counter_reset, "CR");
-  }
-  if((now & ~old & reset_after_read) != 0)
-  {
-    unmodelled(use::reset_after_read, "CR");
   }
 }
 
@@ -1102,9 +1129,20 @@ auto lptim_v2::on_read(
     std::uint8_t   size,
     access_ctx     access) -> std::expected<std::uint32_t, bus_error>
 {
-  catch_up(now_ps());
+  auto const t = now_ps();
+  catch_up(t);
   refresh();
-  return dispatch_model::on_read(regs, offset, size, access);
+  auto const value = dispatch_model::on_read(regs, offset, size, access);
+  if((offset & ~3u) == cnt_.offset
+     and access.by != initiator::debugger
+     and (regs_.peek(cr_.offset) & reset_after_read) != 0
+     and state_.running != 0)
+  {
+    restart_count(t);
+    refresh();
+    reschedule();
+  }
+  return value;
 }
 
 auto lptim_v2::on_write(

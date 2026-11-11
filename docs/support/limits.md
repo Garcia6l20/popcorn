@@ -1465,18 +1465,25 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
 - REPOK sets 4 APB clocks plus 3 kernel clocks after an RCR write, RM0456 58.4.16, the APB clock
   of the instance's bus, APB3 or APB1 for LPTIM2, taken at the write, inferred. The repetition
   counter takes the new REP at the first update event at or after REPOK, with PRELOAD 0 or 1,
-  RM0456 58.4.16. The caution of RM0456 58.7.16, an RCR change less than five counter cycles
+  RM0456 58.4.16, inferred for PRELOAD 0, where RM0456 58.4.11 states an immediate RCR update. The
+  caution of RM0456 58.4.16 and 58.7.16, an RCR change less than five counter cycles
   before the autoreload match with PRELOAD 0, gets no special case: the rule above applies.
 - A flag due at the instant of an update event applies before it: the update and a one-shot
   stop use the old value, the new one counts from then, and a REPOK at that instant reloads the
   new REP, inferred.
+- COUNTRST written with ENABLE 1 resets CNT 3 kernel clocks later, RM0456 58.4.14, and reads 1
+  until then, RM0456 58.7.11. The count restarts at that instant and an update event due then
+  is dropped, inferred. A COUNTRST write with ENABLE 0 is discarded, RM0456 58.7.11.
+- With RSTARE 1 a CPU or DMA read of CNT returns the count and resets CNT, RM0456 58.4.14, the
+  count restarting at the read, inferred. A debugger read leaves CNT, inferred. RSTARE written
+  with ENABLE 0 is discarded, RM0456 58.7.11.
 - DIEROK sets 3 kernel clocks after a DIER write, and the enables take effect then, inferred:
   RM0456 58.7.8 states the flag with no latency. Each DIER bit the write changes clears its ISR
   flag at that instant, ES0499 2.17.3, the instant inferred. A flag that sets while its DIER bit
   is in effect raises the LPTIM IRQ until ICR clears it, so a DIER bit set after its flag raises
   nothing, RM0456 58.6.
-- Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK, REPOK, CC1IF, ARRM,
-  update event, mode switch, inferred.
+- Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK, REPOK, COUNTRST, CC1IF,
+  ARRM, update event, mode switch, inferred.
 - SNGSTRT written while the counter runs in continuous mode makes it stop at a later update
   event, and CNTSTRT written in one-shot mode makes it go on counting, RM0456 58.4.8. The new mode
   reaches the counter 3 kernel clocks after the write, inferred, so an update event before then
@@ -1484,7 +1491,7 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   counter runs is discarded, inferred. A second CNTSTRT or SNGSTRT before the first reaches the
   counter replaces it, logs one `model_warning` and raises `ModelError` under `strict`, inferred.
 - ENABLE written to 0 stops the counter at 0, keeps the flags and a pending CCR1, ARR, RCR or DIER
-  write, and drops the repetition count, inferred.
+  write, and drops a pending COUNTRST and the repetition count, inferred.
 - A CFGR write with ENABLE 1, a DIER, CCR1, ARR or RCR write with ENABLE 0, RM0456 58.7.8,
   58.7.10, 58.7.12, 58.7.13 and 58.7.16, and a second DIER, CCR1, ARR or RCR write before its OK
   flag, RM0456 58.4.11, 58.4.16 and 58.7.8, log one `model_warning` each and raise `ModelError`
@@ -1496,8 +1503,8 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   passes.
 - No LPTIM output drives a pin or a trigger signal.
 - A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
-  start latency, and the kernel clocks left before each pending OK flag and mode switch,
-  inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
+  start latency, and the kernel clocks left before each pending OK flag, COUNTRST and mode
+  switch, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
   them until it runs again, inferred.
 - LPTIM1RST to LPTIM4RST reset the registers and the state of their LPTIM.
 - CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
@@ -1506,9 +1513,8 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   counter start WAVE, CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2, CC1E or CC2E with the
   channel as output and CC1SEL or CC2SEL on LPTIM1 to LPTIM3, the CCMR1 ones also at a CCMR1
   write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN not 00, which leaves
-  the counter stopped, any CCR2 write, so CMP2OK and CC2IF never set, a DIER bit other than
-  CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, COUNTRST, which reads 0 at once, and
-  RSTARE. A function the model lacks otherwise
+  the counter stopped, any CCR2 write, so CMP2OK and CC2IF never set, and a DIER bit other than
+  CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE. A function the model lacks otherwise
   counts the kernel clock with channel 1 comparing CCR1.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
