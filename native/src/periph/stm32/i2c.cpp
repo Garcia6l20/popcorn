@@ -408,6 +408,68 @@ struct i2c_state
  *        and STOPF set at every match and STOP, RM0351 39.9.1. The STM32L4 kernel clock is the
  *        CCIPR I2CxSEL selection of the instance, and the Fast-mode Plus drive is
  *        SYSCFG_CFGR1.I2Cx_FMP, which the model stores.
+ *
+ * @limits i2c I2C
+ *
+ * @group u5,h5,l4 unmodelled
+ * - The I2C runs as a 7-bit controller and as a 7-bit target on OAR1, OAR2 with its mask and the
+ *   general call, with clock stretching, NOSTRETCH, SBC and the SMBus timeouts of TIMEOUTR. 10-bit
+ *   addressing, the SMBus host and device addresses, ALERT, PEC, the autonomous trigger, SBC or
+ *   NOSTRETCH in controller mode and SBC with NOSTRETCH in target mode warn once as unmodelled,
+ *   `model_error` under strict peripherals at the next controller START or target address phase. A
+ *   write of I2C_AUTOCR only warns, since a modelled target setup with SBC or NOSTRETCH writes it
+ *   too.
+ *
+ * @group u5,h5,l4 rule
+ * - As a target, the SCL low timeout counts from the end of each address or data phase of a
+ *   transfer to the start of the next phase or STOP the controller queued, the I2C's own stretch
+ *   included. Across a System link that gap holds the remote controller's wait of 2L + p + s per
+ *   phase and its own waits. A target counts it only while the last address phase of the transfer
+ *   addressed it, for a board controller and a remote one alike. A target the controller does not
+ *   address counts no SCL low during another target's transfer, a controller stall included, where
+ *   silicon measures SCL on the line whatever the address, RM0456 65.4.12. An RCC reset or a PE
+ *   clear of the remote controller's I2C releases the bus at its time plus L and ends the count,
+ *   with no STOP, and an RCC reset of the target keeps a release it holds. The bus idle timeout
+ *   counts while PE is set and BUSY is 0, from the STOP or the PE set. Timeout lengths follow the
+ *   kernel clock rate the model reads at its last event or register access.
+ * - Inferred, unmeasured on a board: TEXTEN sums the I2C's own stretches from START to STOP, a
+ *   controller's waits included, each from the end of the target's stretch before it, and the sum
+ *   restarts after a timeout and at each TEXTEN set. A target timeout releases its stretch as PE =
+ *   0 does and leaves the transfer until the next address match. A controller timeout during a
+ *   target's stretch sends its STOP once the target releases SCL.
+ * - A target stretches before a written byte's acknowledge after the byte instead: the acknowledge
+ *   and the release come at the end of the byte or at the RXDR read, up to one SCL period and the
+ *   acknowledge bit later than on silicon.
+ * - A STOP the controller queues during a target's stretch runs after the stretched byte's answer.
+ *   A STOP due inside a running byte drops that byte.
+ * - A target transmitter's TCR or empty-TXDR stretch holds only the next read byte. A STOP the
+ *   controller queues runs past it, and TCR stays set until a non-zero NBYTES write.
+ * - Inferred, unmeasured on a board: with NOSTRETCH and TXE 1 at the address acknowledge, TXIS sets
+ *   only when the firmware writes it. TXIS set before a NACK or a STOP stays until a TXDR write.
+ *   With SBC and RELOAD clear, bytes past NBYTES are acknowledged as CR2.NACK says, with no TCR. An
+ *   SBC transmitter with RELOAD sets TCR after the acknowledge of the NBYTES-th byte. A NOSTRETCH
+ *   receive overrun leaves CR2.NACK as it is.
+ * - PE set during a bus hold reads BUSY 1 at once. Silicon waits for the next START.
+ * - A transfer that meets a hold waits. On silicon it would lose arbitration. A target's ARLO reply
+ *   models that case.
+ * - An address matched in target mode clears a pending CR2.START on the STM32U5 and STM32H5, RM0456
+ *   65.9.2 and RM0481 53.9.2. On the STM32L4 the match leaves START set and a write of ICR.ADDRCF
+ *   clears it, RM0351 39.9.2 and 39.9.8 as corrected by ES0250 2.20.7.
+ *
+ * @group l4 rule "STM32L4"
+ * - STM32L4 I2C1 to I2C3, RM0351 section 39, run the I2C model without I2C_AUTOCR and without
+ *   CR1.ADDRACLR and STOPFACLR: ADDR and STOPF set at every match and STOP. The kernel clock is the
+ *   instance's `RCC_CCIPR` I2CxSEL selection. The Fast-mode Plus drive bits I2Cx_FMP of
+ *   SYSCFG_CFGR1 are stored, the bus timing follows TIMINGR alone.
+ *
+ * @group l4 note "STM32L4 errata"
+ * - STM32L4 ES0250 2.20.2, the Stop-mode behaviour with WUPEN 0, corrects RM0351 for Stop mode,
+ *   which the model leaves out. ES0250 2.20.1 (10-bit controller restart), 2.20.3 (SDA setup
+ *   shorter than a kernel period), 2.20.4 (spurious BERR), 2.20.5 and 2.20.13 (last byte lost in
+ *   reload mode), 2.20.6 (spurious controller transfer after a match with START pending), 2.20.8
+ *   (OVR not set on underrun with NOSTRETCH), 2.20.9 (stall after the first byte), 2.20.10 (SDA
+ *   held low at an SMBus timeout), 2.20.11 (Fast-mode Plus not on every pin) and 2.20.12 (I2C3
+ *   analog filter needs PC0 and PC1) are silicon effects the model leaves out.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,

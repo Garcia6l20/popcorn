@@ -297,6 +297,20 @@ struct spi_link_attachment
  *
  *        Not modelled, logged once: half duplex, CRC, TI mode, the autonomous trigger, the SS pulse
  *        and timing options.
+ *
+ * @limits spi SPI
+ *
+ * @group u5,h5 unmodelled
+ * - STM32U5 and STM32H5: half duplex, CRC, TI mode, the autonomous trigger and SS timing are not
+ *   modelled. The SPI runs as a plain full-duplex or simplex SPI. One model_warning per machine
+ *   comes at the first transfer started with SPI_CFG2.SP, MIDI or MSSI or SPI_CFG1.CRCEN set.
+ *
+ * @group u5,h5 rule
+ * - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
+ *   at once, with no propagation latency.
+ * - RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits. The
+ *   model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
+ * - SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
  */
 class spi final : public dispatch_model<spi, spi_state>,
                   public spi_controller_port,

@@ -328,6 +328,98 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        model, and a snapshot with another number of targets than the machine's is refused with
  *        config_error. An RCC reset moves the event generation, so the event of a phase in flight
  *        acts on nothing.
+ *
+ * @limits i2c
+ *
+ * @group l1 rule
+ * - STM32L1 I2C1 and I2C2, RM0038 section 26, run as a 7-bit controller transmitter and receiver on
+ *   board targets. The SCL period is Thigh + Tlow from CCR and PCLK1, RM0038 26.6.8, without the
+ *   rise time and the noise filter delay: a START takes 1 period, a byte 9, a STOP 1. FREQ, CCR,
+ *   TRISE and the PCLK1 rate are checked at the first START after PE is set with PCLK1 running, and
+ *   each rule a configuration breaks logs one `model_warning`. TRISE passes at or above the rise
+ *   time.
+ * - SMBus, PEC, ALERT and ARP log one `model_warning`, raise `model_error` under
+ *   `strict_peripherals` at the START that uses them, and the bus stays idle for them.
+ * - DMA, RM0038 26.3.7: with CR2.DMAEN 1 the TX request follows TxE and the RX request follows
+ *   RxNE, in controller and target mode and whatever ITBUFEN holds. A DMA access to DR acts as a
+ *   CPU access. With CR2.LAST 1 at the EOT_1 of the channel serving the RX request, the controller
+ *   receiver NACKs the next byte. Inferred: LAST counts as it is at EOT_1, the NACKed byte is the
+ *   first whose acknowledge the I2C decides after EOT_1, the end of a START drops a pending EOT_1,
+ *   an EOT_1 with DMAEN 0 changes nothing, and LAST has no effect in target mode. The end of the
+ *   DMA transfer sends no STOP: the firmware sets it.
+ * - A `board.i2c_controllers` controller, alone on the instance, queues phases through
+ *   `i2c_controller_port` with the placement, unit order, STOP, drop, reset and snapshot rules of
+ *   the STM32U5 I2C with a board controller.
+ * - Target receiver and transmitter, RM0038 26.3.2: a 7-bit match of OAR1, of OAR2 with ENDUAL 1,
+ *   or the general call with ENGC 1, with CR1.ACK 1, sets ADDR with TRA as the R/W bit, DUALF for
+ *   OAR2 and GENCALL for the general call, and holds SCL until the SR1 then SR2 read. OAR2 matches
+ *   with ADDMODE 0 only, the general call in either ADDMODE. Address 0 never matches OAR1 nor OAR2.
+ *   A STOP, a repeated START and the disable clear DUALF and GENCALL. Written bytes land in DR with
+ *   RxNE, CR1.ACK read at the end of the byte's phase, the acknowledge period included. A byte
+ *   ending with RxNE 1 sets BTF and holds SCL until the DR read. A read byte sends the shift
+ *   register, which the first DR write after the ADDR clear loads with TxE kept 1, and waits for
+ *   that write. The acknowledge of a read byte moves a full DR on and sets TxE, and with DR empty
+ *   BTF sets at the byte's end, RM0038 26.3.2. The controller's NACK sets AF, and a DR write after
+ *   it clears TxE and sends nothing. BUSY follows the port's START and STOP with PE 0 too. A STOP
+ *   sets STOPF after an acknowledged address or byte, none after a NACKed byte. Which acknowledge
+ *   counts for that rule, the last one sent or CR1.ACK at the STOP, is inferred as the last one
+ *   sent. PE 0 written between a match of an address of the I2C and the port's STOP disables it at
+ *   that STOP, RM0038 26.6.1: until then it answers, stretches and takes DR accesses as with PE 1.
+ *   Inferred: OAR1 matches before OAR2 for one address, PE 0 with no address matched since the last
+ *   STOP disables the I2C at once, a match with CR1.ACK 0 answers NACK at the address end with no
+ *   ADDR, address 0 with R/W 1 matches nothing, an SR1 read before STOPF sets arms its clear by a
+ *   CR1 write, the first read byte after the ADDR clear sets no BTF, the communication PE 0 waits
+ *   for runs from the match to the port's STOP, repeated STARTs and their address phases included,
+ *   a repeated START inside it matches the I2C's addresses, the STOP that ends it sets no STOPF,
+ *   and a PE 1 write before that STOP keeps the I2C enabled. A firmware START waits for the port's
+ *   STOP. A 10-bit header with ADDMODE 1 logs one `model_warning`, raises `model_error` under
+ *   `strict_peripherals` at the address phase, and answers NACK.
+ * - Target with NOSTRETCH 1, RM0038 26.3.4 and 26.3.5: an address match answers at its end with
+ *   ADDR set and no SCL hold. A written byte that ends with RxNE 1 is lost and sets OVR, and a read
+ *   byte that starts with the shift register empty sends the DR byte again and sets OVR. BTF never
+ *   sets. A read byte NACKed before the ADDR clear ends the transmission, RM0038 26.3.4 AF.
+ *   Inferred: the lost byte is acknowledged as CR1.ACK says, a read byte before the ADDR clear
+ *   sends DR as it is, TxE sets only with ADDR clear, and the ADDR clear after that NACK sets no
+ *   TxE.
+ * - Errors, RM0038 26.3.4: a target's `bus_error` sets BERR and its `overrun` sets OVR at the end
+ *   of the byte, which completes as its acknowledge says. On silicon OVR sets in slave mode with
+ *   NOSTRETCH only, the injection exercises firmware handlers. With several targets the byte takes
+ *   the error of the first in attachment order. An `arbitration_lost` sets ARLO, clears MSL and
+ *   TRA, RM0038 26.6.7, ignores the reply's acknowledge and stretch, drops a read byte and sends no
+ *   DR byte the firmware wrote, RM0038 26.3.4 ARLO. Inferred: TxE clears and BTF follows a byte
+ *   still held, as at a START end. Inferred: BUSY stays 1 for one SCL period, then the winner's
+ *   STOP reaches the targets, clears BUSY and CR1.STOP and sends a START CR1.START holds. PE 0 in
+ *   that window leaves BUSY 1 until that STOP. In target mode a port STOP inside a running data
+ *   byte of the I2C's acknowledged address, or inside a running address phase while the I2C is
+ *   enabled, sets BERR and drops the byte, RM0038 26.3.4 BERR. Inferred: a STOP inside another
+ *   address's byte or before a queued phase starts sets no BERR.
+ * - The controller receiver decides a byte's acknowledge at the end of its eighth period, before
+ *   the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
+ *   Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
+ *   inferred. With POS 1 it takes ACK as it was at the previous byte's decision or at the end of
+ *   the address, inferred for an ACK write during a byte. A byte clocked after a NACKed byte reads
+ *   0xFF and reaches no target.
+ * - A DR write in reception clears RxNE, and with BTF set the held byte replaces the written value
+ *   in DR, inferred. A DR write with TRA 1 clears RxNE, BTF and a byte held from a reception, and
+ *   the transmitter sends it, inferred.
+ * - PE 0 during a controller transfer, which RM0038 26.6.1 forbids, ends it at once and logs one
+ *   `model_warning`. The SB clear by an SR1 read then a DR write follows RM0038 26.6.6 SB and
+ *   Figure 212 EV5. Inferred: a DR write with SB set and no SR1 read since the last SB or ADDR
+ *   clear sends nothing, and the DR write that clears SB takes the SR1 read, so the ADDR clear
+ *   needs an SR1 read after it. A DR write while ADDR is set, during the address phase or after a
+ *   data NACK sends nothing, inferred. An SR2 read between the SR1 read and the DR write that
+ *   clears SB leaves that clear armed, inferred: RM0038 26.6.7 names the ADDR case only. A CR1.STOP
+ *   set while ADDR is set sends its STOP after the ADDR clear, inferred where RM0038 26.6.1, Figure
+ *   212 and 26.3.3 conflict. A byte written with TxE 1 and NACKed leaves TxE 1, inferred from
+ *   RM0038 26.6.6 TxE.
+ * - An STM32L1 I2C target answers at the phase's end. A target that leaves its answer pending is
+ *   taken as NACK or as a byte of 0xFF and fails the run with `config_error`, and
+ *   `i2c_target_port::complete()` and `complete_read()` throw `config_error`. The STM32L1 I2C is a
+ *   link end of no linked system and takes no host bus hold.
+ * - A Python target whose `on_start`, `on_write`, `on_read` or `on_stop` raises, or whose `matches`
+ *   raises, answers that phase as an absent target: a NACK, a read byte of all ones, no match. The
+ *   phase and its flags complete, and the exception leaves at the end of the event, inferred:
+ *   RM0456 65.4.9 and RM0038 26.3.4 describe a NACK, none describes a target that fails.
  */
 class i2c_v1 final : public dispatch_model<i2c_v1, i2c_v1_state>,
                      public i2c_target_port,

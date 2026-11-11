@@ -471,6 +471,98 @@ struct lock
  *        `usart_variant::kernel_buses`. Without `usart_variant::flow_control` CTSE and RTSE log
  *        one warning and change nothing. Nothing is locked while UE is 1, RWU mute mode is
  *        logged as not modelled, LBD never sets.
+ *
+ * @limits usart USART, UART and LPUART
+ *
+ * @group all unmodelled
+ * - Only plain asynchronous mode is modelled. Synchronous, smartcard, IrDA, LIN, half-duplex,
+ *   driver enable, auto baud and receiver timeout are logged as not modelled.
+ * - The model runs in Run mode only. A CPU or DMA write that sets CR1.UESM, CR3.UCESM, CR3.WUFIE or
+ *   CR3.WUS, where the description has them, logs one `model_warning` and raises `ModelError` under
+ *   `strict_peripherals` before the store, on every family. WUF stays 0.
+ * - GTPR and AUTOCR are not served, so the locks on their fields are not enforced.
+ *
+ * @group all rule
+ * - IDLE is never gated on RXFNE, which RM0456 66.8.10 does.
+ * - BUSY does not follow frames from other machines.
+ * - An aborted frame delivers nothing and holds the line until the abort. The chip would see a
+ *   truncated frame and FE.
+ * - A frame from another machine still being sampled when a link holds the line low becomes the
+ *   break character, data 0. Silicon keeps the bits before the hold.
+ * - A `UartDevice` with its own `line` format reads in both directions through the model's sampler:
+ *   three samples per bit at 7, 8 and 9 sixteenths of the reader's bit time with a majority vote,
+ *   the start bit of a frame that follows reading low from its start, a framing error when the stop
+ *   sample reads low. The device's frames arrive at the later of their stop-bit end and the UART's
+ *   last stop sample. The firmware's frames reach the device with the stamp of the firmware's
+ *   stop-bit end, a slower device sampling later than that stamp. Frames of a device faster than
+ *   the UART overlap the frame the UART still samples: the next frame is sampled on a grid anchored
+ *   at its own start, as a linked frame is, where a receiver busy until its stop sample might
+ *   resynchronise on a later edge. The outcome of a baud, parity or stop-length mismatch is
+ *   inferred: the manuals do not state it, and the model's sampler may differ from the chip's.
+ *
+ * @group l1 rule
+ * - STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
+ *   way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
+ * - The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,
+ *   USART3, UART4 and UART5, whatever `RCC_APBxENR` holds, which gates only the register access,
+ *   see RCC.
+ * - The first frame after TE is set starts at its DR write, without the idle preamble and the 1
+ *   bit-time delay of the RM0038 27.6.4 TE note. Clearing UE lets the frame in flight end, then
+ *   stops the output, RM0038 27.6.4, and drops the word waiting in TDR.
+ * - A write of 0 to RXNE drops the received word, and DR reads 0 while RXNE is 0, inferred.
+ * - A write of 0 to SBK before the break starts cancels it, RM0038 27.3.2. Once the break's low
+ *   part runs, SBK reads 1 until it ends, a write of 0 meanwhile keeps it, inferred. The line stays
+ *   high 1 bit after the break before the next frame, RM0038 27.3.2.
+ * - SBK written with TE 0 and UE 1 sends the break once TE is 1. A write with UE 0 clears SBK,
+ *   inferred.
+ * - Mute mode, RWU, is logged as not modelled. LBD never sets.
+ * - UART4 and UART5 have no hardware flow control, RM0038 Table 157: CTSE and RTSE set there log
+ *   one `model_warning` and transmission and reception ignore them.
+ * - The STM32L1 SR-then-DR clear: a CPU or DMA read of USART_SR notes the IDLE, ORE, NF, FE, PE and
+ *   TC flags it reads set, any later DR read clears the noted IDLE, ORE, NF, FE and PE, and any
+ *   later DR write the noted TC and PE, whatever other accesses lie between, inferred. A flag set
+ *   after the SR read stays set, and a DR write with no SR read since TC rose sends the word and
+ *   leaves TC set, RM0038 27.6.1.
+ * - STM32L1 EIE raises the interrupt on ORE, NF or FE only while DMAR is 1, RM0038 27.6.6.
+ *
+ * @group l4 rule "STM32L4"
+ * - STM32L4 USART1 to USART3, UART4, UART5 and LPUART1, RM0351 sections 40 and 41, run the sci3
+ *   frame engine with one data word each way: ISR.TXE, RXNE and NF, CR1.TXEIE and RXNEIE, ICR.NCF
+ *   clears NF. The kernel clock is the instance's `RCC_CCIPR` selection, BRR alone divides it, the
+ *   L4 has no PRESC. Every instance has CTS and RTS flow control, RM0351 Table 251. USART_ISR reads
+ *   0x000000C0 after reset, TXE and TC, bit 25 0, inferred: RM0351 40.8.8 gives 0x020000C0 with
+ *   TCBGT, which the Table 251 note gives to the L49x and L4Ax only.
+ *
+ * @group all rule "TC at the end of a frame"
+ * - TC sets at the end of a data frame when TXE is set, a break following or not, on every family,
+ *   RM0456 66.8.10 and 67.7.8, RM0481 56.8 and 57.7, RM0351 40.8.8, RM0038 27.6.1. A held data
+ *   frame keeps TC 0.
+ *
+ * @group l1,l4 note "STM32L1 and STM32L4 errata"
+ * - STM32L4 ES0250 2.21.2 and 2.22.1 and STM32L1 ES0125 2.11.3, ES0242 2.11.3, ES0224 2.10.3,
+ *   ES0240 and ES0241 2.12.3 and ES0578 2.11.3 are modelled: a break requested while a data frame
+ *   shifts with CTSE 1 and nCTS deasserted at its end keeps TC 0 until the break has run, inferred.
+ * - STM32L1 ES0125 2.11.8, ES0242 2.11.8, ES0224 2.10.8, ES0240 and ES0241 2.12.8 and ES0578 2.11.8
+ *   are modelled: with CTSE 1 a break leaves at the end of the current transmission whatever nCTS
+ *   says. A data frame waits for nCTS.
+ *
+ * @group l4 rule "STM32L4 RTS and LPUART"
+ * - STM32L4 ES0250 2.21.3 and 2.22.2: RTS is driven low once RTSE is set, also while UE or RE is 0.
+ *   The model reads ready to the host while UE is 0, and while RE is 0 with room in RDR. With RE 0
+ *   and RDR full it reads not ready, inferred: the erratum names no RDR state.
+ * - STM32L4 LPUART1, RM0351 section 41: 256 times the kernel clock over BRR[19:0] gives the baud,
+ *   and a BRR below 0x300 sends and receives nothing, RM0351 41.4.4. The kernel clock is the
+ *   `RCC_CCIPR` LPUART1SEL selection. RQR has no TXFRQ, a write of bit 4 does nothing.
+ *
+ * @group l4 note "STM32L4 errata"
+ * - STM32L4 ES0250 2.22.3, LPUART transmitter jitter at a low BRR, and 2.22.4, LPUART1 outputs not
+ *   open-drain, are pin-level effects the frame engine leaves out.
+ * - STM32L4 ES0250 2.21.1, NACK sampling in smartcard mode, follows smartcard: logged as not
+ *   modelled. ES0250 2.21.4, the receiver timeout start with two stop bits, follows RTOEN: logged
+ *   as not modelled. ES0250 2.21.5, data corruption on a noisy receive line, and 2.21.6, data
+ *   corrupted when ABREN is cleared, are analog and auto-baud effects the frame engine leaves out.
+ *   ES0250 2.21.7, NF with ONEBIT: the model samples once with ONEBIT and sets NF only for a host
+ *   frame tagged with noise.
  */
 class usart final : public dispatch_model<usart, usart_state>,
                     public uart_link_port,

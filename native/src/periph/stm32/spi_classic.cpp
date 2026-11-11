@@ -251,6 +251,93 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        that frame, which lands and runs on, and the frame's event then fails the run with
  *        config_error. A controller drives the instance through spi_controller_port::transfer()
  *        only: spi_controller_port::select(), frame(), deselect() and drop() throw config_error.
+ *
+ * @limits spi
+ *
+ * @group l1,l4 rule "STM32L1 and STM32L4"
+ * - STM32L1 SPI1 to SPI3, RM0038 section 28, run SPI mode with one transmit buffer, one receive
+ *   buffer and frames of 8 or 16 bits by CR1.DFF. The frame time is DFF bits of the APB clock of
+ *   the instance, PCLK2 for SPI1, PCLK1 for SPI2 and SPI3, divided by 2 << BR, whatever
+ *   `RCC_APBxENR` holds, which gates only the register access, see RCC. A frame starts at the DR
+ *   write, without the 2 APB clock delay of the RM0038 28.3.5 note.
+ * - `SPI_I2SCFGR` and `SPI_I2SPR` are storage: the I2S mode is not modelled. On Cat.3 to Cat.6
+ *   CR2.FRF 1 with SPE 1 logs one `model_warning`, raises `model_error` under `strict_peripherals`
+ *   at the CR1 or CR2 write, and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF is
+ *   storage, RM0038 28.5.2. TIFRFE, UDR and CHSIDE stay 0.
+ * - Clearing SPE lets the frame in flight finish and land with BSY 1, then no frame starts, RM0038
+ *   28.3.8 for the receive-only modes, inferred for the others. Both buffers keep their word across
+ *   SPE 0, and a word written with SPE 0 is sent once SPE and MSTR are 1, inferred.
+ * - A target whose transmit buffer is empty at a frame start sends the last frame it received, 0
+ *   after a reset, inferred.
+ * - The CRC runs serially over the frame bits in wire order, RM0038 28.3.6: with LSBFIRST 1 it
+ *   takes the DR value LSB first. The CRC frame shifts TXCRCR out as a data word, bit reversed with
+ *   LSBFIRST 1, inferred. The CRC frame clears CRCNEXT at its end, inferred from ST's HAL, which
+ *   never clears it. With DMA, the completed transmit transfer arms the CRC frame after the last
+ *   data. In receive-only mode, controller or target, the completed receive transfer makes the
+ *   frame in flight the CRC frame, inferred, or the next frame when none is in flight.
+ * - TXCRCR and RXCRCR run on across a CRC phase: no data frame after it clears them, inferred,
+ *   RM0038 28.3.6 clears them only on the CRCEN write.
+ * - While OVR is set, every frame received is lost, also after the DR read of the clear sequence
+ *   and up to its SR read, RM0038 28.3.10.
+ * - RXCRCR takes every frame received, also those lost while OVR is set, inferred from RM0038
+ *   28.3.6.
+ * - A target, MSTR 0 with CRCEN 1, folds into RXCRCR every frame its controller clocks, also with
+ *   NSS high or SPE 0, RM0038 28.3.6. Such a frame lands nowhere else and leaves TXCRCR as it is,
+ *   inferred: RM0038 names no calculator for a target that drives no MISO.
+ * - A target keeps BSY 1 from one frame to the next of a continuous transfer. RM0038 28.3.7 gives a
+ *   slave a BSY low of one SPI clock between frames.
+ * - SPI_DR takes byte accesses as well as the half-word and word accesses RM0038 28.5 requires: a
+ *   byte write merges into the DR value and sends it, a byte read returns its byte.
+ * - A frame with no device answering it, an unselected device or a Python device whose hook raised,
+ *   lands as all ones. Each answering device's reply is ANDed in, as on an open-drain MISO,
+ *   inferred: RM0456 and RM0038 describe no floating MISO.
+ * - The CR1 write that ends the MODF clear sequence leaves SPE and MSTR clear, inferred: RM0038
+ *   28.3.10 restores them after the sequence.
+ * - The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, inferred:
+ *   RM0038 Table 159 and 28.3.9 name no SPE term.
+ * - The STM32L1 SPI takes a controller's frames through `spi_controller_port::transfer()` only.
+ *   `select()`, `frame()`, `deselect()` and `drop()` throw `config_error`, so an STM32L1 SPI is a
+ *   link end of no linked system.
+ * - An STM32L1 SPI device replies at the frame's end. The model calls
+ *   `spi_target::exchange_deferred()` with the frame's generation as ticket, offers no
+ *   `spi_target_port` and calls neither `attached()` nor `detached()`. A device that leaves its
+ *   reply pending drives all ones in that frame, and the frame's end fails the run with
+ *   `config_error`.
+ *
+ * @group l4 rule "STM32L4"
+ * STM32L4 SPI1 to SPI3, RM0351 section 42, follow the STM32L1 rules above with a 4-byte TXFIFO and
+ * RXFIFO and frames of CR2.DS + 1 bits:
+ *
+ * - A DR write pushes one byte at 8 bits and two bytes at 16 or 32 bits, a DR read pops as many,
+ *   the 32-bit access as the 16-bit one, inferred. Byte accesses to DR + 1 to DR + 3 move no FIFO
+ *   byte, inferred.
+ * - A DR write whose bytes do not all fit the TXFIFO is dropped whole and the stored bytes stay,
+ *   with one `model_warning`, and raises `model_error` under `strict_peripherals`, inferred. RM0351
+ *   42.4.9 clears TXE above half full to prevent "possible corruption of 3x 8-bit data frames
+ *   already stored in the TXFIFO when software tries to write more data in 16-bit mode": silicon
+ *   may corrupt the stored frames, popcorn keeps them.
+ * - With DS above 8 a frame takes two bytes, so a byte write waits for the next byte before the
+ *   frame starts, inferred. BSY stays 0 while the TXFIFO holds half a frame, RM0351 42.4.10.
+ * - A DR read of an empty RXFIFO slot returns 0 and pops nothing, inferred.
+ * - FRLVL reads 11 with 3 bytes in the RXFIFO, as with 4, inferred.
+ * - The TXFIFO keeps its bytes across SPE 0 and sends them once SPE and MSTR are 1, inferred.
+ * - The CRC phase of DS 8 frames with CRCL 1 sends TXCRCR[15:8] first with LSBFIRST 0 and
+ *   TXCRCR[7:0] first with LSBFIRST 1, inferred. DS 16 frames with CRCL 0 carry the CRC-8 in one
+ *   16-bit frame and CRCERR compares its low 8 bits, inferred.
+ * - CRCEN with DS other than 8 or 16 runs the CRC over the DS bits, with one `model_warning` and
+ *   `model_error` under `strict_peripherals` at the frame start.
+ * - The last 16-bit DR read of an LDMA_RX transfer returns its one byte in [7:0] and 0 above,
+ *   inferred.
+ * - The end of a DMA transfer arms LDMA_TX or LDMA_RX only with DS 8 or less. The next DR access of
+ *   that side takes the armed flag whatever its width, and SPE written to 0 clears it, inferred:
+ *   RM0351 42.4.9 and 42.6.4 give LDMA meaning only for packed transfers and state no clear.
+ * - The NSS pulse of NSSP 1 lasts exactly one SCK period, inferred: RM0351 42.4.12 gives at least
+ *   one.
+ *
+ * @group l4 note "STM32L4 errata"
+ * - ES0250 2.23.1, BSY staying high once the SPI is disabled, ES0250 2.23.2, BSY staying high at
+ *   the end of a target transfer, and ES0250 2.23.3, CRC corruption when another peripheral's DMA
+ *   transfer completes, are not modelled: BSY follows RM0351 42.4.10 and the CRC RM0351 42.4.14.
  */
 class spi_classic final : public dispatch_model<spi_classic, spi_classic_state>,
                           public spi_controller_port,
