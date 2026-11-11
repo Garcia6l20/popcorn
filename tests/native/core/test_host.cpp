@@ -2568,6 +2568,29 @@ TEST_CASE("a waiter's after counts from the boundary that registers it")
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
+TEST_CASE("a waiter's after past the end of virtual time saturates and keeps waiting")
+{
+  constexpr auto forever = std::numeric_limits<std::uint64_t>::max();
+  hosted         h{idle_forever()};
+  h.start();
+  auto const ended = h.wait({.after = vtime{1'000'000'000}}).future().get();
+  REQUIRE(ended.reason == stop_reason::time);
+  auto const room = forever - ended.time.ps;
+  for(auto const after : {forever, room + 1, room})
+  {
+    auto waiting = h.wait({.after = vtime{after}});
+    REQUIRE(settles([&] { return waiting.deadline().has_value(); }));
+    CHECK(waiting.deadline()->ps == forever);
+    CHECK_FALSE(waiting.future().done());
+    waiting.drop();
+    CHECK_THROWS_AS(waiting.future().get(), core::operation_cancelled);
+  }
+  auto small = h.wait({.after = vtime{2'000'000'000}}).future().get();
+  CHECK(small.reason == stop_reason::time);
+  CHECK(small.time.ps >= ended.time.ps + 2'000'000'000);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
 TEST_CASE("a waiter posted inside a slice counts its after from a block after the post")
 {
   popcorn::testing::machine_fixture<ticking_arch> f{m33(), "alu", core::machine_options{}};

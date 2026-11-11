@@ -19,7 +19,7 @@ from popcorn._refs import Pending, Ref, VarRef
 from popcorn.arm import Reg
 from popcorn.board import AudioOptions, UsbHostOptions
 from popcorn.image.dwarf import BaseType, DebugInfo, Encoding, Member, StructType
-from popcorn.units import VirtualTime, ms, s, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import (
     BOARD_ELF,
@@ -77,6 +77,21 @@ def test_sync_accesses_stay_refused_after_the_free_run_ended_by_itself(
     with pytest.raises(popcorn.FaultError):
         run_bounded(scenario())
     assert not m.busy
+
+
+def test_a_wait_for_past_the_end_of_virtual_time_keeps_waiting(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> None:
+        await m.run(for_=ms(1))
+        async with m.running():
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.3):
+                    await m.wait_for(Never(), for_=VirtualDuration(2**64 - 1))
+            stopped = await m.wait_for(Never(), for_=ms(1))
+            assert stopped.reason is popcorn.StopReason.TIME
+
+    run_bounded(scenario())
 
 
 def test_a_parked_read_returns_at_once_at_the_machine_time(machines: Machines) -> None:

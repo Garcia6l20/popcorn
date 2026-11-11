@@ -12,6 +12,7 @@
 #include <cstring>
 #include <deque>
 #include <format>
+#include <limits>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -62,7 +63,10 @@ struct waiter
     since_slice = slice;
     if(spec.after and not spec.deadline)
     {
-      spec.deadline = vtime{now.ps + spec.after->ps};
+      auto const room = std::numeric_limits<std::uint64_t>::max() - now.ps;
+      spec.deadline   = vtime{
+          spec.after->ps > room ? std::numeric_limits<std::uint64_t>::max()
+                                : now.ps + spec.after->ps};
     }
   }
 

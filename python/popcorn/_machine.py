@@ -2081,8 +2081,9 @@ class Machine:
         run, `start()` or `running()`, it runs at slice ends only, from the end of the slice
         after the one that registered the wait, as `wait_for` says: the time returned is up to
         one slice after it became true, two when it held at the call. `for_` is counted from
-        the boundary that registered the wait. Cancelling it while parked halts the run, inside
-        a free run it drops the wait only.
+        the boundary that registered the wait, and inside a free run a `for_` that reaches past
+        the end of virtual time never ends the wait. Cancelling it while parked halts the run,
+        inside a free run it drops the wait only.
 
         `deadline` stops waiting at that virtual time instead, exclusive with `for_`. Already
         past, it returns at once: parked after one check of `predicate`, inside a free run with
@@ -2143,6 +2144,8 @@ class Machine:
 
         `deadline` stops waiting at that virtual time instead, a TIME stop, exclusive with
         `for_`. Already past, it returns a TIME stop at once: parked, no instruction runs.
+        Inside a free run, a `for_` that reaches past the end of virtual time never ends the wait,
+        only the event or a stop does.
 
         Raises:
             TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
