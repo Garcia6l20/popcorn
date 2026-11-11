@@ -226,7 +226,7 @@ private:
   [[nodiscard]] auto winner() const -> std::optional<std::size_t>;
   [[nodiscard]] auto width(std::size_t ch, field_ref size) -> std::uint8_t;
   [[nodiscard]] auto on_apb(std::uint32_t at) const -> bool;
-  void               schedule();
+  void               schedule(std::uint64_t base_ps);
   void               start(std::size_t ch);
   void               transfer(std::size_t ch);
   void               fail(std::size_t ch);
@@ -433,7 +433,7 @@ auto dma_l1l4::winner() const -> std::optional<std::size_t>
   return best;
 }
 
-void dma_l1l4::schedule()
+void dma_l1l4::schedule(std::uint64_t base_ps)
 {
   if(state_.scheduled or not winner())
   {
@@ -449,7 +449,7 @@ void dma_l1l4::schedule()
     return;
   }
   state_.scheduled = true;
-  state_.due_ps    = ctx_.clock.time().ps + latency_cycles * ps_per_second / hz;
+  state_.due_ps    = base_ps + latency_cycles * ps_per_second / hz;
   ctx_.events.schedule_at(vtime{state_.due_ps}, transfer_due, state_.generation, ctx_.clock);
 }
 
@@ -460,11 +460,12 @@ void dma_l1l4::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   state_.scheduled = false;
+  auto const base  = state_.due_ps;
   if(auto const ch = winner())
   {
     transfer(*ch);
   }
-  schedule();
+  schedule(base);
 }
 
 void dma_l1l4::warn_once(std::size_t ch, unsupported what)
@@ -661,7 +662,7 @@ template <std::size_t Ch> void dma_l1l4::control_written(std::uint32_t old, std:
     start(Ch);
   }
   interrupts(Ch);
-  schedule();
+  schedule(ctx_.clock.time().ps);
 }
 
 template <std::size_t Ch> void dma_l1l4::count_written(std::uint32_t old, std::uint32_t)
@@ -697,7 +698,7 @@ void dma_l1l4::clear_written(std::uint32_t, std::uint32_t now)
 
 void dma_l1l4::selection_written(std::uint32_t, std::uint32_t)
 {
-  schedule();
+  schedule(ctx_.clock.time().ps);
 }
 
 auto dma_l1l4::on_write(
@@ -748,7 +749,7 @@ void dma_l1l4::on_request(std::uint32_t request, bool level)
   }
   if(level)
   {
-    schedule();
+    schedule(ctx_.clock.time().ps);
   }
 }
 }

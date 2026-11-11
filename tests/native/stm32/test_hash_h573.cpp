@@ -509,10 +509,11 @@ auto h553() -> popcorn::part_description const&
 
 struct rig
 {
-  explicit rig(bool strict = true, popcorn::part_description const& desc = h573())
+  explicit rig(bool strict = true, popcorn::part_description const& desc = h573(), double cpi = 1.0)
   {
     auto options               = popcorn::testing::stm32_options();
     options.strict_peripherals = strict;
+    options.cpi                = cpi;
     f = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
@@ -906,6 +907,34 @@ TEST_CASE("one SHA-1, SHA-2 or SHA-3 block keeps BUSY for its cycles from its la
   }
 }
 
+TEST_CASE("H573 board: DINIS after a block appears at the first instruction after its exact time")
+{
+  rig const r{true, h573(), 1.5};
+  for(auto const algo : {sha1, sha224, sha256, sha384, sha512})
+  {
+    CAPTURE(algo);
+    r.begin(algo);
+    r.feed(pattern(block_bytes(algo)));
+    r.feed(pattern(4));
+    auto const flagged = r.now() + cycles_of(algo) * r.cycle_ps() + 2 * r.cycle_ps();
+    std::vector<std::uint64_t> stops;
+    std::uint64_t              dinis_at = 0;
+    while(dinis_at == 0 and r.now() < flagged + 20 * r.cycle_ps())
+    {
+      r.until(r.now() + 1);
+      stops.push_back(r.now());
+      if((r.read(sr) & sr_dinis) != 0)
+      {
+        dinis_at = r.now();
+      }
+    }
+    REQUIRE(dinis_at != 0);
+    CHECK(dinis_at == *std::ranges::find_if(stops, [flagged](std::uint64_t stop) {
+            return stop >= flagged;
+          }));
+  }
+}
+
 TEST_CASE("H573 board: a final digest clears BUSY, then sets DCIS and DINIS one cycle apart")
 {
   struct leg
@@ -936,6 +965,52 @@ TEST_CASE("H573 board: a final digest clears BUSY, then sets DCIS and DINIS one 
     CHECK(r.read(hr0) != 0);
     r.until(start + (busy + 2) * r.cycle_ps());
     CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == (sr_dcis | sr_dinis));
+  }
+}
+
+TEST_CASE("H573 board: DCIS and DINIS appear at the first instruction after their exact times")
+{
+  struct leg
+  {
+    std::uint32_t algo;
+    std::uint64_t busy;
+  };
+  rig const r{true, h573(), 1.5};
+  for(auto const& [algo, busy] : std::to_array<leg>({
+          {sha256, 68 },
+          {sha1,   84 },
+          {sha512, 100},
+  }))
+  {
+    CAPTURE(algo);
+    r.begin(algo);
+    r.feed(text("abc"));
+    r.finish(3);
+    auto const                 start = r.now();
+    auto const                 end   = start + busy * r.cycle_ps();
+    std::vector<std::uint64_t> stops;
+    std::uint64_t              dcis_at  = 0;
+    std::uint64_t              dinis_at = 0;
+    while(dinis_at == 0 and r.now() < end + 20 * r.cycle_ps())
+    {
+      r.until(r.now() + 1);
+      stops.push_back(r.now());
+      auto const status = r.read(sr);
+      if(dcis_at == 0 and (status & sr_dcis) != 0)
+      {
+        dcis_at = r.now();
+      }
+      if((status & sr_dinis) != 0)
+      {
+        dinis_at = r.now();
+      }
+    }
+    REQUIRE(dinis_at != 0);
+    auto const first_stop_from = [&](std::uint64_t at) {
+      return *std::ranges::find_if(stops, [at](std::uint64_t stop) { return stop >= at; });
+    };
+    CHECK(dcis_at == first_stop_from(end + r.cycle_ps()));
+    CHECK(dinis_at == first_stop_from(end + 2 * r.cycle_ps()));
   }
 }
 

@@ -95,6 +95,7 @@ struct flash_l1_state
   bool                         program_locked_up{};
   bool                         option_locked_up{};
   std::uint32_t                generation{};
+  std::uint64_t                due_ps{};
   std::vector<queued_run>      queued{};
   std::vector<std::uint32_t>   loaded{};
   std::uint32_t                first_half{};
@@ -504,6 +505,7 @@ private:
   void                      begin(std::uint32_t tprogs = 1);
   void                      fail(field_ref flag);
   void                      finish();
+  void                      start_operation(std::uint64_t base_ps, std::uint32_t tprogs);
   void                      interrupts();
   void                      check_latency(std::string_view trigger);
   void                      note_once(bool& logged, std::string_view reg, std::string message);
@@ -947,7 +949,7 @@ void flash_l1::finish()
     {
       state_.queued.erase(state_.queued.begin());
     }
-    schedule_in(tprog * tprogs, operation_end, ++state_.generation);
+    start_operation(state_.due_ps, tprogs);
   }
   else
   {
@@ -1072,7 +1074,13 @@ void flash_l1::begin(std::uint32_t tprogs)
   }
   update(regs_, status_.busy, 1);
   update(regs_, status_.high_voltage_end, 0);
-  schedule_in(tprog * tprogs, operation_end, ++state_.generation);
+  start_operation(ctx_.clock.time().ps, tprogs);
+}
+
+void flash_l1::start_operation(std::uint64_t base_ps, std::uint32_t tprogs)
+{
+  state_.due_ps = base_ps + static_cast<std::uint64_t>((tprog * tprogs).count()) * 1000u;
+  ctx_.events.schedule_at(vtime{state_.due_ps}, operation_end, ++state_.generation, ctx_.clock);
 }
 
 auto flash_l1::read_word(std::uint32_t addr) const -> std::uint32_t

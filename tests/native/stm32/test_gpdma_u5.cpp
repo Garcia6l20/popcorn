@@ -1,3 +1,4 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_data.hpp"
@@ -2119,4 +2120,250 @@ TEST_CASE(
   auto const [late, late_bytes]   = reset_mid_copy(true);
   CHECK(early == late);
   CHECK(early_bytes == late_bytes);
+}
+
+namespace
+{
+constexpr std::uint64_t burst_latency_ps = 1'000'000;
+
+auto copy_at_cpi(double cpi, std::string_view entry = "mem2mem") -> stm32_fixture
+{
+  auto options = popcorn::testing::stm32_options();
+  options.cpi  = cpi;
+  stm32_fixture f{u575(), "gpdma_ll", options};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("gpdma_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("gpdma_ll", entry));
+  return f;
+}
+
+auto idle_at_cpi(double cpi) -> stm32_fixture
+{
+  auto options = popcorn::testing::stm32_options();
+  options.cpi  = cpi;
+  stm32_fixture f{u575(), "rcc_ll", options};
+  f.set("pc", sym("rcc_ll", "idle"));
+  for(std::uint32_t index = 0; index < 32; ++index)
+  {
+    REQUIRE(f.target->mem().write(copy_from + index, 1, (index * 11u + 1u) & 0xffu));
+    REQUIRE(f.target->mem().write(copy_to + index, 1, 0));
+  }
+  return f;
+}
+
+auto gpdma_dues(stm32_fixture const& f) -> std::vector<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"GPDMA1"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  std::vector<std::uint64_t> out;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner)
+    {
+      out.push_back(event.due_ps);
+    }
+  }
+  std::ranges::sort(out);
+  return out;
+}
+
+auto chained_dues(stm32_fixture const& f, std::size_t count, std::uint64_t sample_ps)
+    -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> seen;
+  for(int step_count = 0; step_count < 4000 and seen.size() < count; ++step_count)
+  {
+    for(auto const due : gpdma_dues(f))
+    {
+      if(std::ranges::find(seen, due) == seen.end())
+      {
+        seen.push_back(due);
+      }
+    }
+    auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + sample_ps};
+    auto const stop  = f.run({.wall_budget = std::chrono::seconds{60}, .until_time = until});
+    if(stop.stopped and stop.stopped->reason != stop_reason::time)
+    {
+      break;
+    }
+  }
+  return seen;
+}
+}
+
+TEST_CASE("chained bursts are due a whole number of latencies after the first, at any core period")
+{
+  for(auto const cpi : {1.0, 1.5, 3.0})
+  {
+    CAPTURE(cpi);
+    auto       f    = copy_at_cpi(cpi);
+    auto const dues = chained_dues(f, 8, static_cast<std::uint64_t>(250'000 * cpi));
+    REQUIRE(dues.size() >= 8);
+    for(std::size_t index = 1; index < dues.size(); ++index)
+    {
+      CAPTURE(index);
+      CHECK(dues[index] > dues[index - 1]);
+      CHECK((dues[index] - dues[0]) % burst_latency_ps == 0);
+    }
+  }
+}
+
+TEST_CASE("a whole copy ends at the due of its last burst at any core period")
+{
+  struct run_end
+  {
+    std::uint64_t first_due{};
+    std::uint64_t ended{};
+    std::size_t   bursts{};
+  };
+  auto const measure = [](double cpi) {
+    auto                       f      = copy_at_cpi(cpi);
+    auto const                 period = static_cast<std::uint64_t>(250'000 * cpi);
+    run_end                    out;
+    std::vector<std::uint64_t> seen;
+    for(int count = 0; count < 4000; ++count)
+    {
+      for(auto const due : gpdma_dues(f))
+      {
+        if(std::ranges::find(seen, due) == seen.end())
+        {
+          seen.push_back(due);
+        }
+      }
+      if(not seen.empty() and f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0)
+      {
+        out.ended = f.target->virtual_clock().time().ps;
+        break;
+      }
+      auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + period};
+      auto const stop  = f.run({.wall_budget = std::chrono::seconds{60}, .until_time = until});
+      REQUIRE((not stop.stopped or stop.stopped->reason == stop_reason::time));
+    }
+    REQUIRE_FALSE(seen.empty());
+    REQUIRE(out.ended != 0);
+    out.first_due = seen.front();
+    out.bursts    = seen.size();
+    return std::pair{out, period};
+  };
+  auto const [reference, reference_period] = measure(1.0);
+  REQUIRE(reference.bursts >= 6);
+  for(auto const cpi : {1.0, 1.5, 3.0})
+  {
+    CAPTURE(cpi);
+    auto const [run, period] = measure(cpi);
+    auto const last          = run.first_due + (reference.bursts - 1) * burst_latency_ps;
+    CHECK(run.ended >= last);
+    CHECK(run.ended < last + 4 * period);
+  }
+}
+
+TEST_CASE("a linked list and repeated 2D blocks continue the chain on the burst lattice")
+{
+  for(auto const cpi : {1.5, 3.0})
+  {
+    CAPTURE(cpi);
+    auto       list = copy_at_cpi(cpi, "linked");
+    auto const dues = chained_dues(list, 6, static_cast<std::uint64_t>(250'000 * cpi));
+    REQUIRE(dues.size() >= 6);
+    for(std::size_t index = 1; index < dues.size(); ++index)
+    {
+      CHECK((dues[index] - dues[0]) % burst_latency_ps == 0);
+    }
+
+    auto two_d = idle_at_cpi(cpi);
+    start_two_d(two_d, {.tr1 = halfwords(), .tcem = 1, .br1 = 4 | repeat(8)});
+    auto const blocks = chained_dues(two_d, 8, static_cast<std::uint64_t>(250'000 * cpi));
+    REQUIRE(blocks.size() >= 8);
+    for(std::size_t index = 1; index < blocks.size(); ++index)
+    {
+      CHECK((blocks[index] - blocks[0]) % burst_latency_ps == 0);
+    }
+  }
+}
+
+TEST_CASE("a snapshot taken between two chained bursts replays the same dues")
+{
+  auto f = copy_at_cpi(3.0);
+  REQUIRE(chained_dues(f, 4, 750'000).size() >= 4);
+  auto const saved = f.target->snapshot();
+  auto const first = chained_dues(f, 12, 750'000);
+  f.target->restore(saved);
+  auto const again = chained_dues(f, 12, 750'000);
+  REQUIRE(first.size() >= 12);
+  CHECK(again == first);
+  for(std::size_t index = 1; index < first.size(); ++index)
+  {
+    CHECK((first[index] - first[0]) % burst_latency_ps == 0);
+  }
+}
+
+TEST_CASE("the first burst after a request stall is due one latency after the request")
+{
+  constexpr std::uint32_t request = 36;
+  auto                    f       = idle_at_cpi(3.0);
+  auto* const             controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  start_two_d(f, {.tr1 = halfwords() | 3u * bit("GPDMA_C12TR1", "SBL_1"), .tcem = 0, .br1 = 40});
+  put(f, 12, "CR", 0);
+  put(f, 12, "TR2", request * bit("GPDMA_C12TR2", "REQSEL"));
+  put(f, 12, "CR", bit("GPDMA_C12CR", "EN"));
+  controller->on_request(request, true);
+  for(int count = 0; count < 400 and peek(f, 12, "DAR") == copy_to; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(peek(f, 12, "DAR") != copy_to);
+  controller->on_request(request, false);
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(gpdma_dues(f).empty());
+  idle_for(f, std::chrono::nanoseconds{250});
+  auto const raised = f.target->virtual_clock().time().ps;
+  controller->on_request(request, true);
+  auto const dues = gpdma_dues(f);
+  REQUIRE(dues.size() == 1);
+  CHECK(dues.front() == raised + burst_latency_ps);
+}
+
+TEST_CASE(
+    "a core hold with the clock held above the exact time resumes a burst past its due at once")
+{
+  auto f = idle_at_cpi(1.0);
+  popcorn::testing::set_debug_freeze(f, "DBG_GPDMA12_STOP", true);
+  start_two_d(f, {.tr1 = halfwords(), .tcem = 1, .br1 = 20});
+  auto& driver = popcorn::core::machine_internals::clock_driver(*f.target);
+  for(int count = 0; count < 100; ++count)
+  {
+    auto const dues = gpdma_dues(f);
+    if(not dues.empty() and dues.front() > f.target->virtual_clock().time().ps)
+    {
+      break;
+    }
+    step(f);
+  }
+  auto const dues = gpdma_dues(f);
+  REQUIRE_FALSE(dues.empty());
+  auto const due = dues.front();
+  REQUIRE(due > f.target->virtual_clock().time().ps);
+  driver.advance(icount{20});
+  driver.retract(icount{20});
+  auto const held = f.target->virtual_clock().time().ps;
+  REQUIRE(held >= due + burst_latency_ps);
+  f.target->hold_core(true);
+  auto const left = f.field("GPDMA1", "GPDMA_C12BR1", "BNDT");
+  f.target->hold_core(false);
+  auto const resumed = gpdma_dues(f);
+  REQUIRE_FALSE(resumed.empty());
+  CHECK(resumed.back() == f.target->virtual_clock().time().ps);
+  for(int count = 0; count < 400 and f.field("GPDMA1", "GPDMA_C12CR", "EN") != 0; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 0);
+  CHECK(left > 0);
+  CHECK(peek(f, 12, "DAR") == copy_to + 20);
 }

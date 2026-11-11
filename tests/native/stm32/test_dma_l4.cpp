@@ -546,3 +546,42 @@ TEST_CASE("the L4 DMA rows serve DMA1 and DMA2, an L1 variant does not attach to
   options.models.insert_or_assign("DMA2", stm32::dma_l1l4_factory(stm32::l1_dma2));
   CHECK_THROWS_AS((stm32_fixture{l476rc(), firmware, std::move(options)}), popcorn::config_error);
 }
+
+TEST_CASE("a held request moves items a whole number of latencies apart at any core period")
+{
+  for(auto const cpi : {1.5, 3.0})
+  {
+    CAPTURE(cpi);
+    auto options  = with_requesters(all_requesters());
+    options.cpi   = cpi;
+    auto const f  = parked(std::move(options));
+    auto&      p  = peer(f, "ADC1");
+    p.drop_on_ack = false;
+    write(f, source, 0x5A00'0000u);
+    program(f, dma1, 1, 16);
+    p.set("adc1_dma", true);
+    auto const& units = f.target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, std::string_view{"DMA1"}, &popcorn::peripheral_desc::name)
+        - units.begin());
+    std::vector<std::uint64_t> seen;
+    for(int count = 0; count < 400 and seen.size() < 8; ++count)
+    {
+      for(auto const& event : f.target->snapshot().data().events.pending)
+      {
+        if(event.id.owner == owner and not std::ranges::contains(seen, event.due_ps))
+        {
+          seen.push_back(event.due_ps);
+        }
+      }
+      idle_to(f, now_ps(f) + static_cast<std::uint64_t>(250'000 * cpi));
+    }
+    REQUIRE(seen.size() >= 8);
+    for(std::size_t index = 1; index < seen.size(); ++index)
+    {
+      CAPTURE(index);
+      CHECK(seen[index] > seen[index - 1]);
+      CHECK((seen[index] - seen[0]) % latency_ps == 0);
+    }
+  }
+}

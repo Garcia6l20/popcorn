@@ -481,6 +481,49 @@ TEST_CASE("RM0038 3.4.3: the program ends one tprog after the store, by the queu
   CHECK(due[0] == before + tprog_ps);
 }
 
+TEST_CASE("a queued program ends one tprog after the one before it at a core period off the grid")
+{
+  auto options = popcorn::testing::stm32_options();
+  options.cpi  = 1.5;
+  auto const f = parked(l152re(), firmware, std::move(options));
+  unlock(f);
+  REQUIRE(memory_write(f, target, 4, 0x1111'1111u));
+  REQUIRE(memory_write(f, target + 4, 4, 0x2222'2222u));
+  auto const first = flash_due(f);
+  REQUIRE(first.size() == 1);
+  idle_to(f, first[0] + 1'000'000);
+  auto const second = flash_due(f);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0] == first[0] + tprog_ps);
+}
+
+TEST_CASE("a snapshot between two queued programs replays the end of the next from the stored due")
+{
+  auto options = popcorn::testing::stm32_options();
+  options.cpi  = 1.5;
+  auto const f = parked(l152re(), firmware, std::move(options));
+  unlock(f);
+  for(std::uint32_t word = 0; word < 3; ++word)
+  {
+    REQUIRE(memory_write(f, target + 4 * word, 4, 0x1111'1111u * (word + 1)));
+  }
+  auto const first = flash_due(f);
+  REQUIRE(first.size() == 1);
+  idle_to(f, first[0] + 1'000'000);
+  auto const saved  = f.target->snapshot();
+  auto const second = flash_due(f);
+  REQUIRE(second.size() == 1);
+  idle_to(f, second[0] + 1'000'000);
+  auto const third = flash_due(f);
+  REQUIRE(third.size() == 1);
+  CHECK(third[0] == second[0] + tprog_ps);
+  f.target->restore(saved);
+  idle_to(f, second[0] + 1'000'000);
+  auto const again = flash_due(f);
+  REQUIRE(again.size() == 1);
+  CHECK(again[0] == third[0]);
+}
+
 TEST_CASE(
     "a store while BSY is written at once and adds one tprog, decided by the PECR of its time")
 {

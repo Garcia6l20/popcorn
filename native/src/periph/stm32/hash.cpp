@@ -23,21 +23,22 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint32_t busy_done     = 0;
-constexpr std::uint32_t digest_done   = 1;
-constexpr std::uint32_t block_shown   = 2;
-constexpr std::uint32_t block_ready   = 3;
-constexpr std::size_t   block_words   = 16;
-constexpr std::size_t   max_block     = 42;
-constexpr std::size_t   inner_words   = 16;
-constexpr std::size_t   hra_count     = 5;
-constexpr std::uint32_t swap_tag      = 0x4853'0001;
-constexpr std::size_t   csr_config    = 1;
-constexpr std::size_t   csr_blocks    = 2;
-constexpr std::size_t   csr_chain     = 4;
-constexpr std::size_t   csr_pending   = 12;
-constexpr std::size_t   csr_wide_pend = 20;
-constexpr std::size_t   csr_last      = 54;
+constexpr std::uint32_t busy_done      = 0;
+constexpr std::uint32_t digest_done    = 1;
+constexpr std::uint32_t block_shown    = 2;
+constexpr std::uint32_t block_ready    = 3;
+constexpr std::uint32_t digest_flagged = 4;
+constexpr std::size_t   block_words    = 16;
+constexpr std::size_t   max_block      = 42;
+constexpr std::size_t   inner_words    = 16;
+constexpr std::size_t   hra_count      = 5;
+constexpr std::uint32_t swap_tag       = 0x4853'0001;
+constexpr std::size_t   csr_config     = 1;
+constexpr std::size_t   csr_blocks     = 2;
+constexpr std::size_t   csr_chain      = 4;
+constexpr std::size_t   csr_pending    = 12;
+constexpr std::size_t   csr_wide_pend  = 20;
+constexpr std::size_t   csr_last       = 54;
 
 constexpr std::uint8_t phase_inner_key = 0;
 constexpr std::uint8_t phase_message   = 1;
@@ -1642,31 +1643,27 @@ void hash::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     else if(reveal_block())
     {
-      auto const lag = alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
-      state_.shown   = ctx_.events.schedule_at(
-                           vtime{ctx_.clock.time().ps + lag}, block_ready, payload, ctx_.clock)
-                     + 1;
+      auto const due = payload + alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
+      state_.shown   = ctx_.events.schedule_at(vtime{due}, block_ready, due, ctx_.clock) + 1;
     }
+    interrupts();
+    return;
+  }
+  if(kind == digest_flagged)
+  {
+    state_.flagged = 0;
+    update(regs_, dinis_, 1);
     interrupts();
     return;
   }
   if(kind == digest_done)
   {
     state_.flagged = 0;
-    if(payload != 0)
+    complete_digest(alg().flag_lag == 0);
+    if(alg().flag_lag != 0)
     {
-      update(regs_, dinis_, 1);
-    }
-    else
-    {
-      complete_digest(alg().flag_lag == 0);
-      if(alg().flag_lag != 0)
-      {
-        auto const lag = alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
-        state_.flagged =
-            ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, digest_done, 1, ctx_.clock)
-            + 1;
-      }
+      auto const due = payload + alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
+      state_.flagged = ctx_.events.schedule_at(vtime{due}, digest_flagged, due, ctx_.clock) + 1;
     }
     interrupts();
     return;
@@ -1701,18 +1698,15 @@ void hash::finish_work()
     }
     else
     {
-      auto const lag = alg().lag * ps_per_second / ctx_.clock.core_hz();
-      state_.flagged =
-          ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, digest_done, 0, ctx_.clock)
-          + 1;
+      auto const due = state_.busy_end + alg().lag * ps_per_second / ctx_.clock.core_hz();
+      state_.flagged = ctx_.events.schedule_at(vtime{due}, digest_done, due, ctx_.clock) + 1;
     }
   }
   else if(state_.block_lag != 0)
   {
     state_.block_lag = static_cast<std::uint8_t>(launched ? 2 : 1);
-    auto const lag   = alg().lag * ps_per_second / ctx_.clock.core_hz();
-    state_.shown =
-        ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, block_shown, 0, ctx_.clock) + 1;
+    auto const due   = state_.busy_end + alg().lag * ps_per_second / ctx_.clock.core_hz();
+    state_.shown     = ctx_.events.schedule_at(vtime{due}, block_shown, due, ctx_.clock) + 1;
   }
   else
   {

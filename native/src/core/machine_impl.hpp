@@ -2326,6 +2326,13 @@ struct machine_internals
     return target;
   }
 
+  /** @brief The clock driver of @p target, which a test uses to hold the clock as a precise exit
+   * does. */
+  [[nodiscard]] static auto clock_driver(machine& target) noexcept -> core::clock_driver&
+  {
+    return target.clock_driver_;
+  }
+
   /** @brief The arch module of @p target. */
   [[nodiscard]] static auto arch(machine const& target) noexcept -> arch::arch const&
   {

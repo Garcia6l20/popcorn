@@ -368,15 +368,15 @@ private:
   [[nodiscard]] auto wants_burst(std::size_t ch) const -> bool;
   [[nodiscard]] auto valid(std::size_t ch) const -> bool;
   void               start(std::size_t ch);
-  void               schedule(std::size_t ch);
+  void               schedule(std::size_t ch, std::uint64_t base_ps);
   void               burst(std::size_t ch);
   auto               convert(std::size_t ch, std::uint32_t value) -> bool;
   auto               deliver(std::size_t ch, std::uint32_t value) -> bool;
-  void               block_done(std::size_t ch);
+  void               block_done(std::size_t ch, std::uint64_t base_ps);
   void               offset(field_ref amount, field_ref decrement, reg_ref target);
   void               block_offsets(std::size_t ch);
   void               two_d_half(std::size_t ch, std::uint32_t mode);
-  auto               repeat_block(std::size_t ch, std::uint32_t mode) -> bool;
+  auto               repeat_block(std::size_t ch, std::uint32_t mode, std::uint64_t base) -> bool;
   auto               link(std::size_t ch) -> bool;
   void               latch(std::size_t ch);
   void               finish(std::size_t ch, flag_index flag);
@@ -947,10 +947,10 @@ void gpdma::start(std::size_t ch)
   s.packed            = 0;
   s.packed_bytes      = 0;
   s.destination_beats = 0;
-  schedule(ch);
+  schedule(ch, ctx_.clock.time().ps);
 }
 
-void gpdma::schedule(std::size_t ch)
+void gpdma::schedule(std::size_t ch, std::uint64_t base_ps)
 {
   auto& s = state_.channel[ch];
   if(s.scheduled or s.held != 0 or not wants_burst(ch))
@@ -969,7 +969,7 @@ void gpdma::schedule(std::size_t ch)
   constexpr std::uint64_t latency_cycles = 4;
   auto const              ps             = latency_cycles * ps_per_second / hz;
   s.scheduled                            = true;
-  s.due_ps                               = ctx_.clock.time().ps + ps;
+  s.due_ps                               = base_ps + ps;
   ctx_.events.schedule_at(
       vtime{s.due_ps}, burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation,
       ctx_.clock);
@@ -1066,6 +1066,7 @@ void gpdma::burst(std::size_t ch)
 {
   auto&         c       = ch_[ch];
   auto&         s       = state_.channel[ch];
+  auto const    base    = s.due_ps;
   auto const    sw      = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
   auto const    beats   = or_zero(c.source_burst) + 1;
   auto const    request = get(regs_, c.request);
@@ -1109,18 +1110,18 @@ void gpdma::burst(std::size_t ch)
   }
   if(get(regs_, c.bytes) == 0)
   {
-    block_done(ch);
+    block_done(ch, base);
     return;
   }
-  schedule(ch);
+  schedule(ch, base);
 }
 
-void gpdma::block_done(std::size_t ch)
+void gpdma::block_done(std::size_t ch, std::uint64_t base_ps)
 {
   auto&      c    = ch_[ch];
   auto&      s    = state_.channel[ch];
   auto const mode = get(regs_, c.event_mode);
-  if(c.two_d and repeat_block(ch, mode))
+  if(c.two_d and repeat_block(ch, mode, base_ps))
   {
     return;
   }
@@ -1143,10 +1144,10 @@ void gpdma::block_done(std::size_t ch)
   }
   latch(ch);
   s.half_reported = false;
-  schedule(ch);
+  schedule(ch, base_ps);
 }
 
-auto gpdma::repeat_block(std::size_t ch, std::uint32_t mode) -> bool
+auto gpdma::repeat_block(std::size_t ch, std::uint32_t mode, std::uint64_t base_ps) -> bool
 {
   auto const& c = ch_[ch];
   auto&       s = state_.channel[ch];
@@ -1164,7 +1165,7 @@ auto gpdma::repeat_block(std::size_t ch, std::uint32_t mode) -> bool
     s.half_reported = false;
     raise_flag(ch, transfer_complete);
   }
-  schedule(ch);
+  schedule(ch, base_ps);
   return true;
 }
 
@@ -1351,7 +1352,7 @@ template <std::size_t Ch> void gpdma::control_written(std::uint32_t old, std::ui
   else if(was_suspended and not is_suspended and is_on)
   {
     update(regs_, c.idle, 0);
-    schedule(Ch);
+    schedule(Ch, ctx_.clock.time().ps);
   }
   if(is_on and not was_on)
   {
@@ -1406,7 +1407,7 @@ void gpdma::on_core_hold(bool held)
         on_event(burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation);
       }
       s.burst_held   = s.scheduled ? 1 : 0;
-      s.remaining_ps = s.scheduled ? s.due_ps - now : 0;
+      s.remaining_ps = s.scheduled and s.due_ps > now ? s.due_ps - now : 0;
       s.scheduled    = false;
       s.held         = 1;
       ++s.generation;
@@ -1431,7 +1432,7 @@ void gpdma::on_core_hold(bool held)
     }
     else
     {
-      schedule(ch);
+      schedule(ch, now);
     }
   }
 }
@@ -1451,7 +1452,7 @@ void gpdma::on_request(std::uint32_t request, bool level)
   {
     if(get(regs_, ch_[ch].software) == 0 and get(regs_, ch_[ch].request) == request)
     {
-      schedule(ch);
+      schedule(ch, ctx_.clock.time().ps);
     }
   }
 }
