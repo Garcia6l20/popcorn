@@ -240,3 +240,50 @@ async def test_encoder_edges_on_pb5_and_pb7_count_at_the_same_virtual_time(mode:
         (at[2].ps, 1, 1),
         (at[4].ps, 100, 1),
     ]
+
+
+async def started_lptim_capturing_pb2() -> tuple[popcorn.Machine, VirtualTime]:
+    """An LPTIM1 with channel 1 capturing rising edges of PB2 AF1, whose CNTSTRT was just
+    written."""
+    m = popcorn.MachineDescription(part="STM32U575QGIx", images=[popcorn.Elf(RCC_LL)]).machine()
+    m.reset()
+    m.reg.pc = m.sym("idle")
+    m.periph.RCC.APB3ENR.LPTIM1EN = 1
+    m.periph.RCC.AHB2ENR1.GPIOBEN = 1
+    gpiob = m.periph.GPIOB
+    gpiob.MODER.write(gpiob.MODER.read() & ~(3 << 4) | 2 << 4)
+    gpiob.AFRL.write(gpiob.AFRL.read() & ~(15 << 8) | 1 << 8)
+    timer = m.periph.LPTIM1
+    timer.CCMR1.write(1 | 1 << 1)
+    timer.CR.write(1)
+    timer.ARR.write(1000)
+    await m.run(for_=us(1))
+    timer.ICR_output.write(0x10)
+    started = m.time
+    timer.CR.write(1 | 1 << 2)
+    return m, started
+
+
+@pytest.mark.parametrize("mode", ["parked", "running"])
+async def test_pb2_captures_into_ccr1_at_the_same_virtual_time(mode: str) -> None:
+    m, started = await started_lptim_capturing_pb2()
+    timer = m.periph.LPTIM1
+    rises = [started + us(10) + us(5) * index for index in range(3)]
+    edges = [edge for at in rises for edge in ((at, True), (at + us(2.5), False))]
+    await m.periph.GPIOB.pin(2).drive_edges(edges)
+
+    def read() -> tuple[int, int, int]:
+        return m.time.ps, timer.ISR_output.CC1IF, timer.CCR1.read()
+
+    due = rises[2] + us(0.5)
+    samples = [m.sample(read, at=at) for at in (due - CPU_CYCLE, due)]
+    if mode == "parked":
+        await m.run(for_=us(30))
+        seen = [await one for one in samples]
+    else:
+        async with m.running():
+            seen = [await one for one in samples]
+    assert seen == [
+        ((due - CPU_CYCLE).ps, 1, 59),
+        (due.ps, 1, 79),
+    ]

@@ -816,8 +816,8 @@ TEST_CASE(
     bool             logs;
   };
   for(auto const& [text, which, config, channels, logs] : {
-          one{"CC1SEL", units[1], 0, cc1sel, true },
-          one{"CC1SEL", units[1], 0, 0,      false},
+          one{"CC1SEL or CC2SEL 1 with", units[1], 1u << 23, cc2sel, true },
+          one{"CC1SEL or CC2SEL 1 with", units[1], 0,        cc2sel, false},
   })
   {
     CAPTURE(text);
@@ -830,7 +830,7 @@ TEST_CASE(
     auto const start = r.started(6, 10, cntstrt, 0, config);
     CHECK(r.warnings(text) == (logs ? 1 : 0));
     r.idle_to(start + 7 * cycle);
-    CHECK((r.read(isr) & cc1if) == cc1if);
+    CHECK((r.read(isr) & cc1if) == (config == 0 ? cc1if : 0u));
     r.write(cr, 0);
     r.write(cr, enable);
     r.write(cr, enable | cntstrt);
@@ -1911,47 +1911,22 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 43: CFGR2 IC1SEL and IC2SEL are storage, a firmware write setting one logs one "
-    "warning and raises under strict_peripherals before the store, IN1SEL and IN2SEL are modelled")
+    "checklist 43: CFGR2 holds no storage bits, IN1SEL, IN2SEL, IC1SEL and IC2SEL writes log "
+    "nothing at the write and the register keeps them")
 {
-  auto const store = [](rig const& r, std::uint32_t value,
-                        popcorn::initiator by = popcorn::initiator::cpu) {
-    auto& regs = r.f->target->peripheral(r.u.name);
-    return r.f->target->model(r.u.name)->on_write(
-        regs, static_cast<std::uint32_t>(cfgr2), 4, regs.peek(static_cast<std::uint32_t>(cfgr2)),
-        value, {.pc = 0, .now = icount{0}, .by = by});
-  };
-  auto const peek = [](rig const& r) {
-    return r.f->target->peripheral("LPTIM1").peek(static_cast<std::uint32_t>(cfgr2));
-  };
-  rig r;
-  CHECK_FALSE(r.f->target->model("LPTIM1")->storage_only(static_cast<std::uint32_t>(cfgr2)));
-  REQUIRE(store(r, 1).has_value());
-  CHECK(r.logged.empty());
-  REQUIRE(store(r, 0x10).has_value());
-  CHECK(r.logged.empty());
-  REQUIRE(store(r, 1u << 16).has_value());
-  REQUIRE(store(r, 1u << 20 | 1u << 16 | 0x11).has_value());
-  CHECK(peek(r) == (1u << 20 | 1u << 16 | 0x11));
-  CHECK(r.warnings("is storage") == 1);
-  rig strict{units[0], true};
-  REQUIRE(store(strict, 1).has_value());
-  CHECK(strict.logged.empty());
-  for(auto const value : {0x11u | 1u << 16, 1u << 16, 1u << 20})
+  for(auto const strict : {false, true})
   {
-    CAPTURE(value);
-    CHECK_THROWS_AS(static_cast<void>(store(strict, value)), popcorn::model_error);
-    CHECK(peek(strict) == 1);
+    CAPTURE(strict);
+    rig r{units[0], strict};
+    CHECK_FALSE(r.f->target->model("LPTIM1")->storage_only(static_cast<std::uint32_t>(cfgr2)));
+    for(auto const value : {1u, 0x10u, 1u << 16, 1u << 20 | 1u << 16 | 0x11})
+    {
+      CAPTURE(value);
+      r.write(cfgr2, value);
+      CHECK(r.read(cfgr2) == value);
+    }
+    CHECK(r.logged.empty());
   }
-  REQUIRE(store(strict, 0x10, popcorn::initiator::debugger).has_value());
-  CHECK(peek(strict) == 0x10);
-  rig   narrow{units[0], true};
-  auto& regs = narrow.f->target->peripheral("LPTIM1");
-  CHECK_THROWS_AS(
-      static_cast<void>(narrow.f->target->model("LPTIM1")->on_write(
-          regs, static_cast<std::uint32_t>(cfgr2) + 2, 1, 0, 1,
-          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu})),
-      popcorn::model_error);
 }
 
 TEST_CASE(
@@ -3570,4 +3545,630 @@ TEST_CASE(
         std::erase_if(owner->fields, [&](auto const& one) { return one.name == field_name; }) == 1);
     CHECK_THROWS_AS(rig(units[0], false, desc), popcorn::config_error);
   }
+}
+
+namespace
+{
+constexpr std::uint32_t falling_edge  = 1u << 2;
+constexpr std::uint32_t both_edges    = 3u << 2;
+constexpr std::uint32_t reserved_cc1p = 2u << 2;
+
+constexpr auto ic1f(std::uint32_t value) -> std::uint32_t
+{
+  return value << 12;
+}
+
+constexpr auto ic1psc(std::uint32_t value) -> std::uint32_t
+{
+  return value << 8;
+}
+
+constexpr auto table_613 = std::to_array<std::array<std::uint32_t, 4>>({
+    {2, 7, 9, 13},
+    {3, 5, 6, 8 },
+    {2, 3, 4, 5 },
+    {2, 2, 3, 3 },
+    {2, 2, 2, 2 },
+    {2, 2, 2, 2 },
+    {2, 2, 2, 2 },
+    {2, 2, 2, 2 },
+});
+
+struct capture_pin
+{
+  std::string_view port;
+  std::uint8_t     pin;
+  std::uint32_t    af;
+};
+
+constexpr auto capture_pins = std::to_array<std::array<capture_pin, 2>>({
+    {capture_pin{"GPIOB", 2, 1},  capture_pin{"GPIOB", 4, 1} },
+    {capture_pin{"GPIOA", 4, 14}, capture_pin{"GPIOA", 7, 13}},
+    {capture_pin{"GPIOB", 0, 4},  capture_pin{"GPIOB", 1, 4} },
+});
+
+auto capture_input(rig const& r, std::size_t channel) -> stm32::gpio_port&
+{
+  auto const  index = static_cast<std::size_t>(r.u.name.back() - '1');
+  auto const& one   = capture_pins[index][channel];
+  return in1_pin(r, one.port, one.pin, one.af);
+}
+
+auto capture_pin_of(rig const& r, std::size_t channel) -> std::uint8_t
+{
+  return capture_pins[static_cast<std::size_t>(r.u.name.back() - '1')][channel].pin;
+}
+
+auto captured_with(rig const& r, std::uint32_t channels, std::uint32_t config = 0) -> std::uint64_t
+{
+  r.write(ccmr1, channels);
+  return r.started(60, 1000, cntstrt, 0, config);
+}
+}
+
+TEST_CASE(
+    "RM0456 58.4.18 and Table 613: a PB2 rising edge latches CNT into CCR1 and sets CC1IF at the "
+    "counter clock that takes CNT 2 past the count at the edge, the instant inferred, channel 1 "
+    "compares nothing")
+{
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e);
+  auto const e    = t + 20 * cycle + cycle / 2;
+  pins.drive_at(2, true, vtime{e});
+  r.idle_to(e + cycle / 2);
+  CHECK(r.pending() == t + 22 * cycle);
+  r.idle_to(t + 21 * cycle);
+  CHECK(r.read(isr) == r.cc2);
+  CHECK(r.read(ccr1) == 0);
+  r.idle_to(t + 22 * cycle);
+  CHECK(r.read(isr) == (cc1if | r.cc2));
+  CHECK(r.read(ccr1) == 22);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "RM0456 58.4.18 and Table 613: for every PRESC and ICxF, CCR1 minus the offset is the count "
+    "at the edge and CC1IF sets at the counter clock CCR1 names")
+{
+  for(std::uint32_t prescaler = 0; prescaler < 8; ++prescaler)
+  {
+    for(std::uint32_t filter = 0; filter < 4; ++filter)
+    {
+      CAPTURE(prescaler);
+      CAPTURE(filter);
+      rig        r;
+      auto&      pins   = capture_input(r, 0);
+      auto const unit   = cycle << prescaler;
+      auto const t      = captured_with(r, cc1sel | cc1e | ic1f(filter), presc(prescaler));
+      auto const offset = table_613[prescaler][filter];
+      auto const e      = t + 4 * unit + unit / 2;
+      auto const due    = t + (4 + offset) * unit;
+      pins.drive_at(2, true, vtime{e});
+      r.idle_to(e + (filter == 0 ? 0u : 1u << filter) * cycle + cycle / 2);
+      CHECK(r.pending() == due);
+      r.idle_to(due - cycle);
+      CHECK((r.read(isr) & cc1if) == 0);
+      r.idle_to(due);
+      CHECK((r.read(isr) & cc1if) == cc1if);
+      CHECK(r.read(ccr1) == 4 + offset);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.7.17 CC1P: 00 captures on the rising edge, 01 on the falling edge and 11 on both")
+{
+  for(auto const& [polarity, rises, falls] : {
+          std::tuple{0u,           true,  false},
+          std::tuple{falling_edge, false, true },
+          std::tuple{both_edges,   true,  true },
+  })
+  {
+    CAPTURE(polarity);
+    rig        r;
+    auto&      pins = capture_input(r, 0);
+    auto const t    = captured_with(r, cc1sel | cc1e | polarity);
+    auto const up   = t + 20 * cycle;
+    pins.drive_at(2, true, vtime{up});
+    pins.drive_at(2, false, vtime{up + 10 * cycle});
+    r.idle_to(up + 2 * cycle);
+    CHECK((r.read(isr) & cc1if) == (rises ? cc1if : 0u));
+    CHECK(r.read(ccr1) == (rises ? 22u : 0u));
+    r.write(icr, cc1if);
+    r.idle_to(up + 12 * cycle);
+    CHECK((r.read(isr) & cc1if) == (falls ? cc1if : 0u));
+    CHECK(r.read(ccr1) == (falls ? 32u : rises ? 22u : 0u));
+  }
+}
+
+TEST_CASE("RM0456 58.7.17 IC1PSC: CCR1 captures once every 1, 2, 4 and 8 rising edges")
+{
+  for(std::uint32_t prescaler = 0; prescaler < 4; ++prescaler)
+  {
+    CAPTURE(prescaler);
+    rig        r;
+    auto&      pins  = capture_input(r, 0);
+    auto const t     = captured_with(r, cc1sel | cc1e | ic1psc(prescaler));
+    auto const rises = pulses(pins, 2, t + 20 * cycle, 8);
+    auto       seen  = std::vector<std::uint32_t>{};
+    for(auto const at : rises)
+    {
+      r.idle_to(at + 2 * cycle);
+      if((r.read(isr) & cc1if) != 0)
+      {
+        seen.push_back(r.read(ccr1));
+        r.write(icr, cc1if);
+      }
+    }
+    auto expected = std::vector<std::uint32_t>{};
+    for(std::uint32_t edge = (1u << prescaler) - 1u; edge < 8; edge += 1u << prescaler)
+    {
+      expected.push_back(22 + 10 * edge);
+    }
+    CHECK(seen == expected);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.7.17 IC1F: a level change counts once it has held 2, 4 or 8 kernel clocks, a "
+    "shorter pulse captures nothing, the sampling phase inferred")
+{
+  for(std::uint32_t filter = 1; filter < 4; ++filter)
+  {
+    CAPTURE(filter);
+    rig        r;
+    auto&      pins     = capture_input(r, 0);
+    auto const t        = captured_with(r, cc1sel | cc1e | ic1f(filter));
+    auto const n        = 1u << filter;
+    auto const short_at = t + 20 * cycle;
+    pins.drive_at(2, true, vtime{short_at});
+    pins.drive_at(2, false, vtime{short_at + (n - 1) * cycle});
+    r.idle_to(short_at + 20 * cycle);
+    CHECK((r.read(isr) & cc1if) == 0);
+    auto const e = t + 60 * cycle;
+    pins.drive_at(2, true, vtime{e});
+    r.idle_to(e + (n - 1) * cycle);
+    CHECK(r.pending() == e + n * cycle);
+    r.idle_to(e + 20 * cycle);
+    CHECK((r.read(isr) & cc1if) == cc1if);
+    CHECK(r.read(ccr1) == 60 + table_613[0][filter]);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.7.3: a CPU or DMA read of CCR1 clears CC1IF, a debugger read leaves it, CC1CF "
+    "clears it, and a CCR1 write in capture mode is discarded with no CMP1OK, inferred")
+{
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | both_edges);
+  pins.drive_at(2, true, vtime{t + 20 * cycle});
+  pins.drive_at(2, false, vtime{t + 30 * cycle});
+  pins.drive_at(2, true, vtime{t + 40 * cycle});
+  r.idle_to(t + 22 * cycle);
+  CHECK(r.cpu_read(ccr1, popcorn::initiator::debugger) == 22);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.cpu_read(ccr1) == 22);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(t + 32 * cycle);
+  CHECK(r.cpu_read(ccr1, popcorn::initiator::dma) == 32);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(t + 42 * cycle);
+  r.write(icr, cc1if);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.write(ccr1, 7);
+  r.idle_to(t + 50 * cycle);
+  CHECK(r.read(ccr1) == 42);
+  CHECK((r.read(isr) & cmp1ok) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "RM0456 58.3 Table 599: LPTIM1 to LPTIM3 capture on both channels from their own pins, CC2IF "
+    "with CCR2, LPTIM4 takes no channel pin")
+{
+  for(auto const& which : {units[0], units[1], units[2]})
+  {
+    for(std::size_t channel = 0; channel < 2; ++channel)
+    {
+      CAPTURE(which.name);
+      CAPTURE(channel);
+      rig        r{which};
+      auto&      pins = capture_input(r, channel);
+      auto const flag = channel == 0 ? cc1if : cc2if;
+      auto const mode = channel == 0 ? cc1sel | cc1e : cc2sel | cc2e;
+      auto const t    = captured_with(r, mode);
+      auto const e    = t + 20 * cycle;
+      pins.drive_at(capture_pin_of(r, channel), true, vtime{e});
+      r.idle_to(e + 2 * cycle);
+      CHECK((r.read(isr) & flag) == flag);
+      CHECK(r.read(channel == 0 ? ccr1 : ccr2) == 22);
+      CHECK(r.read(channel == 0 ? ccr2 : ccr1) == (channel == 0 ? 0u : 60u));
+    }
+  }
+  rig   last{units[3]};
+  auto* sink = dynamic_cast<stm32::trigger_sink*>(last.f->target->model("LPTIM4"));
+  REQUIRE(sink != nullptr);
+  CHECK_FALSE(sink->takes_pin("lptim4_ch1"));
+  CHECK_FALSE(sink->takes_pin("lptim4_ch2"));
+  rig   first;
+  auto* taker = dynamic_cast<stm32::trigger_sink*>(first.f->target->model("LPTIM1"));
+  REQUIRE(taker != nullptr);
+  CHECK(taker->takes_pin("lptim1_ch1"));
+  CHECK(taker->takes_pin("lptim1_ch2"));
+}
+
+TEST_CASE(
+    "inferred: with the counter stopped a capture comes at the prescaled kernel clock, counted "
+    "from ENABLE, the Table 613 offset past the edge's and latches CNT 0, CC1E 0 captures nothing")
+{
+  rig   r;
+  auto& pins = capture_input(r, 0);
+  r.write(ccmr1, cc1sel | cc1e);
+  r.enable_with(0, presc(1));
+  auto const e    = r.now_ps() + 10 * cycle + cycle / 2;
+  auto const unit = 2 * cycle;
+  auto const due  = r.enabled_at + ((e - r.enabled_at) / unit + 3) * unit;
+  pins.drive_at(2, true, vtime{e});
+  r.idle_to(e + cycle / 2);
+  CHECK(r.pending() == due);
+  r.idle_to(due - cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(due);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 0);
+  r.write(icr, cc1if);
+  r.write(ccmr1, cc1sel);
+  pins.drive(2, false);
+  pins.drive(2, true);
+  r.idle_to(r.now_ps() + 20 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+}
+
+TEST_CASE(
+    "inferred: CC1E or ENABLE written to 0 drops a capture in flight, CC1E written to 0 resets "
+    "the IC1PSC count")
+{
+  for(auto const by_enable : {false, true})
+  {
+    CAPTURE(by_enable);
+    rig        r;
+    auto&      pins = capture_input(r, 0);
+    auto const t    = captured_with(r, cc1sel | cc1e | ic1f(3));
+    auto const e    = t + 20 * cycle;
+    pins.drive_at(2, true, vtime{e});
+    r.idle_to(e + 9 * cycle);
+    REQUIRE(r.pending() == e + 13 * cycle);
+    if(by_enable)
+    {
+      r.write(cr, 0);
+    }
+    else
+    {
+      r.write(ccmr1, cc1sel | ic1f(3));
+      r.write(ccmr1, cc1sel | cc1e | ic1f(3));
+    }
+    r.idle_to(e + 20 * cycle);
+    CHECK((r.read(isr) & cc1if) == 0);
+    CHECK(r.read(ccr1) == 0);
+  }
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | ic1psc(1));
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(2, true, vtime{e});
+  pins.drive_at(2, false, vtime{e + 5 * cycle});
+  r.idle_to(e + 7 * cycle);
+  r.write(ccmr1, cc1sel | ic1psc(1));
+  r.write(ccmr1, cc1sel | cc1e | ic1psc(1));
+  static_cast<void>(pulses(pins, 2, e + 10 * cycle, 2));
+  r.idle_to(e + 13 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(e + 23 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 42);
+}
+
+TEST_CASE(
+    "inferred: a second edge accepted inside the Table 613 offset of the first gives a second "
+    "capture after the first, each latching its own count")
+{
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | both_edges | ic1f(1));
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(2, true, vtime{e});
+  pins.drive_at(2, false, vtime{e + 2 * cycle});
+  r.idle_to(e + 4 * cycle);
+  REQUIRE(r.pending() == t + 27 * cycle);
+  r.idle_to(t + 27 * cycle);
+  CHECK(r.read(ccr1) == 27);
+  r.write(icr, cc1if);
+  r.idle_to(t + 28 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(t + 29 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 29);
+}
+
+TEST_CASE(
+    "IC1SEL or IC2SEL not 00 on a capture channel logs one warning at a start and at a CFGR2 "
+    "write while the counter runs and raises under strict_peripherals, the input reading 0")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{units[0], strict};
+    static_cast<void>(capture_input(r, 1));
+    r.write(cfgr2, 1u << 20);
+    r.write(ccmr1, cc2sel | cc2e);
+    if(strict)
+    {
+      CHECK_THROWS_AS(static_cast<void>(r.started(60, 1000)), popcorn::model_error);
+      rig  running{units[0], true};
+      auto t = captured_with(running, cc1sel | cc1e);
+      running.idle_to(t + 5 * cycle);
+      CHECK_THROWS_AS(running.write(cfgr2, 2u << 16), popcorn::model_error);
+      continue;
+    }
+    auto const t = r.started(60, 1000);
+    CHECK(r.warnings("IC1SEL or IC2SEL not 00") == 1);
+    r.f->model_of<stm32::gpio_port>("GPIOB")->drive_at(4, true, vtime{t + 20 * cycle});
+    r.idle_to(t + 30 * cycle);
+    CHECK((r.read(isr) & cc2if) == 0);
+    r.write(cfgr2, 0);
+    r.write(cfgr2, 1u << 20);
+    CHECK(r.warnings("IC1SEL or IC2SEL not 00") == 1);
+  }
+  rig plain;
+  plain.write(cfgr2, 1u << 16);
+  static_cast<void>(plain.started(60, 1000));
+  CHECK(plain.logged.empty());
+}
+
+TEST_CASE(
+    "inferred: a CFGR2 write that changes IC1SEL counts the level change it makes on the "
+    "capture input as an edge")
+{
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | falling_edge);
+  r.write(cfgr2, 1u << 16);
+  pins.drive(2, true);
+  r.idle_to(t + 20 * cycle);
+  r.write(cfgr2, 0);
+  r.write(cfgr2, 1u << 16);
+  r.idle_to(t + 25 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 22);
+}
+
+TEST_CASE(
+    "RM0456 58.7.17: CC1P 10 on a capture channel logs one warning at a start and raises under "
+    "strict_peripherals, both edges then capture, inferred")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig   r{units[0], strict};
+    auto& pins = capture_input(r, 0);
+    if(strict)
+    {
+      CHECK_THROWS_AS(
+          static_cast<void>(captured_with(r, cc1sel | cc1e | reserved_cc1p)), popcorn::model_error);
+      continue;
+    }
+    auto const t = captured_with(r, cc1sel | cc1e | reserved_cc1p);
+    CHECK(r.warnings("CC1P 10 on a capture channel") == 1);
+    pins.drive_at(2, true, vtime{t + 20 * cycle});
+    pins.drive_at(2, false, vtime{t + 30 * cycle});
+    r.idle_to(t + 22 * cycle);
+    CHECK(r.read(ccr1) == 22);
+    r.idle_to(t + 32 * cycle);
+    CHECK(r.read(ccr1) == 32);
+  }
+}
+
+TEST_CASE(
+    "inferred: with COUNTMODE 1 a capture latches CNT at the filtered edge after the not "
+    "modelled warning")
+{
+  rig        r;
+  auto&      pins = lptim1_in1(r);
+  auto&      caps = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e, countmode);
+  CHECK(r.warnings("CC1SEL or CC2SEL 1 with") == 1);
+  auto const rises = pulses(pins, 5, t + 20 * cycle, 3);
+  caps.drive_at(2, true, vtime{rises[2] + 2 * cycle});
+  r.idle_to(rises[2] + cycle);
+  CHECK(r.read(cnt) == 3);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.idle_to(rises[2] + 2 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 3);
+}
+
+TEST_CASE("inferred: LPTIMxRST takes the level of the capture inputs")
+{
+  rig   r;
+  auto& pins = capture_input(r, 0);
+  pins.drive(2, true);
+  rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
+  auto const t = captured_with(r, cc1sel | cc1e | falling_edge);
+  pins.drive_at(2, false, vtime{t + 20 * cycle});
+  r.idle_to(t + 22 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 22);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot with two captures in flight, an IC2PSC count and a pending "
+    "IC2F change restores into a machine with no reset, the captures equal")
+{
+  rig   r;
+  auto& one = capture_input(r, 0);
+  static_cast<void>(capture_input(r, 1));
+  auto const t = captured_with(
+      r, cc1sel | cc1e | both_edges | ic1f(1) | cc2sel | cc2e | (2u << 28) | (1u << 24));
+  auto const e = t + 20 * cycle;
+  one.drive_at(4, true, vtime{e - 10 * cycle});
+  one.drive_at(4, false, vtime{e - 5 * cycle});
+  one.drive_at(4, true, vtime{e + 3 * cycle});
+  one.drive_at(2, true, vtime{e});
+  one.drive_at(2, false, vtime{e + 2 * cycle});
+  r.idle_to(e + 5 * cycle);
+  REQUIRE(r.pending() == t + 27 * cycle);
+  auto const saved = r.f->target->snapshot();
+  rig        other{no_reset};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.saved() == r.saved());
+  for(auto const* each : {&r, &other})
+  {
+    each->idle_to(t + 27 * cycle);
+    CHECK(each->read(ccr1) == 27);
+    each->idle_to(t + 29 * cycle);
+    CHECK(each->read(ccr1) == 29);
+    CHECK((each->read(isr) & cc2if) == 0);
+    each->idle_to(t + 32 * cycle);
+    CHECK((each->read(isr) & cc2if) == cc2if);
+    CHECK(each->read(ccr2) == 32);
+    each->write(icr, cc2if);
+    auto* const port = each->f->model_of<stm32::gpio_port>("GPIOB");
+    REQUIRE(port != nullptr);
+    for(auto const at : {t + 40 * cycle, t + 60 * cycle})
+    {
+      port->drive_at(4, false, vtime{at});
+      port->drive_at(4, true, vtime{at + 10 * cycle});
+    }
+    each->idle_to(t + 90 * cycle);
+    CHECK((each->read(isr) & cc2if) == cc2if);
+    CHECK(each->read(ccr2) == 79);
+  }
+}
+
+TEST_CASE("inferred: with the kernel clock stopped and CKSEL 0 a capture edge captures nothing")
+{
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | both_edges);
+  r.idle_to(t + 20 * cycle);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+  pins.drive(2, true);
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 0);
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK((r.read(isr) & cc1if) == 0);
+  pins.drive(2, false);
+  r.idle_to(r.now_ps() + 3 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+}
+
+TEST_CASE(
+    "checklist 6: 400 capture edges one kernel clock apart, counter started or stopped, or 9 "
+    "apart with the offset 13, keep at most one capture in flight per counter clock")
+{
+  for(auto const& [running, prescaler, filter, apart] : {
+          std::tuple{true,  7u, 0u, 1u},
+          std::tuple{false, 7u, 0u, 1u},
+          std::tuple{true,  0u, 3u, 9u},
+  })
+  {
+    CAPTURE(running);
+    CAPTURE(prescaler);
+    rig   r;
+    auto& pins = capture_input(r, 0);
+    r.write(ccmr1, cc1sel | cc1e | both_edges | ic1f(filter));
+    if(running)
+    {
+      static_cast<void>(r.started(60, 1000, cntstrt, 0, presc(prescaler)));
+    }
+    else
+    {
+      r.enable_with(0, presc(prescaler));
+    }
+    auto const before = r.saved().size();
+    for(auto index = 0; index < 400; ++index)
+    {
+      pins.drive(2, index % 2 == 0);
+      r.idle_to(r.now_ps() + apart * cycle);
+    }
+    CHECK(r.saved().size() <= before + 4 * 16);
+  }
+}
+
+TEST_CASE(
+    "inferred: a capture that falls due before one already in flight, after a kernel rate "
+    "increase or an IC1F change, comes first and both come")
+{
+  {
+    rig r;
+    r.hsi_on();
+    auto&      pins = capture_input(r, 0);
+    auto const t    = captured_with(r, cc1sel | cc1e | both_edges | ic1f(3));
+    pins.drive_at(2, true, vtime{t + 20 * cycle});
+    r.idle_to(t + 28 * cycle);
+    REQUIRE(r.pending() == t + 33 * cycle);
+    r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
+    pins.drive_at(2, false, vtime{t + 29 * cycle});
+    r.idle_to(t + 32 * cycle);
+    CHECK((r.read(isr) & cc1if) == 0);
+    auto const first = r.pending();
+    REQUIRE(first.has_value());
+    CHECK(*first > t + 32 * cycle);
+    CHECK(*first < t + 33 * cycle);
+    r.idle_to(t + 33 * cycle);
+    CHECK((r.read(isr) & cc1if) == cc1if);
+  }
+  rig        r;
+  auto&      pins = capture_input(r, 0);
+  auto const t    = captured_with(r, cc1sel | cc1e | both_edges | ic1f(3));
+  auto const e    = t + 20 * cycle;
+  pins.drive_at(2, true, vtime{e});
+  r.idle_to(e + 9 * cycle);
+  REQUIRE(r.pending() == e + 13 * cycle);
+  r.write(ccmr1, cc1sel | cc1e | both_edges);
+  CHECK(r.warnings("a CCMR1 write that changes CC1SEL, IC1F") == 1);
+  pins.drive_at(2, false, vtime{e + 10 * cycle});
+  r.idle_to(e + 11 * cycle);
+  CHECK(r.pending() == e + 12 * cycle);
+  r.idle_to(e + 12 * cycle);
+  CHECK(r.read(ccr1) == 32);
+  r.write(icr, cc1if);
+  r.idle_to(e + 13 * cycle);
+  CHECK((r.read(isr) & cc1if) == cc1if);
+  CHECK(r.read(ccr1) == 33);
+}
+
+TEST_CASE(
+    "RM0456 58.7.17: a CCMR1 write that changes IC1F, CC1P, IC1PSC or CC1SEL of a capture channel "
+    "with CC1E 1 logs one warning and raises under strict_peripherals, CC1E alone passes")
+{
+  for(auto const changed : {ic1f(1), falling_edge, ic1psc(1), 0u})
+  {
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(changed);
+      CAPTURE(strict);
+      rig r{units[0], strict};
+      static_cast<void>(captured_with(r, cc1sel | cc1e));
+      auto const value = changed == 0 ? cc1e : cc1sel | cc1e | changed;
+      if(strict)
+      {
+        CHECK_THROWS_AS(r.write(ccmr1, value), popcorn::model_error);
+        continue;
+      }
+      r.write(ccmr1, value);
+      r.write(ccmr1, cc1sel | cc1e);
+      CHECK(r.warnings("a CCMR1 write that changes CC1SEL") == 1);
+    }
+  }
+  rig quiet{units[0], true};
+  static_cast<void>(captured_with(quiet, cc1sel | cc1e | ic1f(2)));
+  quiet.write(ccmr1, cc1sel | ic1f(2));
+  quiet.write(ccmr1, cc1sel | ic1f(1));
+  quiet.write(ccmr1, cc1sel | cc1e | ic1f(1));
+  CHECK(quiet.logged.empty());
 }
