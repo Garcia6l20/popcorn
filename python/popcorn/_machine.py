@@ -6,6 +6,7 @@ import atexit
 import contextlib
 import contextvars
 import dataclasses
+import functools
 import os
 import sys
 import threading
@@ -23,7 +24,7 @@ from typing import (
     override,
 )
 
-from popcorn import _core
+from popcorn import _core, _machine_hooks
 from popcorn._arena import Arena
 from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
@@ -1710,8 +1711,8 @@ class Machine:
             MachineRunning: The machine is busy, outside its handlers.
         """
         if handler is None:
-            return lambda given: self._install_intercept(fn, given, once)
-        return self._install_intercept(fn, handler, once)
+            return lambda given: _machine_hooks.install_intercept(self, fn, given, once)
+        return _machine_hooks.install_intercept(self, fn, handler, once)
 
     @contextlib.contextmanager
     def intercepted(
@@ -1723,7 +1724,7 @@ class Machine:
             fn: The function to intercept.
             handler: Called with the `Call` of each arrival.
         """
-        installed = self._install_intercept(fn, handler, False)
+        installed = _machine_hooks.install_intercept(self, fn, handler, False)
         try:
             yield installed
         finally:
@@ -1741,7 +1742,7 @@ class Machine:
                 return call.returns(answers[call.occurrence])
             return call.proceed()
 
-        return self._install_intercept(fn, answer, False)
+        return _machine_hooks.install_intercept(self, fn, answer, False)
 
     def intercept_log(self, fn: int | str | Symbol) -> list[LogEntry]:
         """Every call the intercepts of `fn` saw, oldest first: arguments from DWARF, and the
@@ -1823,10 +1824,12 @@ class Machine:
             raise ValueError(f"capacity must be above 0, not {capacity}")
         if convert is None:
             log = _core.ReturnLog(capacity)
-            native, intercept, decoded = self._add_return_log(fn, log)
+            native, intercept, decoded = _machine_hooks.add_return_log(self, fn, log)
             return Recording(NativeReturns(log, decoded), intercept, native.retire)
         buffer = ReturnBuffer(capacity, convert)
-        native, intercept = self._add_return_hook(fn, lambda r: buffer.add(self.time, r))
+        native, intercept = _machine_hooks.add_return_hook(
+            self, fn, lambda r: buffer.add(self.time, r)
+        )
         return Recording(buffer, intercept, native.retire)
 
     def watch(
@@ -1913,97 +1916,42 @@ class Machine:
         secure = probe_state(state, self._registers.names())
         address = self.address_of(target)
         hook = self._handle.add_probe(address, secure)
-        return self._keep(Probe(hook, address, self._probe_hit, self._handle.remove_probe))
-
-    async def _probe_hit(self, hook: _core.ProbeHook, within: VirtualDuration) -> bool:
-        self._refuse_on_host()
-        ready = self._handle.predicate_probe_hit(hook)
-        if self._handle.session_open():
-            try:
-                raw, ended, deadline = cast(
-                    tuple[_core.StopInfo, bool, int | None],
-                    await awaited(
-                        self._handle.wait_predicate_timed(ready, within.ps), lambda got: got
-                    ),
-                )
-            except BaseException as error:
-                self._surfaced = error
-                raise
-            stop = stop_of(raw)
-            self._surfaced = stop
-            if ended:
-                raise stop_error(
-                    stop, "the free run, while waiting for a probe hit", error_prefix(self)
-                )
-            first = hook.first_ps()
-            return first is not None and deadline is not None and first < deadline
-        try:
-            start = self.time
-        except MachineRunning as error:
-            where = (
-                "is a member of a running linked system"
-                if self._linked() is not None
-                else "runs a goal outside a free run"
+        return self._keep(
+            Probe(
+                hook,
+                address,
+                functools.partial(_machine_hooks.probe_hit, self),
+                self._handle.remove_probe,
             )
-            raise MachineBusy(f"{self._name} {where}: await a probe hit outside it") from error
-        stop = await self.wait_for(Native(ready), for_=within)
-        first = hook.first_ps()
-        missed = stop.reason is StopReason.USER and first is None
-        if missed or stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise stop_error(stop, "the run waiting for a probe hit", error_prefix(self))
-        return first is not None and first < start.ps + within.ps
+        )
 
     def stub_libc(self) -> list[Intercept]:
         """Replace memcpy, memmove, memset, strlen and the `__aeabi_mem*` helpers the images
         define with Python doing the work through `m.mem`, for fast calls and object mode."""
         stubs: dict[str, InterceptHandler] = {
-            "memcpy": self._copy_stub(returns_dest=True),
-            "memmove": self._copy_stub(returns_dest=True),
-            "memset": self._set_stub(order="dcn", returns_dest=True),
-            "strlen": self._strlen_stub,
+            "memcpy": _machine_hooks.copy_stub(self, returns_dest=True),
+            "memmove": _machine_hooks.copy_stub(self, returns_dest=True),
+            "memset": _machine_hooks.set_stub(self, order="dcn", returns_dest=True),
+            "strlen": functools.partial(_machine_hooks.strlen_stub, self),
         }
         for suffix in ("", "4", "8"):
-            stubs[f"__aeabi_memcpy{suffix}"] = self._copy_stub(returns_dest=False)
-            stubs[f"__aeabi_memmove{suffix}"] = self._copy_stub(returns_dest=False)
-            stubs[f"__aeabi_memset{suffix}"] = self._set_stub(order="dnc", returns_dest=False)
-            stubs[f"__aeabi_memclr{suffix}"] = self._set_stub(order="dn", returns_dest=False)
+            stubs[f"__aeabi_memcpy{suffix}"] = _machine_hooks.copy_stub(self, returns_dest=False)
+            stubs[f"__aeabi_memmove{suffix}"] = _machine_hooks.copy_stub(self, returns_dest=False)
+            stubs[f"__aeabi_memset{suffix}"] = _machine_hooks.set_stub(
+                self, order="dnc", returns_dest=False
+            )
+            stubs[f"__aeabi_memclr{suffix}"] = _machine_hooks.set_stub(
+                self, order="dn", returns_dest=False
+            )
         known = self.symbols
         return [
-            self._install_intercept(name, stub, False)
+            _machine_hooks.install_intercept(self, name, stub, False)
             for name, stub in stubs.items()
             if name in known
         ]
 
     def _words(self, call: Call, count: int) -> list[int]:
         return [int(v) & 0xFFFF_FFFF for v in call.args([ValueKind.I32] * count)]
-
-    def _copy_stub(self, *, returns_dest: bool) -> InterceptHandler:
-        def copy(call: Call) -> Return:
-            dest, src, n = self._words(call, 3)
-            if n:
-                self.mem.write(dest, self.mem.read(src, n))
-            return call.returns(dest if returns_dest else None)
-
-        return copy
-
-    def _set_stub(self, *, order: str, returns_dest: bool) -> InterceptHandler:
-        def fill(call: Call) -> Return:
-            words = dict(zip(order, self._words(call, len(order)), strict=True))
-            if words["n"]:
-                self.mem.write(words["d"], bytes([words.get("c", 0) & 0xFF]) * words["n"])
-            return call.returns(words["d"] if returns_dest else None)
-
-        return fill
-
-    def _strlen_stub(self, call: Call) -> Return:
-        (text,) = self._words(call, 1)
-        length = 0
-        while True:
-            block = self.mem.read(text + length, 64 - (text + length) % 64)
-            end = block.find(b"\0")
-            if end >= 0:
-                return call.returns(length + end)
-            length += len(block)
 
     def _relay(self, handler: Callable[..., object], keys: list[int]) -> Relay:
         """The native side's callable for `handler`, its key appended to `keys`."""
@@ -2024,98 +1972,8 @@ class Machine:
         finally:
             _HANDLER_OF.reset(token)
 
-    def _install_intercept(
-        self, fn: int | str | Symbol, handler: InterceptHandler, once: bool
-    ) -> Intercept:
-        self._require_stopped()
-        entry = self.address_of(fn)
-        signature = self._signature(fn, entry)
-        log = self._logs.setdefault(entry, [])
-
-        def native(view: _core.InterceptCall) -> _core.InterceptResult:
-            call = Call(self, view, signature)
-            with self._as_handler():
-                args = call.args_typed() if signature.params is not None else ()
-                reply = handler(call)
-            record = LogEntry(call.occurrence, args)
-            if reply.action == "returns":
-                record.value, record.returned = reply.value, True
-            log.append(record)
-            return reply.native
-
-        keys: list[int] = []
-        hooks = [self._handle.add_intercept(entry, self._relay(native, keys), once)]
-        if signature.params is not None:
-            kinds = [p.kind for p in signature.params]
-
-            def returned(done: _core.ReturnedCall) -> None:
-                pending = next((r for r in reversed(log) if not r.returned), None)
-                if pending is not None:
-                    pending.value = (
-                        None if signature.void else decode(signature.returns, done.value)
-                    )
-                    pending.returned = True
-
-            hooks.append(
-                self._handle.add_return_hook(
-                    entry, kinds, signature.returns.kind, self._relay(returned, keys)
-                )
-            )
-        return self._keep(Intercept(hooks, entry, log, self._callback_table, keys))
-
     def _install_return_hook(self, fn: int | str | Symbol, handler: ReturnHandler) -> Intercept:
-        return self._add_return_hook(fn, handler)[1]
-
-    def _add_return_hook(
-        self, fn: int | str | Symbol, handler: ReturnHandler
-    ) -> tuple[_core.Hook, Intercept]:
-        entry, kinds, returns, returned_of = self._return_decoder(fn)
-
-        def native(done: _core.ReturnedCall) -> None:
-            returned = returned_of(done.occurrence, done.args, done.value, done.instructions)
-            with self._as_handler():
-                handler(returned)
-
-        keys: list[int] = []
-        hook = self._handle.add_return_hook(entry, kinds, returns, self._relay(native, keys))
-        return hook, self._keep(Intercept([hook], entry, [], self._callback_table, keys))
-
-    def _add_return_log(
-        self, fn: int | str | Symbol, log: _core.ReturnLog
-    ) -> tuple[_core.Hook, Intercept, Callable[[_core.LoggedReturn], Returned]]:
-        entry, kinds, returns, returned_of = self._return_decoder(fn)
-        hook = self._handle.add_return_log(entry, kinds, returns, log)
-
-        def decoded(logged: _core.LoggedReturn) -> Returned:
-            return returned_of(logged.occurrence, logged.args, logged.value, logged.instructions)
-
-        return hook, self._keep(Intercept([hook], entry, [], self._callback_table, [])), decoded
-
-    def _return_decoder(self, fn: int | str | Symbol) -> tuple[
-        int,
-        list[_core.ValueKind],
-        _core.ValueKind,
-        Callable[[int, Sequence[int], int, int], Returned],
-    ]:
-        self._require_stopped()
-        entry = self.address_of(fn)
-        signature = self._signature(fn, entry)
-        if signature.params is None and signature.unsupported is None:
-            raise TypeError(f"{signature.name} has no DWARF signature for on_return")
-        params = signature.params or ()
-
-        def returned_of(
-            occurrence: int, args: Sequence[int], value: int, instructions: int
-        ) -> Returned:
-            return Returned(
-                entry,
-                occurrence,
-                tuple(decode(p, b) for p, b in zip(params, args, strict=True)),
-                None if signature.void else decode(signature.returns, value),
-                instructions,
-            )
-
-        return entry, [p.kind for p in params], signature.returns.kind, returned_of
+        return _machine_hooks.add_return_hook(self, fn, handler)[1]
 
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
