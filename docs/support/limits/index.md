@@ -28,7 +28,6 @@ The pages of this section carry what the models of those families leave out.
 
 ## Peripherals
 
-Each page lists the deviations of one peripheral model by family. The peripheral sections not yet
-moved to their own page are on [Remaining peripheral limits](../limits_legacy.md).
+Each page lists the deviations of one peripheral model by family.
 
 --8<-- "limits_table.inc"

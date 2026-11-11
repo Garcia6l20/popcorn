@@ -22,7 +22,6 @@ from popcorn_build.support_pages import LIMIT_ROOTS
 
 ROOT = Path(__file__).parents[2]
 MODELS = ROOT / "native/src/periph/stm32"
-LIMITS = ROOT / "docs/support/limits_legacy.md"
 LIMIT_SITE = re.compile(
     r"throw unmodelled_config|warn_unsupported\(|unmodelled\(|not modelled|deviation|divergence",
     re.IGNORECASE,
@@ -112,7 +111,6 @@ def test_the_general_limits_pages_link_to_existing_pages(generated: Path) -> Non
     built = docs / "support/generated"
     names = {path.name for path in (docs / "support/limits").glob("*.md")}
     assert names == {"index.md", "unmodelled.md", "memory.md", "stm32l4.md", "stm32l1.md"}
-    assert "(../limits_legacy.md)" in (docs / "support/limits/index.md").read_text()
     pages = [*(docs / "support/limits").glob("*.md"), docs / "support/index.md"]
     pages += [docs / "guide/faults.md", docs / "guide/uart_devices.md"]
     checked = 0
@@ -154,17 +152,6 @@ def limited_models() -> list[str]:
     return sorted(f.name for f in sources if LIMIT_SITE.search(f.read_text()))
 
 
-def section_sources() -> dict[str, str]:
-    """The `Source:` line that opens each `## ` section of limits_legacy.md, by heading."""
-    found: dict[str, str] = {}
-    for section in LIMITS.read_text().split("\n## ")[1:]:
-        heading, _, body = section.partition("\n")
-        lines = [line for line in body.splitlines() if line.strip()]
-        if lines and lines[0].startswith("Source: "):
-            found[heading] = lines[0]
-    return found
-
-
 @cache
 def limit_pages() -> dict[str, limits_docs.Page]:
     return limits_docs.read_pages(LIMIT_ROOTS)
@@ -175,10 +162,20 @@ def has_limits_page(model: str) -> bool:
 
 
 @pytest.mark.parametrize("model", limited_models())
-def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
-    link = f"native/src/periph/stm32/{model})"
-    legacy = [heading for heading, source in section_sources().items() if link in source]
-    assert legacy or has_limits_page(model)
+def test_each_model_with_a_limit_carries_a_limits_block(model: str) -> None:
+    assert has_limits_page(model)
+
+
+INFERRED_TOTAL = 412
+
+
+@pytest.mark.timeout(60)
+def test_the_limits_pages_keep_every_inferred_mark(generated: Path) -> None:
+    pages = limit_pages()
+    for ident, page in pages.items():
+        text = (generated / "limits" / f"{ident}.md").read_text()
+        assert f"{page.inferred} inferred." in text, ident
+    assert sum(page.inferred for page in pages.values()) == INFERRED_TOTAL
 
 
 def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
@@ -558,25 +555,11 @@ L1_MODEL_SOURCES = (
 )
 
 
-def section_bodies() -> dict[str, str]:
-    return {
-        heading: body
-        for section in LIMITS.read_text().split("\n## ")[1:]
-        for heading, _, body in [section.partition("\n")]
-    }
-
-
 @pytest.mark.parametrize("model", L1_MODEL_SOURCES)
-def test_each_l1_model_has_a_limits_section_that_covers_the_stm32l1(model: str) -> None:
-    link = f"native/src/periph/stm32/{model})"
-    bodies = [body for body in section_bodies().values() if link in body.split("\n\n")[0]]
-    if not bodies:
-        pages = [p for p in limit_pages().values() if model in {f.name for f in p.sources}]
-        assert len(pages) == 1
-        assert any("l1" in g.scopes or "STM32L1" in g.body for g in pages[0].groups)
-        return
-    assert len(bodies) == 1
-    assert "STM32L1" in bodies[0]
+def test_each_l1_model_has_a_limits_group_that_covers_the_stm32l1(model: str) -> None:
+    pages = [p for p in limit_pages().values() if model in {f.name for f in p.sources}]
+    assert len(pages) == 1
+    assert any("l1" in g.scopes or not g.scopes or "STM32L1" in g.body for g in pages[0].groups)
 
 
 @pytest.mark.timeout(60)

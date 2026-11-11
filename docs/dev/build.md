@@ -137,7 +137,8 @@ uv run python -m popcorn_build.docs
 The reference reads the package from `build/popcorn`, so the native build comes first. The docs
 stage then:
 
-1. Regenerates the support pages into `docs/support/generated`.
+1. Regenerates the support pages into `docs/support/generated`, the limits pages from the
+   `@limits` blocks of the model class docs included.
 2. Builds the SDK reference. Without doxygen on PATH it prints one warning, writes a stub page
    and fetches nothing, so it needs no network. With doxygen it first fetches the
    doxygen-awesome-css theme, which needs network access the first time. The download is kept

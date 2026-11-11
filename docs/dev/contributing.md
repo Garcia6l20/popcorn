@@ -55,4 +55,6 @@ fail and restore it. Do not bound a test by wall time. See [Testing](testing.md)
 Guide snippets come from tests in `tests/docs` through `--8<--` sections, so a snippet is always
 run. A public Python name needs a reference page, and `test_reference_coverage.py` fails when it
 has none. Every declaration in the SDK headers that doxygen extracts needs a `/** */` comment.
-Build the docs with `uv run python -m popcorn_build.docs`, see [Build](build.md).
+A model's limits go in an `@limits` block of its class doc, see
+[Peripherals](peripherals.md). Build the docs with `uv run python -m popcorn_build.docs`, see
+[Build](build.md).

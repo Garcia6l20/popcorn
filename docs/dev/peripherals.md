@@ -54,6 +54,40 @@ range past the size and `peripherals.<name>.registers.<reg>` for an unclaimed re
 become a bus error. Once the machine's Python side is collected, no method is called and the
 run is asked to stop.
 
+## Documenting a model's limits
+
+The limits of a model live in its class doc, and the docs build generates one page per IP from
+them, see [Limits](../support/limits/index.md). A limits block is a doxygen block in a file under
+`native/src/periph/stm32` that follows the model's `@brief` with an `@limits` line and one or more
+`@group` sections of markdown:
+
+```cpp
+/**
+ * @brief CRC calculation unit ...
+ *
+ * @limits crc CRC
+ *
+ * @group all unmodelled
+ * - The RCC clock gate is not modelled.
+ *
+ * @group u5,h5,l4 deviation "Differs from RM0456 and RM0351"
+ * - An even polynomial is computed anyway and logged.
+ */
+```
+
+- `@limits <id> <Title>` names the page. One id may appear in several files: the file that
+  carries the title leads, the others carry `@limits <id>` alone. Groups appear in file name
+  order, then in file order.
+- `@group <scopes> <kind> ["heading"]` opens a section. The scopes are `all` or a comma list of
+  `u5`, `h5`, `l1` and `l4`. The kinds are `unmodelled`, `deviation`, `rule` and `note`. A heading
+  that is not quoted is built from the scopes and the kind. A heading must be unique on the page,
+  and a quoted one may wrap over two lines.
+- The body is markdown, one bullet per fact. Mark a rule no manual states with the word
+  `inferred`, the page counts the marks.
+- A block holds one `@limits`, and no other tag may stand between it and its groups. A malformed
+  block fails the docs build with its file and line.
+- A public header carries no limits block, doxygen reads those.
+
 ## Lines
 
 `irq_line` and `dma_request` are level-driven. A line connected to nothing only keeps its

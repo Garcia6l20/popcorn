@@ -42,7 +42,6 @@ nav = [
       "support/generated/limits/core.md",
       "support/limits/stm32l4.md",
       "support/limits/stm32l1.md",
-      "support/limits_legacy.md",
     ] },
   ] },
   { "Reference" = [
