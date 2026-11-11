@@ -539,7 +539,7 @@ L1_MODEL_SOURCES = (
     "exti_l1l4.cpp",
     "dma_classic.cpp",
     "i2c_v1.cpp",
-    "rtc_classic.cpp",
+    "rtc_l1l4.cpp",
     "spi_classic.cpp",
     "syscfg_l1l4.cpp",
     "crc.cpp",
