@@ -1,5 +1,5 @@
 #include "debug_freeze.hpp"
-#include "exti_classic.hpp"
+#include "exti_l1l4.hpp"
 #include "exti_rows.hpp"
 #include "read_protection.hpp"
 #include "stm32_fixture.hpp"

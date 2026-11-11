@@ -1,5 +1,5 @@
 #include "backup_domain.hpp"
-#include "exti_classic.hpp"
+#include "exti_l1l4.hpp"
 #include "gpio_peers.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"

@@ -1,4 +1,4 @@
-#include "exti_classic.hpp"
+#include "exti_l1l4.hpp"
 #include "model_base.hpp"
 #include "read_protection.hpp"
 #include "secure_config.hpp"

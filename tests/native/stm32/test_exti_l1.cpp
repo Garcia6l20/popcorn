@@ -1,4 +1,4 @@
-#include "exti_classic.hpp"
+#include "exti_l1l4.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_probe.hpp"
 #include "trigger_signal.hpp"

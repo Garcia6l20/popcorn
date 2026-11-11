@@ -536,7 +536,7 @@ def test_the_cores_page_lists_the_cortex_m3_parts(generated: Path) -> None:
 L1_MODEL_SOURCES = (
     "adc_l1.cpp",
     "flash_l1.cpp",
-    "exti_classic.cpp",
+    "exti_l1l4.cpp",
     "dma_classic.cpp",
     "i2c_v1.cpp",
     "rtc_classic.cpp",

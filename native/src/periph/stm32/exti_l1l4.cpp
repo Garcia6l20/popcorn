@@ -1,4 +1,4 @@
-#include "exti_classic.hpp"
+#include "exti_l1l4.hpp"
 #include "exti_rows.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
