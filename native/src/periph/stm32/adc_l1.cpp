@@ -291,6 +291,8 @@ struct trigger_selection
  *
  *        Not modelled, each logged once, a model_error under strict_peripherals: at the regular
  *        group start PDI, PDD and DELS with JAUTO, and at the injected group start PDI and PDD.
+ *
+ * @limits adc
  */
 class adc_l1_model final : public dispatch_model<adc_l1_model, adc_l1_state>,
                            public analog_port,

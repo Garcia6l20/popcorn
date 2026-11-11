@@ -1314,6 +1314,266 @@ struct adc_clock
  *        model_error under strict_peripherals, and convert one sample per trigger in the resumed
  *        mode. TROVS with JAUTO logs a warning once as not modelled. A strict model_error raised
  *        at a JADSTART write leaves ADC_CR as it was before the write.
+ *
+ * @limits adc ADC
+ *
+ * @group u5,h5,l4 unmodelled "Not modelled, logged once each"
+ * - Auto-delayed conversions, `ADC_CFGR1.AUTDLY`.
+ * - The low frequency trigger mode, `ADC_CFGR2.LFTRIG`.
+ * - The MDF data path, `ADC_CFGR1.DMNGT` 10.
+ * - DMA requests gated by the AWD1 window, `AWDFILT1` with `DMNGT`.
+ * - Left shift, gain compensation and offset of the result.
+ * - Bulb sampling, `ADC_CFGR2.BULB`.
+ * - The sampling time control trigger mode, `ADC_CFGR2.SMPTRIG` with `SWTRIG`.
+ * - Triggered regular oversampling, `ADC_CFGR2.TROVS`, on the STM32U5 and STM32H5: all samples of a
+ *   result convert back to back from the first trigger.
+ * - Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
+ *   single-ended.
+ * - Reserved trigger selections in `EXTSEL`.
+ * - The EXTI line 11 and 15 selections, `EXTSEL` 6 and 16: the STM32U5 and STM32H5 EXTI drives no
+ *   trigger signal, so they start nothing.
+ * - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
+ *
+ * @group all rule "Every family"
+ * - An external channel converts the analog level of its pad, the GPIO pin its description's
+ *   `channel_pins` names, an STM32L1 bank B channel on a pad of its own that of its bank B pad.
+ *   Channels of several ADCs on one pad read one level: a drive through `ADCx.input(n).volts` is
+ *   the pad's board drive, and every ADC channel on that pad converts it. A description without
+ *   `channel_pins` gives its ADC no pads: drive and input of an external channel raise
+ *   `ConfigError` naming `channel_pins`, and the channel converts 0. Every shipped description
+ *   carries the table.
+ *
+ * @group u5,h5,l4 rule "On the STM32U5, STM32H5 and STM32L4"
+ * - Writes to `ADC_CFGR`, `ADC_CFGR2`, `ADC_SMPRx`, `ADC_SQRx`, `ADC_OFRy`, `ADC_TRx` and
+ *   `ADC_AWDxCR` with ADSTART or JADSTART set apply at once.
+ *
+ * @group h5 rule "On the STM32H5, RM0481 section 28"
+ * - The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
+ *   independently. `ADC_CDR` is storage. `ADC_CSR` reads the `ADC_ISR` bits 10:0 of ADC1 at its
+ *   bits 10:0 and of ADC2 at its bits 26:16.
+ * - An enabled offset, `ADC_OFRy.OFFSET_EN` on the converted channel, is logged once and leaves the
+ *   result unchanged.
+ * - ADC2 channels 16 and 17, VBAT / 4 and VDDCORE, read 0.
+ * - Channel 0 of ADC1 or ADC2 converted while ADC1 `ADC_OR.OP0` is clear is logged once, a
+ *   model_error under strict_peripherals, and converts as 0. An STM32H573 reads an internal level
+ *   there, not PA0.
+ * - ADC2 `ADC_OR.OP0`, the VDDCORE channel enable, is storage.
+ * - In the synchronous clock modes the ADC clock is HCLK divided by CKMODE, whatever ADC12EN.
+ *   CKMODE 01 with HCLK not SYSCLK is logged once at the ADEN edge, a model_error under
+ *   strict_peripherals, and converts at HCLK.
+ * - Out of deep power-down, ADRDY sets 35 HCLK cycles after the ADEN edge with ADVREGEN set and 45
+ *   with it clear, as measured on an STM32H573 with the ADC clock at HCLK. The cycle count is kept
+ *   in HCLK cycles at every ADC clock. The tADCVREG_STUP wait of DS14121 Table 96 is the
+ *   firmware's.
+ * - Under OVRMOD 0 a result that finds the three-result FIFO full sets OVR and leaves the head
+ *   only. While OVR stays set, a result lands when the FIFO is empty and is discarded otherwise.
+ *   Measured on an STM32H573, the discard of a second result while the FIFO holds one is the
+ *   reading consistent with that run.
+ * - The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
+ *   measured on an STM32H573 with CONT 1.
+ * - At CKMODE 00 a trigger waits for the next ADC clock edge, and tLATR is 4.5 ADC clock cycles
+ *   from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
+ *   DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
+ *   from virtual time 0.
+ *
+ * @group l1 rule "On the STM32L1, RM0038 section 12"
+ * - The automatic power-down, `PDI` and `PDD`, and `DELS` with `JAUTO` are logged once, a
+ *   model_error under strict_peripherals.
+ * - The analog watchdog compares an injected code before its offset, a code below 12 bits shifted
+ *   to 12 bits, and a result an overrun loses, each inferred. `ADC_HTR` and `ADC_LTR` are read at
+ *   the end of each conversion.
+ * - With `SCAN` and `AWDIE` set, a conversion that sets `AWD` aborts the scan, RM0038 12.15.2. Its
+ *   result is the group's last: `EOC` or `JEOC` sets, `CONT`, `DISCEN` and `JAUTO` do not go on,
+ *   and the next start begins at the first rank, inferred.
+ * - With `DMA` 1, `adc_dma` on DMA1 channel 1 requests each regular result until `ADC_DR` is read
+ *   or 0 is written to `EOC`. An overrun with `DMA` 1 aborts the regular conversion and further
+ *   regular triggers are ignored, RM0038 12.11.1. They stay ignored until `OVR` is cleared,
+ *   `SWSTART` counting as a trigger, inferred. With `DDS` 0 the end of the channel's count while
+ *   `DMA` is 1, at the end of a normal channel or at a circular reload, stops the requests and the
+ *   ADC converts as with `DMA` 0, no overrun, until `DMA` is written 0, then 1, inferred from the
+ *   RM0038 12.11.1 "avoids generating an overrun error".
+ * - Hardware triggers start conversions from every selection of `EXTSEL` and `JEXTSEL`: the TRGO
+ *   selections from the timer's TRGO, the TIMx_CCy selections from the timer's capture/compare
+ *   event, and EXTI lines 11 and 15 from the line input, a pin edge counting at its own time,
+ *   inferred. A selection whose source has no model on the part is logged once, a model_error under
+ *   strict_peripherals, and starts nothing. tlatr is 3.5 ADC clock cycles, the datasheet maximum.
+ *   Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it for 2 PCLK cycles.
+ *   A model_error of a selection surfaces from the `ADC_CR2` write or the `ADONS` event that starts
+ *   the listening.
+ * - `DELS` 010 to 111 add 1 PCLK2 cycle and 3 ADC clock cycles of synchronisation to the delay, the
+ *   maxima RM0038 gives, inferred, at the PCLK2 rate of the conversion end. `DISCEN` with `CONT`
+ *   converts as `DISCEN` alone and is logged once, a model_error under strict_peripherals,
+ *   inferred. With `EOCS` 1 the `DELS` 010 to 111 delay follows each group though `EOC` sets per
+ *   conversion, RM0038 12.9.1.
+ * - `DELS` 001 holds the next conversion at each `EOC`: after each conversion with `EOCS` 1, after
+ *   the group with `EOCS` 0, inferred for `EOCS` 0. A trigger or `SWSTART` during a `DELS` hold is
+ *   ignored, RM0038 12.9 and Figure 47.
+ * - `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once with
+ *   `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of `RCC_APB2ENR`
+ *   holds, which gates only its register access, see RCC.
+ * - A `SWSTART` while a conversion runs is cleared and ignored, inferred. A `JSWSTART` or an
+ *   injected trigger while the injected group runs is cleared and ignored, inferred.
+ * - With `SCAN` 0 the injected group is one conversion of JSQ(4 - `JL`), the first of the `JL`
+ *   order, also over a regular conversion, inferred. An `ADC_JSQR` write, or an `ADC_SQR1` to
+ *   `ADC_SQR5` write, between `JDISCEN` or `DISCEN` subgroups starts the next group at its first
+ *   conversion, inferred. The k-th conversion of the injected group lands in `ADC_JDRk` less the
+ *   offset of `ADC_JOFRk`, inferred from the HAL rank order. Below 12 bits `JOFFSET` counts from
+ *   bit 11 and its bits under the resolution are ignored, inferred from the LL driver note, and a
+ *   left-aligned injected result sits one bit below the regular one at every resolution, RM0038
+ *   Figures 45 and 46 for 12 and 6 bits, inferred for 10 and 8 bits.
+ * - An injection drops a regular conversion in progress or due, and the same rank converts again
+ *   after the injected group, once the delay of the regular conversion before it has passed. A
+ *   regular trigger or `SWSTART` during the injected group starts the regular group after it. One
+ *   edge of a signal both groups select starts both.
+ * - `JAUTO` with `JEXTEN` not 0, `DISCEN` or `JDISCEN`, a `JSWSTART` with `JAUTO`, and `DISCEN`
+ *   with `JDISCEN` are logged once, a model_error under strict_peripherals. With `JAUTO` the whole
+ *   injected group follows the last regular rank and injected triggers are ignored, inferred.
+ * - With `JDISCEN` the last subgroup sets `JEOC` alone, inferred: the RM0038 12.3.10 example also
+ *   names `EOC`. The injected tlatr is the regular 3.5 ADC clock cycles, inferred.
+ * - Channels 16 and 17 read their TS_CAL1 and VREFINT_CAL values from the `TSVREFE` write on, with
+ *   no sensor tSTART, and 0 while `TSVREFE` is clear, inferred.
+ * - A conversion keeps the end time, sampling end and resolution it started with. `RES` and `SMPx`
+ *   written with `ADON` 1 apply from the next conversion.
+ * - With `EOCS` 1, a result that finds `ADC_DR` unread sets `OVR` and is lost, and the group goes
+ *   on, inferred.
+ * - On Cat.3 to Cat.6, the bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and ADC_IN6b
+ *   to ADC_IN12b, read their bank B input, `ADC.input(n, bank="B")`. The other bank B channels read
+ *   their bank A pad and take no bank B drive. VCOMP, channel 26, reads 0, logged once.
+ * - A package bonds a bank B channel on a pad of its own when it bonds that pad, RM0038 Table 41
+ *   and the DS10002, DS10764, DS8890, DS10262 and DS8576 pin tables: PB2 for ADC_IN0b on every
+ *   Cat.3 to Cat.6 package.
+ * - The factory TS_CAL1, TS_CAL2 and VREFINT_CAL words are datasheet typical values. TS_CAL1 is
+ *   derived from two typicals, inferred. The L100 parts carry the words though their datasheets
+ *   give no TS_CAL, inferred.
+ *
+ * @group l4 rule "On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5
+ *       model"
+ * - The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once, a model_error under
+ *   strict_peripherals. ADC1, ADC2 and ADC3 convert independently. `ADC_CDR` is storage. `ADC_CSR`
+ *   reads the `ADC_ISR` bits 10:0 of ADC1 at its bits 10:0 and of ADC2 at its bits 26:16, RM0351
+ *   18.8.1. ADC3 has no `ADC_CSR` bits.
+ * - `ADC_DR` holds one result. Under OVRMOD 0 a result that finds EOC set sets OVR and is
+ *   discarded, and so is every result while OVR stays set, RM0351 18.4.26.
+ * - An `ADC_OFRy` with OFFSET_EN subtracts OFFSET from the code of its channel, left-aligned on 12
+ *   bits, RM0351 Table 114, the lowest enabled y first, inferred from RM0351 18.7.17, whose
+ *   lowest-x rule would otherwise let a disabled `ADC_OFR1` at its reset channel 0 block the
+ *   others, for `ADC_DR` and `ADC_JDRy`, and the result reads signed, RM0351 Figures 97 and 99.
+ *   ROVSE and JOVSE ignore OFFSET_EN. OFFSET bits below the resolution, which Table 114 requires
+ *   clear, are subtracted too and the result keeps its upper bits, inferred. The watchdogs compare
+ *   the raw code.
+ * - The one-shot DMA end, DMACFG 0, drops the conversion in progress and stops the sequence with
+ *   ADSTART left set, RM0351 18.4.15, and freezes `ADC_DR`, RM0351 18.4.26. A result while frozen
+ *   sets no OVR, RM0351 18.4.26 "This avoids generating an overrun error". It leaves EOC unchanged,
+ *   sets EOS at the end of the sequence and still reaches the watchdogs, inferred. ADSTART going
+ *   from 0 to 1 re-arms the request and ends the freeze, inferred.
+ * - ES0250 2.8.8, ADC_AWDy_OUT reset by unguarded channels, has no counterpart: no watchdog output
+ *   reaches a timer, and the TIM1 and TIM8 `ETR_ADCx_RMP` selections log once, see TIM.
+ * - ADRDY sets 15 ADC clock cycles after the ADEN write, the DS10198 Table 76 tSTAB of one
+ *   conversion cycle read as one 12-bit conversion at SMP 000, inferred. The tADCVREG_STUP wait of
+ *   Table 76 is the firmware's.
+ * - A calibration keeps ADCAL set for 116 ADC clock cycles, the DS10198 Table 76 tCAL, and leaves
+ *   CALFACT_S or CALFACT_D at 0, inferred: popcorn converts with no offset error. Without a kernel
+ *   clock it waits for one. An ADEN write within 4 ADC clock cycles after ADCAL clears is dropped,
+ *   RM0351 18.4.9 as corrected by ES0250 2.8.4.
+ * - A channel converted with the `GPIOx_ASCR` switch of its pad open reads 0, inferred, logged
+ *   once, a model_error under strict_peripherals.
+ * - ES0250 2.8.11 and 2.8.12, a wrong first result after 1 ms idle and spurious temperature
+ *   samples, have no counterpart: every result is the converted input. ES0250 2.8.18, the clamp of
+ *   an ADC input to VDD, has none either: inputs saturate at VDDA. ES0250 2.2.4, the VREFINT
+ *   corruption at Stop entry, has none: Stop is not modelled.
+ * - With ROVSE, AWD1 compares `ADC_DR[15:4]`, RM0351 18.4.30. AWD2 and AWD3 compare `ADC_DR[15:8]`,
+ *   the STM32H5 rule, inferred: RM0351 18.4.29 and 18.4.30 give no oversampled rule for them.
+ * - VBAT / 3 on channel 18 of ADC1 and ADC3 reads 0 with `CH18SEL`.
+ * - The ADC2 channels 17 and 18 and the ADC3 channels 14 and 15 convert the on-chip outputs of DAC1
+ *   channels 1 and 2, RM0351 18.4.11, and read 0 while that output reaches no on-chip peripheral.
+ *   They need no `ADC_CCR` enable, RM0351 18.4.11 naming VREFEN, CH17SEL and CH18SEL only.
+ * - The trigger from EXTI line 11 reaches the ADC whatever the EXTI interrupt configuration, ES0250
+ *   2.8.13 requires the line enabled as an interrupt and its pending bit cleared.
+ * - LDM, STM, LDRD and STRD accesses to the ADC registers complete as single accesses, ES0250 2.8.3
+ *   and 2.8.15 list them as not supported.
+ * - ES0250 2.8.7 and 2.8.10, an unexpected regular conversion after two injected conversions and a
+ *   shifted slave datum, have no counterpart: the dual modes are not modelled.
+ * - ES0250 2.8.9, injected data stored in ADC_JDR1 when JADSTP lands at the end of an injected
+ *   conversion, has no counterpart: every injected result goes to its own ADC_JDRy.
+ * - `EXTSEL` 8 and 10, TIM8_TRGO2 and TIM1_TRGO2, have no source and are logged once, a model_error
+ *   under strict_peripherals. `EXTSEL` 6 takes EXTI line 11 from the line input, a pin edge
+ *   counting at its own time.
+ * - At CKMODE 00 a trigger waits for the next ADC clock edge, counted from virtual time 0, then
+ *   tLATR is 1.5 ADC clock cycles, so it lies in the 1.5 to 2.5 cycles of DS10198 Table 76,
+ *   inferred. At CKMODE 01, 10 and 11 tLATR is the Table 76 maximum, 2, 2.25 and 2.125 cycles.
+ * - The factory TS_CAL1 and VREFINT_CAL words are the datasheet typical values of the L4 patch,
+ *   inferred.
+ * - The injected group converts with JQDIS 1. JADSTART with JEXTEN 0 converts the JSQ channels at
+ *   once, with JEXTEN set each edge of the JEXTSEL event of RM0351 Table 112 converts them after
+ *   the tLATR of a regular trigger. With JDISCEN and JEXTEN 0 each JADSTART converts the next
+ *   channel and JADSTART clears after it, inferred: RM0351 18.4.20 describes JDISCEN with hardware
+ *   triggers only.
+ * - JOVSE oversamples the injected ranks with OVSR and OVSS, RM0351 18.4.30, and AWD1 compares
+ *   `ADC_JDRy[15:4]`, the `ADC_DR[15:4]` rule of RM0351 18.4.30, inferred. With ROVSE and JOVSE an
+ *   injection restarts the dropped regular rank from its first sample, RM0351 Figure 115, and JAUTO
+ *   with both oversamples both groups, Figure 117.
+ * - With ROVSE, ROVSM 0 and JOVSE 0 an injection keeps the samples the dropped rank completed, and
+ *   the rank converts its remaining samples after the group, the sample in progress again, RM0351
+ *   18.4.30 Figure 114. TROVS with ROVSE converts one sample per trigger and lands the result after
+ *   2 to the OVSR + 1 triggers, Figure 113, with DISCEN read as 1 and one rank per trigger. An
+ *   injection between triggers zeroes the samples taken, and a sample it drops converts again at
+ *   the end of the group with no trigger, RM0351 Figure 116. ADSTP between triggers zeroes them
+ *   too, inferred. With EXTEN 0 each ADSTART converts one sample and ADSTART clears after it,
+ *   inferred. The samples taken survive an `ADC_CFGR2`, `ADC_SQRx` or `ADC_SMPRx` write while
+ *   ADSTART reads 0 between them, and the result then sums samples taken under both settings,
+ *   inferred.
+ * - TROVS with CONT is the DISCEN and CONT pair RM0351 18.4.20 forbids, as RM0351 18.4.30 reads
+ *   DISCEN as 1 under TROVS. It is logged once, a model_error under strict_peripherals, and
+ *   converts as DISCEN alone.
+ * - These oversampling settings are logged once, a model_error under strict_peripherals: ROVSE and
+ *   JOVSE with ROVSM 0 and JAUTO 0 convert in the resumed mode, as the RM0351 18.4.30 text says
+ *   ROVSM is ignored there, and are logged because Table 119 marks the setting not supported, and
+ *   TROVS with ROVSM 0, and TROVS with JOVSE outside JAUTO, not supported by Table 119, convert one
+ *   sample per trigger in the resumed mode. TROVS with JAUTO is logged as not modelled. A strict
+ *   model_error at a JADSTART write leaves `ADC_CR` as before the write.
+ * - With JQDIS 0 a CPU or DMA `ADC_JSQR` write goes through the queue of context with one stage at
+ *   JQM 0, ES0250 2.8.1, where RM0351 18.4.21 describes two. A write before the waiting context is
+ *   consumed sets JQOVF, an interrupt with JQOVFIE, and is ignored. `ADC_JSQR` reads the active
+ *   context. JEOS consumes it, and with JDISCEN the first trigger does, RM0351 18.4.21 note: a
+ *   write after that waits and becomes the context at JEOS. Otherwise a write after the consumption
+ *   applies at once, RM0351 Figure 84, and so does the first write after JADSTP or ADDIS drop the
+ *   wait, Figures 86, 88 and 90, or after ADCRST, inferred. A set or reset of JQDIS flushes the
+ *   queue and clears `ADC_JSQR`, RM0351 18.7.4. A debugger write stores the word with no queue
+ *   effect. Only hardware triggers start a sequence with the queue on, RM0351 18.4.21: JADSTART
+ *   with JEXTEN 0 is ignored and logged once, a model_error under strict_peripherals.
+ * - With JQM 1 the queue holds two contexts, RM0351 18.4.21. A write to the empty queue applies at
+ *   once, a later one waits, and a third sets JQOVF. JEOS applies the next context or empties the
+ *   queue, which then reads `ADC_JSQR` 0, RM0351 Figures 85, 89 and 91, and ignores the injected
+ *   triggers until a write. JADSTP, ADDIS and a JQDIS change empty it.
+ * - ES0250 2.8.5 and 2.8.6, JQM 0: a new context converts at its own trigger, and a longer context
+ *   written just after the previous one completes converts its own ranks. Silicon may start the new
+ *   context without its trigger, or merge the two contexts.
+ * - With JAUTO the injected group converts after the last regular rank, RM0351 18.4.19, with no
+ *   delay, inferred, and with CONT the regular sequence starts again at JEOS. With CONT 0 and EXTEN
+ *   0 ADSTART clears at EOS, as the RM0351 18.7.3 ADSTART bit says, and JADSTART reads 0 while the
+ *   auto-injected group converts, inferred: the RM0351 18.4.15 note says ADSTART and JADSTART
+ *   "provide information on whether any ADC operation is currently ongoing". ADSTP stops both
+ *   groups, RM0351 18.4.17. The one-shot DMA transfer end stops the sequence and drops the
+ *   conversion in progress, RM0351 18.4.19 and 18.4.26, and clears ADSTART, inferred.
+ * - JADSTART or JADSTP with JAUTO is ignored, JAUTO with JEXTEN set ignores the injected triggers,
+ *   JAUTO with DISCEN or JDISCEN converts as JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0
+ *   oversamples the regular ranks only, RM0351 18.4.30. Each is logged once, a model_error under
+ *   strict_peripherals, RM0351 18.4.19 and 18.7.4.
+ * - An injected start or trigger during a regular conversion drops it, and the dropped rank
+ *   converts again after the group, RM0351 18.4.19, starting at the group's end, inferred. tLATRINJ
+ *   is the next ADC clock edge then 2.5 cycles at CKMODE 00, inside the 2.5 to 3.5 cycles of
+ *   DS10198 Table 76, inferred. At CKMODE 01, 10 and 11 it is the Table 76 maximum, 3, 3.25 and
+ *   3.125 cycles.
+ * - A regular start with EXTEN 0 or a regular trigger during the injected group starts the regular
+ *   sequence at the group's end, RM0351 18.4.19, at once with no tLATR, inferred. ADSTART with
+ *   EXTEN set arms the trigger. ADSTP during the group cancels the dropped rank and the latched
+ *   start, and the injected group runs on. JADSTP during the group resumes the dropped rank at
+ *   once, inferred.
+ * - `JEXTSEL` 8 and 10, TIM1_TRGO2 and TIM8_TRGO2, have no source and are logged once, a
+ *   model_error under strict_peripherals. `JEXTSEL` 6 takes EXTI line 15 from the line input.
+ * - An `ADC_JSQR` write with JADSTART 1 and JQDIS 1 applies to the next injected sequence and is
+ *   logged once, a model_error under strict_peripherals, RM0351 18.7.16 as corrected by ES0250
+ *   2.8.2.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits::state>,

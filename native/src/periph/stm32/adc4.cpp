@@ -210,8 +210,8 @@ using source_ptr = internal_analog_source const*;
  *        a 6-bit result on bit 7, Figure 291. A CPU or DMA read of ADC_DR clears EOC. A result
  *        finding EOC set sets OVR, and replaces ADC_DR with OVRMOD 1. With OVRMOD 0 every result is
  *        lost while EOC or OVR is set: ADC_DR and EOC keep their values and OVR is set. A write
- *        changing ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, ADC_AWD2CR or ADC_AWD3CR with ADSTART
- *        set keeps the old register, RM0456 34.7.4 to 34.7.15, logged once for the six, a
+ *        changing ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, ADC_AWD2CR, ADC_AWD3CR or ADC_OR with
+ *        ADSTART set keeps the old register, RM0456 34.7.4 to 34.7.17, logged once for the seven, a
  *        model_error under strict_peripherals. ADC_IER, ADC_AWDxTR and ADC_CCR accept writes while
  *        ADSTART is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for
  *        ADEN 0. `analog_port` drive and input act on the pad's board slot. Without a pad, drive
@@ -312,6 +312,152 @@ using source_ptr = internal_analog_source const*;
  *        conversions run as with AUTOFF alone. VREFPROT and
  *        VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. VIN[12] and VIN[14] with VBATEN:
  *        they convert 0.
+ *
+ * @limits adc4 ADC4
+ *
+ * @group u5 rule "STM32U5 ADC4, RM0456 section 34"
+ * STM32U5 ADC4, RM0456 section 34: the voltage regulator, the calibration, the enable and disable
+ * sequence, the ADC clock, the interrupt, the channel sequencer, the conversion timing and
+ * `ADC_DR`.
+ *
+ * @group u5 unmodelled "Not modelled, logged once at the ADSTART that uses it"
+ * Not modelled, each logged once at the `ADSTART` that uses it, a model_error under
+ * strict_peripherals that keeps `ADC_CR`:
+ *
+ * - The triggers `tim1_trgo2` and `exti15`, `EXTSEL` 0 and 7: no model produces them, `ADSTART`
+ *   stays set and nothing converts.
+ * - `AUTOFF` with `DPD`, the autonomous mode of RM0456 34.4.24: its clock requests and LDO
+ *   power-off are not modelled, the conversions run as with `AUTOFF` alone. `DPD` alone is stored.
+ * - `VIN[12]`, VCORE, and `VIN[14]`, VBAT / 4, with `VBATEN` in the sequence: they convert 0, the
+ *   board model has no VBAT source and the level of VCORE depends on the PWR voltage range of
+ *   DS13737, which is not modelled.
+ * - `VIN[0]` sampled for less than the typical 12.65 us of tS_vrefint, DS13737 Table 36, or
+ *   `VIN[13]` for less than the 13 us of tS_temp, Table 109, at `ADSTART` or at the `VREFEN` or
+ *   `VSENSESEL` write with `ADSTART` set: the exact level converts.
+ * - `VREFPROT` and `VREFSECSMP` of `ADC_PWRR`: tCONV stays at tSMPL + tSAR, the DS13737 Table 106
+ *   minimum.
+ *
+ * @group u5 rule "Analog watchdogs, RM0456 34.4.25"
+ * - At the end of each conversion the 12-bit raw result, left aligned, is compared with
+ *   `ADC_AWDxTR`: AWDx sets when it is below LTx or above HTx, an LTx above HTx flagging every
+ *   result. A result an overrun discards is compared too. AWDx sets with EOC, inferred, no figure
+ *   gives a delay.
+ * - AWD1 guards every channel of the sequence with `AWD1EN` and `AWD1SGL` 0, the channel `AWD1CH`
+ *   names with `AWD1SGL` 1. An `AWD1CH` of 18 to 21 or 24 to 31, reserved, guards no channel and is
+ *   logged once at `ADSTART`, a model_error under strict_peripherals. AWD2 and AWD3 guard the
+ *   channels set in `ADC_AWD2CR` and `ADC_AWD3CR`.
+ * - A threshold write while a conversion samples or converts masks that watchdog for that
+ *   conversion. The conversion starts with its sampling, inferred. The new thresholds apply from
+ *   the next one. With the oversampler the mask lasts for the whole series of N conversions,
+ *   inferred. A threshold write at the exact end instant of a conversion masks the next one,
+ *   inferred. A result arriving while `ADC_DR` is frozen after a one-shot DMA end is compared,
+ *   inferred.
+ * - The `ADC_AWDx_OUT` signals to the timers' ETR inputs are not produced.
+ *
+ * @group u5 rule "Oversampler, RM0456 34.4.26"
+ * - With `OVSE` each result is the sum of N conversions of the channel, N = 2 << `OVSR`, 2 to 256,
+ *   shifted right by `OVSS` with rounding to the nearest, then truncated to 16 bits, Table 335. It
+ *   lands right aligned whatever `ALIGN` says. RES applies to each conversion before the sum.
+ * - The conversions of a series follow each other, each with its own sampling: EOSMP sets after
+ *   every sampling, EOC after the Nth conversion, EOS after N conversions of every channel. ADSTP
+ *   and ADDIS drop the sum, ADDIS inferred.
+ * - An `OVSS` of 9 to 15, reserved, shifts by 8 and is logged once at `ADSTART`, a model_error
+ *   under strict_peripherals, the shift inferred.
+ * - The watchdogs compare `ADC_DR[15:4]` of the result and ignore RES, RM0456 34.4.26.
+ * - With `DISCEN` one trigger starts the N conversions of a channel. With `TOVS`, `DISCEN` taken as
+ *   1, each trigger starts one conversion and the series goes on at the next trigger. A software
+ *   `ADSTART` clears at the end of each conversion with `TOVS`, and the oversampler fields of
+ *   `ADC_CFGR2` are then writable between the conversions, both inferred.
+ *
+ * @group u5 rule "Low-power features, RM0456 34.4.22 and 34.4.24"
+ * - With `WAIT` a new conversion starts only when `ADC_DR` is read by a bus master other than the
+ *   debugger or `EOC` is cleared, from that instant, inferred. A continuous sequence holds after
+ *   each conversion, a software `ADSTART` with `EOC` set holds until then, and a hardware trigger
+ *   that arrives while a conversion runs or `EOC` is set is ignored. No overrun occurs.
+ * - With `AUTOFF` `ADRDY` stays clear and each start from a software `ADSTART` or a hardware
+ *   trigger waits tLATR then tSTAB, a read that releases `WAIT` waits tSTAB, 17 ADC clock cycles,
+ *   inferred. The conversions of a continuous sequence follow each other with no power-up, Figure
+ *   295.
+ * - With `LFTRIG` a software or hardware trigger starts 2 ADC clock cycles later. With `WAIT` only
+ *   the first trigger does, taken as the first after `ADSTART`, inferred. With `AUTOFF` it adds
+ *   nothing, inferred.
+ * - `ADC_PWRR` bits are stored. `VREFPROT` and `VREFSECSMP` are logged as above. The ADC4 has no
+ *   VREGPW bit.
+ *
+ * @group u5 rule "Triggers and DMA"
+ * - With `EXTEN` not 00 the ADC listens to the signal `EXTSEL` selects, RM0456 Table 329:
+ *   `tim1_cc4`, `tim2_trgo`, `tim15_trgo` and `tim6_trgo` are produced. `EXTEN` 01 takes the rising
+ *   edge of a TRGO pulse, 10 the falling edge one timer clock later, 11 both. An edge during a
+ *   conversion or the tLATR is ignored. The sequence starts tLATR after the edge, inferred for
+ *   every clock. An edge ahead of the machine time is taken at its own time, after the ADC's own
+ *   events due then, inferred. `ADSTART` stays set at the end of a sequence. The `tim1_oc4`
+ *   selection takes the capture/compare event `tim1_cc4`, inferred.
+ * - `EXTSEL` 5 and 6 take the outputs `lptim1_ch1` and `lptim3_ch2` of the LPTIM model, RM0456
+ *   Table 329. `EXTEN` 01 takes the rise of the output, 10 its fall and 11 both, each at the
+ *   instant the output changes, and the sequence starts tLATR after it. The ADC listens from
+ *   `ADSTART` with the LPTIM running or not.
+ * - DMAEN holds the `adc4_dma` request high while EOC is set and OVR clear, a DMA read of `ADC_DR`
+ *   drops it. With DMACFG 0 the request stops and `ADC_DR` freezes when the GPDMA channel
+ *   completes, `ADSTART` staying set until it rises again, inferred. A result arriving then leaves
+ *   `ADC_DR` and EOC as they are, and the last result of a sequence sets EOS, inferred. DMACFG 1
+ *   keeps requesting. DMAEN written with EOC set raises the request, inferred. The calibration
+ *   order RM0456 34.4.23 asks for DMAEN is not checked.
+ *
+ * @group u5 rule "Internal channels, RM0456 Table 329 and 34.4.27"
+ * - `VIN[0]` reads VREFINT with `ADC_CCR.VREFEN` and `VIN[13]` the temperature sensor with
+ *   `VSENSESEL`, 0 without. They read the factory VREFINT_CAL and TS_CAL1 words, taken at 3.0 V and
+ *   30 C, scaled by 3000 / VDDA and cut from 14 to 12 bits, `RES` shifting them like any result,
+ *   inferred. A part description with no such word makes an `ADSTART` that converts the channel a
+ *   config_error.
+ * - `VIN[21]` reads the DAC1 output `ADC_OR.CHN21SEL` selects, 0 while that output reaches no
+ *   on-chip peripheral. It has no enable bit. The level is taken at the end of the sampling like a
+ *   pad level.
+ * - `ADC_OR` follows the lock of `ADC_CFGR1`, RM0456 34.7.17.
+ *
+ * @group u5 rule "Timing and values"
+ * - LDORDY sets 25 us after ADVREGEN, the tADCVREG_STUP maximum of DS13737 Table 106.
+ * - The calibration takes 123 ADC clock cycles, the typical tOFF_CAL of DS13737 Table 106. The
+ *   factor it leaves in `ADC_CALFACT` and `ADC_DR` is 0, inferred. The factor leaves the codes
+ *   unchanged.
+ * - ADRDY sets 17 ADC clock cycles after ADEN: tSTAB of DS13737 Table 106 is 3 cycles and one
+ *   conversion, here a 12-bit conversion at SMP 000, inferred. ADEN before LDORDY sets ADRDY tSTAB
+ *   after LDORDY, inferred.
+ * - ADEN written with ADVREGEN 0 sets ADVREGEN and starts the regulator, ES0499 2.9.2, with the
+ *   timing above, inferred.
+ * - The calibration needs the regulator ready, its LDORDY event, whether software cleared the flag
+ *   since, inferred.
+ * - Sampling starts tLATR after the `ADSTART` write: 4 ADC clock cycles at fADC = HCLK and HCLK / 2
+ *   and 3.75 at HCLK / 4 with the bus clock as kernel clock, DS13737 Table 106. Any other kernel
+ *   clock takes 4 cycles, inferred, RM0456 Table 330 calls its latency not deterministic. An
+ *   `ADSTART` before ADRDY samples too, inferred. ADSTP clears ADSTP and ADSTART in the write,
+ *   inferred. A sequence that waited for the ADC clock starts sampling when the clock arrives,
+ *   inferred. EOC and the result land at the end of tSAR, the `ADC_DR` write latency taken as 0,
+ *   inferred. The next conversion samples from the end of the previous one.
+ * - An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
+ *   strict_peripherals, inferred. `DISCEN` or `TOVS` with `CONT`, forbidden by RM0456 34.4.17,
+ *   converts with `CONT` ignored and is logged once, a model_error under strict_peripherals.
+ * - A write changing `ADC_CFGR1`, `ADC_SMPR`, `ADC_CHSELR`, `ADC_CFGR2`, `ADC_AWD2CR`, `ADC_AWD3CR`
+ *   or `ADC_OR` with `ADSTART` set keeps the old register, RM0456 34.7.4 to 34.7.17, logged once
+ *   for the seven, a model_error under strict_peripherals.
+ * - With `OVRMOD` 0 every result is discarded while EOC or OVR is set, RM0456 34.4.23: `ADC_DR` and
+ *   EOC keep their values and OVR is set. A rank past the end of a shortened sequence starts over
+ *   at the first channel.
+ * - `ADC_IER`, `ADC_AWD1TR` to `ADC_AWD3TR` and `ADC_CCR` accept writes while `ADSTART` is set. RES
+ *   is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for ADEN 0.
+ * - ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, as ES0499 2.9.2 states for its startup
+ *   sequence, inferred for every other use.
+ * - A reserved `ADC_CCR.PRESC`, 1100 to 1111, divides by 256, inferred, and is logged once, a
+ *   model_error under strict_peripherals that keeps the old `ADC_CCR`.
+ * - Writes that RM0456 34.4.8, 34.7.3, 34.7.13, 34.7.16 and 34.7.18 forbid are ignored and logged
+ *   once, a model_error under strict_peripherals that keeps the old register.
+ *
+ * @group u5 note "Errata of ES0499 Rev 12"
+ * - 2.9.1, an ADC4 conversion disturbed by an ADC1 sampling phase on VREF+, is an electrical effect
+ *   outside the model. The workaround, both prescalers at 0000, applies unchanged.
+ * - 2.9.2, the ADC clock request active after reset, is a current consumption effect with no
+ *   counterpart. The timing of its workaround sequence, ADEN then ADDIS, is the model's.
+ * - 2.2.8, MSIK and HSI16 kept on when ADCDACSEL selects them, is a clock-tree effect outside the
+ *   model.
  */
 class adc4_model final : public dispatch_model<adc4_model, adc4_state>,
                          public analog_port,
