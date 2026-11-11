@@ -34,7 +34,7 @@ master does, through the model's link port. A device is a port of the medium and
 ### Link ports
 
 `spi_link_port` and `i2c_link_port` are the attach route of a proxy, as `uart_link_port` is for
-a UART. They live in internal headers and `spi.cpp` and `i2c.cpp` implement them.
+a UART. They live in internal headers and `spi_u5h5.cpp` and `i2c.cpp` implement them.
 
 - `attach_target` and `attach_controller` give a proxy the model's `core::clock`. A target is
   added after the board devices. `attach_controller` takes an instance with no board controller,
