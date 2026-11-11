@@ -4,13 +4,17 @@
 with one that fills in `popcorn_build.version.popcorn_version` when `version` is listed in
 `dynamic`, and drops that entry, then re-exports every hook. `build_editable` also leaves out the
 `[tool.pcons] variables`, so the editable install keeps the development build of `build/`.
-`build_sdist` leaves out the `.pyi` copies of build outputs under `python/popcorn`. The patches of
-`pcons.pyproject._load_pyproject` and `_sdist_files` are the only coupling to pcons internals.
+`build_sdist` ships the files git tracks, submodules included, so git-ignored paths such as
+`local/`, `build-*` and the `.pyi` copies of build outputs never reach the archive. A tree with no
+git data keeps the file walk of pcons. The patches of `pcons.pyproject._load_pyproject` and
+`_sdist_files` are the only coupling to pcons internals.
 """
 
 from __future__ import annotations
 
 import functools
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -64,21 +68,54 @@ _pcons._load_pyproject = _load_with_version  # pyright: ignore[reportPrivateUsag
 _sdist_files = _pcons._sdist_files  # pyright: ignore[reportPrivateUsage]
 
 
-def _sdist_without_mirrors(source_dir: Path, build_dir: Path) -> list[Path]:
-    """The sdist files of pcons, less the `.pyi` copies the build puts under `python/popcorn`.
+def _git(source_dir: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    command = ["git", "-C", str(source_dir), *args]
+    try:
+        return subprocess.run(command, capture_output=True, check=False)
+    except OSError as error:
+        return subprocess.CompletedProcess(command, 127, b"", str(error).encode())
 
-    The source package holds no `.pyi` of its own: every one there is a git-ignored copy of a
-    build output, made for pyright, see `popcorn_build.python.add_source_mirror`.
+
+def _walk(source_dir: Path, build_dir: Path, cause: bytes) -> list[Path]:
+    line = cause.decode().strip().splitlines()
+    print(
+        f"popcorn_build.backend: no git file list ({line[0] if line else 'git failed'}), "
+        "the sdist lists every file of the tree",
+        file=sys.stderr,
+    )
+    return _sdist_files(source_dir, build_dir)
+
+
+def tracked_sdist_files(source_dir: Path, build_dir: Path) -> list[Path]:
+    """The files git tracks in `source_dir`, submodules included.
+
+    `source_dir` must be the top of its git work tree. Otherwise, as for an unpacked sdist, the file
+    walk of pcons lists the files.
+
+    Raises:
+        SystemExit: `.gitmodules` names a submodule that is not checked out.
     """
-    package = source_dir / "python" / "popcorn"
-    return [
-        path
-        for path in _sdist_files(source_dir, build_dir)
-        if not (path.suffix == ".pyi" and path.is_relative_to(package))
-    ]
+    top = _git(source_dir, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return _walk(source_dir, build_dir, top.stderr)
+    if Path(top.stdout.decode().strip()).resolve() != source_dir.resolve():
+        return _sdist_files(source_dir, build_dir)
+    listing = _git(source_dir, "ls-files", "-z", "--recurse-submodules")
+    if listing.returncode != 0:
+        return _walk(source_dir, build_dir, listing.stderr)
+    names = [name for name in listing.stdout.decode().split("\0") if name]
+    if (source_dir / ".gitmodules").is_file() and not _submodules_present(names):
+        raise SystemExit("the sdist needs the submodule sources, run: git submodule update --init")
+    return sorted(path for name in names if (path := source_dir / name).is_file())
 
 
-_pcons._sdist_files = _sdist_without_mirrors  # pyright: ignore[reportPrivateUsage]
+def _submodules_present(names: list[str]) -> bool:
+    return "third_party/unicorn/CMakeLists.txt" in names and any(
+        name.startswith("third_party/reflex/core/include/") for name in names
+    )
+
+
+_pcons._sdist_files = tracked_sdist_files  # pyright: ignore[reportPrivateUsage]
 
 
 def build_editable(

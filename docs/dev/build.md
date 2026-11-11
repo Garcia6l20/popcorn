@@ -46,6 +46,8 @@ backend `popcorn_build.backend` hands it to `pcons.pyproject`, which reads a sta
   build passes the version the workflow derived from the tags this way.
 - An sdist carries its version in `PKG-INFO`, so a wheel built from it has the same version and
   needs no git.
+- A source build from an sdist has no git checkout of `third_party/unicorn`, so it needs
+  `POPCORN_UNICORN_COMMIT` set to the commit the submodule pins.
 - `uv sync` rebuilds the editable install after a new commit or tag, through `cache-keys` in
   `[tool.uv]`.
 
