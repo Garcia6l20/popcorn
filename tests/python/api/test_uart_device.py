@@ -1882,9 +1882,9 @@ def test_a_restore_drops_the_tapped_frames_and_restarts_index_and_dropped(row: R
 def test_the_tap_keeps_a_bounded_number_and_counts_the_oldest_it_dropped(
     u575: popcorn.PartDescription, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from popcorn import _devices
+    from popcorn._devices import uart
 
-    monkeypatch.setattr(_devices, "_TAP_KEEP", 3)
+    monkeypatch.setattr(uart, "_TAP_KEEP", 3)
     device = Starter(b"abcde", 100)
     device.tapping = True
     row = Row("STM32U575QGIx", "CR1_disabled", "TDR", "ISR_enabled", "RXFNE", "RDR", u575)

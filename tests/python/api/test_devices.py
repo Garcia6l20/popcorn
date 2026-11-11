@@ -723,10 +723,12 @@ class _StrSnapshotSpi(SpiTarget):
 
 
 def test_the_picosecond_bound_is_one_constant_for_every_checking_module() -> None:
-    from popcorn import _devices, _limits, _streams, _views
+    from popcorn import _limits, _streams, _views
+    from popcorn._devices import i2c_target, pins, spi_controller, uart
 
     assert _limits.MAX_PS == (1 << 64) - 1
-    assert all(vars(module)["MAX_PS"] is _limits.MAX_PS for module in (_devices, _streams, _views))
+    modules = (i2c_target, pins, spi_controller, uart, _streams, _views)
+    assert all(vars(module)["MAX_PS"] is _limits.MAX_PS for module in modules)
 
 
 @pytest.mark.parametrize(
