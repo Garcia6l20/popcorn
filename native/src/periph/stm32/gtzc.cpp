@@ -408,6 +408,24 @@ struct securable
  *        page since no FLASH model programs it. Deviation: no debugger access raises a TZIC
  *        event, here, in the MPCBBs or in a TrustZone-aware model, so a view leaves the
  *        firmware's TZIC flags and GTZC_IRQn as they are.
+ *
+ * @limits gtzc GTZC
+ *
+ * @group u5,h5 rule
+ * - The GTZC models serve only with TrustZone enabled, `OptionBytes(tzen=True)`.
+ *
+ * @group u5,h5 deviation
+ * - No debugger access raises a TZIC event, so a host view leaves the TZIC flags and GTZC_IRQn as
+ *   they are.
+ *
+ * @group h5 note
+ * - STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC.
+ *
+ * @group u5,h5 note
+ * - A delay block takes the SEC bit of the peripheral it serves: DLYBSD1 and DLYBSD2 those of
+ *   SDMMC1 and SDMMC2, DLYBOS1 that of OCTOSPI1 and DLYBOS2 that of OCTOSPI2 on the STM32U5,
+ *   DLYBOS1 that of the OCTOSPI on the STM32H573. RM0456 Table 5 and RM0481 Table 3 list no delay
+ *   block, and RM0456 Table 297 and RM0481 Table 275 give the same pairs.
  */
 class tzsc final : public gtzc_block, public bus_firewall, public peripheral_security
 {

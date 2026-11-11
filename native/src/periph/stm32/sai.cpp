@@ -202,6 +202,24 @@ auto sai_writes(bool pdm) -> std::span<write_entry<sai> const>;
  *        BDR of section 43.5, OSR read as 0. MCKDIV above 0 divides the kernel clock by 2 x MCKDIV
  *        and MCKDIV 0 by 1, so a master frame lasts 256 such divided clocks with NODIV = 0, and FRL
  *        + 1 kernel clocks with NODIV = 1, which bypasses MCKDIV, section 43.3.8.
+ *
+ * @limits sai SAI
+ *
+ * @group u5,h5,l4 unmodelled
+ * - SPDIF, AC'97, PDM, companding, mute and synchronization with another SAI are not modelled.
+ *
+ * @group l4 rule
+ * - STM32L4 SAI1 and SAI2, RM0351 section 43, run on the registers GCR to BDR, OSR read as 0.
+ *   MCKDIV above 0 divides the kernel clock by 2 x MCKDIV and MCKDIV 0 by 1. A master frame lasts
+ *   256 such divided clocks with NODIV 0, and FRL + 1 kernel clocks with NODIV 1, which bypasses
+ *   MCKDIV, RM0351 43.3.8.
+ *
+ * @group u5,h5,l4 note
+ * - The external clock always matches the block's frame, so AFSDET and LFSDET stay 0 and the I2S
+ *   slave resynchronisation of ES0250 2.24.1, a reference manual correction, has nothing to act on.
+ * - The SAI drives no pin, its frames go to the board's audio endpoints, so ES0250 2.24.2 to
+ *   2.24.4, the SCK and MCLK pulses at a master disable and the MCLK output with FRL 0xFF, lie
+ *   outside the model.
  */
 class sai final : public dispatch_model<sai, sai_state>,
                   public audio_port,

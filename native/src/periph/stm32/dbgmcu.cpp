@@ -34,6 +34,22 @@ struct dbgmcu_state
  *        power-on reset", RM0456 75.12, "not reset by system reset", RM0038 30.16.3 and 30.16.4,
  *        "System reset: not affected", RM0351 48.16.3 to 48.16.6: a power-on or brown-out reset
  *        restores them, other resets keep them.
+ *
+ * @limits dbgmcu DBGMCU
+ *
+ * @group all deviation
+ * - A freeze bit written while the core is held takes effect at the next hold or release. On
+ *   silicon it takes effect at once.
+ *
+ * @group l4 rule
+ * - STM32L4: the U5 and L1 model, RM0351 48.16. `DBGMCU_IDCODE` reads 0x10076415, `DBGMCU_CR` is
+ *   storage, and the freeze fields carry the RM0351 names, `DBG_TIM2_STOP` and others. A power-on
+ *   reset clears the registers, a system reset keeps them, 48.16.3 to 48.16.6.
+ *
+ * @group l1 rule
+ * - STM32L1: `DBGMCU_CR` is storage, as on the STM32U5. `DBGMCU_IDCODE` reads the description's
+ *   value of the category. REV_ID is 0x1000 on every category, the revision A of RM0038 30.6.1, and
+ *   the choice of one revision is inferred.
  */
 class dbgmcu final : public dispatch_model<dbgmcu, dbgmcu_state>, public debug_freeze
 {

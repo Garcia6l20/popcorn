@@ -318,6 +318,15 @@ struct transfer_cache
  *        writes while its channel is enabled, where RM0456 17.8.10 makes it read-only. Under
  *        TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are storage, `RCFGLOCKR` ignores writes,
  *        RM0456 17.8.3, and transfers keep the attributes of a machine without TrustZone.
+ *
+ * @limits gpdma GPDMA and LPDMA
+ *
+ * @group u5,h5 unmodelled
+ * - The link step mode is not modelled. A channel that uses it runs to completion.
+ * - Triggers are not modelled.
+ *
+ * @group u5,h5 deviation
+ * - `CxTR1` takes writes while its channel is enabled. RM0456 17.8.10 makes it read-only then.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>,
                     public dma_controller,

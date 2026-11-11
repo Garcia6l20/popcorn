@@ -61,9 +61,10 @@ struct flag_pair
  *        `FEDIR`, 1 while counting down, and classes the error by RM0456 12.4.5 and 12.7.3:
  *        `SYNCOKF` below 3 x `FELIM`, `SYNCWARNF` below 128 x `FELIM`, else `SYNCERR` and `ERRF`
  *        while counting down. `FECAP` holds at most `RELOAD`, the value loaded, when two SYNCs land
- * in one HSI48 cycle. A SYNC that finds the counter stopped latches 128 x `FELIM` and adds no flag
- * to the `SYNCMISS` of the stop. `TRIM` holds its value with or without `AUTOTRIMEN`, so `TRIMOVF`
- * stays 0 and the error stays what `RELOAD` and the SYNC period give. `SWSYNC` reads 0.
+ *        in one HSI48 cycle. A SYNC that finds the counter stopped latches 128 x `FELIM` and adds
+ *        no flag to the `SYNCMISS` of the stop. `TRIM` holds its value with or without
+ *        `AUTOTRIMEN`, so `TRIMOVF` stays 0 and the error stays what `RELOAD` and the SYNC period
+ *        give. `SWSYNC` reads 0.
  *
  *        `CRS_CFGR` ignores writes while `CEN` is set, `TRIM` ignores them while `AUTOTRIMEN`
  *        is set. A write of 1 to a `CRS_ICR` bit clears the flags of the description's cross
@@ -73,6 +74,22 @@ struct flag_pair
  *        `SWSYNC` and the USB SOF give a SYNC. `SYNCPOL` and the RCC clock gate act on nothing.
  *        Every reset kind and the RCC reset restore the description reset values, the divider
  *        and an idle counter, and drop its pending event.
+ *
+ * @limits crs CRS
+ *
+ * @group u5,h5 rule
+ * - A SYNC event is a write of 1 to `SWSYNC`, or a USB start of frame from the OTG_FS (STM32U5) or
+ *   the USB (STM32H5) while `SYNCSRC` is 2, divided by 2^`SYNCDIV`. Only `SWSYNC` and the USB SOF
+ *   give a SYNC, and only while `CEN` is set. Setting `CEN` with `SYNCSRC` 0, 1 or 3 logs one
+ *   warning per model life. `SYNCPOL` is storage.
+ * - The frequency error counter runs at exactly 48 MHz. The first SYNC after `CEN` is set loads
+ *   `RELOAD` and sets no flag. Each later SYNC latches `FECAP` and `FEDIR` and sets `SYNCOKF`,
+ *   `SYNCWARNF`, or `SYNCERR` with `ERRF`, by the thresholds of RM0456 12.4.5, then reloads.
+ *   `ESYNCF` is set `RELOAD` + 1 cycles after a SYNC, so the `RELOAD` of RM0456 12.4.6 gives
+ *   `FECAP` 0. When no SYNC comes, `SYNCMISS` and `ERRF` follow 128 x `FELIM` cycles later and the
+ *   counter stops, and the next SYNC latches 128 x `FELIM`. With `SYNCSRC` 2, `RELOAD` 47999
+ *   matches `SYNCDIV` 0 only.
+ * - `TRIM` keeps what the firmware wrote, with or without `AUTOTRIMEN`, and `TRIMOVF` stays 0.
  */
 class crs final : public dispatch_model<crs, crs_state>,
                   public bus_reset_listener,
