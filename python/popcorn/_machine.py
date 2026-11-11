@@ -87,16 +87,16 @@ from popcorn._machine_events import (
     Event,
     InterceptHandler,
     Linked,
-    Reached,
     ReturnHandler,
     WatchHandler,
     check_image_names,
     check_machine_name,
     error_prefix,
     probe_state,
-    stack_access,
     stop_error,
 )
+from popcorn._machine_events import Reached as Reached
+from popcorn._machine_events import stack_access as stack_access
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import (
     LogForwarder,
@@ -138,22 +138,6 @@ from popcorn.units import VirtualDuration, VirtualTime
 if TYPE_CHECKING:
     from popcorn._system import System
     from popcorn.image.dwarf import DebugInfo, DebugType
-__all__ = [
-    "DEFAULT_ARENA_BASE",
-    "DEFAULT_ARENA_SIZE",
-    "AttachedDevice",
-    "Call",
-    "Event",
-    "InterceptHandler",
-    "Machine",
-    "Reached",
-    "ReturnHandler",
-    "WatchHandler",
-    "check_machine_name",
-    "error_prefix",
-    "stack_access",
-    "stop_error",
-]
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None

@@ -13,20 +13,24 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
+    from popcorn._devices.i2c_target import I2CTarget
+    from popcorn._devices.spi_target import SpiTarget
     from popcorn._refs import Pending
 
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
 ATTACHED: dict[int, _Attachment] = {}
 
 
-def _state_of(cls: type, base: type) -> tuple[tuple[str, type], ...]:
+def _state_of(
+    cls: type[I2CTarget | SpiTarget], base: type[I2CTarget] | type[SpiTarget]
+) -> tuple[tuple[str, type], ...]:
     state = _STATES.get(cls)
     if state is None:
         state = _STATES[cls] = declared_fields(cls, base, custom=False)[0]
     return state
 
 
-def snapshot_state(device: object, base: type) -> bytes:
+def snapshot_state(device: I2CTarget | SpiTarget, base: type[I2CTarget] | type[SpiTarget]) -> bytes:
     out = bytearray()
     for name, kind in _state_of(type(device), base):
         value: object = getattr(device, name)
@@ -39,7 +43,9 @@ def snapshot_state(device: object, base: type) -> bytes:
     return bytes(out)
 
 
-def restore_state(device: object, base: type, data: bytes) -> None:
+def restore_state(
+    device: I2CTarget | SpiTarget, base: type[I2CTarget] | type[SpiTarget], data: bytes
+) -> None:
     fields = _state_of(type(device), base)
     reader = StateReader(data)
     values = [(name, reader.read(kind)) for name, kind in fields]
