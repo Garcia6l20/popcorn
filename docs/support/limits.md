@@ -476,7 +476,12 @@ strict_peripherals that keeps `ADC_CR`:
   model produces them, `ADSTART` stays set and nothing converts.
 - The wait mode `WAIT`, the auto-off mode `AUTOFF` and the low-frequency trigger mode `LFTRIG`:
   the conversions run without them.
-- The internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
+- `VIN[12]`, VCORE, and `VIN[14]`, VBAT / 4, with `VBATEN` in the sequence: they convert 0, the
+  board model has no VBAT source and the level of VCORE depends on the PWR voltage range of
+  DS13737, which is not modelled.
+- `VIN[0]` sampled for less than the typical 12.65 us of tS_vrefint, DS13737 Table 36, or
+  `VIN[13]` for less than the 13 us of tS_temp, Table 109, at `ADSTART` or at the `VREFEN` or
+  `VSENSESEL` write with `ADSTART` set: the exact level converts.
 - `VREFPROT` and `VREFSECSMP` of `ADC_PWRR`: tCONV stays at tSMPL + tSAR, the DS13737 Table 106
   minimum.
 
@@ -530,6 +535,18 @@ Triggers and DMA:
   keeps requesting. DMAEN written with EOC set raises the request, inferred. The calibration
   order RM0456 34.4.23 asks for DMAEN is not checked.
 
+Internal channels, RM0456 Table 329 and 34.4.27:
+
+- `VIN[0]` reads VREFINT with `ADC_CCR.VREFEN` and `VIN[13]` the temperature sensor with
+  `VSENSESEL`, 0 without. They read the factory VREFINT_CAL and TS_CAL1 words, taken at 3.0 V and
+  30 C, scaled by 3000 / VDDA and cut from 14 to 12 bits, `RES` shifting them like any result,
+  inferred. A part description with no such word makes an `ADSTART` that converts the channel a
+  config_error.
+- `VIN[21]` reads the DAC1 output `ADC_OR.CHN21SEL` selects, 0 while that output reaches no
+  on-chip peripheral. It has no enable bit. The level is taken at the end of the sampling like a
+  pad level.
+- `ADC_OR` follows the lock of `ADC_CFGR1`, RM0456 34.7.17.
+
 Timing and values:
 
 - LDORDY sets 25 us after ADVREGEN, the tADCVREG_STUP maximum of DS13737 Table 106.
@@ -553,9 +570,9 @@ Timing and values:
 - An `ADSTART` with no channel in the sequence is ignored and logged once, a model_error under
   strict_peripherals, inferred. `DISCEN` or `TOVS` with `CONT`, forbidden by RM0456 34.4.17,
   converts with `CONT` ignored and is logged once, a model_error under strict_peripherals.
-- A write changing `ADC_CFGR1`, `ADC_SMPR`, `ADC_CHSELR`, `ADC_CFGR2`, `ADC_AWD2CR` or
-  `ADC_AWD3CR` with `ADSTART` set keeps the old register, RM0456 34.7.4 to 34.7.15, logged once
-  for the six, a model_error under strict_peripherals.
+- A write changing `ADC_CFGR1`, `ADC_SMPR`, `ADC_CHSELR`, `ADC_CFGR2`, `ADC_AWD2CR`,
+  `ADC_AWD3CR` or `ADC_OR` with `ADSTART` set keeps the old register, RM0456 34.7.4 to 34.7.17,
+  logged once for the seven, a model_error under strict_peripherals.
 - With `OVRMOD` 0 every result is discarded while EOC or OVR is set, RM0456 34.4.23: `ADC_DR`
   and EOC keep their values and OVR is set. A rank past the end of a shortened sequence starts
   over at the first channel.

@@ -1,3 +1,4 @@
+#include "factory_data.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
 
@@ -96,12 +97,17 @@ constexpr std::uint32_t awd1sgl   = 1u << 22;
   return channel << 26;
 }
 
-auto options_with(popcorn::part_description const& description, bool strict, double cpi = 1.0)
-    -> core::machine_options
+auto options_with(
+    popcorn::part_description const& description,
+    bool                             strict,
+    double                           cpi     = 1.0,
+    std::uint32_t                    vdda_mv = 3000) -> core::machine_options
 {
+  auto board                 = stm32::board{};
+  board.supply.vdda_mv       = vdda_mv;
   auto options               = popcorn::testing::stm32_options();
   options.cpi                = cpi;
-  options.models             = stm32::factories(stm32::board{}, description);
+  options.models             = stm32::factories(board, description);
   options.strict_peripherals = strict;
   return options;
 }
@@ -112,8 +118,9 @@ struct adc4_fixture : stm32_fixture
       popcorn::part_description const& description = u575(),
       bool                             strict      = false,
       bool                             hsi         = true,
-      double                           cpi         = 1.0)
-      : stm32_fixture{description, "rcc_ll", options_with(description, strict, cpi)}
+      double                           cpi         = 1.0,
+      std::uint32_t                    vdda_mv     = 3000)
+      : stm32_fixture{description, "rcc_ll", options_with(description, strict, cpi, vdda_mv)}
   {
     set("pc", sym("rcc_ll", "idle"));
     put("RCC", "RCC_AHB3ENR", "ADC4EN", 1);
@@ -1327,7 +1334,7 @@ TEST_CASE(
                    "CFGR1", (1u << 23) | (1u << 22) | (24u << 26), 1u << pa4,
                    "AWD1CH 18 to 21 and 24 to 31"                                                       },
           function{"CFGR1", cont | discen,                         1u << pa4, "DISCEN or TOVS with CONT"},
-          function{"CFGR1", 0,                                     1u << 13,  "internal channel"        }
+          function{"CFGR1", 0,                                     1u << 12,  "VCORE"                   }
   })
   {
     CAPTURE(reg);
@@ -1584,13 +1591,14 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.7.4 to 34.7.15: ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, "
-    "ADC_AWD2CR or ADC_AWD3CR written with ADSTART 1 keeps the old register, logs once, a "
+    "RM0456 34.7.4 to 34.7.17: ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, "
+    "ADC_AWD2CR, ADC_AWD3CR or ADC_OR written with ADSTART 1 keeps the old register, logs once, a "
     "model_error when strict")
 {
-  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0", "CFGR2", "AWD2CR", "AWD3CR"})
+  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0", "CFGR2", "AWD2CR", "AWD3CR", "OR"})
   {
     CAPTURE(std::string_view{reg});
+    auto const flip = std::string_view{reg} == "OR" ? 1u : 1u << 2;
     {
       adc4_fixture const f;
       static_cast<void>(f.enable());
@@ -1600,7 +1608,7 @@ TEST_CASE(
       std::vector<core::log_record> logged;
       auto const                    sink = recorder(f, logged);
       auto const                    kept = f.read(reg);
-      f.write(reg, kept ^ (1u << 2));
+      f.write(reg, kept ^ flip);
       CHECK(f.read(reg) == kept);
       REQUIRE(logged.size() == 1);
       CHECK(logged[0].message.contains("ADSTART 1"));
@@ -1612,7 +1620,7 @@ TEST_CASE(
     static_cast<void>(f.start());
     auto const kept = f.read(reg);
     CHECK_THROWS_AS(
-        static_cast<void>(f.target->mem().write(f.at("ADC4", reg), 4, kept ^ (1u << 2))),
+        static_cast<void>(f.target->mem().write(f.at("ADC4", reg), 4, kept ^ flip)),
         popcorn::model_error);
     CHECK(f.read(reg) == kept);
   }
@@ -1692,7 +1700,7 @@ TEST_CASE("ADSTART with DISCEN after CHSELR shrank below the rank restarts at th
 
 TEST_CASE(
     "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSS 9, LFTRIG, AWD1CH 24, "
-    "VREFPROT and an internal channel logs nine times, one model_error when "
+    "VREFPROT and VCORE logs nine times, one model_error when "
     "strict that keeps ADC_CR")
 {
   auto const setup = [](adc4_fixture const& f) {
@@ -1710,7 +1718,7 @@ TEST_CASE(
                      | cont
                      | discen);
     f.write("CFGR2", (1u << 0) | (9u << 5) | (1u << 29));
-    f.write("CHSELRMOD0", (1u << pa4) | (1u << 13));
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << 12));
   };
   {
     adc4_fixture const f;
@@ -3321,5 +3329,402 @@ TEST_CASE("RM0456 34.4.26: with the oversampler DMAEN raises adc4_dma with the N
       CHECK(buffer_words(f, 2) == std::vector<std::uint32_t>{2 * code_of(600'000), 0});
       CHECK(f.dues().empty());
     }
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t vrefen      = 1u << 22;
+constexpr std::uint32_t vsensesel   = 1u << 23;
+constexpr std::uint32_t vbaten      = 1u << 24;
+constexpr std::uint32_t vrefint_in  = 0;
+constexpr std::uint32_t vcore_in    = 12;
+constexpr std::uint32_t vsense_in   = 13;
+constexpr std::uint32_t vbat_in     = 14;
+constexpr std::uint32_t dac_in      = 21;
+constexpr std::uint32_t ts_cal1     = 0x0BFA'0710;
+constexpr std::uint32_t vrefint_cal = 0x0BFA'07A5;
+
+[[nodiscard]] auto factory(std::uint32_t at, std::uint32_t vdda_mv) -> std::uint32_t
+{
+  auto const word = stm32::factory_halfword(u575(), at);
+  REQUIRE(word.has_value());
+  return std::min(*word * 3000u / vdda_mv, 16383u) >> 2;
+}
+
+[[nodiscard]] auto convert(adc4_fixture const& f, std::uint32_t channel) -> std::uint32_t
+{
+  f.write("CHSELRMOD0", 1u << channel);
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  REQUIRE(f.isr("EOC") == 1);
+  auto const value = f.cpu_read("DR");
+  f.write("ISR", eos | eosmp);
+  return value;
+}
+
+void drive_dac(adc4_fixture const& f, std::uint32_t channel, std::uint32_t mode, std::uint32_t code)
+{
+  f.put("RCC", "RCC_AHB3ENR", "DAC1EN", 1);
+  f.put("DAC1", "MCR", std::format("MODE{}", channel), mode);
+  f.put("DAC1", "CR", std::format("EN{}", channel), 1);
+  f.run_until(f.now() + 10 * us);
+  f.write("DAC1", std::format("DHR12R{}", channel), code);
+  f.run_until(f.now() + 10 * us);
+}
+}
+
+TEST_CASE(
+    "RM0456 Table 329 and 34.4.27: VIN[0] reads VREFINT_CAL with VREFEN and VIN[13] TS_CAL1 with "
+    "VSENSESEL, each scaled by 3000 / VDDA and cut from 14 to 12 bits, 0 without its enable, "
+    "RES shifting it, inferred")
+{
+  for(std::uint32_t const vdda : {3000u, 3300u})
+  {
+    for(auto const& [channel, enable, other, word] : {
+            std::tuple{vrefint_in, vrefen,    vsensesel, vrefint_cal},
+            std::tuple{vsense_in,  vsensesel, vrefen,    ts_cal1    }
+    })
+    {
+      CAPTURE(vdda);
+      CAPTURE(channel);
+      auto const         expected = factory(word, vdda);
+      adc4_fixture const f{u575(), false, true, 1.0, vdda};
+      static_cast<void>(f.enable());
+      CHECK(convert(f, channel) == 0);
+      f.write("CCR", other);
+      CHECK(convert(f, channel) == 0);
+      f.write("CCR", enable);
+      CHECK(convert(f, channel) == expected);
+      f.write("CCR", enable | other);
+      CHECK(convert(f, channel) == expected);
+      for(std::uint32_t res = 1; res < 4; ++res)
+      {
+        CAPTURE(res);
+        f.write("CFGR1", res << 2);
+        CHECK(convert(f, channel) == expected >> (2 * res));
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "ADSTART converting VREFINT with VREFEN or VSENSE with VSENSESEL on a part with no factory "
+    "word is a config_error, with the enable clear or the channel out of the sequence it is not")
+{
+  auto description = u575();
+  for(auto& region : description.regions)
+  {
+    if(region.content)
+    {
+      std::erase_if(*region.content, [&](popcorn::region_content const& piece) {
+        return region.start + piece.offset == vrefint_cal or region.start + piece.offset == ts_cal1;
+      });
+    }
+  }
+  adc4_fixture const f{description};
+  static_cast<void>(f.enable());
+  auto const start = [](adc4_fixture const& g) {
+    static_cast<void>(g.target->mem().write(g.at("ADC4", "CR"), 4, advregen | aden | adstart));
+  };
+  f.write("CHSELRMOD0", 1u << vrefint_in);
+  CHECK(convert(f, vrefint_in) == 0);
+  f.write("CCR", vrefen);
+  CHECK(convert(f, vsense_in) == 0);
+  f.write("CCR", vsensesel);
+  CHECK(convert(f, vrefint_in) == 0);
+  for(auto const& [enable, channel] : {
+          std::pair{vrefen,    vrefint_in},
+          std::pair{vsensesel, vsense_in }
+  })
+  {
+    adc4_fixture const g{description};
+    static_cast<void>(g.enable());
+    g.write("CCR", enable);
+    g.write("CHSELRMOD0", 1u << channel);
+    CHECK_THROWS_AS(start(g), popcorn::config_error);
+  }
+}
+
+TEST_CASE(
+    "RM0456 Table 329 and ADC_OR 34.7.17: VIN[21] reads dac1_out1 with CHN21SEL 0 and dac1_out2 "
+    "with 1, 0 while that DAC output reaches no on-chip peripheral, at the DAC code scaled to "
+    "VDDA and the RES shift")
+{
+  for(std::uint32_t const select : {0u, 1u})
+  {
+    CAPTURE(select);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.write("OR", select);
+    drive_dac(f, 1, 1, 0x5A5);
+    drive_dac(f, 2, 1, 0xA5A);
+    CHECK(convert(f, dac_in) == (select == 0 ? 0x5A5u : 0xA5Au));
+    f.write("OR", 1 - select);
+    CHECK(convert(f, dac_in) == (select == 0 ? 0xA5Au : 0x5A5u));
+    f.write("CFGR1", 1u << 2);
+    CHECK(convert(f, dac_in) == (select == 0 ? 0xA5Au : 0x5A5u) >> 2);
+    f.put("DAC1", "CR", "EN1", 0);
+    f.put("DAC1", "CR", "EN2", 0);
+    f.run_until(f.now() + us);
+    CHECK(convert(f, dac_in) == 0);
+  }
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  drive_dac(f, 1, 0, 0x5A5);
+  CHECK(convert(f, dac_in) == 0);
+}
+
+TEST_CASE("a DAC1 level change before the end of the sampling converts, one after it does not")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  drive_dac(f, 1, 1, 0x400);
+  f.write("SMPR", 7);
+  f.write("CHSELRMOD0", 1u << dac_in);
+  auto const begin = f.start();
+  f.run_until(begin + halves(1629) - 3 * us);
+  f.write("DAC1", "DHR12R1", 0x800);
+  f.run_until(begin + halves(1629) + early);
+  f.write("DAC1", "DHR12R1", 0xC00);
+  f.run_until(begin + halves(1654));
+  CHECK(f.read("DR") == 0x800);
+}
+
+TEST_CASE(
+    "VIN[12], VCORE, converts 0 and logs once at ADSTART, VIN[14] with VBATEN too, a model_error "
+    "when strict that keeps ADC_CR, VIN[14] without VBATEN converts 0 and logs nothing")
+{
+  for(auto const& [channel, enable, phrase] : {
+          std::tuple{vcore_in, 0u,     std::string_view{"VCORE"}              },
+          std::tuple{vbat_in,  vbaten, std::string_view{"VBATEN with VIN[14]"}}
+  })
+  {
+    CAPTURE(channel);
+    {
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.write("CCR", enable);
+      f.write("CHSELRMOD0", 1u << channel);
+      std::vector<core::log_record> logged;
+      auto const                    sink  = recorder(f, logged);
+      auto const                    begin = f.start();
+      f.run_until(begin + halves(28));
+      CHECK(f.read("DR") == 0);
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(phrase));
+      f.write("CR", advregen | aden | adstart);
+      CHECK(logged.size() == 1);
+    }
+    adc4_fixture const f{u575(), true};
+    static_cast<void>(f.enable());
+    f.write("CCR", enable);
+    f.write("CHSELRMOD0", 1u << channel);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(f.at("ADC4", "CR"), 4, advregen | aden | adstart)),
+        popcorn::model_error);
+    CHECK(f.cr("ADSTART") == 0);
+  }
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  std::vector<core::log_record> logged;
+  auto const                    sink = recorder(f, logged);
+  CHECK(convert(f, vbat_in) == 0);
+  CHECK(logged.empty());
+}
+
+TEST_CASE(
+    "VBATEN set while ADSTART is set with VIN[14] in the sequence logs once, a model_error when "
+    "strict_peripherals")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    adc4_fixture const f{u575(), strict};
+    static_cast<void>(f.enable());
+    f.write("CFGR1", cont);
+    f.write("CHSELRMOD0", 1u << vbat_in);
+    static_cast<void>(f.start());
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    if(strict)
+    {
+      CHECK_THROWS_AS(
+          static_cast<void>(f.target->mem().write(f.at("ADC4", "CCR"), 4, vbaten)),
+          popcorn::model_error);
+      CHECK(f.read("CCR") == 0);
+      continue;
+    }
+    f.write("CCR", vbaten);
+    f.write("CCR", 0);
+    f.write("CCR", vbaten);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].message.contains("VBATEN with VIN[14]"));
+  }
+}
+
+TEST_CASE(
+    "DS13737 Tables 36 and 109, inferred: VREFINT or VSENSE connected and sampled for less than "
+    "12.65 us or 13 us logs once at ADSTART, a model_error when strict, a long sampling or the "
+    "enable clear logs nothing")
+{
+  for(auto const& [channel, enable] : {
+          std::tuple{vrefint_in, vrefen   },
+          std::tuple{vsense_in,  vsensesel}
+  })
+  {
+    CAPTURE(channel);
+    {
+      adc4_fixture const f;
+      static_cast<void>(f.enable());
+      f.write("CHSELRMOD0", 1u << channel);
+      std::vector<core::log_record> logged;
+      auto const                    sink = recorder(f, logged);
+      f.write("CCR", 0);
+      static_cast<void>(f.start());
+      CHECK(logged.empty());
+      f.run_until(f.now() + 2 * halves(28));
+      f.write("CCR", enable);
+      f.write("SMPR", 7);
+      static_cast<void>(f.start());
+      CHECK(logged.empty());
+      f.run_until(f.now() + halves(1700));
+      f.write("SMPR", 0);
+      static_cast<void>(f.start());
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(channel == vrefint_in ? "Table 36" : "Table 109"));
+    }
+    adc4_fixture const f{u575(), true};
+    static_cast<void>(f.enable());
+    f.write("CHSELRMOD0", 1u << channel);
+    f.write("CCR", enable);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(f.at("ADC4", "CR"), 4, advregen | aden | adstart)),
+        popcorn::model_error);
+    CHECK(f.cr("ADSTART") == 0);
+  }
+}
+
+TEST_CASE(
+    "an RCC reset of ADC4 restores ADC_OR and ADC_CCR, a snapshot keeps CHN21SEL and the enables")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.write("OR", 1);
+  f.write("CCR", vrefen | vsensesel | vbaten);
+  auto const saved = f.target->snapshot();
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 1);
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 0);
+  CHECK(f.read("OR") == 0);
+  CHECK(f.read("CCR") == 0);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(fresh.read("OR") == 1);
+  CHECK(fresh.read("CCR") == (vrefen | vsensesel | vbaten));
+}
+
+TEST_CASE(
+    "VBATEN, VREFEN or VSENSESEL written with ADSTART 0 and the channel already in the sequence "
+    "raises nothing under strict, the raise comes at ADSTART")
+{
+  adc4_fixture const f{u575(), true};
+  static_cast<void>(f.enable());
+  f.write("CHSELRMOD0", 1u << vbat_in);
+  CHECK_NOTHROW(f.write("CCR", vbaten));
+  CHECK(f.read("CCR") == vbaten);
+  CHECK_THROWS_AS(
+      static_cast<void>(f.target->mem().write(f.at("ADC4", "CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+  f.write("CCR", 0);
+  f.write("CHSELRMOD0", 1u << vrefint_in);
+  CHECK_NOTHROW(f.write("CCR", vrefen));
+  f.write("CCR", 0);
+  f.write("CHSELRMOD0", 1u << vsense_in);
+  CHECK_NOTHROW(f.write("CCR", vsensesel));
+}
+
+TEST_CASE(
+    "VREFEN or VSENSESEL written with ADSTART set and the channel in the sequence is checked at "
+    "the write, a missing factory word is a config_error, a short sampling logs once, a "
+    "model_error when strict that keeps the old ADC_CCR")
+{
+  for(auto const& [channel, enable, word] : {
+          std::tuple{vrefint_in, vrefen,    vrefint_cal},
+          std::tuple{vsense_in,  vsensesel, ts_cal1    }
+  })
+  {
+    CAPTURE(channel);
+    auto description = u575();
+    for(auto& region : description.regions)
+    {
+      if(region.content)
+      {
+        std::erase_if(*region.content, [&](popcorn::region_content const& piece) {
+          return region.start + piece.offset == word;
+        });
+      }
+    }
+    {
+      adc4_fixture const f{description};
+      static_cast<void>(f.enable());
+      f.write("CFGR1", cont);
+      f.write("CHSELRMOD0", 1u << channel);
+      static_cast<void>(f.start());
+      CHECK_THROWS_AS(
+          static_cast<void>(f.target->mem().write(f.at("ADC4", "CCR"), 4, enable)),
+          popcorn::config_error);
+    }
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(strict);
+      adc4_fixture const f{u575(), strict};
+      static_cast<void>(f.enable());
+      f.write("CFGR1", cont);
+      f.write("CHSELRMOD0", 1u << channel);
+      static_cast<void>(f.start());
+      std::vector<core::log_record> logged;
+      auto const                    sink = recorder(f, logged);
+      if(strict)
+      {
+        CHECK_THROWS_AS(
+            static_cast<void>(f.target->mem().write(f.at("ADC4", "CCR"), 4, enable)),
+            popcorn::model_error);
+        CHECK(f.read("CCR") == 0);
+        continue;
+      }
+      f.write("CCR", enable);
+      f.write("CCR", 0);
+      f.write("CCR", enable);
+      REQUIRE(logged.size() == 1);
+      CHECK(logged[0].message.contains(channel == vrefint_in ? "Table 36" : "Table 109"));
+    }
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.write("SMPR", 7);
+    f.write("CFGR1", cont);
+    f.write("CHSELRMOD0", 1u << channel);
+    static_cast<void>(f.start());
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.write("CCR", enable);
+    CHECK(logged.empty());
+  }
+}
+
+TEST_CASE(
+    "the factory words of the shipped STM32U575 description convert to fixed codes: VREFINT_CAL "
+    "6635 reads 1658 at 3000 mV and 1507 at 3300 mV, TS_CAL1 4107 reads 1026 and 933")
+{
+  for(auto const& [vdda, vrefint_code, sensor_code] : {
+          std::tuple{3000u, 1658u, 1026u},
+          std::tuple{3300u, 1507u, 933u }
+  })
+  {
+    CAPTURE(vdda);
+    adc4_fixture const f{u575(), false, true, 1.0, vdda};
+    static_cast<void>(f.enable());
+    f.write("CCR", vrefen | vsensesel);
+    CHECK(convert(f, vrefint_in) == vrefint_code);
+    CHECK(convert(f, vsense_in) == sensor_code);
   }
 }

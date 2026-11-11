@@ -1,6 +1,8 @@
 #include "adc4_rows.hpp"
 #include "adc_pads.hpp"
+#include "analog_peers.hpp"
 #include "dma_signal.hpp"
+#include "factory_data.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -113,11 +115,22 @@ struct kernel_select
   std::uint32_t mask;
 };
 
+constexpr std::string_view battery_message =
+    "VBATEN with VIN[14]: the board model has no VBAT source, VBAT / 4 converted as 0";
+constexpr std::string_view vrefint_sampling_message =
+    "VIN[0] VREFINT sampled for less than the typical 12.65 us, DS13737 Table 36: the model "
+    "converts the exact level";
+constexpr std::string_view sensor_sampling_message =
+    "VIN[13] VSENSE sampled for less than 13 us, DS13737 Table 109: the model converts the exact "
+    "level";
+
 struct refusal
 {
   bool*            logged{};
   std::string_view message;
 };
+
+using source_ptr = internal_analog_source const*;
 
 /**
  * @brief The ADC4 of the STM32U5, `aditf4_v4_U5_Cube`, RM0456 section 34: the voltage
@@ -269,11 +282,23 @@ struct refusal
  *        writable between the conversions, both inferred. ADC_CFGR2 follows the lock of ADC_CFGR1,
  *        RM0456 34.7.5.
  *
+ *        Internal channels, RM0456 Table 329 and 34.4.27: VIN[0] reads VREFINT with
+ *        ADC_CCR.VREFEN and VIN[13] the temperature sensor with VSENSESEL, 0 without. Both read
+ *        the factory VREFINT_CAL and TS_CAL1 words, taken at 3.0 V and 30 C, scaled by 3000 / VDDA
+ *        and cut from 14 to 12 bits, RES shifting them like any result, inferred. A missing word
+ *        is a config_error at an ADSTART that converts the channel. VIN[21] reads the DAC1 output
+ *        that ADC_OR.CHN21SEL selects, 0 while that output reaches no on-chip peripheral, with no
+ *        enable bit, taken at the sampling end like a pad. ADC_OR follows the lock of ADC_CFGR1,
+ *        RM0456 34.7.17.
+ *        VIN[14], VBAT / 4, converts 0 as the board has no VBAT source, VIN[12], VCORE, converts
+ *        0, inferred, and a sampling shorter than the typical tS_vrefint or the tS_temp minimum of
+ *        the datasheet is logged once at ADSTART or at the enable write, inferred.
+ *
  *        Not modelled, each logged once at an ADSTART that uses it, a model_error under
  *        strict_peripherals that keeps the old ADC_CR. The wait mode WAIT, the auto-off mode AUTOFF
  *        and the low-frequency trigger mode LFTRIG: the conversions run without them. VREFPROT and
- *        VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. The internal channels VIN[0],
- *        VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
+ *        VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. VIN[12] and VIN[14] with VBATEN:
+ *        they convert 0.
  */
 class adc4_model final : public dispatch_model<adc4_model, adc4_state>,
                          public analog_port,
@@ -324,6 +349,10 @@ public:
   void calfact_written(std::uint32_t old, std::uint32_t now);
   void pwrr_written(std::uint32_t old, std::uint32_t now);
   void ccr_written(std::uint32_t old, std::uint32_t now);
+  void or_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("OR", old, now);
+  }
   void ier_written(std::uint32_t, std::uint32_t)
   {
     signal();
@@ -401,6 +430,14 @@ private:
   [[nodiscard]] auto oversampling_ratio() const -> std::uint32_t;
   [[nodiscard]] auto oversampled() const -> std::uint32_t;
   [[nodiscard]] auto code(std::uint32_t channel) const -> std::uint32_t;
+  [[nodiscard]] auto level_code(std::uint32_t microvolts) const -> std::uint32_t;
+  [[nodiscard]] auto factory_code(std::uint32_t at, std::string_view name) const -> std::uint32_t;
+  [[nodiscard]] auto factory_level(std::uint32_t at, std::string_view name) const -> std::uint32_t;
+  [[nodiscard]] auto internal_source() const -> internal_analog_source const*;
+  [[nodiscard]] auto in_sequence(std::uint32_t channel) const -> bool;
+  [[nodiscard]] auto sampling_short(std::uint32_t channel, std::uint64_t minimum_ns) const -> bool;
+  void               enable_written_running(std::uint32_t old, std::uint32_t now);
+  void               require_factory_words() const;
   [[nodiscard]] auto external(analog_channel channel) const -> std::uint32_t;
   [[nodiscard]] auto pad_port(char letter) const -> gpio_port*;
   [[nodiscard]] auto driven_pad(analog_channel channel) const
@@ -470,6 +507,10 @@ private:
   dma_signal                   request_;
   field_ref                    vref_protection_;
   field_ref                    vref_sampling_;
+  field_ref                    vrefint_enable_;
+  field_ref                    sensor_enable_;
+  field_ref                    battery_enable_;
+  field_ref                    dac_select_;
   core::clock_domain           hclk_;
   std::uint32_t                clearable_{};
   std::uint32_t                set_only_{};
@@ -495,10 +536,14 @@ private:
   bool                         low_frequency_logged_{};
   bool                         watchdog_logged_{};
   bool                         vref_logged_{};
-  bool                         internal_logged_{};
+  bool                         vcore_logged_{};
+  bool                         battery_logged_{};
+  bool                         vrefint_sampling_logged_{};
+  bool                         sensor_sampling_logged_{};
+  mutable source_ptr           dac_source_{};
 };
 
-constexpr std::array<write_entry<adc4_model>, 16> writes{
+constexpr std::array<write_entry<adc4_model>, 17> writes{
     {
      {"ISR", &adc4_model::isr_written},
      {"IER", &adc4_model::ier_written},
@@ -516,6 +561,7 @@ constexpr std::array<write_entry<adc4_model>, 16> writes{
      {"AWD2CR", &adc4_model::awd2cr_written},
      {"AWD3CR", &adc4_model::awd3cr_written},
      {"CFGR2", &adc4_model::cfgr2_written},
+     {"OR", &adc4_model::or_written},
      }
 };
 
@@ -551,7 +597,9 @@ adc4_model::adc4_model(
       triggered_oversampling_{field("CFGR2", "TOVS")}, low_frequency_{field("CFGR2", "LFTRIG")},
       trigger_select_{field("CFGR1", "EXTSEL")}, dma_mode_{field("CFGR1", "DMACFG")},
       request_{ctx.peers, lower(desc.name) + "_dma"}, vref_protection_{field("PWR", "VREFPROT")},
-      vref_sampling_{field("PWR", "VREFSECSMP")}, hclk_{ctx.clock.domain("hclk")}
+      vref_sampling_{field("PWR", "VREFSECSMP")}, vrefint_enable_{field("CCR", "VREFEN")},
+      sensor_enable_{field("CCR", "VSENSESEL")}, battery_enable_{field("CCR", "VBATEN")},
+      dac_select_{field("OR", "CHN21SEL")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(auto const& name :
       {"LDORDY", "EOCAL", "AWD3", "AWD2", "AWD1", "OVR", "EOS", "EOC", "EOSMP", "ADRDY"})
@@ -822,6 +870,7 @@ void adc4_model::cr_written(std::uint32_t old, std::uint32_t now)
   }
   if(rises(start_))
   {
+    require_factory_words();
     auto const unmodelled = unmodelled_at_start();
     if(not unmodelled.empty() and ctx_.strict_peripherals)
     {
@@ -971,8 +1020,58 @@ void adc4_model::pwrr_written(std::uint32_t old, std::uint32_t now)
       "ADC_PWRR written with ADEN 1, RM0456 34.7.13: the write is ignored");
 }
 
+auto adc4_model::sampling_short(std::uint32_t channel, std::uint64_t minimum_ns) const -> bool
+{
+  auto const hz     = adc_hz();
+  auto const second = (regs_.peek(sampling_.offset) >> (8 + channel) & 1u) != 0;
+  auto const halves = variant_.sampling_halves[get(regs_, second ? smp2_ : smp1_)];
+  return hz != 0 and cycles_ps(halves, 2 * hz) < minimum_ns * 1000u;
+}
+
+void adc4_model::enable_written_running(std::uint32_t old, std::uint32_t now)
+{
+  if(get(regs_, start_) == 0)
+  {
+    return;
+  }
+  auto const refuse = [&](bool& logged, std::string_view message) {
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(ccr_.offset, old);
+    }
+    forbidden(logged, "CCR", message);
+  };
+  if(battery_enable_.of(now) != 0
+     and battery_enable_.of(old) == 0
+     and in_sequence(variant_.battery_channel))
+  {
+    refuse(battery_logged_, battery_message);
+  }
+  if(vrefint_enable_.of(now) != 0
+     and vrefint_enable_.of(old) == 0
+     and in_sequence(variant_.vrefint_channel))
+  {
+    static_cast<void>(factory_code(variant_.vrefint_cal_address, "VREFINT_CAL"));
+    if(sampling_short(variant_.vrefint_channel, variant_.vrefint_sampling_ns))
+    {
+      refuse(vrefint_sampling_logged_, vrefint_sampling_message);
+    }
+  }
+  if(sensor_enable_.of(now) != 0
+     and sensor_enable_.of(old) == 0
+     and in_sequence(variant_.sensor_channel))
+  {
+    static_cast<void>(factory_code(variant_.ts_cal1_address, "TS_CAL1"));
+    if(sampling_short(variant_.sensor_channel, variant_.sensor_sampling_ns))
+    {
+      refuse(sensor_sampling_logged_, sensor_sampling_message);
+    }
+  }
+}
+
 void adc4_model::ccr_written(std::uint32_t old, std::uint32_t now)
 {
+  enable_written_running(old, now);
   if(prescaler_.of(now) == prescaler_.of(old))
   {
     return;
@@ -1144,8 +1243,8 @@ void adc4_model::config_written(std::string_view name, std::uint32_t old, std::u
   regs_.poke(reg(name).offset, old);
   forbidden(
       config_refused_logged_, name,
-      "ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, ADC_AWD2CR or ADC_AWD3CR written with "
-      "ADSTART 1, RM0456 34.7.4 to 34.7.15: the write is ignored");
+      "ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_CFGR2, ADC_AWD2CR, ADC_AWD3CR or ADC_OR written with "
+      "ADSTART 1, RM0456 34.7.4 to 34.7.17: the write is ignored");
 }
 
 auto adc4_model::length() const -> std::uint32_t
@@ -1216,14 +1315,22 @@ auto adc4_model::unmodelled_at_start() -> std::vector<refusal>
       "AWD1CH 18 to 21 and 24 to 31 are reserved, RM0456 34.7.4: AWD1 guards no channel");
   add(get(regs_, vref_protection_) != 0 or get(regs_, vref_sampling_) != 0, vref_logged_,
       "VREFPROT or VREFSECSMP: the extra conversion cycles not modelled, tCONV at its minimum");
-  auto internal = false;
   for(std::uint32_t rank = 0; rank < length(); ++rank)
   {
-    internal = internal or (variant_.internal >> channel_at(rank) & 1u) != 0;
+    auto const channel = channel_at(rank);
+    add(channel == variant_.vcore_channel, vcore_logged_,
+        "VIN[12] VCORE: the logic supply level not modelled, converted as 0");
+    add(channel == variant_.battery_channel and get(regs_, battery_enable_) != 0, battery_logged_,
+        battery_message);
+    add(channel == variant_.vrefint_channel
+            and get(regs_, vrefint_enable_) != 0
+            and sampling_short(channel, variant_.vrefint_sampling_ns),
+        vrefint_sampling_logged_, vrefint_sampling_message);
+    add(channel == variant_.sensor_channel
+            and get(regs_, sensor_enable_) != 0
+            and sampling_short(channel, variant_.sensor_sampling_ns),
+        sensor_sampling_logged_, sensor_sampling_message);
   }
-  add(internal, internal_logged_,
-      "an internal channel in the sequence: VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21] not "
-      "modelled, converted as 0");
   return out;
 }
 
@@ -1323,16 +1430,95 @@ void adc4_model::hold()
   state_.held_code = static_cast<std::uint16_t>(code(channel_at(state_.rank)));
 }
 
+auto adc4_model::level_code(std::uint32_t microvolts) const -> std::uint32_t
+{
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      std::uint64_t{microvolts} * 4096u / (std::uint64_t{supply_.vdda_mv} * 1000u), 4095u));
+}
+
+auto adc4_model::factory_code(std::uint32_t at, std::string_view name) const -> std::uint32_t
+{
+  auto const word = factory_halfword(ctx_.part, at);
+  if(not word)
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("regions.content.{:#010x}", at),
+        std::format("the factory {} word the ADC4 model converts", name));
+  }
+  return *word;
+}
+
+auto adc4_model::factory_level(std::uint32_t at, std::string_view name) const -> std::uint32_t
+{
+  constexpr std::uint32_t full_scale_14 = 1u << 14;
+  auto const scaled = factory_code(at, name) * variant_.factory_vdda_mv / supply_.vdda_mv;
+  return std::min(scaled, full_scale_14 - 1u) >> 2;
+}
+
+auto adc4_model::internal_source() const -> internal_analog_source const*
+{
+  if(dac_source_ == nullptr)
+  {
+    dac_source_ = dynamic_cast<internal_analog_source const*>(ctx_.peers.find("DAC1"));
+  }
+  return dac_source_;
+}
+
+auto adc4_model::in_sequence(std::uint32_t channel) const -> bool
+{
+  for(std::uint32_t rank = 0; rank < length(); ++rank)
+  {
+    if(channel_at(rank) == channel)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+void adc4_model::require_factory_words() const
+{
+  if(get(regs_, vrefint_enable_) != 0 and in_sequence(variant_.vrefint_channel))
+  {
+    static_cast<void>(factory_code(variant_.vrefint_cal_address, "VREFINT_CAL"));
+  }
+  if(get(regs_, sensor_enable_) != 0 and in_sequence(variant_.sensor_channel))
+  {
+    static_cast<void>(factory_code(variant_.ts_cal1_address, "TS_CAL1"));
+  }
+}
+
 auto adc4_model::code(std::uint32_t channel) const -> std::uint32_t
 {
-  auto const pad = std::ranges::find(pads_, channel, &adc4_pad::channel);
-  auto const uv =
-      pad == pads_.end() or pad->gpio == nullptr or (variant_.external >> channel & 1u) == 0
-          ? 0u
-          : pad->gpio->analog_level(pad->pin);
-  auto const full = std::min<std::uint64_t>(
-      std::uint64_t{uv} * 4096u / (std::uint64_t{supply_.vdda_mv} * 1000u), 4095u);
-  return static_cast<std::uint32_t>(full) >> (2u * get(regs_, resolution_));
+  auto const full = [&]() -> std::uint32_t {
+    if(channel == variant_.vrefint_channel)
+    {
+      return get(regs_, vrefint_enable_) != 0
+               ? factory_level(variant_.vrefint_cal_address, "VREFINT_CAL")
+               : 0u;
+    }
+    if(channel == variant_.sensor_channel)
+    {
+      return get(regs_, sensor_enable_) != 0 ? factory_level(variant_.ts_cal1_address, "TS_CAL1")
+                                             : 0u;
+    }
+    if(channel == variant_.vcore_channel or channel == variant_.battery_channel)
+    {
+      return 0;
+    }
+    if(channel == variant_.dac_channel)
+    {
+      auto const* const source = internal_source();
+      auto const        level =
+          source == nullptr ? std::nullopt : source->internal_level(get(regs_, dac_select_));
+      return level_code(level.value_or(0));
+    }
+    auto const pad = std::ranges::find(pads_, channel, &adc4_pad::channel);
+    return pad == pads_.end() or pad->gpio == nullptr or (variant_.external >> channel & 1u) == 0
+             ? 0u
+             : level_code(pad->gpio->analog_level(pad->pin));
+  }();
+  return full >> (2u * get(regs_, resolution_));
 }
 
 void adc4_model::end_sampling()

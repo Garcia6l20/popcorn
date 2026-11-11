@@ -238,3 +238,41 @@ def test_an_oversampled_scan_converts_the_same_parked_and_running(
     parked = oversampled_scan(enabled(u575), running=False)
     assert parked == (2 * int(2.0 * 4096 / 3.0), 1)
     assert oversampled_scan(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+DAC1EN = 1 << 6
+DAC_MODE_CHIP = 1
+DAC_EN1 = 1
+CHN21 = 1 << 21
+
+
+def dac_channel(m: popcorn.Machine, running: bool) -> tuple[int, int]:
+    rcc = m.periph.RCC
+    rcc.RCC_AHB3ENR.write(rcc.RCC_AHB3ENR.value | DAC1EN)
+    dac = m.periph.DAC1
+    dac.MCR.write(DAC_MODE_CHIP)
+    dac.CR.write(DAC_EN1)
+    settle(m, 10)
+    dac.DHR12R1.write(0x800)
+    settle(m, 2)
+    adc = m.periph.ADC4
+    adc.CHSELRMOD0.write(CHN21)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 2)
+    return adc.DR.value, adc.ISR.EOS
+
+
+def test_a_dac1_output_converts_on_channel_21_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = dac_channel(enabled(u575), running=False)
+    assert parked == (0x800, 1)
+    assert dac_channel(enabled(u575, slice_instructions=1_000), running=True) == parked

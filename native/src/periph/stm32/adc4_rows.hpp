@@ -36,9 +36,27 @@ struct adc4_variant
   /** @brief Channels ADC_CFGR1.AWD1CH can name, bit n for channel n, RM0456 34.7.4. The other
    *         codes are reserved. */
   std::uint32_t awd1_channels = 0x00C3'FFFF;
-  /** @brief Internal channels, bit n for VIN[n]: VREFINT, VCORE, VSENSE, VBAT / 4 and the DAC1
-   *         output, RM0456 Table 329. */
-  std::uint32_t internal = 0x0020'7001;
+  /** @brief The channel VIN[n] of VREFINT with VREFEN, RM0456 Table 329. */
+  std::uint32_t vrefint_channel = 0;
+  /** @brief The channel of VCORE, RM0456 Table 329. */
+  std::uint32_t vcore_channel = 12;
+  /** @brief The channel of VSENSE with VSENSESEL, RM0456 Table 329. */
+  std::uint32_t sensor_channel = 13;
+  /** @brief The channel of VBAT / 4 with VBATEN, RM0456 Table 329. */
+  std::uint32_t battery_channel = 14;
+  /** @brief The channel of the DAC1 output ADC_OR.CHN21SEL selects, RM0456 Table 329. */
+  std::uint32_t dac_channel = 21;
+  /** @brief Address of the factory TS_CAL1 halfword, 14 bits at 30 C, RM0456 Table 325. */
+  std::uint32_t ts_cal1_address = 0x0BFA'0710;
+  /** @brief Address of the factory VREFINT_CAL halfword, 14 bits at 30 C, RM0456 Table 326. */
+  std::uint32_t vrefint_cal_address = 0x0BFA'07A5;
+  /** @brief VDDA of the factory words in millivolts, RM0456 Tables 325 and 326. */
+  std::uint32_t factory_vdda_mv = 3000;
+  /** @brief Typical sampling time of VREFINT in nanoseconds, the tS_vrefint of DS13737 Table 36,
+   *         its minimum is not given. */
+  std::uint64_t vrefint_sampling_ns = 12'650;
+  /** @brief Shortest sampling time of VSENSE in nanoseconds, the tS_temp of DS13737 Table 109. */
+  std::uint64_t sensor_sampling_ns = 13'000;
   /** @brief Sampling times of the SMPx codes 000 to 111 in half ADC clock cycles, RM0456 34.7.6. */
   std::array<std::uint16_t, 8> sampling_halves{3, 7, 15, 25, 39, 79, 159, 1629};
   /** @brief tSAR of RES 12, 10, 8 and 6 bits in half ADC clock cycles, RM0456 Table 332. */
