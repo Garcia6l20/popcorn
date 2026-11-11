@@ -1504,9 +1504,9 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   flag, RM0456 58.4.11, 58.4.16 and 58.7.8, log one `model_warning` each and raise `ModelError`
   under `strict`. The register keeps its value, inferred, except the second write outside
   `strict`, whose value replaces the pending one, inferred.
-- CFGR2 IN2SEL, IC1SEL and IC2SEL are storage: a firmware write that sets one logs one
-  `model_warning` and raises `ModelError` under `strict` before it is stored. A write that leaves
-  them 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make, passes. IN1SEL selects input 1.
+- CFGR2 IC1SEL and IC2SEL are storage: a firmware write that sets one logs one `model_warning` and
+  raises `ModelError` under `strict` before it is stored. A write that leaves them 0, as
+  `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make, passes. IN1SEL selects input 1 and IN2SEL input 2.
 - The output of channel 1 of LPTIM1 to LPTIM3 drives the trigger signal `lptim1_ch1`, `lptim2_ch1`
   or `lptim3_ch1`, channel 2 `lptim1_ch2` to `lptim3_ch2`, and the output of LPTIM4 `lptim4_out`. No
   LPTIM output drives a pin. OC1REF is high while CNT is above CCR1, so the output rises at CNT CCR1
@@ -1575,19 +1575,39 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   counter clocks later, RM0456 58.4.9 and 58.7.10, the latency inferred, and a match flag in flight
   is lost, inferred. In one-shot mode each trigger after the update event starts a new run, RM0456
   58.4.8, and with WAVE 1 only the first trigger starts one, a later one setting no EXTTRIG,
-  inferred. LPTIMxRST takes the trigger level, inferred. TRGFLT not 00 with the kernel clock stopped logs one `model_warning` at the arm and
-  raises `ModelError` under `strict`, RM0456 58.4.5.
+  inferred. LPTIMxRST takes the trigger level, inferred. TRGFLT not 00 with the kernel clock
+  stopped logs one `model_warning` at the arm and raises `ModelError` under `strict`, RM0456
+  58.4.5.
+- With ENC 1 and CKSEL 0, on LPTIM1 and LPTIM2, RM0456 58.3 and 58.4.15, the counter counts the
+  active edges CKPOL selects on the pin signals `lptim1_in1` and `lptim1_in2` (`lptim2_in1`,
+  `lptim2_in2`) with CFGR2 IN1SEL and IN2SEL 00, RM0456 58.4.3 Tables 605 and 606, up or down by
+  the level of the other input, RM0456 58.4.15 Table 612, between 0 and ARR: counting down from 0
+  gives ARR. CKFLT filters both inputs, RM0456 58.4.5, and the direction takes the filtered level
+  of the other input, inferred. A change of direction sets DOWN or UP at the edge, RM0456 58.4.15,
+  and the count starts upwards, inferred. CC1IF, CC2IF and ARRM set at the counted edge that
+  leaves CCR1, CCR2 and ARR in either direction, as with COUNTMODE 1, inferred. A down wrap from 0
+  loads ARR, RM0456 58.4.15, and is an overflow: the repetition counter, the update event, PRELOAD
+  and the one-shot stop apply there as at an up wrap, inferred. ENC takes precedence over
+  COUNTMODE, inferred. An edge with the kernel clock stopped is dropped, inferred. The inputs never
+  switch at the same time, RM0456 58.4.15. A CFGR2 write that changes IN2SEL counts the level
+  change it makes as an edge, inferred. On LPTIM3 and LPTIM4, whose IN2SEL bits are reserved,
+  RM0456 58.3 Table 599, a CFGR2 write stores them with no effect. SNGSTRT with
+  ENC 1 logs one `model_warning` and raises `ModelError` under `strict`, RM0456 58.4.15 asking for
+  continuous mode, and the one-shot stop then applies at a wrap. ENC 1 with CKSEL 1 logs one
+  `model_warning` at a start and raises under `strict`, RM0456 58.4.15: input 1 then clocks the
+  counter.
 - LPTIM1RST to LPTIM4RST reset the registers and the state of their LPTIM.
 - CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
 - These functions are not modelled. Each logs one `model_warning` at its first use and raises
   `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
-  counter start and at a CFGR2 write while it runs IN1SEL not 00 with CKSEL 1 or COUNTMODE 1, input
-  1 then reading 0, at a counter start ENC on LPTIM1 and LPTIM2 and CC1SEL or CC2SEL on LPTIM1 to
-  LPTIM3, the CCMR1 ones also at a CCMR1 write while the counter runs. At a CNTSTRT or SNGSTRT write
-  with TRIGEN not 00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, named in the
-  warning, which leaves the counter stopped. At the write: a DIER bit other than CC1IE, ARRMIE,
-  EXTTRIGIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, and on LPTIM1 to LPTIM3 CC2IE and CMP2OKIE. A
-  function the model lacks otherwise counts the kernel clock with channel 1 comparing CCR1.
+  counter start and at a CFGR2 write while it runs IN1SEL not 00 with CKSEL 1 or COUNTMODE 1 and
+  IN2SEL not 00 with ENC 1, the input then reading 0, at a counter start CC1SEL or CC2SEL on LPTIM1
+  to LPTIM3, the CCMR1 ones also at a CCMR1 write while the counter runs. At a CNTSTRT or SNGSTRT
+  write with TRIGEN not 00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, named in
+  the warning, which leaves the counter stopped. At the write: a DIER bit other than CC1IE,
+  ARRMIE, EXTTRIGIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, on LPTIM1 and LPTIM2 UPIE and DOWNIE,
+  and on LPTIM1 to LPTIM3 CC2IE and CMP2OKIE. A function the model lacks otherwise counts the
+  kernel clock with channel 1 comparing CCR1.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
 - ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, is

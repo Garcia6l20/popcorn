@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -238,6 +239,12 @@ struct rig
   [[nodiscard]] auto irq_pending() const -> bool
   {
     return f->pending(u.irq);
+  }
+
+  void clear_irq() const
+  {
+    write_at(0xE000'E280u + 4 * (u.irq / 32), 1u << (u.irq % 32));
+    REQUIRE_FALSE(irq_pending());
   }
 
   [[nodiscard]] auto saved() const -> std::vector<std::byte>
@@ -809,10 +816,8 @@ TEST_CASE(
     bool             logs;
   };
   for(auto const& [text, which, config, channels, logs] : {
-          one{"ENC 1",  units[0], enc, 0,      true },
-          one{"ENC 1",  units[2], enc, 0,      false},
-          one{"CC1SEL", units[1], 0,   cc1sel, true },
-          one{"CC1SEL", units[1], 0,   0,      false},
+          one{"CC1SEL", units[1], 0, cc1sel, true },
+          one{"CC1SEL", units[1], 0, 0,      false},
   })
   {
     CAPTURE(text);
@@ -848,7 +853,7 @@ TEST_CASE(
     "strict_peripherals, TRIGSEL 1 leaving the counter stopped")
 {
   for(auto const& [reg, value, text] : {
-          std::tuple{dier, 1u << 5, std::string_view{"DIER enable of UP"}},
+          std::tuple{dier, 1u << 23, std::string_view{"DIER enable of an over-capture"}},
   })
   {
     CAPTURE(text);
@@ -1906,8 +1911,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "checklist 43: CFGR2 IN2SEL, IC1SEL and IC2SEL are storage, a firmware write setting one logs "
-    "one warning and raises under strict_peripherals before the store, IN1SEL is modelled")
+    "checklist 43: CFGR2 IC1SEL and IC2SEL are storage, a firmware write setting one logs one "
+    "warning and raises under strict_peripherals before the store, IN1SEL and IN2SEL are modelled")
 {
   auto const store = [](rig const& r, std::uint32_t value,
                         popcorn::initiator by = popcorn::initiator::cpu) {
@@ -1924,13 +1929,15 @@ TEST_CASE(
   REQUIRE(store(r, 1).has_value());
   CHECK(r.logged.empty());
   REQUIRE(store(r, 0x10).has_value());
-  REQUIRE(store(r, 0x11).has_value());
-  CHECK(peek(r) == 0x11);
+  CHECK(r.logged.empty());
+  REQUIRE(store(r, 1u << 16).has_value());
+  REQUIRE(store(r, 1u << 20 | 1u << 16 | 0x11).has_value());
+  CHECK(peek(r) == (1u << 20 | 1u << 16 | 0x11));
   CHECK(r.warnings("is storage") == 1);
   rig strict{units[0], true};
   REQUIRE(store(strict, 1).has_value());
   CHECK(strict.logged.empty());
-  for(auto const value : {0x11u, 1u << 16, 1u << 20})
+  for(auto const value : {0x11u | 1u << 16, 1u << 16, 1u << 20})
   {
     CAPTURE(value);
     CHECK_THROWS_AS(static_cast<void>(store(strict, value)), popcorn::model_error);
@@ -3151,5 +3158,416 @@ TEST_CASE(
     }
     CHECK(r.read(cnt) == 0);
     CHECK((r.read(isr) & (arrok | arrm)) == (arrok | arrm));
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t counting_up   = 1u << 5;
+constexpr std::uint32_t counting_down = 1u << 6;
+constexpr std::uint8_t  pin_in1       = 5;
+constexpr std::uint8_t  pin_in2       = 7;
+
+auto lptim1_in2(rig const& r) -> stm32::gpio_port&
+{
+  return in1_pin(r, "GPIOB", pin_in2, 1);
+}
+
+struct quadrature
+{
+  std::uint32_t config;
+  bool          second;
+  bool          rise;
+  bool          opposite;
+  int           direction;
+};
+}
+
+TEST_CASE(
+    "RM0456 58.4.15 Table 612: each CKPOL sub-mode counts up, down or not at all by the edge, the "
+    "input and the level of the other input, DOWN set by the first down edge")
+{
+  constexpr auto up   = +1;
+  constexpr auto down = -1;
+  constexpr auto none = 0;
+  for(auto const& [config, second, rise, opposite, direction] : {
+          quadrature{enc,           false, true,  true,  down},
+          quadrature{enc,           false, true,  false, up  },
+          quadrature{enc,           false, false, true,  none},
+          quadrature{enc,           false, false, false, none},
+          quadrature{enc,           true,  true,  true,  up  },
+          quadrature{enc,           true,  true,  false, down},
+          quadrature{enc,           true,  false, true,  none},
+          quadrature{enc,           true,  false, false, none},
+          quadrature{enc | falling, false, true,  true,  none},
+          quadrature{enc | falling, false, true,  false, none},
+          quadrature{enc | falling, false, false, true,  up  },
+          quadrature{enc | falling, false, false, false, down},
+          quadrature{enc | falling, true,  true,  true,  none},
+          quadrature{enc | falling, true,  true,  false, none},
+          quadrature{enc | falling, true,  false, true,  down},
+          quadrature{enc | falling, true,  false, false, up  },
+          quadrature{enc | both,    false, true,  true,  down},
+          quadrature{enc | both,    false, true,  false, up  },
+          quadrature{enc | both,    false, false, true,  up  },
+          quadrature{enc | both,    false, false, false, down},
+          quadrature{enc | both,    true,  true,  true,  up  },
+          quadrature{enc | both,    true,  true,  false, down},
+          quadrature{enc | both,    true,  false, true,  down},
+          quadrature{enc | both,    true,  false, false, up  },
+  })
+  {
+    CAPTURE(config);
+    CAPTURE(second);
+    CAPTURE(rise);
+    CAPTURE(opposite);
+    rig   r;
+    auto& pins = lptim1_in1(r);
+    static_cast<void>(lptim1_in2(r));
+    auto const moving = second ? pin_in2 : pin_in1;
+    auto const other  = second ? pin_in1 : pin_in2;
+    pins.drive(moving, not rise);
+    pins.drive(other, opposite);
+    auto const t = r.started(60, 100, cntstrt, 0, config);
+    auto const e = t + 20 * cycle;
+    pins.drive_at(moving, rise, vtime{e});
+    r.idle_to(e - cycle);
+    CHECK(r.read(cnt) == 0);
+    r.idle_to(e);
+    CHECK(r.read(cnt) == (direction == up ? 1u : direction == down ? 100u : 0u));
+    CHECK(
+        (r.read(isr) & (counting_up | counting_down)) == (direction == down ? counting_down : 0u));
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.15 and 58.7.2: a quadrature sequence counts between 0 and ARR in both "
+    "directions, the first edge of a direction sets DOWN or UP and later edges leave it, raising "
+    "the IRQ through UPIE and DOWNIE")
+{
+  struct step
+  {
+    std::uint8_t  pin;
+    bool          level;
+    std::uint32_t count;
+    std::uint32_t flags;
+  };
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  static_cast<void>(lptim1_in2(r));
+  auto const t = r.started(60, 4, cntstrt, counting_up | counting_down, enc | both);
+  auto       e = t + 20 * cycle;
+  for(auto const& [pin, level, count, flags] : {
+          step{pin_in1, true,  1, 0            },
+          step{pin_in2, true,  2, 0            },
+          step{pin_in1, false, 3, 0            },
+          step{pin_in2, false, 4, 0            },
+          step{pin_in1, true,  0, 0            },
+          step{pin_in1, false, 4, counting_down},
+          step{pin_in2, true,  3, 0            },
+          step{pin_in1, true,  2, 0            },
+          step{pin_in2, false, 1, 0            },
+          step{pin_in2, true,  2, counting_up  },
+  })
+  {
+    CAPTURE(e);
+    CAPTURE(count);
+    pins.drive_at(pin, level, vtime{e});
+    r.idle_to(e - cycle);
+    r.idle_to(e);
+    CHECK(r.read(cnt) == count);
+    CHECK((r.read(isr) & (counting_up | counting_down)) == flags);
+    CHECK(r.irq_pending() == (flags != 0));
+    r.write(icr, counting_up | counting_down);
+    r.clear_irq();
+    e += 10 * cycle;
+  }
+  CHECK(r.warnings("DIER enable of") == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.19 and 58.4.15: counting down from 0 gives ARR, CC1IF and ARRM set at the counted "
+    "edge that leaves CCR1 and ARR in the down direction, inferred")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  lptim1_in2(r).drive(pin_in2, true);
+  auto const t     = r.started(2, 5, cntstrt, 0, enc);
+  auto const rises = pulses(pins, pin_in1, t + 20 * cycle, 7);
+  auto const flags = [&](std::size_t index) {
+    r.idle_to(rises[index]);
+    return r.read(isr) & (cc1if | arrm | ue);
+  };
+  CHECK(flags(0) == 0);
+  CHECK(r.read(cnt) == 5);
+  CHECK(flags(1) == (arrm | ue));
+  CHECK(r.read(cnt) == 4);
+  r.write(icr, arrm | ue);
+  CHECK(flags(3) == 0);
+  CHECK(r.read(cnt) == 2);
+  CHECK(flags(4) == cc1if);
+  CHECK(r.read(cnt) == 1);
+}
+
+TEST_CASE(
+    "RM0456 58.4.16 and 58.4.15, inferred: a down wrap from 0 counts as an overflow, REP 1 makes "
+    "every second wrap the update event and UE sets at the next counted edge")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  lptim1_in2(r).drive(pin_in2, true);
+  auto const t     = r.started(60, 1, cntstrt, 0, enc, 1);
+  auto const rises = pulses(pins, pin_in1, t + 20 * cycle, 4);
+  for(std::size_t index = 0; index < 3; ++index)
+  {
+    r.idle_to(rises[index]);
+    CHECK((r.read(isr) & ue) == 0);
+  }
+  r.idle_to(rises[3]);
+  CHECK((r.read(isr) & ue) == ue);
+}
+
+TEST_CASE(
+    "RM0456 58.4.11 and 58.4.15, inferred: with PRELOAD 1 a pending ARR applies at the first down "
+    "wrap and that wrap loads the new ARR")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  lptim1_in2(r).drive(pin_in2, true);
+  auto const t = r.started(60, 10, cntstrt, 0, enc | preload);
+  r.write(arr, 3);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const e = r.now_ps() + 4 * cycle;
+  pins.drive_at(pin_in1, true, vtime{e});
+  r.idle_to(e);
+  CHECK(r.read(cnt) == 3);
+  CHECK(t < e);
+}
+
+TEST_CASE(
+    "RM0456 58.4.15: ENABLE written to 0 and a new start count upwards again, DOWN sets once more")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  lptim1_in2(r).drive(pin_in2, true);
+  for(auto const round : {0, 1})
+  {
+    CAPTURE(round);
+    auto const t = r.started(60, 100, cntstrt, 0, enc);
+    auto const e = t + 20 * cycle;
+    pins.drive_at(pin_in1, true, vtime{e});
+    r.idle_to(e);
+    CHECK(r.read(cnt) == 100);
+    CHECK((r.read(isr) & counting_down) == counting_down);
+    pins.drive(pin_in1, false);
+    r.write(icr, counting_down);
+    r.write(cr, 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.5 and 58.7.10 CKFLT: the filter holds back both encoder inputs, the direction "
+    "takes the filtered level of the other input, inferred")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  static_cast<void>(lptim1_in2(r));
+  auto const t = r.started(60, 100, cntstrt, 0, enc | ckflt(1));
+  auto const e = t + 20 * cycle;
+  pins.drive_at(pin_in1, true, vtime{e});
+  pins.drive_at(pin_in2, true, vtime{e + cycle});
+  r.idle_to(e + cycle);
+  CHECK(r.read(cnt) == 0);
+  r.idle_to(e + 2 * cycle);
+  CHECK(r.read(cnt) == 1);
+  CHECK((r.read(isr) & (counting_up | counting_down)) == 0);
+  r.idle_to(e + 3 * cycle);
+  CHECK(r.read(cnt) == 2);
+}
+
+TEST_CASE(
+    "inferred: an encoder edge with the kernel clock stopped is dropped, the level it leaves still "
+    "sets the direction of the next edge")
+{
+  rig   r;
+  auto& pins = lptim1_in1(r);
+  static_cast<void>(lptim1_in2(r));
+  auto const t = r.started(60, 100, cntstrt, 0, enc);
+  r.idle_to(t + 20 * cycle);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+  pins.drive(pin_in2, true);
+  pins.drive(pin_in1, true);
+  pins.drive(pin_in1, false);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 0);
+  r.idle_to(r.now_ps() + 10 * cycle);
+  CHECK(r.read(cnt) == 0);
+  pins.drive(pin_in1, true);
+  r.idle_to(r.now_ps() + cycle);
+  CHECK(r.read(cnt) == 100);
+}
+
+TEST_CASE(
+    "inferred: a CFGR2 write that changes IN2SEL counts the level change of input 2 as an edge, "
+    "IN2SEL not 00 logs one warning and raises under strict_peripherals")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig   r{units[0], strict};
+    auto& pins = lptim1_in1(r);
+    lptim1_in2(r).drive(pin_in2, true);
+    static_cast<void>(pins);
+    auto const t = r.started(60, 100, cntstrt, 0, enc | both);
+    r.idle_to(t + 20 * cycle);
+    if(strict)
+    {
+      CHECK_THROWS_AS(r.write(cfgr2, 1u << 4), popcorn::model_error);
+      continue;
+    }
+    r.write(cfgr2, 1u << 4);
+    r.idle_to(r.now_ps() + cycle);
+    CHECK(r.read(cnt) == 1);
+    CHECK(r.warnings("IN2SEL not 00") == 1);
+    r.write(cfgr2, 0);
+    r.write(cfgr2, 1u << 4);
+    CHECK(r.warnings("IN2SEL not 00") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.15 and 58.7.10: SNGSTRT with ENC 1, ENC 1 with CKSEL 1 and PRESC not 0 with ENC 1 "
+    "log one warning each and raise under strict_peripherals, IN2SEL not 00 only with ENC 1")
+{
+  using refusal = std::tuple<std::uint32_t, bool, std::string_view>;
+  for(auto const& [config, single, text] : {
+          refusal{enc,            true,  "SNGSTRT with ENC 1"                   },
+          refusal{enc | cksel,    false, "ENC 1 with CKSEL 1"                   },
+          refusal{enc | presc(1), false, "PRESC not 0 with COUNTMODE 1 or ENC 1"},
+  })
+  {
+    CAPTURE(text);
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(strict);
+      rig r{units[0], strict};
+      r.write(cfgr, config);
+      r.write(cr, enable);
+      auto const mode = single ? sngstrt : cntstrt;
+      if(strict)
+      {
+        CHECK_THROWS_AS(r.write(cr, enable | mode), popcorn::model_error);
+        continue;
+      }
+      r.write(cr, enable | mode);
+      r.write(cr, 0);
+      r.write(cr, enable);
+      r.write(cr, enable | mode);
+      CHECK(r.warnings(text) == 1);
+    }
+  }
+  rig plain;
+  plain.write(cfgr2, 1u << 4);
+  static_cast<void>(plain.started(60, 100, cntstrt, 0, 0));
+  CHECK(plain.warnings("IN2SEL") == 0);
+  rig input_2{units[0], true};
+  input_2.write(cfgr2, 1u << 4);
+  CHECK_THROWS_AS(
+      static_cast<void>(input_2.started(60, 100, cntstrt, 0, enc)), popcorn::model_error);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot of an encoder counting down and of an input 2 change pending "
+    "under CKFLT restores into a machine with no reset, the direction and the count equal")
+{
+  for(auto const filtered : {false, true})
+  {
+    CAPTURE(filtered);
+    rig   r;
+    auto& pins = lptim1_in1(r);
+    static_cast<void>(lptim1_in2(r));
+    auto const t = r.started(60, 100, cntstrt, 0, enc | (filtered ? ckflt(1) : 0u));
+    auto const e = t + 20 * cycle;
+    if(filtered)
+    {
+      pins.drive_at(pin_in2, true, vtime{e});
+      r.idle_to(e + cycle);
+      REQUIRE(r.pending() == e + 2 * cycle);
+      REQUIRE(r.read(cnt) == 0);
+    }
+    else
+    {
+      pins.drive(pin_in2, true);
+      pins.drive_at(pin_in1, true, vtime{e});
+      pins.drive_at(pin_in1, false, vtime{e + 5 * cycle});
+      r.idle_to(e + 6 * cycle);
+      REQUIRE(r.read(cnt) == 100);
+      REQUIRE((r.read(isr) & counting_down) == counting_down);
+      r.write(icr, counting_down);
+    }
+    auto const saved = r.f->target->snapshot();
+    rig        other{no_reset};
+    other.f->target->restore(
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    CHECK(other.saved() == r.saved());
+    for(auto const* one : {&r, &other})
+    {
+      auto* const port = one->f->model_of<stm32::gpio_port>("GPIOB");
+      REQUIRE(port != nullptr);
+      if(filtered)
+      {
+        CHECK(one->read(cnt) == 0);
+        one->idle_to(e + 2 * cycle);
+        CHECK(one->read(cnt) == 100);
+        CHECK((one->read(isr) & (counting_up | counting_down)) == counting_down);
+        continue;
+      }
+      port->drive_at(pin_in1, true, vtime{e + 10 * cycle});
+      one->idle_to(e + 10 * cycle);
+      CHECK(one->read(cnt) == 99);
+      CHECK((one->read(isr) & (counting_up | counting_down)) == 0);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.3 Table 599: LPTIM3 and LPTIM4 have no encoder, ENC is reserved and the counter "
+    "counts the kernel clock")
+{
+  for(auto const& which : {units[2], units[3]})
+  {
+    CAPTURE(which.name);
+    rig        r{which};
+    auto const t = r.started(6, 10, cntstrt, 0, enc);
+    r.idle_to(t + 7 * cycle);
+    CHECK((r.read(isr) & cc1if) == cc1if);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "checklist 39: a description without ISR UP or DOWN, DIER UPIE or DOWNIE, ICR UPCF or "
+    "DOWNCF or CFGR ENC on LPTIM1 is refused at construction")
+{
+  for(auto const& [reg_name, field_name] : {
+          std::pair{std::string_view{"ISR_output"},  std::string_view{"UP"}    },
+          std::pair{std::string_view{"ISR_output"},  std::string_view{"DOWN"}  },
+          std::pair{std::string_view{"DIER_output"}, std::string_view{"UPIE"}  },
+          std::pair{std::string_view{"DIER_output"}, std::string_view{"DOWNIE"}},
+          std::pair{std::string_view{"ICR_output"},  std::string_view{"UPCF"}  },
+          std::pair{std::string_view{"ICR_output"},  std::string_view{"DOWNCF"}},
+          std::pair{std::string_view{"CFGR"},        std::string_view{"ENC"}   },
+  })
+  {
+    CAPTURE(field_name);
+    auto desc  = u575();
+    auto found = std::ranges::find(
+        desc.peripherals, std::string_view{"LPTIM1"}, &popcorn::peripheral_desc::name);
+    REQUIRE(found != desc.peripherals.end());
+    auto owner = std::ranges::find(found->registers, reg_name, &popcorn::register_desc::name);
+    REQUIRE(owner != found->registers.end());
+    REQUIRE(
+        std::erase_if(owner->fields, [&](auto const& one) { return one.name == field_name; }) == 1);
+    CHECK_THROWS_AS(rig(units[0], false, desc), popcorn::config_error);
   }
 }
