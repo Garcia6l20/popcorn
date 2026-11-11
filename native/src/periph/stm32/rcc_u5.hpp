@@ -384,6 +384,9 @@ constexpr auto rcc_backup_secured = std::to_array<secured_group>({
     {"", "RCC_BDCR", "BDRST"},
 });
 
+/** @brief The peripherals behind each shared RCC unit name, whose Secure state secures the unit's
+ *         bits. `TIMIC` lists TIM16 and TIM17 only: a Secure LPTIM2 leaves `TIMICSEL` Non-secure,
+ *         ES0499 2.3.2. */
 constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
     {"ADCDAC",    "ADC1"    },
     {"ADCDAC",    "ADC2"    },
@@ -397,7 +400,6 @@ constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
     {"SDMMC",     "SDMMC2"  },
     {"TIMIC",     "TIM16"   },
     {"TIMIC",     "TIM17"   },
-    {"TIMIC",     "LPTIM2"  },
     {"DCMI_PSSI", "DCMI"    },
     {"FSMC",      "FMC"     },
     {"OTG",       "OTG_FS"  },

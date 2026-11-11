@@ -1503,9 +1503,9 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   kernel clock, are probabilistic and outside the model. ES0499 2.17.4, the over-capture lost
   when CCxOF clears with a capture pulse active, concerns the input capture mode, not modelled.
 - ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, concerns the LPTIM inputs, not
-  modelled. ES0499 2.3.2, TIMICSEL not protected by LPTIM2SEC: the RCC model secures TIMICSEL
-  while LPTIM2, TIM16 or TIM17 is Secure, as RM0456 11.5.1 reads, so a Non-secure TIMICSEL write
-  with only LPTIM2 Secure is lost where the silicon takes it.
+  modelled. ES0499 2.3.2, TIMICSEL not protected by LPTIM2SEC, is reproduced: the RCC model
+  secures TIMICSEL while TIM16 or TIM17 is Secure, and a Non-secure TIMICSEL write with only
+  LPTIM2 Secure is taken.
 
 ## MDF and ADF
 
@@ -1789,7 +1789,8 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   STM32U5 and the STM32H5 alike. RM0456 11.5.1 and RM0481 11.5.1 secure "its related clock
   source selection" for each Secure peripheral and name no rule for a shared one. The shared bits
   are `ADCDACSEL`, `LPTIM34SEL`, `OCTOSPISEL`, `SDMMCSEL` and `TIMICSEL` on the STM32U5,
-  `ADCDACSEL`, `TIMICSEL` and the `FDCAN12` bits on the STM32H5.
+  `ADCDACSEL`, `TIMICSEL` and the `FDCAN12` bits on the STM32H5. The STM32U5 `TIMICSEL` follows
+  TIM16 and TIM17 only: a Secure LPTIM2 leaves it Non-secure, ES0499 2.3.2.
 - STM32H5 TrustZone: `RCC_CR.HSIDIV`, `HSIDIVF` and the `RCC_CFGR2` `AHBxDIS` and `APBxDIS` bits
   take Non-secure writes, RM0481 Table 122 lists them under no security bit.
 - SWS follows SW in the store that selects a ready source. On an STM32H573, the first one or two

@@ -336,14 +336,15 @@ template <typename Signal> struct bus_gate
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
  *        FLASH by RM0456 Table 62. A bit shared by several peripherals, such as `ADCDACSEL` or
  *        `LPTIM34SEL`, is Secure while any of them is, as "its related clock source selection"
- *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. A bit whose name gives no
- *        peripheral of the part stays Non-secure, such as the GTZCn. Deviation: SRAMnEN
- *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
- *        modelled. `BDRST` is Secure while the RTC or the TAMP has a secure function, RM0456
- *        11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way, through the H5
- *        traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and `RTCSEL` Secure
- *        in place of `BDRST`. `SPRIV` makes the Secure bits privileged, `NSPRIV` the others,
- *        RAZ/WI to an unprivileged access.
+ *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. On the STM32U5 `TIMICSEL`
+ *        follows TIM16 and TIM17 only, a Secure LPTIM2 leaving it Non-secure, ES0499 2.3.2.
+ *        A bit whose name gives no peripheral of the part stays Non-secure, such as the GTZCn.
+ *        Deviation: SRAMnEN and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of
+ *        RM0456 5.4 is not modelled. `BDRST` is Secure while the RTC or the TAMP has a secure
+ *        function, RM0456 11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way,
+ *        through the H5 traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and
+ *        `RTCSEL` Secure in place of `BDRST`. `SPRIV` makes the Secure bits privileged,
+ *        `NSPRIV` the others, RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
  *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the

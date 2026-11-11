@@ -441,7 +441,7 @@ TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own securit
 
 TEST_CASE(
     "RM0456 11.5.1: a kernel clock selection shared by several peripherals is Secure while any "
-    "of them is")
+    "of them is, ES0499 2.3.2: a Secure LPTIM2 leaves TIMICSEL Non-secure")
 {
   struct row
   {
@@ -450,18 +450,19 @@ TEST_CASE(
     std::string_view sec;
     std::string_view reg;
     std::string_view field;
+    bool             held = true;
   };
   for(auto const& one : std::initializer_list<row>{
-          {"GTZC2_TZSC", "SECCFGR1", "DAC1SEC",         "CCIPR3", "ADCDACSEL" },
-          {"GTZC2_TZSC", "SECCFGR1", "ADC4SEC",         "CCIPR3", "ADCDACSEL" },
-          {"GTZC1_TZSC", "SECCFGR3", "ADC1SEC",         "CCIPR3", "ADCDACSEL" },
-          {"GTZC2_TZSC", "SECCFGR1", "LPTIM4SEC",       "CCIPR3", "LPTIM34SEL"},
-          {"GTZC2_TZSC", "SECCFGR1", "LPTIM3SEC",       "CCIPR3", "LPTIM34SEL"},
-          {"GTZC1_TZSC", "SECCFGR3", "SDMMC1SEC",       "CCIPR2", "SDMMCSEL"  },
+          {"GTZC2_TZSC", "SECCFGR1", "DAC1SEC", "CCIPR3", "ADCDACSEL"},
+          {"GTZC2_TZSC", "SECCFGR1", "ADC4SEC", "CCIPR3", "ADCDACSEL"},
+          {"GTZC1_TZSC", "SECCFGR3", "ADC1SEC", "CCIPR3", "ADCDACSEL"},
+          {"GTZC2_TZSC", "SECCFGR1", "LPTIM4SEC", "CCIPR3", "LPTIM34SEL"},
+          {"GTZC2_TZSC", "SECCFGR1", "LPTIM3SEC", "CCIPR3", "LPTIM34SEL"},
+          {"GTZC1_TZSC", "SECCFGR3", "SDMMC1SEC", "CCIPR2", "SDMMCSEL"},
           {"GTZC1_TZSC", "SECCFGR3", "OCTOSPI1_REGSEC", "CCIPR2", "OCTOSPISEL"},
-          {"GTZC1_TZSC", "SECCFGR2", "TIM16SEC",        "CCIPR1", "TIMICSEL"  },
-          {"GTZC1_TZSC", "SECCFGR2", "TIM17SEC",        "CCIPR1", "TIMICSEL"  },
-          {"GTZC1_TZSC", "SECCFGR1", "LPTIM2SEC",       "CCIPR1", "TIMICSEL"  },
+          {"GTZC1_TZSC", "SECCFGR2", "TIM16SEC", "CCIPR1", "TIMICSEL"},
+          {"GTZC1_TZSC", "SECCFGR2", "TIM17SEC", "CCIPR1", "TIMICSEL"},
+          {"GTZC1_TZSC", "SECCFGR1", "LPTIM2SEC", "CCIPR1", "TIMICSEL", false},
   })
   {
     std::string const name = std::string{one.sec} + " " + std::string{one.field};
@@ -481,7 +482,7 @@ TEST_CASE(
       r.write(
           one.tzsc, one.sec_reg, secured ? bit(one.tzsc, one.sec_reg, one.sec) : 0, secure_priv);
       r.write("RCC", one.reg, r.peek("RCC", one.reg) | bits, nonsecure_priv);
-      CHECK((r.peek("RCC", one.reg) & bits) == (secured ? 0 : bits));
+      CHECK((r.peek("RCC", one.reg) & bits) == (secured and one.held ? 0 : bits));
     }
   }
   rig const r{
