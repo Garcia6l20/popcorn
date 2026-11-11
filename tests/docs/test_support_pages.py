@@ -124,7 +124,7 @@ def test_the_general_limits_pages_link_to_existing_pages(generated: Path) -> Non
                 assert anchor in heading_slugs(resolved.read_text()), (page.name, target, anchor)
             checked += 1
     assert checked > 20
-    assert (generated / "limits/core.md").read_text().count("\n## ") == 2
+    assert (generated / "limits/core.md").read_text().count("\n## ") == 3
 
 
 @pytest.mark.timeout(60)
@@ -166,7 +166,7 @@ def test_each_model_with_a_limit_carries_a_limits_block(model: str) -> None:
     assert has_limits_page(model)
 
 
-INFERRED_TOTAL = 412
+INFERRED_TOTAL = 413
 
 
 @pytest.mark.timeout(60)

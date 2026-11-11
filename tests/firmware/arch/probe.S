@@ -167,7 +167,9 @@
     movs r0, #3
     msr control, r0
     isb
-    PEND 16
+    bkpt #6
+    dsb
+    isb
     mrs r0, faultmask
     ldr r1, =faultmask_seen
     str r0, [r1]

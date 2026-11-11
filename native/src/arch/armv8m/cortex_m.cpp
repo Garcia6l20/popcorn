@@ -98,6 +98,12 @@ auto cortex_m::mmio_read(
   access.self->access_ = attrs;
   try
   {
+    if(access.self->space_.rule_of(access.which, static_cast<std::uint32_t>(offset), false)
+       == access_rule::fault)
+    {
+      access.self->refuse_access();
+      return 0;
+    }
     return access.self->space_.read(access.which, static_cast<std::uint32_t>(offset), size);
   }
   catch(...)
@@ -120,7 +126,16 @@ void cortex_m::mmio_write(
   try
   {
     auto&      self = *access.self;
-    auto const was  = self.pending() and self.deliverable_now();
+    auto const rule = self.space_.rule_of(access.which, static_cast<std::uint32_t>(offset), true);
+    if(rule != access_rule::allow)
+    {
+      if(rule == access_rule::fault)
+      {
+        self.refuse_access();
+      }
+      return;
+    }
+    auto const was = self.pending() and self.deliverable_now();
     self.space_.write(
         access.which, static_cast<std::uint32_t>(offset), size, static_cast<std::uint32_t>(value));
     if(not was and self.pending() and self.deliverable_now())
@@ -132,6 +147,11 @@ void cortex_m::mmio_write(
   {
     access.self->keep_failure(std::current_exception());
   }
+}
+
+void cortex_m::refuse_access()
+{
+  require(uc_ctl_refuse_mmio(engine_handle()), "refusing an unprivileged system space access");
 }
 
 cortex_m::cortex_m(core_desc const& core)

@@ -35,6 +35,18 @@
  *
  * [Faults and errors](../../../guide/faults.md) shows both policies.
  *
+ * @group all rule "Unprivileged system space access"
+ * - An unprivileged access to the system space, 0xE0000000 to 0xE000EFFF, takes a precise
+ *   BusFault, with BFAR set to the address, and changes nothing. A debugger or host access is
+ *   privileged.
+ * - STIR takes an unprivileged write when `CCR.USERSETMPEND` of the access's security state is
+ *   set. The ITM stimulus ports, trace enables and ID registers take unprivileged access, an
+ *   unprivileged write to ITM_TPR, ITM_TCR or ITM_LAR is ignored, and an unprivileged write to
+ *   ITM_TER leaves the bits of the stimulus ports `ITM_TPR.PRIVMASK` masks unchanged.
+ * - A Non-secure unprivileged access to the SCS_NS alias takes the same BusFault, except at STIR,
+ *   which is RAZ/WI to it. The ARM ARM does not rank the RAZ/WI of the alias against the
+ *   unprivileged fault, inferred.
+ *
  * @group all rule "Reset requests"
  * - Only a lone Python `Machine` applies the reset a RESET_REQUEST stop reported at its next
  *   run, step or free run. A C++ driver of `machine::run_slice` or `host::run` resumes the old

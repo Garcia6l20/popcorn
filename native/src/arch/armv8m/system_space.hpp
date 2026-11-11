@@ -31,6 +31,17 @@ inline constexpr address scs_nonsecure_base = 0xE002'E000;
 /** @brief Size of each window. */
 inline constexpr std::uint32_t window_size = 0x1000;
 
+/** @brief What an unprivileged access to a system space register does, B8.2 and D1.2. */
+enum class access_rule
+{
+  /** @brief The access completes. */
+  allow,
+  /** @brief A read completes, a write has no effect. */
+  ignore_write,
+  /** @brief The access takes a precise BusFault and changes nothing. */
+  fault,
+};
+
 /**
  * @brief Register model of the ITM, DWT, FPB and SCS windows over the module's state. Accesses
  *        touch only the state and the machine services, so a callback may re-enter. With
@@ -45,6 +56,15 @@ public:
   /** @brief Creates the model over @p core, which it keeps. */
   explicit system_space(cortex_m& core) noexcept : core_{core}
   {}
+
+  /**
+   * @brief The outcome of the access in flight, from its privilege attribute: a privileged access
+   *        completes. An unprivileged one faults except on STIR with CCR.USERSETMPEND of its
+   *        state and on the ITM block, which permits it and ignores the writes of ITM_TPR,
+   *        ITM_TCR and ITM_LAR.
+   * @param write Whether the access is a write.
+   */
+  [[nodiscard]] auto rule_of(window which, std::uint32_t offset, bool write) const -> access_rule;
 
   /**
    * @brief Reads @p size bytes at @p offset of a window, right-aligned.

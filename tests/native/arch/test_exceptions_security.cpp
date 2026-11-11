@@ -82,6 +82,7 @@ constexpr std::uint32_t pris      = 0x05FA'4000;
 constexpr std::uint16_t bkpt      = 0xbe01;
 constexpr std::uint16_t udf       = 0xde00;
 constexpr std::uint16_t ldr_r1_r0 = 0x6801;
+constexpr std::uint16_t str_r1_r0 = 0x6001;
 constexpr std::uint16_t bx_lr     = 0x4770;
 constexpr std::uint16_t nop       = 0xbf00;
 
@@ -2673,6 +2674,92 @@ TEST_CASE(
       auto const state = saved(f).exceptions;
       CHECK(state.active == before.active);
       CHECK(state.nonsecure_active == before.nonsecure_active);
+    }
+  }
+}
+
+TEST_CASE(
+    "an unprivileged access to the system space takes a precise BusFault of the bank BFHFNMINS "
+    "names, B8.2 RRTKK and D1.2")
+{
+  constexpr address       bfar    = 0xE000'ED38;
+  constexpr std::uint32_t precise = (1u << 9) | (1u << 15);
+  for(auto const bfhfnmins_set : {false, true})
+  {
+    for(auto const from_secure : {true, false})
+    {
+      for(auto const write : {false, true})
+      {
+        CAPTURE(bfhfnmins_set);
+        CAPTURE(from_secure);
+        CAPTURE(write);
+        auto f = booted();
+        open_nonsecure_region(f);
+        if(bfhfnmins_set)
+        {
+          poke(f, aircr, bfhfnmins);
+        }
+        tables(f, armv8m::exc_busfault);
+        poke(f, bfhfnmins_set ? shcsr + scs_ns : shcsr, busfault_ena);
+        put(f, from_secure ? secure_code : ns_code, {write ? str_r1_r0 : ldr_r1_r0, bkpt});
+        auto const target = write ? address{0xE000'E400} : address{0xE000'ED00};
+        f.set("r0", target);
+        f.set("r1", 0xff);
+        if(from_secure)
+        {
+          engine_write(f, UC_ARM_REG_CONTROL_S, 1);
+          REQUIRE(run_secure(f, secure_code, 3).reason == stop_reason::user);
+        }
+        else
+        {
+          engine_write(f, UC_ARM_REG_CONTROL_NS, 1);
+          REQUIRE(run_nonsecure(f, ns_code, 3).reason == stop_reason::user);
+        }
+        CHECK(ipsr(f) == armv8m::exc_busfault);
+        CHECK(secure_now(f) == not bfhfnmins_set);
+        auto const bank = bfhfnmins_set ? scs_ns : 0;
+        CHECK((f.word(cfsr + bank) & precise) == precise);
+        CHECK(f.word(bfar + bank) == target);
+        CHECK((f.word(hfsr + bank) & hfsr_forced) == 0);
+        if(write)
+        {
+          CHECK(f.word(target) == 0);
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "a Non-secure access to the SCS_NS alias is RAZ/WI when privileged and takes a precise "
+    "BusFault when unprivileged, inferred")
+{
+  constexpr address       alias_cpuid = 0xE002'ED00;
+  constexpr address       bfar        = 0xE000'ED38;
+  constexpr std::uint32_t precise     = (1u << 9) | (1u << 15);
+  for(auto const unprivileged : {false, true})
+  {
+    CAPTURE(unprivileged);
+    auto f = booted();
+    open_nonsecure_region(f);
+    tables(f, armv8m::exc_busfault);
+    poke(f, shcsr, busfault_ena);
+    put(f, ns_code, {ldr_r1_r0, bkpt});
+    f.set("r0", alias_cpuid);
+    f.set("r1", 0xff);
+    engine_write(f, UC_ARM_REG_CONTROL_NS, unprivileged ? 1 : 0);
+    REQUIRE(run_nonsecure(f, ns_code, 3).reason == stop_reason::user);
+    if(unprivileged)
+    {
+      CHECK(ipsr(f) == armv8m::exc_busfault);
+      CHECK(secure_now(f));
+      CHECK((f.word(cfsr) & precise) == precise);
+      CHECK(f.word(bfar) == alias_cpuid);
+    }
+    else
+    {
+      CHECK(ipsr(f) == 0);
+      CHECK(f.reg("r1") == 0);
     }
   }
 }

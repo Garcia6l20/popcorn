@@ -362,6 +362,8 @@ TEST_CASE("a handler setting FAULTMASK returns to an unprivileged task with FAUL
   auto f = booted();
   REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
   REQUIRE(run_to(f, "faultmask_to_unpriv").reason == stop_reason::user);
+  pend(f, 1u << 16);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
   CHECK(f.word(fn("faultmask_seen") + 4) == 3);
   CHECK(f.reg("faultmask") == 0);
   CHECK(f.reg("control") == 3);

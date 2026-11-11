@@ -328,12 +328,139 @@ TEST_CASE("MSPLIM raises STKOF, the UsageFault entry below it stops, a reset cle
   }
 }
 
-TEST_CASE("recorded: an unprivileged read of CPUID is answered, no BusFault")
+TEST_CASE(
+    "an unprivileged read of CPUID takes a precise BusFault and reads nothing, "
+    "B8.2 RRTKK and RNDML")
 {
   auto m = booted(fault_policy::enter_handler);
   REQUIRE(run_entry(m, "unpriv_scs").reason == stop_reason::user);
-  CHECK(m.f->word(fn("unpriv_read")) == m.f->module->cpuid());
+  CHECK(m.f->word(fn("unpriv_read")) == 0);
+  auto const log = log_of(*m.f);
+  REQUIRE(log.size() == 5);
+  CHECK(log[0] == 0xC30);
+  CHECK(log[1] == 0x00008200);
+  CHECK(log[2] == 0xE000'ED00);
+  CHECK(log[3] == 0);
+}
+
+namespace
+{
+constexpr address       unprivileged_code = 0x2008'0000;
+constexpr address       shcsr_at          = 0xE000'ED24;
+constexpr std::uint32_t busfault_ena      = 1u << 17;
+constexpr std::uint16_t ldr_r0_r3         = 0x6818;
+constexpr std::uint16_t str_r1_r3         = 0x6019;
+constexpr std::uint16_t bkpt_1            = 0xbe01;
+
+struct unprivileged_access
+{
+  std::string_view title;
+  address          at;
+  bool             write;
+  std::uint32_t    value;
+};
+
+void run_unprivileged(machine_under& m, unprivileged_access const& access)
+{
+  address cursor = unprivileged_code;
+  for(auto const half : {access.write ? str_r1_r3 : ldr_r0_r3, bkpt_1})
+  {
+    REQUIRE(m.f->target->mem().write(cursor, 2, half));
+    cursor += 2;
+  }
+  m.f->set("r1", access.value);
+  m.f->set("r3", access.at);
+  m.f->set("control", 1);
+  m.f->set("pc", unprivileged_code | 1);
+}
+}
+
+TEST_CASE(
+    "an unprivileged access to a system space register takes a precise BusFault and changes "
+    "nothing, escalated to HardFault with BusFault disabled, B8.2 RRTKK and RNSWG")
+{
+  std::vector<unprivileged_access> const accesses{
+      {"CPUID read",       0xE000'ED00, false, 0          },
+      {"NVIC_IPR0 read",   0xE000'E400, false, 0          },
+      {"NVIC_IPR0 write",  0xE000'E400, true,  0xff       },
+      {"AIRCR write",      0xE000'ED0C, true,  0x05FA'0300},
+      {"VTOR write",       0xE000'ED08, true,  0x2000'0080},
+      {"SYST_CSR write",   0xE000'E010, true,  7          },
+      {"DWT_CTRL read",    0xE000'1000, false, 0          },
+      {"FP_CTRL read",     0xE000'2000, false, 0          },
+      {"DWT offset 0xF00", 0xE000'1F00, false, 0          },
+      {"FPB offset 0xF00", 0xE000'2F00, false, 0          },
+      {"ITM offset 0xF00", 0xE000'0F00, false, 0          },
+      {"ITM offset 0x400", 0xE000'0400, true,  1          },
+  };
+  for(auto const enabled : {true, false})
+  {
+    for(auto const& access : accesses)
+    {
+      CAPTURE(enabled);
+      CAPTURE(access.title);
+      auto m = booted(fault_policy::enter_handler);
+      REQUIRE(
+          m.f->target->mem().write(0xE000'ED14, 4, *m.f->target->mem().read(0xE000'ED14, 4) | 2u));
+      if(enabled)
+      {
+        REQUIRE(m.f->target->mem().write(
+            shcsr_at, 4, *m.f->target->mem().read(shcsr_at, 4) | busfault_ena));
+      }
+      auto const before = m.f->target->mem().read(access.at, 4);
+      REQUIRE(before.has_value());
+      run_unprivileged(m, access);
+      REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+      auto const log = log_of(*m.f);
+      REQUIRE(log.size() == 5);
+      CHECK(log[0] == (enabled ? 0xC30u : 0xC10u));
+      CHECK(log[1] == 0x00008200);
+      CHECK(log[2] == access.at);
+      CHECK(log[3] == (enabled ? 0u : 0x4000'0000u));
+      CHECK((m.f->reg("xpsr") & 0x1ff) == (enabled ? armv8m::exc_busfault : armv8m::exc_hardfault));
+      CHECK(m.f->target->mem().read(access.at, 4) == before);
+    }
+  }
+}
+
+TEST_CASE(
+    "CCR.BFHFNMIGN with a negative execution priority skips an unprivileged system space access "
+    "and records it in CFSR and BFAR")
+{
+  auto m = booted(fault_policy::enter_handler);
+  REQUIRE(
+      m.f->target->mem().write(shcsr_at, 4, *m.f->target->mem().read(shcsr_at, 4) | busfault_ena));
+  REQUIRE(m.f->target->mem().write(
+      0xE000'ED14, 4, *m.f->target->mem().read(0xE000'ED14, 4) | (1u << 8)));
+  m.f->set("faultmask", 1);
+  m.f->set("r0", 0xA5A5);
+  run_unprivileged(m, {"CPUID read", 0xE000'ED00, false, 0});
+  REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+  CHECK(m.f->reg("r0") == 0xA5A5);
   CHECK(log_of(*m.f).empty());
+  CHECK((m.f->word(0xE000'ED28) & 0x8200) == 0x8200);
+  CHECK(m.f->word(0xE000'ED38) == 0xE000'ED00);
+}
+
+TEST_CASE(
+    "an unprivileged write to STIR pends the interrupt with CCR.USERSETMPEND set and takes a "
+    "BusFault with it clear, B8.2 RDQQS")
+{
+  constexpr address ccr = 0xE000'ED14;
+  for(auto const allowed : {true, false})
+  {
+    CAPTURE(allowed);
+    auto m = booted(fault_policy::enter_handler);
+    REQUIRE(m.f->target->mem().write(
+        shcsr_at, 4, *m.f->target->mem().read(shcsr_at, 4) | busfault_ena));
+    REQUIRE(
+        m.f->target->mem().write(ccr, 4, *m.f->target->mem().read(ccr, 4) | (allowed ? 2u : 0u)));
+    m.f->set("primask", 1);
+    run_unprivileged(m, {"STIR write", 0xE000'EF00, true, 0});
+    REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+    CHECK(m.f->module->is_pending(16) == allowed);
+    CHECK(log_of(*m.f).empty() == allowed);
+  }
 }
 
 TEST_CASE("exception entry stacking below the pushed stack's limit stops with STKOF")

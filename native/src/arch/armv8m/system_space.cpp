@@ -7,6 +7,7 @@
 
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <tuple>
@@ -47,6 +48,41 @@ constexpr std::uint32_t demcr_sdme              = 1u << 20;
 constexpr std::uint32_t sau_ctrl_writable       = 0x3;
 constexpr std::uint32_t sau_rbar_writable       = 0xffff'ffe0;
 constexpr std::uint32_t sau_rlar_writable       = 0xffff'ffe3;
+
+struct itm_row
+{
+  std::uint32_t first;
+  std::uint32_t last;
+  access_rule   unprivileged;
+};
+
+/**
+ * @brief Registers of the ITM window an unprivileged access reaches, ARMv8-M ARM D1.2.143 to
+ *        D1.2.162 and ARMv7-M ARM C1.7: the stimulus ports ITM_STIMn, the trace enables ITM_TERn,
+ *        which take an unprivileged write bit by bit under ITM_TPR.PRIVMASK, ITM_TPR, ITM_TCR and
+ *        ITM_LAR, whose unprivileged writes are ignored, and the management and ID registers.
+ *        Every other offset of the window faults.
+ */
+constexpr std::array itm_rows{
+    itm_row{0x000, 0x3fc, access_rule::allow       },
+    itm_row{0xe00, 0xe1c, access_rule::allow       },
+    itm_row{0xe40, 0xe40, access_rule::ignore_write},
+    itm_row{0xe80, 0xe80, access_rule::ignore_write},
+    itm_row{0xfb0, 0xfb0, access_rule::ignore_write},
+    itm_row{0xfb4, 0xffc, access_rule::allow       },
+};
+
+constexpr std::uint32_t stir_offset = 0xf00;
+
+constexpr auto itm_blocked_ports(std::uint32_t privmask) noexcept -> std::uint32_t
+{
+  std::uint32_t blocked = 0;
+  for(std::uint32_t port = 0; port < 32; ++port)
+  {
+    blocked |= ((privmask >> (port / 8)) & 1u) << port;
+  }
+  return blocked;
+}
 
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,
@@ -104,6 +140,37 @@ auto bit(std::uint32_t value, std::uint32_t at) noexcept -> bool
 {
   return ((value >> at) & 1u) != 0;
 }
+}
+
+auto system_space::rule_of(window which, std::uint32_t offset, bool write) const -> access_rule
+{
+  if(core_.access_attrs().privileged)
+  {
+    return access_rule::allow;
+  }
+  auto const word = offset & ~3u;
+  if(which == window::itm)
+  {
+    auto const row = std::ranges::find_if(
+        itm_rows, [&](itm_row const& one) { return in(word, one.first, one.last); });
+    if(row == itm_rows.end())
+    {
+      return access_rule::fault;
+    }
+    return write ? row->unprivileged : access_rule::allow;
+  }
+  if(which == window::dwt or which == window::fpb or word != stir_offset)
+  {
+    return access_rule::fault;
+  }
+  auto const view = core_.view_of(which);
+  if(not view)
+  {
+    return access_rule::allow;
+  }
+  auto const& scs = core_.state_.scs;
+  return bit(*view == security::nonsecure ? scs.nonsecure.ccr : scs.ccr, 1) ? access_rule::allow
+                                                                            : access_rule::fault;
 }
 
 auto system_space::read(window which, std::uint32_t offset, unsigned size) const -> std::uint32_t
@@ -586,7 +653,8 @@ void system_space::write_word(
     case window::itm:
       if(offset == 0xe00)
       {
-        scs.itm_ter = merge(scs.itm_ter, value, mask);
+        auto const blocked = core_.access_attrs().privileged ? 0u : itm_blocked_ports(scs.itm_tpr);
+        scs.itm_ter        = merge(scs.itm_ter, value, mask & ~blocked);
       }
       else if(offset == 0xe40)
       {
@@ -1022,11 +1090,8 @@ void system_space::write_scs(
     }
     case 0xf00:
     {
-      auto const number      = exc_irq0 + ((value & mask) & 0x1ffu);
-      auto const user_pended = bit(nonsecure ? ns.ccr : scs.ccr, 1);
-      if(number < core_.exception_count()
-         and irq_visible(number, view)
-         and (user_pended or core_.privileged()))
+      auto const number = exc_irq0 + ((value & mask) & 0x1ffu);
+      if(number < core_.exception_count() and irq_visible(number, view))
       {
         core_.set_exception_pending(number, true);
       }

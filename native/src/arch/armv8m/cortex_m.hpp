@@ -110,6 +110,7 @@ public:
 
   /** @brief Keeps the first failure of an arch callback and ends the slice. */
   void keep_failure(std::exception_ptr failure) noexcept;
+  void refuse_access();
 
 private:
   friend class system_space;

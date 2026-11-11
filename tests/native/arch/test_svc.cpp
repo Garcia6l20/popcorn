@@ -112,7 +112,6 @@ TEST_CASE("each SVC, PendSV, NMI and STIR entry logs its sequence, twice in one 
         {"pendsv_clear",     {0xE03}                       },
         {"nmi_run",          {0xE1D, 0xE04}                },
         {"stir_run",         {0xE13, 0xE05}                },
-        {"stir_unpriv",      {0xE06}                       },
         {"stir_allowed",     {0xE13, 0xE07}                },
     };
     for(auto const& one : cases)

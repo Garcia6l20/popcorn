@@ -332,6 +332,47 @@ TEST_CASE(
   CHECK(f.module->is_active(armv8m::exc_hardfault));
 }
 
+TEST_CASE(
+    "M4 takes a precise BusFault on an unprivileged PPB access and lets an unprivileged ITM_TER "
+    "read through, DDI0403E B3.1.1 and C1.7")
+{
+  auto const            firmware = name_of("faults", cm4);
+  core::machine_options enter;
+  enter.faults = arch::fault_policy::enter_handler;
+  struct row
+  {
+    std::uint16_t instruction;
+    address       at;
+    bool          faults;
+  };
+  for(auto const& one : {
+          row{0x6818, 0xE000'ED00, true },
+          row{0x6019, 0xE000'E400, true },
+          row{0x6818, 0xE000'0E00, false},
+  })
+  {
+    CAPTURE(one.at);
+    auto f = booted("faults", cm4, enter);
+    REQUIRE(run_to(f, sym(firmware, "faults_setup")).reason == stop_reason::user);
+    REQUIRE(f.target->mem().write(0xE000'ED24, 4, 1u << 17));
+    REQUIRE(f.target->mem().write(0x2008'0000, 2, one.instruction));
+    REQUIRE(f.target->mem().write(0x2008'0002, 2, 0xbe01));
+    f.set("r1", 0xff);
+    f.set("r3", one.at);
+    f.set("control", 1);
+    f.set("pc", 0x2008'0001);
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    auto const log = log_of(f, firmware);
+    CHECK((log.size() == 5) == one.faults);
+    if(one.faults)
+    {
+      CHECK(log[0] == 0xC30);
+      CHECK(log[1] == 0x00008200);
+      CHECK(log[2] == one.at);
+    }
+  }
+}
+
 TEST_CASE("M4 runs the SVC and PendSV logs, and SysTick ticks 1000 times a virtual second")
 {
   auto const svc = name_of("svc", cm4);

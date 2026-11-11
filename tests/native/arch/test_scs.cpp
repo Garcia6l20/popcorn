@@ -602,8 +602,8 @@ void check_access_attrs(popcorn::part_description desc)
   }
   f.set("r1", 0);
   f.set("r2", testdev);
-  f.set("r3", 0xE000'ED00);
-  f.set("r4", 0xE000'E400);
+  f.set("r3", 0xE000'0E80);
+  f.set("r4", 0xE000'0000);
   for(auto const entry : {at, at + 0x10})
   {
     for(auto const control : {0u, 1u})
@@ -639,7 +639,7 @@ TEST_CASE("a host read and write of the system space carry Secure privileged att
   constexpr address at = 0x2008'0000;
   REQUIRE(f.target->mem().write(at, 2, 0x6818));
   REQUIRE(f.target->mem().write(at + 2, 2, 0xbe01));
-  f.set("r3", 0xE000'ED00);
+  f.set("r3", 0xE000'0E80);
   f.set("control", 1);
   f.set("pc", at | 1);
   REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{2}}).reason == stop_reason::user);
@@ -650,4 +650,70 @@ TEST_CASE("a host read and write of the system space carry Secure privileged att
   REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{2}}).reason == stop_reason::user);
   REQUIRE(f.target->mem().write(0xE000'E400, 4, 0));
   CHECK(seen(f.module->access_attrs()) == seen_attrs{.secure = true, .privileged = true});
+  REQUIRE(f.target->mem().read(0xE000'ED00, 4).has_value());
+  CHECK_FALSE(f.module->is_pending(16));
+  REQUIRE(f.target->mem().write(0xE000'EF00, 4, 0));
+  CHECK(f.module->is_pending(16));
+}
+
+namespace
+{
+constexpr address itm_ter   = 0xE000'0E00;
+constexpr address itm_tpr   = 0xE000'0E40;
+constexpr address itm_tcr   = 0xE000'0E80;
+constexpr address itm_stim0 = 0xE000'0000;
+constexpr address itm_pidr0 = 0xE000'0FE0;
+
+struct user_code
+{
+  arch_fixture f{m33(), "scs", {}};
+
+  void access(address at, bool write, std::uint32_t value = 0)
+  {
+    constexpr address code = 0x2008'0000;
+    REQUIRE(f.target->mem().write(code, 2, write ? 0x6019 : 0x6818));
+    REQUIRE(f.target->mem().write(code + 2, 2, 0xbe01));
+    f.set("r1", value);
+    f.set("r3", at);
+    f.set("control", 1);
+    f.set("pc", code | 1);
+    REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{2}}).reason == stop_reason::user);
+    f.set("control", 0);
+  }
+
+  [[nodiscard]] auto word(address at) const -> std::uint32_t
+  {
+    auto const value = f.target->mem().read(at, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+};
+}
+
+TEST_CASE(
+    "the ITM block permits unprivileged access, ignores the unprivileged writes of ITM_TPR and "
+    "ITM_TCR, and masks those of ITM_TER by ITM_TPR.PRIVMASK, D1.2.143 to D1.2.162")
+{
+  user_code u;
+  REQUIRE(u.f.target->mem().write(itm_ter, 4, 0x0f));
+  REQUIRE(u.f.target->mem().write(itm_tcr, 4, 0x0105));
+  u.access(itm_ter, false);
+  CHECK(u.f.reg("r0") == 0x0f);
+  u.access(itm_tcr, false);
+  CHECK(u.f.reg("r0") == 0x0105);
+  u.access(itm_pidr0, false);
+  CHECK(u.f.reg("r0") == 0);
+  u.access(itm_stim0, true, 0x41);
+  u.access(itm_ter, true, 0xffff);
+  CHECK(u.word(itm_ter) == 0xffff);
+  REQUIRE(u.f.target->mem().write(itm_ter, 4, 0x0f));
+  REQUIRE(u.f.target->mem().write(itm_tpr, 4, 0x1));
+  u.access(itm_ter, true, 0xffff);
+  CHECK(u.word(itm_ter) == 0xff0f);
+  u.access(itm_tpr, true, 0xf);
+  CHECK(u.word(itm_tpr) == 0x1);
+  u.access(itm_tcr, true, 0x1);
+  CHECK(u.word(itm_tcr) == 0x0105);
+  REQUIRE(u.f.target->mem().write(itm_ter, 4, 0));
+  CHECK(u.word(itm_ter) == 0);
 }
