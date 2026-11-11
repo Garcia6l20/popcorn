@@ -10,11 +10,8 @@ import functools
 import os
 import sys
 import threading
-import types
-import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
-from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,19 +21,13 @@ from typing import (
     override,
 )
 
-from popcorn import _core, _machine_hooks
+from popcorn import _core, _machine_call, _machine_hooks
 from popcorn._arena import Arena
 from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
-    I32_SLOT,
     CallResult,
-    HandlerCallWarning,
-    Signature,
     Stack,
-    argument,
     decode,
-    signature_of,
-    slot_for,
 )
 from popcorn._devices import (
     BusDevice,
@@ -78,7 +69,6 @@ from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._image_view import ImageView, debug_infos, find_variable, selected_images
 from popcorn._machine_checks import (
-    FAULT_CONTEXT,
     AttachedDevice,
     checked_audio,
     checked_budget,
@@ -96,9 +86,7 @@ from popcorn._machine_checks import (
 from popcorn._machine_events import (
     DEFAULT_ARENA_BASE,
     DEFAULT_ARENA_SIZE,
-    FIRST_IRQ,
     RUNNING,
-    SYSTEM_EXCEPTIONS,
     Call,
     ContextCell,
     Event,
@@ -594,7 +582,12 @@ class Machine:
         self._arena = (
             None
             if arena_base is None
-            else Arena(self._memory, arena_base, arena_size, self._type_view)
+            else Arena(
+                self._memory,
+                arena_base,
+                arena_size,
+                functools.partial(_machine_call.type_view, self),
+            )
         )
         self._call_baseline: Snapshot | None = None
         self._last_stop: Stop | None = None
@@ -1557,136 +1550,20 @@ class Machine:
         Warns:
             HandlerCallWarning: `from_thread` is None and the call began with a handler active.
         """
-        if from_thread is not None and not isinstance(cast(object, from_thread), bool):
-            raise TypeError(f"from_thread is True, False or None, not {from_thread!r}")
-        entry = self.address_of(fn)
-        signature = self._signature(fn, entry)
-        where = signature.name
-        if signature.unsupported is not None:
-            raise NotImplementedError(signature.unsupported)
-        if signature.params is not None and len(signature.params) != len(args):
-            raise TypeError(f"{where} takes {len(signature.params)} arguments, {len(args)} given")
-        frame = _core.CallFrame()
-        frame.entry = entry
-        frame.args = [
-            argument(
-                value,
-                None if signature.params is None else signature.params[index],
-                f"argument {index} of {where}",
-            )
-            for index, value in enumerate(args)
-        ]
-        result_slot = signature.returns if returns is None else slot_for(returns)
-        frame.returns = result_slot.kind
-        frame.abi = _core.FloatAbi((abi or self._abi_at(entry)).value)
-        frame.return_sentinel = self._sentinel
-        frame.stack = stack_top
-        frame.stack_select = _core.CallStack[stack.value]
-        frame.privileged = privileged
-        frame.interrupts = interrupts
-
-        def prepare() -> None:
-            if isinstance(reset, Snapshot):
-                self.restore(reset)
-            elif reset:
-                if self._call_baseline is None:
-                    self._call_baseline = self.snapshot()
-                else:
-                    self.restore(self._call_baseline)
-
-        self._last_stop = None
-        outcome = await awaited(
-            self._handle.call_goal(
-                frame,
-                self._default_budget if budget is None else budget,
-                prepare if reset is not False else None,
-                bool(from_thread),
-            ),
-            lambda raw: cast(_core.CallOutcome, raw),
+        return await _machine_call.call(
+            self,
+            fn,
+            *args,
+            returns=returns,
+            budget=budget,
+            privileged=privileged,
+            stack=stack,
+            stack_top=stack_top,
+            interrupts=interrupts,
+            reset=reset,
+            abi=abi,
+            from_thread=from_thread,
         )
-        stop = stop_of(outcome.stopped)
-        if stop.reason is StopReason.FAULT and outcome.began:
-            stop = replace(stop, registers=self._fault_context(outcome.registers))
-        if not outcome.began and not stop.detail:
-            stop = replace(stop, detail="before thread mode")
-        if stop.reason is StopReason.BUDGET and outcome.began and not interrupts:
-            hint = self._masked_hint(outcome.pending_exceptions, outcome.held_exceptions)
-            stop = replace(stop, detail=stop.detail or hint)
-        self._last_stop = stop
-        bits = outcome.bits
-        value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
-        if from_thread is None and outcome.began and outcome.ipsr != 0:
-            warnings.warn(
-                f"{where} was called with exception {outcome.ipsr} active, which resumes after"
-                " it: from_thread=True waits for thread mode, from_thread=False silences this",
-                HandlerCallWarning,
-                stacklevel=2,
-            )
-        return CallResult(value, bits, stop, ipsr=outcome.ipsr, began=outcome.began)
-
-    def _masked_hint(self, pending: Sequence[int], held: Sequence[int]) -> str:
-        parts: list[str] = []
-        if pending:
-            parts.append(
-                f"{self._exception_list(pending)} pending: call(interrupts=True) lets them run"
-            )
-        if held:
-            parts.append(
-                f"{self._exception_list(held)} pending, held by the firmware too: PRIMASK,"
-                " BASEPRI, FAULTMASK or an active handler masks them, call(interrupts=True) does"
-                " not run them"
-            )
-        if not parts:
-            return "interrupts masked by the call: call(interrupts=True) lets them run"
-        return f"interrupts masked by the call, {', '.join(parts)}"
-
-    def _exception_list(self, numbers: Sequence[int]) -> str:
-        names = {irq.number: irq.name for irq in self._description.irqs}
-
-        def named(number: int) -> str:
-            if number < FIRST_IRQ:
-                return f"{SYSTEM_EXCEPTIONS.get(number, 'exception')} ({number})"
-            irq = number - FIRST_IRQ
-            return f"{names.get(irq, f'IRQ{irq}')} ({irq})"
-
-        shown = ", ".join(named(n) for n in numbers[:4])
-        more = f" and {len(numbers) - 4} more" if len(numbers) > 4 else ""
-        verb = "is" if len(numbers) == 1 else "are"
-        return f"{shown}{more} {verb}"
-
-    def _fault_context(self, values: Sequence[int]) -> Mapping[str, int]:
-        read = dict(zip(self._handle.register_names(), values, strict=True))
-        captured = {name: read[name] for name in FAULT_CONTEXT if name in read}
-        return types.MappingProxyType(captured)
-
-    def _signature(self, fn: int | str | Symbol, entry: int) -> Signature:
-        name = fn if isinstance(fn, str) else fn.name if isinstance(fn, Symbol) else f"{fn:#x}"
-        for info in reversed(self._debug_infos()):
-            function = info.functions.get(name) if isinstance(fn, str | Symbol) else None
-            if function is None:
-                function = next((f for f in info.functions.values() if f.address == entry), None)
-            if function is not None and function.address == entry:
-                return signature_of(info, function)
-        return Signature(name, None, I32_SLOT)
-
-    def _abi_at(self, address: int) -> FloatAbi:
-        for image in reversed(self._images):
-            if any(s.start <= address < s.start + s.memory_size for s in image.segments):
-                return image.abi
-        return FloatAbi.SOFT
-
-    def _type_view(self, debug_type: DebugType | str, address: int) -> Var | None:
-        for info in reversed(self._debug_infos()):
-            if isinstance(debug_type, str):
-                type_id = info.types.get(debug_type)
-                if type_id is not None:
-                    return Var(self._memory, info, type_id, address, debug_type)
-                continue
-            for type_id, candidate in info.by_id.items():
-                if candidate is debug_type:
-                    name = next((n for n, t in info.types.items() if t == type_id), "block")
-                    return Var(self._memory, info, type_id, address, name)
-        return None
 
     @overload
     def intercept(
@@ -2278,17 +2155,19 @@ class Machine:
             raise stop_error(stop, f"the step out of {target.name}", error_prefix(self))
         if target.exception:
             return None
-        signature = self._signature(target.name, target.start)
+        signature = _machine_call.call_signature(self, target.name, target.start)
         if signature.void:
             return None
         slot = signature.returns
-        abi = _core.FloatAbi(self._abi_at(target.start).value)
+        abi = _core.FloatAbi(_machine_call.abi_at(self, target.start).value)
         return decode(slot, self._handle.result_bits(slot.kind, abi))
 
     def _check_returns(self, target: Returning) -> None:
         if target.exception:
             return
-        unsupported = self._signature(target.name, target.start).returns_unsupported
+        unsupported = _machine_call.call_signature(
+            self, target.name, target.start
+        ).returns_unsupported
         if unsupported is not None:
             raise NotImplementedError(unsupported)
 

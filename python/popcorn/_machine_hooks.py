@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
-from popcorn import _core
+from popcorn import _core, _machine_call
 from popcorn._call import decode
 from popcorn._enums import StopReason
 from popcorn._errors import MachineBusy, MachineRunning
@@ -33,7 +33,7 @@ def install_intercept(
 ) -> Intercept:
     machine._require_stopped()
     entry = machine.address_of(fn)
-    signature = machine._signature(fn, entry)
+    signature = _machine_call.call_signature(machine, fn, entry)
     log = machine._logs.setdefault(entry, [])
 
     def native(view: _core.InterceptCall) -> _core.InterceptResult:
@@ -101,7 +101,7 @@ def return_decoder(machine: Machine, fn: int | str | Symbol) -> tuple[
 ]:
     machine._require_stopped()
     entry = machine.address_of(fn)
-    signature = machine._signature(fn, entry)
+    signature = _machine_call.call_signature(machine, fn, entry)
     if signature.params is None and signature.unsupported is None:
         raise TypeError(f"{signature.name} has no DWARF signature for on_return")
     params = signature.params or ()

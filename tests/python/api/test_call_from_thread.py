@@ -54,9 +54,14 @@ def test_a_call_at_once_runs_over_the_handler(callee: popcorn.Machine) -> None:
         silent = ticks_now(callee, False)
     assert (silent.value, silent.ipsr, silent.began) == (t, SYSTICK, True)
     callee.restore(start)
+
+    async def warned_call() -> popcorn.CallResult:
+        return await callee.call("ticks_now", from_thread=None, budget=None)
+
     with pytest.warns(popcorn.HandlerCallWarning, match="exception 15") as caught:
-        warned = ticks_now(callee, None)
+        warned = asyncio.run(warned_call())
     assert len(caught) == 1
+    assert caught[0].filename == __file__
     assert (warned.value, warned.ipsr) == (t, SYSTICK)
 
 
