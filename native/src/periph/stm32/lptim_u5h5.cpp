@@ -1,6 +1,6 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
-#include "lptim_v2_rows.hpp"
+#include "lptim_u5h5_rows.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 

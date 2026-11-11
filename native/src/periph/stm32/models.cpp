@@ -15,7 +15,7 @@
 #include "iwdg_rows.hpp"
 #include "lpgpio_rows.hpp"
 #include "lptim_l4_rows.hpp"
-#include "lptim_v2_rows.hpp"
+#include "lptim_u5h5_rows.hpp"
 #include "mdf_rows.hpp"
 #include "pwr_rows.hpp"
 #include "rcc_rows.hpp"
