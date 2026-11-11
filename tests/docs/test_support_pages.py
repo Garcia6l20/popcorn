@@ -538,7 +538,7 @@ L1_MODEL_SOURCES = (
     "flash_l1.cpp",
     "exti_l1l4.cpp",
     "dma_classic.cpp",
-    "i2c_v1.cpp",
+    "i2c_l1.cpp",
     "rtc_l1l4.cpp",
     "spi_l1l4.cpp",
     "syscfg_l1l4.cpp",
