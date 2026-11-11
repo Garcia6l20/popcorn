@@ -117,17 +117,17 @@ Not modelled:
   `test_a_value_the_u5_family_refuses_raises_before_the_machine_is_built`.
 - Without `option_bytes`, FLASH_OPTR reads 0, the description's reset, not the production
   0x1FEFF8AA. With `option_bytes` the reserved bits read their production values.
-  `stm32/test_flash.cpp` "without option bytes the option registers are the description's
+  `stm32/test_flash_u5.cpp` "without option bytes the option registers are the description's
   storage" and `test_option_bytes.py` `test_tzen_1_reads_the_encoded_option_bytes`.
 - Privilege filters without TrustZone. TZSC `PRIVCFGRx`, MPCBB `PRIVCFGRx` and FLASH `PRIVBBRx`
-  filter only under TZEN=1. Under TZEN=0 they are storage. `stm32/test_gtzc.cpp` "without
+  filter only under TZEN=1. Under TZEN=0 they are storage. `stm32/test_gtzc_u5.cpp` "without
   TrustZone no GTZC block has a model".
 - MPU enforcement. The MPU is storage only, so TT reports MRVALID 0 with an MPU region
   programmed, and SG checks no MPU region. `arch/test_scs_security.cpp` "TT reports MRVALID 0".
 - RDP level 0.5 and the external-memory watermarks MPCWM1 to MPCWM3, MPCWM5 and MPCWM6. popcorn
   has no OCTOSPI or FMC model. Not tested, nothing to reach.
 - Execution from BKPSRAM. MPCWM4 filters data accesses only: BKPSRAM is execute-never in the
-  default memory map, so no fetch reaches the filter. `stm32/test_gtzc.cpp` "an MPCWM4 store
+  default memory map, so no fetch reaches the filter. `stm32/test_gtzc_u5.cpp` "an MPCWM4 store
   that makes a BKPSRAM sub-region Non-secure".
 - RTC and TAMP `SECCFGR` and `PRIVCFGR`. They are storage and log one model_warning each under
   TrustZone. RCC BDRST and the RTC clock bits follow the stored secure functions.
@@ -155,7 +155,7 @@ Register rules:
 - Without TrustZone the GTZC TZSC `SECCFGRx`, `PRIVCFGRx` and `CR` and every MPCBB register are
   storage at the SVD reset with no model. RM0456 3.5.7 makes the secure registers of a
   TrustZone-aware peripheral RAZ/WI then, so the MPCBB `SECCFGRx` and `PRIVCFGRx` read
-  0xFFFFFFFF where silicon reads 0. `stm32/test_gtzc.cpp` "without TrustZone no GTZC block has
+  0xFFFFFFFF where silicon reads 0. `stm32/test_gtzc_u5.cpp` "without TrustZone no GTZC block has
   a model".
 - Without TrustZone `EXTI_SECCFGR1` and the GPDMA and LPDMA `SECCFGR` stay storage. RM0456
   states no TZEN=0 rule for them. `stm32/test_tz_aware.cpp` "EXTI_SECCFGR1 stays storage under
@@ -165,10 +165,10 @@ Register rules:
   read-only. `stm32/test_tz_aware.cpp` "popcorn takes a CxTR1 write while EN".
 - A peek or poke of a channel's `SECCFGR`, `PRIVCFGR` or `CxTR1` reaches the channel at its
   next transfer, not during the current one. Not tested, host storage access only.
-- MPCBB registers of super-blocks past the SRAM read 0 and drop writes. `stm32/test_gtzc.cpp`
+- MPCBB registers of super-blocks past the SRAM read 0 and drop writes. `stm32/test_gtzc_u5.cpp`
   "RM0456 5.3 Table 33: the U575 MPCBB1 has 12 super-blocks".
 - A Non-secure read of the TZSC `CR` or `CFGLOCKRx` raises the illegal access event of RM0456
-  3.5.5. RM0456 5.5 states it only for the TZIC. `stm32/test_gtzc.cpp` "RM0456 5.7: TZIC
+  3.5.5. RM0456 5.5 states it only for the TZIC. `stm32/test_gtzc_u5.cpp` "RM0456 5.7: TZIC
   registers are Secure privileged only" pins the TZIC. The `CR` and `CFGLOCKRx` event is not
   tested.
 - A TZSC or TZIC that a Python or plugin model replaces turns its checks off: its peripherals are
@@ -189,7 +189,7 @@ Bus filter:
   vectors where silicon reads 0. Not tested, a boot that silicon refuses.
 - A fetch raises the illegal access event only when it is a Secure fetch of a Non-secure SRAM
   block or BKPSRAM sub-region. A Non-secure fetch, any flash fetch and an unprivileged fetch only
-  BusFault. `stm32/test_gtzc.cpp` "RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault".
+  BusFault. `stm32/test_gtzc_u5.cpp` "RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault".
 - A Non-secure DMA read of Secure SRAM returns 0 and a write is dropped, with the TZIC event and
   no DTEF. `stm32/test_tz_aware.cpp` "RM0456 17.4.14, 5.4.2: a Non-secure channel reads Secure
   SRAM as zeros".
@@ -297,7 +297,7 @@ Debug blocks:
 
 - The TPIU, ETM, CTI and both ROM tables have no model. They read 0 and drop writes with one
   model_warning per block, and raise ModelError under `strict` and from the host.
-  `stm32/test_gtzc.cpp` "RM0456 75.5: the U5 debug blocks without a model" and
+  `stm32/test_gtzc_u5.cpp` "RM0456 75.5: the U5 debug blocks without a model" and
   `test_debug_blocks.py`.
 - The ROM tables read 0, not the RM0456 Tables 797 and 798 entries, so a ROM table walk ends at
   its first entry. Pinned by the zero reads only.
