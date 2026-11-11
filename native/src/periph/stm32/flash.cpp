@@ -5605,27 +5605,6 @@ constexpr auto u5_flash_5bit_parts = std::to_array<std::string_view>({"STM32U535
 constexpr auto u5_flash_8bit_parts =
     std::to_array<std::string_view>({"STM32U59*", "STM32U5A*", "STM32U5F*", "STM32U5G*"});
 
-struct flash_entry
-{
-  builtin       row;
-  flash_variant variant;
-};
-
-template <std::meta::info Factory, std::meta::info Variant>
-consteval auto flash_entry_of(row_key key) -> flash_entry
-{
-  if constexpr(std::meta::remove_cvref(std::meta::type_of(Variant)) == ^^flash_l1_variant)
-  {
-    return {row_of<Factory, Variant, ^^board::flash>(key), flash_l1_of<([:Variant:])>};
-  }
-  else
-  {
-    auto row    = row_of<Factory, ^^void, ^^board::flash>(key);
-    row.variant = std::meta::identifier_of(Variant);
-    return {row, [:Variant:]};
-  }
-}
-
 constexpr auto flash_entries = std::to_array<flash_entry>({
     flash_entry_of<^^flash_factory, ^^flash_5bit>(
         {.ip              = "flash",
@@ -5643,20 +5622,6 @@ constexpr auto flash_entries = std::to_array<flash_entry>({
         {.ip = "flash", .ip_version_glob = "v1.0.0_H5_Cube", .families = family::h5}),
     flash_entry_of<^^flash_l4_factory, ^^flash_l4>(
         {.ip = "Flash", .ip_version_glob = "", .families = family::l4}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat1>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat1", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2_pcrop>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2_pcrop", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3_pcrop>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3_pcrop", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat46>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat46", .families = family::l1}),
-    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat5>(
-        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat5", .families = family::l1}),
 });
 
 template <std::size_t... Index> constexpr auto flash_rows_of(std::index_sequence<Index...>)
@@ -5676,7 +5641,8 @@ auto flash_variant_of(part_description const& part, peripheral_desc const& unit)
 {
   auto const* const row =
       select_in(flash_row_table, unit.ip, unit.ip_version, part.part, unit.name);
-  return row == nullptr ? flash_variant{} : flash_entries[row - flash_row_table.data()].variant;
+  return row == nullptr ? flash_l1_variant_of(part, unit)
+                        : flash_entries[row - flash_row_table.data()].variant;
 }
 
 }

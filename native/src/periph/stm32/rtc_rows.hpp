@@ -134,6 +134,9 @@ inline constexpr rtc_l1l4_variant l4_rtc{
  */
 [[nodiscard]] auto tamp_factory(rtc_variant variant) -> model_factory;
 
-/** @brief The RTC and TAMP model rows. */
-[[nodiscard]] auto rtc_rows() -> std::span<builtin const>;
+/** @brief The STM32U5 and STM32H5 RTC and TAMP model rows. */
+[[nodiscard]] auto rtc_u5h5_rows() -> std::span<builtin const>;
+
+/** @brief The STM32L1 and STM32L4 RTC model rows. */
+[[nodiscard]] auto rtc_l1l4_rows() -> std::span<builtin const>;
 }

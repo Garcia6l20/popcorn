@@ -1813,4 +1813,19 @@ auto otg_fs_factory(decltype(board::usb_hosts) const& hosts, otg_fs_variant cons
 {
   return usb_device_factory<otg_fs>(hosts, variant);
 }
+
+namespace
+{
+constexpr auto otg_fs_row_table = std::to_array<builtin>({
+    row_of<^^otg_fs_factory, ^^u5_otg_fs, ^^board::usb_hosts>(
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v3_0_Cube", .families = family::u5}),
+    row_of<^^otg_fs_factory, ^^l4_otg_fs, ^^board::usb_hosts>(
+        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v2_0_Cube", .families = family::l4}),
+});
+}
+
+auto otg_fs_rows() -> std::span<builtin const>
+{
+  return otg_fs_row_table;
+}
 }

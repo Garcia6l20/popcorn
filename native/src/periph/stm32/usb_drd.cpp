@@ -1589,11 +1589,7 @@ auto usb_packet_memory_factory(std::string_view controller) -> model_factory
 
 namespace
 {
-constexpr auto usb_row_table = std::to_array<builtin>({
-    row_of<^^otg_fs_factory, ^^u5_otg_fs, ^^board::usb_hosts>(
-        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v3_0_Cube", .families = family::u5}),
-    row_of<^^otg_fs_factory, ^^l4_otg_fs, ^^board::usb_hosts>(
-        {.ip = "USB_OTG_FS", .ip_version_glob = "otgfs1_v2_0_Cube", .families = family::l4}),
+constexpr auto usb_drd_row_table = std::to_array<builtin>({
     row_of<^^usb_drd_factory, ^^h5_usb, ^^board::usb_hosts>(
         {.ip = "USB", .ip_version_glob = "usbfs_v1*", .families = family::h5}),
     row_of<^^usb_drd_factory, ^^l1_usb, ^^board::usb_hosts>(
@@ -1603,8 +1599,8 @@ constexpr auto usb_row_table = std::to_array<builtin>({
 });
 }
 
-auto usb_rows() -> std::span<builtin const>
+auto usb_drd_rows() -> std::span<builtin const>
 {
-  return usb_row_table;
+  return usb_drd_row_table;
 }
 }

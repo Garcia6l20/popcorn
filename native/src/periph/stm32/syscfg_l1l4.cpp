@@ -470,20 +470,18 @@ auto syscfg_l1l4_factory(syscfg_l1l4_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto syscfg_table = std::to_array<builtin>({
+constexpr auto syscfg_l1l4_row_table = std::to_array<builtin>({
     row_of<^^syscfg_l1l4_factory, ^^l1_syscfg>(
         {.ip = "SYSCFG", .ip_version_glob = "", .families = family::l1}),
     row_of<^^syscfg_l1l4_factory, ^^l1_syscfg_cat12>(
         {.ip = "SYSCFG", .ip_version_glob = "STM32L1_exti_23", .families = family::l1}),
     row_of<^^syscfg_l1l4_factory, ^^l4_syscfg>(
         {.ip = "SYS", .ip_version_glob = "STM32L47x_sys_*", .families = family::l4}),
-    row_of<^^syscfg_factory>(
-        {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .families = family::u5}),
 });
 }
 
-auto syscfg_rows() -> std::span<builtin const>
+auto syscfg_l1l4_rows() -> std::span<builtin const>
 {
-  return syscfg_table;
+  return syscfg_l1l4_row_table;
 }
 }

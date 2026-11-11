@@ -113,6 +113,9 @@ inline constexpr exti_l1l4_variant l4_exti{.banks = l4_exti_banks, .irqs = l4_ex
  */
 [[nodiscard]] auto exti_l1l4_factory(exti_l1l4_variant variant) -> model_factory;
 
-/** @brief The EXTI model rows. */
-[[nodiscard]] auto exti_rows() -> std::span<builtin const>;
+/** @brief The STM32U5 and STM32H5 EXTI model rows. */
+[[nodiscard]] auto exti_u5h5_rows() -> std::span<builtin const>;
+
+/** @brief The STM32L1 and STM32L4 EXTI model rows. */
+[[nodiscard]] auto exti_l1l4_rows() -> std::span<builtin const>;
 }

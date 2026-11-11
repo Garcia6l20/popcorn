@@ -2160,4 +2160,17 @@ auto i2c_l1_factory(
         controller != controllers.end() ? controller->second : nullptr, variant);
   };
 }
+
+namespace
+{
+constexpr auto i2c_l1_row_table = std::to_array<builtin>({
+    row_of<^^i2c_l1_factory, ^^l1_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+        {.ip = "I2C", .ip_version_glob = "i2c1_v1_*", .families = family::l1}),
+});
+}
+
+auto i2c_l1_rows() -> std::span<builtin const>
+{
+  return i2c_l1_row_table;
+}
 }

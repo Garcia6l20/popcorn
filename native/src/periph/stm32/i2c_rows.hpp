@@ -71,4 +71,7 @@ inline constexpr i2c_l1_variant l1_i2c{.kernel_buses = l1_apb_windows};
 
 /** @brief The I2C model rows. */
 [[nodiscard]] auto i2c_rows() -> std::span<builtin const>;
+
+/** @brief The STM32L1 I2C model rows. */
+[[nodiscard]] auto i2c_l1_rows() -> std::span<builtin const>;
 }

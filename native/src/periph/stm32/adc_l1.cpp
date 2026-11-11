@@ -1933,4 +1933,19 @@ auto adc_l1_factory(supply_options supply, adc_l1_variant variant) -> model_fact
         return std::make_shared<adc_l1_model>(ctx, desc, supply, variant);
       };
 }
+
+namespace
+{
+constexpr auto adc_l1_row_table = std::to_array<builtin>({
+    row_of<^^adc_l1_factory, ^^l1_adc, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "aditf3_v1*", .families = family::l1}),
+    row_of<^^adc_l1_factory, ^^l1_cat12_adc, ^^board::supply>(
+        {.ip = "ADC", .ip_version_glob = "STM32L1_adc_cat12", .families = family::l1}),
+});
+}
+
+auto adc_l1_rows() -> std::span<builtin const>
+{
+  return adc_l1_row_table;
+}
 }

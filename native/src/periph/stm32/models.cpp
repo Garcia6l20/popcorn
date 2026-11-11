@@ -61,13 +61,14 @@ auto builtins() -> std::span<builtin const>
   static auto const table = [] {
     std::vector<builtin> all;
     for(auto const rows :
-        {rcc_rows(),        pwr_rows(),  flash_rows(),  caches_rows(),   crs_rows(),
-         gpio_rows(),       exti_rows(), syscfg_rows(), dma_l1l4_rows(), gpdma_rows(),
-         lptim_l4_rows(),   tim_rows(),  usart_rows(),  i2c_rows(),      spi_rows(),
-         usb_rows(),        adc_rows(),  dac_rows(),    iwdg_rows(),     rtc_rows(),
-         sai_rows(),        mdf_rows(),  dbgmcu_rows(), crc_rows(),      hash_rows(),
-         rng_rows(),        gtzc_rows(), sbs_rows(),    wwdg_rows(),     lpgpio_rows(),
-         lptim_u5h5_rows(), adc4_rows()})
+        {rcc_rows(),       pwr_rows(),      flash_rows(),     flash_l1_rows(),   caches_rows(),
+         crs_rows(),       gpio_rows(),     exti_u5h5_rows(), exti_l1l4_rows(),  syscfg_l1l4_rows(),
+         syscfg_u5_rows(), dma_l1l4_rows(), gpdma_rows(),     lptim_l4_rows(),   tim_rows(),
+         usart_rows(),     i2c_rows(),      i2c_l1_rows(),    spi_u5h5_rows(),   spi_l1l4_rows(),
+         usb_drd_rows(),   otg_fs_rows(),   adc_rows(),       adc_l1_rows(),     dac_rows(),
+         iwdg_rows(),      rtc_u5h5_rows(), rtc_l1l4_rows(),  sai_rows(),        mdf_rows(),
+         dbgmcu_rows(),    crc_rows(),      hash_rows(),      rng_rows(),        gtzc_rows(),
+         sbs_rows(),       wwdg_rows(),     lpgpio_rows(),    lptim_u5h5_rows(), adc4_rows()})
     {
       all.insert(all.end(), rows.begin(), rows.end());
     }

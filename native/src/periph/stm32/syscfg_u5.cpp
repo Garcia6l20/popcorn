@@ -238,4 +238,17 @@ auto syscfg_factory() -> model_factory
     return std::make_shared<syscfg>(ctx, desc);
   };
 }
+
+namespace
+{
+constexpr auto syscfg_u5_row_table = std::to_array<builtin>({
+    row_of<^^syscfg_factory>(
+        {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .families = family::u5}),
+});
+}
+
+auto syscfg_u5_rows() -> std::span<builtin const>
+{
+  return syscfg_u5_row_table;
+}
 }

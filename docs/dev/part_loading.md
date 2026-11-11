@@ -35,7 +35,7 @@ flowchart TD
 | Machine | `Machine` in `python/popcorn/_machine.py`, `options_of` in `native/src/bind/machine.cpp` | Board options and per-name models become `machine_options::models`, a map from instance name to factory |
 | Registry | `register_builtin_models` in `native/src/periph/stm32/models.cpp`, `find_model` in `native/src/periph/registry.cpp` | Importing `popcorn._core` loads `libpopcorn_stm32`, whose entry point registers one closure per distinct `(ip, ip_version glob)` pair of the row table |
 | Attach | `machine::run_state::attach_peripherals` in `native/src/core/peripherals.cpp` | Per peripheral, in description order: the machine option for the name wins, else `find_model` |
-| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, families, lines and instance globs all match. The table is the row set of each model, `rcc_rows()`, `pwr_rows()`, `flash_rows()` and so on, one `<ip>_rows()` per `<ip>_rows.hpp` |
+| Row | `select_row` in `models.cpp` | The first row of the table (`builtins()`) whose ip, version glob, families, lines and instance globs all match. The table is the row set of each model, `rcc_rows()`, `pwr_rows()`, `flash_rows()` and so on, one `<model source stem>_rows()` per model source, declared in its IP's `<ip>_rows.hpp` (`exti_u5h5_rows()`, `exti_l1l4_rows()`) |
 | Factory | `<ip>_rows.hpp` next to the model | The row's `make` calls a factory, often with a `*_variant` from the same header |
 | Model | `stm32_model` in `native/src/periph/stm32/model_base.hpp` | `reg` and `field` bind registers by name, `expect_register` and `expect_field` check the description against the variant |
 

@@ -262,6 +262,9 @@ inline constexpr std::string_view usb_packet_memory_controller = "USB";
  */
 [[nodiscard]] auto usb_packet_memory_factory(std::string_view controller) -> model_factory;
 
-/** @brief The USB model rows. */
-[[nodiscard]] auto usb_rows() -> std::span<builtin const>;
+/** @brief The USB model rows of the STM32H5 and STM32L1. */
+[[nodiscard]] auto usb_drd_rows() -> std::span<builtin const>;
+
+/** @brief The STM32U5 and STM32L4 USB_OTG_FS model rows. */
+[[nodiscard]] auto otg_fs_rows() -> std::span<builtin const>;
 }

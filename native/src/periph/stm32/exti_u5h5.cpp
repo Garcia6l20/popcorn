@@ -281,4 +281,17 @@ auto exti_factory() -> model_factory
     return std::make_shared<exti>(ctx, desc);
   };
 }
+
+namespace
+{
+constexpr auto exti_u5h5_row_table = std::to_array<builtin>({
+    row_of<^^exti_factory>(
+        {.ip = "EXTI", .ip_version_glob = "", .families = family::u5 | family::h5}),
+});
+}
+
+auto exti_u5h5_rows() -> std::span<builtin const>
+{
+  return exti_u5h5_row_table;
+}
 }

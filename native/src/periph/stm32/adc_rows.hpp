@@ -75,4 +75,7 @@ inline constexpr adc_l1_variant l1_cat12_adc{
 
 /** @brief The ADC model rows. */
 [[nodiscard]] auto adc_rows() -> std::span<builtin const>;
+
+/** @brief The STM32L1 ADC model rows. */
+[[nodiscard]] auto adc_l1_rows() -> std::span<builtin const>;
 }

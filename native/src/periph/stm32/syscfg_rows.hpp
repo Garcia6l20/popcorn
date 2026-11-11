@@ -127,6 +127,9 @@ inline constexpr syscfg_l1l4_variant l1_syscfg_cat12{
  */
 [[nodiscard]] auto syscfg_l1l4_factory(syscfg_l1l4_variant variant) -> model_factory;
 
-/** @brief The SYSCFG model rows. */
-[[nodiscard]] auto syscfg_rows() -> std::span<builtin const>;
+/** @brief The STM32L1 and STM32L4 SYSCFG model rows. */
+[[nodiscard]] auto syscfg_l1l4_rows() -> std::span<builtin const>;
+
+/** @brief The STM32U5 SYSCFG model rows. */
+[[nodiscard]] auto syscfg_u5_rows() -> std::span<builtin const>;
 }

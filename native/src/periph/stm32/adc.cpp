@@ -4351,10 +4351,6 @@ constexpr auto adc_row_table = std::to_array<builtin>({
         {.ip = "ADC", .ip_version_glob = "aditf5_v2_0*", .families = family::l4}),
     row_of<^^adc_common_l4_factory>(
         {.ip = "ADC_Common", .ip_version_glob = "", .families = family::l4}),
-    row_of<^^adc_l1_factory, ^^l1_adc, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "aditf3_v1*", .families = family::l1}),
-    row_of<^^adc_l1_factory, ^^l1_cat12_adc, ^^board::supply>(
-        {.ip = "ADC", .ip_version_glob = "STM32L1_adc_cat12", .families = family::l1}),
 });
 }
 

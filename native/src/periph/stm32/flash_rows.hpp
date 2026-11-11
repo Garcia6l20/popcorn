@@ -183,6 +183,28 @@ inline constexpr flash_variant flash_l1_of{.encode_options = l1_encode_options_o
 [[nodiscard]] auto flash_l1_factory(flash_options const& options, flash_l1_variant variant)
     -> model_factory;
 
+/** @brief A FLASH model row with the variant its units use. */
+struct flash_entry
+{
+  builtin       row;
+  flash_variant variant;
+};
+
+template <std::meta::info Factory, std::meta::info Variant>
+consteval auto flash_entry_of(row_key key) -> flash_entry
+{
+  if constexpr(std::meta::remove_cvref(std::meta::type_of(Variant)) == ^^flash_l1_variant)
+  {
+    return {row_of<Factory, Variant, ^^board::flash>(key), flash_l1_of<([:Variant:])>};
+  }
+  else
+  {
+    auto row    = row_of<Factory, ^^void, ^^board::flash>(key);
+    row.variant = std::meta::identifier_of(Variant);
+    return {row, [:Variant:]};
+  }
+}
+
 /**
  * @brief The FLASH variant of the model row that serves a unit of @p part.
  * @param part Description the machine is built from.
@@ -192,6 +214,18 @@ inline constexpr flash_variant flash_l1_of{.encode_options = l1_encode_options_o
 [[nodiscard]] auto flash_variant_of(part_description const& part, peripheral_desc const& unit)
     -> flash_variant;
 
-/** @brief The FLASH model rows. */
+/** @brief The FLASH model rows of the STM32U5, STM32H5 and STM32L4. */
 [[nodiscard]] auto flash_rows() -> std::span<builtin const>;
+
+/** @brief The FLASH model rows of the STM32L1. */
+[[nodiscard]] auto flash_l1_rows() -> std::span<builtin const>;
+
+/**
+ * @brief The FLASH variant of the STM32L1 model row that serves a unit of @p part.
+ * @param part Description the machine is built from.
+ * @param unit FLASH unit of @p part.
+ * @return The row's variant, the default one when no row serves the unit.
+ */
+[[nodiscard]] auto flash_l1_variant_of(part_description const& part, peripheral_desc const& unit)
+    -> flash_variant;
 }

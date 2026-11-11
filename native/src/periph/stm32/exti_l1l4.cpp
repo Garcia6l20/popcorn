@@ -413,9 +413,7 @@ auto exti_l1l4_factory(exti_l1l4_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto exti_table = std::to_array<builtin>({
-    row_of<^^exti_factory>(
-        {.ip = "EXTI", .ip_version_glob = "", .families = family::u5 | family::h5}),
+constexpr auto exti_l1l4_row_table = std::to_array<builtin>({
     row_of<^^exti_l1l4_factory, ^^l1_exti_24>(
         {.ip = "EXTI", .ip_version_glob = "", .families = family::l1}),
     row_of<^^exti_l1l4_factory, ^^l1_exti_23>(
@@ -425,8 +423,8 @@ constexpr auto exti_table = std::to_array<builtin>({
 });
 }
 
-auto exti_rows() -> std::span<builtin const>
+auto exti_l1l4_rows() -> std::span<builtin const>
 {
-  return exti_table;
+  return exti_l1l4_row_table;
 }
 }

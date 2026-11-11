@@ -87,6 +87,9 @@ inline constexpr spi_l1l4_variant l4_spi{
     decltype(board::spi_controllers) const& controllers,
     spi_l1l4_variant                        variant) -> model_factory;
 
-/** @brief The SPI model rows. */
-[[nodiscard]] auto spi_rows() -> std::span<builtin const>;
+/** @brief The STM32U5 and STM32H5 SPI model rows. */
+[[nodiscard]] auto spi_u5h5_rows() -> std::span<builtin const>;
+
+/** @brief The STM32L1 and STM32L4 SPI model rows. */
+[[nodiscard]] auto spi_l1l4_rows() -> std::span<builtin const>;
 }

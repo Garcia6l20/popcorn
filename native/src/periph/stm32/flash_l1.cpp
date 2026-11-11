@@ -1738,4 +1738,45 @@ auto l1_encode_options(
   }
   return address{*second};
 }
+
+namespace
+{
+constexpr auto flash_l1_entries = std::to_array<flash_entry>({
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat1>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat1", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat2_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat2_pcrop", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3_pcrop>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3_pcrop", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat3>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat3", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat46>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat46", .families = family::l1}),
+    flash_entry_of<^^flash_l1_factory, ^^l1_flash_cat5>(
+        {.ip = "Flash", .ip_version_glob = "STM32L1_flash_cat5", .families = family::l1}),
+});
+
+template <std::size_t... Index> constexpr auto flash_l1_rows_of(std::index_sequence<Index...>)
+{
+  return std::array<builtin, sizeof...(Index)>{flash_l1_entries[Index].row...};
+}
+
+constexpr auto flash_l1_row_table =
+    flash_l1_rows_of(std::make_index_sequence<flash_l1_entries.size()>{});
+}
+
+auto flash_l1_rows() -> std::span<builtin const>
+{
+  return flash_l1_row_table;
+}
+
+auto flash_l1_variant_of(part_description const& part, peripheral_desc const& unit) -> flash_variant
+{
+  auto const* const row =
+      select_in(flash_l1_row_table, unit.ip, unit.ip_version, part.part, unit.name);
+  return row == nullptr ? flash_variant{}
+                        : flash_l1_entries[row - flash_l1_row_table.data()].variant;
+}
 }

@@ -1573,4 +1573,21 @@ auto rtc_l1l4_factory(std::optional<std::chrono::sys_seconds> initial, rtc_l1l4_
     return std::make_shared<rtc_l1l4>(ctx, desc, initial, variant);
   };
 }
+
+namespace
+{
+constexpr auto rtc_l1l4_row_table = std::to_array<builtin>({
+    row_of<^^rtc_l1l4_factory, ^^l1_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_5*", .families = family::l1}),
+    row_of<^^rtc_l1l4_factory, ^^l1_cat1_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "STM32L1_rtc_cat1", .families = family::l1}),
+    row_of<^^rtc_l1l4_factory, ^^l4_rtc, ^^board::rtc_initial>(
+        {.ip = "RTC", .ip_version_glob = "rtc2_v2_4*", .families = family::l4}),
+});
+}
+
+auto rtc_l1l4_rows() -> std::span<builtin const>
+{
+  return rtc_l1l4_row_table;
+}
 }
