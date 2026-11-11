@@ -574,8 +574,13 @@ def test_a_cut_window_stays_in_system_time_across_a_receiver_reset(pair: Build) 
     assert [index for index, cut, _ in plain if cut] == [*range(12, 32), 37, 38, 39]
 
 
-def owner_after_resets(pair: Build, until_complete: bool) -> tuple[Seen, list[TapFrame]]:
-    system = pair()
+def owner_after_resets(
+    pair: Build,
+    until_complete: bool,
+    slice_instructions: int = 1_000_000,
+    third: VirtualDuration | None = None,
+) -> tuple[Seen, list[TapFrame]]:
+    system = pair(slice_instructions, third)
     a = system.members["a"]
     asyncio.run(to(system, at(100)))
     system.reset("a", ResetKind.POWER_ON)
@@ -621,6 +626,23 @@ def intercept_lag(u575: popcorn.PartDescription) -> int:
     return seen[0] - reached.time.ps
 
 
+def test_an_intercept_time_is_the_same_at_every_quantum_and_slicing(pair: Build) -> None:
+    runs = [
+        owner_after_resets(pair, False, slice_instructions, third)
+        for slice_instructions in (1_000_000, 997)
+        for third in (None, us(3))
+    ]
+    first, *rest = runs
+    assert first[0]
+    assert all(other == first for other in rest)
+
+
+def test_an_intercept_reads_the_time_a_run_to_its_site_stops_at(
+    u575: popcorn.PartDescription,
+) -> None:
+    assert intercept_lag(u575) == 0
+
+
 def test_a_callback_s_time_is_the_owner_s_system_time_after_its_resets(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
@@ -629,7 +651,7 @@ def test_a_callback_s_time_is_the_owner_s_system_time_after_its_resets(
     [(start, own)] = seen
     [(stopped_at, _)] = reached
     assert start == own
-    assert start.ps - stopped_at.ps == intercept_lag(u575)
+    assert start == stopped_at
     assert start > at(200)
     before = [f for f in frames if f.start < start]
     after = [f for f in frames if f.start >= start]

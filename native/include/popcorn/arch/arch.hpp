@@ -459,6 +459,22 @@ public:
   }
 
   /**
+   * @brief Whether the instruction at @p to lies inside a Thumb IT block that starts at or after
+   *        @p from, decoding code memory. The instruction after the IT instruction is the first
+   *        inside it, the IT instruction itself and the instruction after the block are outside.
+   *        The engine ends no run at an instruction inside such a block, and the IT state in the
+   *        CPU registers is not current at a code hook there.
+   * @param from Address of the first instruction of the translated block.
+   * @param to Address of an instruction after it.
+   * @return Whether it lies inside an IT block, false when the arch has none or cannot decode.
+   */
+  [[nodiscard]] virtual auto
+      inside_it_block([[maybe_unused]] address from, [[maybe_unused]] address to) const -> bool
+  {
+    return false;
+  }
+
+  /**
    * @brief Whether the instruction that ends at @p to ends the translated block holding it, by
    *        its encoding: a branch, a write to the program counter, an exception or a system
    *        instruction the engine ends a block after. A block also ends where the engine's page

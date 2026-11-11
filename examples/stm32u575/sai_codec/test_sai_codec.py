@@ -120,8 +120,8 @@ async def test_half_and_complete_callbacks_come_per_2d_block_of_64_frames(
     }
     started = codec(sai_codec).started_ps
     for name, frames, earliest, latest in (
-        ("rx_half", FRAMES // 2, us(12.66), us(12.84)),
-        ("rx_complete", FRAMES, us(16.41), us(16.59)),
+        ("rx_half", FRAMES // 2, us(11.40), us(11.60)),
+        ("rx_complete", FRAMES, us(15.15), us(15.35)),
     ):
         due = [started + (frames + buffer * FRAMES) * FRAME_PS for buffer in range(BUFFERS)]
         late = [time - when for time, when in zip(seen[name], due, strict=True)]

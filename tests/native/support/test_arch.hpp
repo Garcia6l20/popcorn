@@ -127,6 +127,7 @@ public:
   [[nodiscard]] auto pc() const -> address override;
   [[nodiscard]] auto instructions_between(address from, address to) const
       -> std::optional<std::uint32_t> override;
+  [[nodiscard]] auto inside_it_block(address from, address to) const -> bool override;
   [[nodiscard]] auto ends_block_before(address from, address to) const
       -> std::optional<bool> override;
   [[nodiscard]] auto resume_address() const -> address override;

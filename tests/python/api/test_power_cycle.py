@@ -301,7 +301,7 @@ TORN_ERASE = 0x27_F000
 SCAN_LOAD = 0x10
 SCAN_AFTER_LOAD = 0x14
 SCB_ICSR = 0xE000_ED04
-STORED_AT = VirtualTime(384_750_000)
+STORED_AT = VirtualTime(384_500_000)
 
 
 def record() -> bytes:

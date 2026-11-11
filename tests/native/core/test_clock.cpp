@@ -430,6 +430,46 @@ TEST_CASE("random public calls never put the epoch past the count or wrap the ti
   CHECK(held_calls > 3'000);
 }
 
+TEST_CASE(
+    "a rewind takes back the charged instructions, at most to the epoch start, and holds nothing")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  CHECK(driver.rewind({0}) == popcorn::icount{0});
+  CHECK(driver.rewind({30}) == popcorn::icount{30});
+  CHECK(driver.exact_now().value == 70);
+  CHECK(clock.now().value == 70);
+  CHECK(clock.time() == popcorn::vtime{70'000'000});
+  CHECK(driver.state().held == popcorn::icount{0});
+  driver.advance({30});
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+
+  clock.set_core_hz(2'000'000);
+  driver.advance({10});
+  CHECK(driver.rewind({500}) == popcorn::icount{10});
+  CHECK(driver.exact_now().value == 100);
+  CHECK(driver.state().epoch_icount == driver.state().now);
+  CHECK(driver.rewind({1}) == popcorn::icount{0});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("a rewind below a retract's hold leaves the held values")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({40});
+  CHECK(driver.rewind({10}) == popcorn::icount{10});
+  CHECK(driver.exact_now().value == 50);
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({10});
+  CHECK(driver.exact_now().value == 60);
+  CHECK(clock.now().value == 100);
+}
+
 TEST_CASE("a restore drops the held values")
 {
   popcorn::core::clock        clock{1'000'000};

@@ -1811,13 +1811,25 @@ struct machine::run_state
     return stop_pending() or now >= deadline or now >= owner.scheduler_.earliest();
   }
 
-  /** @brief Virtual time at the start of the instruction at @p addr, which the code hook of
-   * the running block reports. A clock rate write does not end the block. A CPU write to a
-   * model that drives the core clock starts the new epoch inside the block, before any later
-   * arrival in it, so the arrival takes the time a parked run to @p addr stops at. A rate
-   * change by another initiator during the block starts the epoch at the block's charged end:
-   * an arrival before that is raised to the epoch start, at most one block late. */
-  [[nodiscard]] auto arrival_time(address addr) const -> vtime;
+  /** @brief Where a code site lies in the block charged at its entry. */
+  struct site_tail
+  {
+    /** @brief Instructions of the block from the site on, the site included, that the clock was
+     * charged for and the engine does not run when the site stops or returns. 0 for a site the
+     * run cannot end at. */
+    std::uint32_t tail{};
+    /** @brief Whether the site lies inside a Thumb IT block, where the engine ends no run. */
+    bool in_it{};
+  };
+
+  /**
+   * @brief Where the site at @p addr lies in the current block. Empty for a single-stepped run and
+   *        for an address no instruction of the block starts at: an emulated instruction, whose
+   *        clock charge comes after its site, lies past the previous block or below its start. A
+   *        site at the block start takes the whole block without decoding.
+   * @param addr Address reached.
+   */
+  [[nodiscard]] auto block_tail(address addr) const -> site_tail;
 
   /** @brief Removes the engine side and the entry of a hook by handle id, between slices. */
   void remove_hook(std::uint64_t id) noexcept;

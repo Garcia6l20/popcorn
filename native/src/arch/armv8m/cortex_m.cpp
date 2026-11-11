@@ -492,6 +492,36 @@ auto cortex_m::instructions_between(address from, address to) const -> std::opti
   return count;
 }
 
+auto cortex_m::inside_it_block(address from, address to) const -> bool
+{
+  auto const code = halfwords(from, to);
+  if(not code)
+  {
+    return false;
+  }
+  std::uint8_t covered = 0;
+  for(std::size_t at = 0; at < code->size();)
+  {
+    auto const        first = (*code)[at];
+    thumb::insn const insn{
+        .at = from + static_cast<address>(2 * at), .bits = first, .size = thumb::size(first)};
+    if(at + insn.size / 2 > code->size())
+    {
+      return false;
+    }
+    if(covered != 0)
+    {
+      --covered;
+    }
+    else if(thumb::is_it(insn))
+    {
+      covered = thumb::it_length(insn);
+    }
+    at += insn.size / 2;
+  }
+  return covered != 0;
+}
+
 auto cortex_m::ends_block_before(address from, address to) const -> std::optional<bool>
 {
   auto const code = halfwords(from, to);

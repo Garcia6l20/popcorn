@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.units import VirtualTime, ms
 
-from .conftest import CALLEE_ELF, ISR_ELF, run_bounded
+from .conftest import BOARD_ELF, CALLEE_ELF, ISR_ELF, run_bounded
 
 
 def call(m: popcorn.Machine, fn: str, *args: int) -> popcorn.CallResult:
@@ -438,3 +438,71 @@ def test_a_raising_handler_on_an_exception_return_leaves_the_exit_completed(
     assert raised == [0]
     assert [e.value.value for e in exits.since()] == [10 * (n + 1) for n in range(1, ISR_ROUNDS)]
     assert [e.value.occurrence for e in handlers.since()] == list(range(ISR_ROUNDS - 1))
+
+
+def board_machine(u575: popcorn.PartDescription) -> popcorn.Machine:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    return m
+
+
+def test_an_intercept_reads_the_time_and_count_an_until_run_stops_at(
+    u575: popcorn.PartDescription,
+) -> None:
+    reached = board_machine(u575)
+    until = asyncio.run(reached.run(until=reached.sym("ready"), budget=1_000_000))
+    assert until.reason is popcorn.StopReason.ADDRESS
+
+    stopped = board_machine(u575)
+    seen: list[int] = []
+
+    def at_ready(call: popcorn.Call) -> popcorn.Return:
+        seen.append(stopped.time.ps)
+        return call.stop()
+
+    stopped.intercept("ready", at_ready)
+    stop = asyncio.run(stopped.run(budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.instructions == until.instructions
+    assert stop.time == until.time
+    assert seen == [reached.time.ps]
+    assert stopped.time.ps == reached.time.ps
+
+
+def soft_mixed(m: popcorn.Machine, first: int) -> popcorn.CallResult:
+    return asyncio.run(
+        m.call("soft_mixed", first, 2.5, 3, 4.5, 5, abi=popcorn.FloatAbi.SOFT, budget=1_000_000)
+    )
+
+
+@pytest.mark.parametrize(("offset", "first"), [(6, 0), (8, 0), (26, -1)])
+def test_returning_from_inside_an_it_block_is_refused(
+    callee: popcorn.Machine, offset: int, first: int
+) -> None:
+    callee.intercept(callee.sym("__aeabi_i2d") + offset, lambda c: c.returns())
+    with pytest.raises(popcorn.EmulationError, match="Thumb IT block"):
+        soft_mixed(callee, first)
+
+
+def test_stopping_inside_an_it_block_ends_after_the_block(callee: popcorn.Machine) -> None:
+    callee.intercept(callee.sym("__aeabi_i2d") + 6, lambda c: c.stop(), once=True)
+    assert soft_mixed(callee, 0).stop.reason is popcorn.StopReason.USER
+    assert callee.reg.pc != callee.sym("__aeabi_i2d") + 6
+
+
+@pytest.mark.parametrize(("offset", "first"), [(4, 0), (10, 1), (24, -1), (28, -1)])
+def test_returning_at_the_it_instruction_and_after_the_block_is_allowed(
+    callee: popcorn.Machine, offset: int, first: int
+) -> None:
+    hits: list[int] = []
+
+    def returning(call: popcorn.Call) -> popcorn.Return:
+        hits.append(callee.reg.pc)
+        return call.returns()
+
+    callee.intercept(callee.sym("__aeabi_i2d") + offset, returning, once=True)
+    try:
+        soft_mixed(callee, first)
+    except popcorn.EmulationError as error:
+        assert "Thumb IT block" not in str(error)
+    assert hits == [callee.sym("__aeabi_i2d") + offset]

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
+#include <tuple>
 
 namespace
 {
@@ -262,6 +263,39 @@ TEST_CASE(
   CHECK(probe.hits->count() == 2);
   CHECK(control.instructions.value - from.instructions.value == nonsecure_count);
   REQUIRE(uc_hook_del(engine_of(f), raw) == UC_ERR_OK);
+}
+
+TEST_CASE(
+    "an intercept at an SG veneer proceeds with the count of a run without it and stops before SG")
+{
+  auto const through = [](bool intercept, bool stops) {
+    auto f = booted();
+    open_regions(f);
+    secure_function(f);
+    put(f, ns_code, {bkpt, blx_r1, bkpt});
+    std::optional<core::hook_handle> hook;
+    if(intercept)
+    {
+      hook = f.target->add_intercept(veneer, [stops](core::intercept_call const&) {
+        return stops ? core::intercept_result::stop(stop_reason::user)
+                     : core::intercept_result::proceed();
+      });
+    }
+    f.set("r1", veneer | 1u);
+    auto const before = run_from(f, ns_code, false, 10);
+    REQUIRE(before.reason == stop_reason::user);
+    auto const after = resume(f, 10);
+    REQUIRE(after.reason == stop_reason::user);
+    return std::tuple{
+        before.instructions.value, after.instructions.value, f.reg("pc"),
+        f.target->virtual_clock().time().ps};
+  };
+  auto const plain   = through(false, false);
+  auto const watched = through(true, false);
+  CHECK(watched == plain);
+  auto const stopped = through(true, true);
+  CHECK(std::get<2>(stopped) == veneer);
+  CHECK(std::get<1>(stopped) == std::get<0>(stopped) + 1);
 }
 
 TEST_CASE(

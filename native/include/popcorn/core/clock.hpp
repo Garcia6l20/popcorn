@@ -97,9 +97,11 @@ public:
   /**
    * @brief Instructions executed since reset, exact to the translated block: the block hook
    *        advances the clock once per block, so the clock is the instruction counter. A block
-   *        the engine leaves before its end, for any reason, an intercept that returns or stops,
-   *        a code hook stop, an exception or a fault, counts its full length: deterministic, not
-   *        exact. Instructions single-stepped for exact_instructions count one by one.
+   *        the engine leaves before its end by an exception or a fault counts its full length:
+   *        deterministic, not exact. A code site that returns or stops, and the callback of an
+   *        intercept, read the count of the site's own instruction, equal to an `until` stop
+   *        there. A site inside a Thumb IT block counts the block's full length. Instructions
+   *        single-stepped for exact_instructions count one by one.
    *
    * The one exception is a block cut right after an access that made an interrupt deliverable:
    * the run loop takes back the instructions it did not run, see clock_driver::retract. now()
@@ -309,6 +311,24 @@ public:
     clock_.state_.held_time = clock_.time();
     auto& now               = clock_.state_.now.value;
     now -= std::min(unrun.value, now - clock_.state_.epoch_icount.value);
+  }
+
+  /**
+   * @brief Takes back instructions advance() charged for the rest of the block a code site
+   *        stands in, at most down to the start of the current epoch, so the site reads the
+   *        clock of its own instruction. Unlike retract(), nothing is held: clock::now() and
+   *        clock::time() read the lower value, except where a hold from a retract() keeps them
+   *        higher. The site pairs it with advance() of the returned amount when the run goes
+   *        on through the block.
+   * @param ahead Instructions charged for the block from the site on.
+   * @return Instructions taken back, below @p ahead only when the epoch start is nearer.
+   */
+  auto rewind(icount ahead) -> icount
+  {
+    auto&      now   = clock_.state_.now.value;
+    auto const taken = std::min(ahead.value, now - clock_.state_.epoch_icount.value);
+    now -= taken;
+    return icount{taken};
   }
 
   /**

@@ -221,9 +221,10 @@ struct slice_result
    * lets the caller continue. */
   std::optional<stop> stopped{};
   /** @brief Instructions executed in the slice, read from the block hook, never assumed from the
-   * bounds: a slice overshoots by up to one block. A block the engine leaves before its end, for
-   * any reason, an intercept that returns or stops, a code hook stop, an exception or a fault,
-   * counts its full length: deterministic, not exact. Instructions single-stepped for
+   * bounds: a slice overshoots by up to one block. A block the engine leaves before its end by
+   * an exception or a fault counts its full length: deterministic, not exact. An intercept that
+   * returns or stops counts the instructions before its site, as an `until` stop does, except
+   * inside a Thumb IT block, which counts its full length. Instructions single-stepped for
    * exact_instructions count one by one. */
   icount executed{};
   /** @brief Whether stopped is the stop_reason::user stop of the request's stop_when, not one

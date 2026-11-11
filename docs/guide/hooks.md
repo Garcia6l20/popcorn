@@ -24,6 +24,17 @@ decorator. The handler returns one of:
 holding the GIL, may read the machine, and must not await. An exception it raises reaches the
 run with its traceback. `once=True` removes the intercept after its first call.
 
+A handler reads the time of its site: `machine.time` inside the handler equals the time a
+`run(until=fn)` stops at, and `call.stop()` reports the same `Stop.instructions` and `Stop.time`. The
+site is the instruction at the address, so an intercept at an address inside a function sees the
+time of that instruction. An exception or a fault in the block counts the whole block.
+
+An address inside a Thumb IT block stops after the block, with the block counted in full, and an
+instruction the IT condition skips never reaches its handler. `call.returns()` at such an address
+raises `EmulationError` once the handler has returned, its side effects stay: the engine runs an IT
+block to its end, so the return cannot take effect at the site. The IT instruction itself and the
+instruction after the block are ordinary sites.
+
 `machine.intercept_log(fn)` lists every call the intercepts of `fn` saw, with its arguments and the
 value it returned.
 
@@ -53,8 +64,8 @@ the original.
 ```
 
 `machine.on_return(fn, handler)` calls `handler(returned)` each time `fn` returns. A `Returned`
-holds the entry arguments, the return value and the instructions the call took. The function needs a
-DWARF signature.
+holds the entry arguments, the return value and the instructions the call took, counted from the
+function's first instruction. The function needs a DWARF signature.
 
 `machine.record_returns(fn, convert)` records each return with its virtual time. Without
 `convert`, the machine thread appends the entries natively with no GIL. With `convert`, as

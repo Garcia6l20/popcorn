@@ -193,6 +193,34 @@ TEST_CASE("an intercepted call leaves a call record naming its symbol")
   CHECK(symbols[calls[0].aux].name == "seven");
 }
 
+TEST_CASE("a call record of an intercept in the middle of a block is stamped at its site")
+{
+  auto       f    = alu_fixture();
+  auto const site = sym("alu", "alu_body") + 4;
+  auto const hook = f.target->add_intercept(site, [](core::intercept_call const&) {
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  collector  seen;
+  auto const start = f.target->virtual_clock().now();
+  auto const sink  = f.target->add_trace_sink({trace_kind::call}, seen.sink());
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto                at = start;
+  std::vector<icount> calls;
+  for(auto const& record : seen.records)
+  {
+    at = record.kind == trace_kind::time
+           ? icount{record.payload[0] | std::uint64_t{record.payload[1]} << 32}
+           : icount{at.value + record.dt};
+    if(record.kind == trace_kind::call)
+    {
+      calls.push_back(at);
+    }
+  }
+  REQUIRE(calls.size() == 1);
+  CHECK(calls.front().value - start.value == 5);
+  CHECK(f.target->virtual_clock().now().value - start.value == 5);
+}
+
 TEST_CASE("every stop ends with a stop record carrying its reason")
 {
   auto                f    = alu_fixture();

@@ -86,17 +86,30 @@ void machine::run_state::add_probe_to_site(address at, probe_entry entry)
   site_at(at).probes.push_back(std::move(entry));
 }
 
-auto machine::run_state::arrival_time(address addr) const -> vtime
+auto machine::run_state::block_tail(address addr) const -> site_tail
 {
-  auto const now = owner.clock_driver_.exact_now();
   if(stepping)
   {
-    return owner.clock_driver_.time_at(now);
+    return {};
   }
-  auto const inside = addr - block_pc < max_insn_bytes * block_size;
-  auto const before = inside ? arch->instructions_between(block_pc, addr) : std::nullopt;
-  auto const ahead  = before and *before < block_size ? block_size - *before : 0;
-  return owner.clock_driver_.time_at(icount{now.value - std::min<std::uint64_t>(ahead, now.value)});
+  if(addr == block_pc)
+  {
+    return {.tail = block_size};
+  }
+  if(addr - block_pc >= max_insn_bytes * block_size)
+  {
+    return {};
+  }
+  auto const before = arch->instructions_between(block_pc, addr);
+  if(not before or *before >= block_size)
+  {
+    return {};
+  }
+  if(arch->inside_it_block(block_pc, addr))
+  {
+    return {.in_it = true};
+  }
+  return {.tail = block_size - *before};
 }
 
 void machine::run_state::remove_hook(std::uint64_t id) noexcept
@@ -292,9 +305,11 @@ auto machine::run_state::visit_site(code_site& site, address addr, bool in_block
 {
   auto const        resumed = resume_past and resume_past->first == site.at;
   std::size_t const first   = resumed ? std::exchange(resume_past, std::nullopt)->second : 0;
+  auto const        where   = block_tail(addr);
+  auto const        rewound = owner.clock_driver_.rewind(icount{where.tail});
   if(not resumed and not site.probes.empty())
   {
-    auto const          at = arrival_time(addr);
+    auto const          at = owner.clock_driver_.exact_time();
     std::optional<bool> secure;
     for(auto const& probe : site.probes)
     {
@@ -355,6 +370,14 @@ auto machine::run_state::visit_site(code_site& site, address addr, bool in_block
       case intercept_action::proceed:
         continue;
       case intercept_action::returns:
+        if(where.in_it)
+        {
+          throw emulation_error(
+              std::format(
+                  "the intercept at {:#010x} cannot return: the site lies inside a Thumb IT block, "
+                  "which the engine runs to its end",
+                  entry.at));
+        }
         if(coverage_on and in_block)
         {
           coverage.leave(*arch, addr, false);
@@ -369,6 +392,7 @@ auto machine::run_state::visit_site(code_site& site, address addr, bool in_block
         return site_visit::stopped;
     }
   }
+  owner.clock_driver_.advance(rewound);
   return site_visit::proceed;
 }
 

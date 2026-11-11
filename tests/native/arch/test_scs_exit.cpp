@@ -150,6 +150,15 @@ TEST_CASE("instructions counted across an SCS precise exit are the instructions 
 
 TEST_CASE("a debugger store that pends an interrupt between slices cuts no block")
 {
+  auto const until_executed = [] {
+    auto g = booted();
+    REQUIRE(g.target->mem().write(ispr0, 4, 1u << testdev_irq));
+    enter(g, 0x2000'0000, 0);
+    auto const reached =
+        g.run({.wall_budget = std::chrono::seconds{60}, .until = sym("irq", "scs_raise_next") + 4});
+    REQUIRE(reached.stopped.has_value());
+    return reached.executed.value;
+  }();
   auto f = booted();
   REQUIRE(f.target->mem().write(ispr0, 4, 1u << testdev_irq));
   enter(f, 0x2000'0000, 0);
@@ -162,7 +171,7 @@ TEST_CASE("a debugger store that pends an interrupt between slices cuts no block
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->where.pc == sym("irq", "scs_raise_next") + 4);
   CHECK(f.target->coverage().cuts.size() == 1);
-  CHECK(result.executed.value == handler_length + 14);
+  CHECK(result.executed.value == until_executed);
 }
 
 TEST_CASE("an SHPR store that raises a pended exception above BASEPRI takes it at once")

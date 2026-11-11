@@ -383,6 +383,36 @@ auto test_arch::pc() const -> address
   return state_.wfi_at == at ? at + wfi_size(at) : at;
 }
 
+auto test_arch::inside_it_block(address from, address to) const -> bool
+{
+  if(to < from or (to - from) % 2 != 0)
+  {
+    return false;
+  }
+  std::vector<std::uint16_t> code((to - from) / 2);
+  if(not code.empty()
+     and not context_->services.read_block(
+         from, std::as_writable_bytes(std::span{code}), initiator::debugger))
+  {
+    return false;
+  }
+  std::uint32_t covered = 0;
+  for(std::size_t at = 0; at < code.size();)
+  {
+    auto const size = (code[at] >> 11) >= 0b11101u ? 2u : 1u;
+    if(covered != 0)
+    {
+      --covered;
+    }
+    else if((code[at] & 0xff00) == 0xbf00 and (code[at] & 0xf) != 0)
+    {
+      covered = 4 - std::countr_zero(static_cast<unsigned>(code[at] & 0xf));
+    }
+    at += size;
+  }
+  return covered != 0;
+}
+
 auto test_arch::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
 {
   if(to < from or (to - from) % 2 != 0)

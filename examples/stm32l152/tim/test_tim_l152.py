@@ -8,7 +8,7 @@ update records the tick count it fired at. TIM3 channel 1 captures the rising ed
 AF2, and the capture callback keeps the count between the last two edges in `capture_period`.
 
 The boot stops at `timers_started`, after all three timers started. TIM2 was enabled a few
-instructions earlier, so its first update comes 998.125 us later and a 100 ms run holds exactly
+instructions earlier, so its first update comes 998 us later and a 100 ms run holds exactly
 99 updates. TIM6 starts after TIM2, so its update at 50 ms of its own count follows the 50th TIM2
 update. The capture case reads TIM3_CNT with `read()`, a bus read that brings the count up to the
 machine's time, where `.value` shows the count at the model's last access. The project sets
@@ -24,7 +24,7 @@ from popcorn.units import VirtualDuration, VirtualTime, ms, us
 pytestmark = pytest.mark.popcorn(budget=5_000_000)
 
 HSI = 1
-FIRST_UPDATE = us(998.125)
+FIRST_UPDATE = us(998.0)
 EDGES = 4
 
 

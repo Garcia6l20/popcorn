@@ -84,9 +84,10 @@ offset in `RepeatBlockConfig` sets the matching DEC bit:
 
 The transfer event mode is `DMA_TCEM_REPEATED_BLOCK_TRANSFER`. On channels 12 to 15 it raises
 the half transfer after the rounded-up half of BRC + 1 blocks and the complete at the end of the
-2D block. The receive callbacks run 12.67 to 12.83 us after the 32nd frame ends and 16.42 to
-16.58 us after the 64th: the time `HAL_DMA_IRQHandler` takes at 4 MHz, plus one 651 ns bit clock,
-since with FSOFF the right-channel word completes one bit into the next frame.
+2D block. The receive callbacks start 11.42 to 11.58 us after the 32nd frame ends and 15.17 to
+15.33 us after the 64th: the time `HAL_DMA_IRQHandler` takes up to the call at 4 MHz, plus one
+651 ns bit clock, since with FSOFF the right-channel word completes one bit into the next frame.
+A callback's intercept reads the time of its first instruction.
 
 ## Starting the streams without HAL_SAI_Transmit_DMA
 

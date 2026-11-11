@@ -31,7 +31,8 @@ RING_BYTES = 256
 POLL_BYTES = 4
 REPLACE_AHEAD = 10_000
 CYCLE_PS = 6250
-WAKE_CYCLES = 4
+WAKE_CYCLES = 1
+REFRESH_BLOCK_CYCLES = 5
 LSI_HZ = 32_000
 CUT = s(4)
 CUT_AHEAD = ms(15)
@@ -315,7 +316,8 @@ async def test_a_starved_responder_resets_and_comes_back(system: System) -> None
     await system.run(until=VirtualTime(ms(1005).ps))
     last_refresh = refreshes[-1].ps
     period_ps = (4 << responder.periph.IWDG.PR.value) * 10**12 // LSI_HZ
-    bite = last_refresh + responder.periph.IWDG.RLR.value * period_ps
+    reload = last_refresh + REFRESH_BLOCK_CYCLES * CYCLE_PS
+    bite = reload + responder.periph.IWDG.RLR.value * period_ps
     responder.var("starve").value = 1
     events.clear()
 

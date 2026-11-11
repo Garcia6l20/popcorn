@@ -7,10 +7,13 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -137,10 +140,9 @@ TEST_CASE("an intercept stop leaves pc at the function and the resumed run execu
   CHECK(calls == 1);
 }
 
-TEST_CASE("a skipped function counts its first translated block in full")
+TEST_CASE("a skipped function counts none of its first translated block")
 {
-  constexpr std::uint64_t n        = 6;
-  auto const              run_loop = [](std::string_view entry, bool intercept) {
+  auto const run_loop = [](std::string_view entry, bool intercept) {
     auto                             f = booted();
     std::optional<core::hook_handle> hook;
     if(intercept)
@@ -155,7 +157,7 @@ TEST_CASE("a skipped function counts its first translated block in full")
   };
   auto const skipped   = run_loop("loop_six", true);
   auto const reference = run_loop("loop_nop", false);
-  CHECK(skipped == reference + 100 * n);
+  CHECK(skipped == reference);
   CHECK(run_loop("loop_six", true) == skipped);
 }
 
@@ -428,7 +430,7 @@ auto in_delay(core::machine_options options = {}) -> std::pair<fixture, core::fr
   f.set("lr", fn("halt") | 1);
   stopped_at(f, "delay_ms");
   auto const          target = frame_here(f);
-  core::slice_request step{.exact_instructions = icount{40}};
+  core::slice_request step{.exact_instructions = icount{12}};
   step.wall_budget = std::chrono::seconds{60};
   REQUIRE(f.run(step).stopped->reason == stop_reason::budget);
   return {std::move(f), target};
@@ -792,4 +794,395 @@ TEST_CASE("an intercept and a return hook run once per arrival when stepped")
       });
   std::ignore = stepped_to_end(f);
   CHECK(returns == six_calls);
+}
+
+namespace
+{
+struct reading
+{
+  std::uint64_t executed{};
+  std::uint64_t now{};
+  std::uint64_t ps{};
+  popcorn::stop stop{};
+  friend auto   operator==(reading const&, reading const&) -> bool = default;
+};
+
+constexpr std::uint32_t alu_loops = 1000;
+
+auto alu_at(bool from_body) -> fixture
+{
+  fixture f{m33(), "alu", core::machine_options{}};
+  f.set("r0", alu_loops);
+  if(from_body)
+  {
+    f.set("pc", popcorn::testing::sym("alu", "alu_body"));
+  }
+  return f;
+}
+
+auto alu_site(std::int32_t offset) -> address
+{
+  return static_cast<address>(
+      static_cast<std::int64_t>(popcorn::testing::sym("alu", "alu_body")) + offset);
+}
+
+auto reading_of(fixture const& f, core::slice_result const& result) -> reading
+{
+  REQUIRE(result.stopped.has_value());
+  return {
+      .executed = result.executed.value,
+      .now      = f.target->virtual_clock().now().value,
+      .ps       = f.target->virtual_clock().time().ps,
+      .stop     = *result.stopped};
+}
+
+auto until_reading(bool from_body, address site) -> reading
+{
+  auto f = alu_at(from_body);
+  return reading_of(f, f.run({.wall_budget = std::chrono::seconds{60}, .until = site}));
+}
+
+struct site_view
+{
+  reading       stopped;
+  std::uint64_t handler_now{};
+  std::uint64_t handler_ps{};
+};
+
+auto intercept_reading(bool from_body, address site) -> site_view
+{
+  auto       f = alu_at(from_body);
+  site_view  out;
+  auto const hook = f.target->add_intercept(site, [&](core::intercept_call const&) {
+    out.handler_now = f.target->virtual_clock().now().value;
+    out.handler_ps  = f.target->virtual_clock().time().ps;
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  out.stopped     = reading_of(f, f.run({.wall_budget = std::chrono::seconds{60}}));
+  return out;
+}
+
+struct position
+{
+  char const*  name;
+  bool         from_body;
+  std::int32_t offset;
+};
+
+constexpr std::array positions{
+    position{"entry block, first instruction",   false, -6},
+    position{"entry block, second instruction",  false, -4},
+    position{"entry block, middle",              false, 0 },
+    position{"entry block, one before the last", false, 6 },
+    position{"entry block, last instruction",    false, 8 },
+    position{"body block, first instruction",    true,  0 },
+    position{"body block, middle",               true,  4 },
+    position{"body block, last instruction",     true,  8 },
+};
+}
+
+TEST_CASE("an intercept reads the clock of its site and stops at it as an until run does")
+{
+  for(auto const& where : positions)
+  {
+    CAPTURE(where.name);
+    auto const site     = alu_site(where.offset);
+    auto const expected = until_reading(where.from_body, site);
+    auto const seen     = intercept_reading(where.from_body, site);
+    CHECK(seen.handler_now == expected.now);
+    CHECK(seen.handler_ps == expected.ps);
+    CHECK(seen.stopped.executed == expected.executed);
+    CHECK(seen.stopped.now == expected.now);
+    CHECK(seen.stopped.ps == expected.ps);
+    CHECK(seen.stopped.stop.instructions == expected.stop.instructions);
+    CHECK(seen.stopped.stop.time == expected.stop.time);
+    CHECK(seen.stopped.stop.where.pc == expected.stop.where.pc);
+  }
+}
+
+TEST_CASE("a run resumed from an intercept stop counts the block tail once")
+{
+  auto const site  = alu_site(4);
+  auto const done  = popcorn::testing::sym("alu", "alu_done");
+  auto       whole = alu_at(false);
+  auto const plain =
+      reading_of(whole, whole.run({.wall_budget = std::chrono::seconds{60}, .until = done}));
+
+  auto          f     = alu_at(false);
+  std::uint32_t calls = 0;
+  auto const    hook  = f.target->add_intercept(site, [&](core::intercept_call const&) {
+    return ++calls == 1 ? core::intercept_result::stop(stop_reason::user)
+                        : core::intercept_result::proceed();
+  });
+  auto const    first = f.run({.wall_budget = std::chrono::seconds{60}});
+  REQUIRE(first.stopped.has_value());
+  CHECK(first.stopped->reason == stop_reason::user);
+  CHECK(first.stopped->instructions.value == 5);
+  auto const rest = reading_of(f, f.run({.wall_budget = std::chrono::seconds{60}, .until = done}));
+  CHECK(calls == alu_loops);
+  CHECK(first.executed.value + rest.executed == plain.executed);
+  CHECK(rest.now == plain.now);
+  CHECK(rest.ps == plain.ps);
+}
+
+TEST_CASE("an intercept that only proceeds leaves the instruction count of a run unchanged")
+{
+  auto const done  = popcorn::testing::sym("alu", "alu_done");
+  auto       plain = alu_at(false);
+  auto const base =
+      reading_of(plain, plain.run({.wall_budget = std::chrono::seconds{60}, .until = done}));
+  for(auto const offset : {0, 4, 8})
+  {
+    CAPTURE(offset);
+    auto          f     = alu_at(false);
+    std::uint32_t calls = 0;
+    auto const hook = f.target->add_intercept(alu_site(offset), [&](core::intercept_call const&) {
+      ++calls;
+      return core::intercept_result::proceed();
+    });
+    auto const seen =
+        reading_of(f, f.run({.wall_budget = std::chrono::seconds{60}, .until = done}));
+    CHECK(calls == alu_loops);
+    CHECK(seen.executed == base.executed);
+    CHECK(seen.now == base.now);
+    CHECK(seen.ps == base.ps);
+  }
+}
+
+TEST_CASE("an intercept that returns from mid-block counts the instructions before its site")
+{
+  auto f = alu_at(false);
+  f.set("lr", popcorn::testing::sym("alu", "alu_done") | 1u);
+  auto const hook = f.target->add_intercept(alu_site(4), [](core::intercept_call const&) {
+    return core::intercept_result::returns(std::nullopt);
+  });
+  auto const seen = reading_of(
+      f, f.run(
+             {.wall_budget = std::chrono::seconds{60},
+              .until       = popcorn::testing::sym("alu", "alu_done")}));
+  CHECK(seen.stop.reason == stop_reason::address);
+  CHECK(seen.executed == 5);
+  CHECK(seen.now == 5);
+}
+
+TEST_CASE("two intercepts at one site read the same clock and the second stops there")
+{
+  auto const                   site     = alu_site(4);
+  auto const                   expected = until_reading(false, site);
+  auto                         f        = alu_at(false);
+  std::array<std::uint64_t, 2> seen{};
+  auto const first   = f.target->add_intercept(site, [&](core::intercept_call const&) {
+    seen[0] = f.target->virtual_clock().now().value;
+    return core::intercept_result::proceed();
+  });
+  auto const second  = f.target->add_intercept(site, [&](core::intercept_call const&) {
+    seen[1] = f.target->virtual_clock().now().value;
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  auto const stopped = reading_of(f, f.run({.wall_budget = std::chrono::seconds{60}}));
+  CHECK(seen[0] == expected.now);
+  CHECK(seen[1] == expected.now);
+  CHECK(stopped.stop.instructions == expected.stop.instructions);
+}
+
+TEST_CASE("a probe and an intercept on one site read the time an until run stops at")
+{
+  auto const    site       = alu_site(4);
+  auto const    expected   = until_reading(false, site);
+  auto          f          = alu_at(false);
+  std::uint64_t handler_ps = 0;
+  auto const    probe      = f.target->add_probe(site);
+  auto const    hook       = f.target->add_intercept(site, [&](core::intercept_call const&) {
+    handler_ps = f.target->virtual_clock().time().ps;
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  REQUIRE(f.run({.wall_budget = std::chrono::seconds{60}}).stopped.has_value());
+  REQUIRE(probe.hits->first().has_value());
+  CHECK(probe.hits->first()->ps == expected.ps);
+  CHECK(handler_ps == expected.ps);
+}
+
+TEST_CASE("a handler that throws ends the slice at its site with an exact count")
+{
+  auto const site     = alu_site(4);
+  auto const expected = until_reading(false, site);
+  auto       f        = alu_at(false);
+  auto const hook =
+      f.target->add_intercept(site, [](core::intercept_call const&) -> core::intercept_result {
+        throw std::runtime_error("handler failed");
+      });
+  CHECK_THROWS_AS(
+      std::ignore = f.run({.wall_budget = std::chrono::seconds{60}}), std::runtime_error);
+  CHECK(f.target->virtual_clock().now().value == expected.now);
+}
+
+TEST_CASE("an intercept on a single-stepped run counts as a run with no intercept")
+{
+  auto       plain = alu_at(false);
+  auto const base  = reading_of(
+      plain,
+      plain.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{12}}));
+  auto       f    = alu_at(false);
+  auto const hook = f.target->add_intercept(
+      alu_site(4), [](core::intercept_call const&) { return core::intercept_result::proceed(); });
+  auto const seen = reading_of(
+      f, f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{12}}));
+  CHECK(seen.executed == base.executed);
+  CHECK(seen.now == base.now);
+  CHECK(seen.ps == base.ps);
+
+  auto       until      = alu_at(false);
+  auto const stopped_at = reading_of(
+      until, until.run(
+                 {.wall_budget        = std::chrono::seconds{60},
+                  .until              = alu_site(4),
+                  .exact_instructions = icount{12}}));
+  auto          g           = alu_at(false);
+  std::uint64_t handler_now = 0;
+  auto const    stopper = g.target->add_intercept(alu_site(4), [&](core::intercept_call const&) {
+    handler_now = g.target->virtual_clock().now().value;
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  auto const    stepped = reading_of(
+      g, g.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{12}}));
+  CHECK(handler_now == stopped_at.now);
+  CHECK(stepped.executed == stopped_at.executed);
+  CHECK(stepped.now == stopped_at.now);
+}
+
+TEST_CASE("a return hook counts the instructions from the function's first instruction")
+{
+  auto       f = booted();
+  address    return_to{};
+  auto const hook = f.target->add_intercept(fn("seven"), [&](core::intercept_call const& c) {
+    return_to = c.return_address();
+    return core::intercept_result::proceed();
+  });
+  std::vector<core::returned_call> returns;
+  auto const                       watch = f.target->add_return_hook(
+      fn("seven"), {}, arch::value_kind::i32,
+      [&](core::returned_call const& r) { returns.push_back(r); });
+  f.set("pc", fn("call_seven"));
+  f.set("lr", fn("halt") | 1);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(returns.size() == 1);
+  REQUIRE(return_to != 0);
+
+  auto g = booted();
+  g.set("pc", fn("call_seven"));
+  g.set("lr", fn("halt") | 1);
+  auto const entered = g.run_to_stop({.until = fn("seven")});
+  REQUIRE(entered.reason == stop_reason::address);
+  core::slice_request request{.until = return_to};
+  request.leave_until = true;
+  auto const left     = g.run_to_stop(request);
+  REQUIRE(left.reason == stop_reason::address);
+  CHECK(returns.front().instructions.value == left.instructions.value - entered.instructions.value);
+}
+
+namespace
+{
+constexpr address ram = 0x2000'0000;
+
+auto it_machine() -> fixture
+{
+  fixture f{m33(), "irq", core::machine_options{}};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.set("pc", popcorn::testing::sym("irq", "it_fault"));
+  f.set("r1", 1);
+  f.set("r2", ram);
+  f.set("r8", ram + 0x100);
+  f.set("lr", popcorn::testing::sym("irq", "store_raise_done") | 1u);
+  return f;
+}
+
+auto it_site(std::uint32_t offset) -> address
+{
+  return popcorn::testing::sym("irq", "it_fault") + offset;
+}
+
+constexpr std::uint32_t it_cmp    = 0;
+constexpr std::uint32_t it_itt    = 2;
+constexpr std::uint32_t it_first  = 4;
+constexpr std::uint32_t it_second = 6;
+constexpr std::uint32_t it_after  = 10;
+}
+
+TEST_CASE("an intercept on the instructions around an IT block stops exactly at its site")
+{
+  for(auto const offset : {it_cmp, it_itt, it_after})
+  {
+    CAPTURE(offset);
+    auto       f        = it_machine();
+    auto const base_now = f.target->virtual_clock().now().value;
+    auto const expected = [&] {
+      auto       g = it_machine();
+      auto const result =
+          g.run({.wall_budget = std::chrono::seconds{60}, .until = it_site(offset)});
+      REQUIRE(result.stopped.has_value());
+      return std::pair{*result.stopped, result.executed.value};
+    }();
+    std::uint64_t seen = 0;
+    auto const    hook = f.target->add_intercept(it_site(offset), [&](core::intercept_call const&) {
+      seen = f.target->virtual_clock().now().value;
+      return core::intercept_result::stop(stop_reason::user);
+    });
+    auto const    result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    CHECK(result.stopped->where.pc == expected.first.where.pc);
+    CHECK(result.stopped->instructions == expected.first.instructions);
+    CHECK(result.executed.value == expected.second);
+    CHECK(seen - base_now == expected.second);
+  }
+}
+
+TEST_CASE("a stop at an instruction inside an IT block lands after the block at its full charge")
+{
+  auto const silent = [] {
+    auto       f      = it_machine();
+    auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    return std::pair{*result.stopped, result.executed.value};
+  }();
+  for(auto const offset : {it_first, it_second})
+  {
+    CAPTURE(offset);
+    auto       f      = it_machine();
+    auto const hook   = f.target->add_intercept(it_site(offset), [](core::intercept_call const&) {
+      return core::intercept_result::stop(stop_reason::user);
+    });
+    auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    CHECK(result.stopped->reason == stop_reason::user);
+    CHECK(result.stopped->where.pc != it_site(offset));
+    CHECK(result.stopped->where.pc == silent.first.where.pc);
+    CHECK(result.stopped->instructions == silent.first.instructions);
+    CHECK(result.executed.value == silent.second);
+  }
+}
+
+TEST_CASE("an intercept returning from inside an IT block is refused, from outside it is not")
+{
+  for(auto const offset : {it_first, it_second})
+  {
+    CAPTURE(offset);
+    auto       f    = it_machine();
+    auto const hook = f.target->add_intercept(it_site(offset), [](core::intercept_call const&) {
+      return core::intercept_result::returns(std::nullopt);
+    });
+    CHECK_THROWS_AS(
+        std::ignore = f.run({.wall_budget = std::chrono::seconds{60}}), popcorn::emulation_error);
+  }
+  for(auto const offset : {it_cmp, it_itt, it_after})
+  {
+    CAPTURE(offset);
+    auto       f      = it_machine();
+    auto const hook   = f.target->add_intercept(it_site(offset), [](core::intercept_call const&) {
+      return core::intercept_result::returns(std::nullopt);
+    });
+    auto const result = f.run({.wall_budget = std::chrono::seconds{60}});
+    REQUIRE(result.stopped.has_value());
+    CHECK(result.stopped->reason == stop_reason::user);
+    CHECK(f.reg("pc") != it_site(offset));
+  }
 }

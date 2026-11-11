@@ -11,6 +11,16 @@ of the core rate starts an epoch, and time inside an epoch is the instructions s
 divided by the instruction rate, `core_hz / cpi`. The clock never reads wall time. The
 instruction counter advances once per translated block, so it is exact to the block.
 
+An intercept or a probe stands at a code site inside its block. The block hook has charged the
+whole block when the site runs, so the site takes the instructions from itself to the block end
+back before it reads the clock, `clock_driver::rewind`, and charges them again when the run
+goes on through the block. A callback reads the time of its site and a stop or a return at the
+site counts the instructions before it, as an `until` stop at the same address does. A fault or
+an exception inside a block counts the block in full. A site inside a Thumb IT block, found by
+decoding the block from its first instruction, keeps the full charge: the engine ends no run
+inside an IT block, so a stop there lands after the block, and `returns` there raises
+`EmulationError`.
+
 A core asleep in WFI executes nothing. When nothing is deliverable the loop jumps the clock to
 the next deadline, which is why a sleeping firmware runs fast. The slice keeps two counters,
 `executed` and `jumped`. A run's `budget` counts `executed` only, and `max_instructions`
