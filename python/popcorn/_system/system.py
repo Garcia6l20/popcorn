@@ -972,9 +972,7 @@ class System:
         index, stop = ends[0]
         name = self._names[index]
         prefix = _machine.error_prefix(self._machines[name])
-        raised = _machine._stop_error(  # pyright: ignore[reportPrivateUsage]
-            stop, "its run in the system's free run", prefix
-        )
+        raised = _machine.stop_error(stop, "its run in the system's free run", prefix)
         for other, more in ends[1:]:
             raised.add_note(f"{self._names[other]} also stopped: {more}")
         raise raised

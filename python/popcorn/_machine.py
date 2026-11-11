@@ -6,8 +6,6 @@ import atexit
 import contextlib
 import contextvars
 import dataclasses
-import difflib
-import functools
 import os
 import sys
 import threading
@@ -15,57 +13,42 @@ import types
 import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Protocol,
     cast,
     overload,
     override,
-    runtime_checkable,
 )
 
 from popcorn import _core
 from popcorn._arena import Arena
 from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
-    F32,
     I32_SLOT,
-    I64,
     CallResult,
     HandlerCallWarning,
     Signature,
-    Slot,
     Stack,
     argument,
     decode,
-    encode,
     signature_of,
     slot_for,
 )
 from popcorn._devices import (
     BusDevice,
-    I2CController,
-    I2CTarget,
     PinWatches,
-    SpiController,
-    SpiTarget,
     UartDevice,
     Unwatch,
     attach,
-    cs_of,
-    refuse_shadowed,
-    serving,
 )
 from popcorn._dwarf_views import Var
 from popcorn._enums import FloatAbi, PinMode, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
-    BudgetExceeded,
     ConfigError,
     EmulationError,
-    FaultError,
     MachineBusy,
     MachineRunning,
     ModelError,
@@ -93,7 +76,50 @@ from popcorn._hooks import (
 from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._image_view import ImageView, debug_infos, find_variable, selected_images
-from popcorn._model_build import build_model
+from popcorn._machine_checks import (
+    FAULT_CONTEXT,
+    AttachedDevice,
+    checked_audio,
+    checked_budget,
+    checked_devices,
+    chosen_plugin_models,
+    clock_wiring,
+    free_sentinel,
+    masked_stop,
+    model_makers,
+    option_bytes_config,
+    pty_opener,
+    submitted,
+    uart_attacher,
+)
+from popcorn._machine_events import (
+    DEFAULT_ARENA_BASE,
+    DEFAULT_ARENA_SIZE,
+    FIRST_IRQ,
+    RUNNING,
+    SYSTEM_EXCEPTIONS,
+    Call,
+    ContextCell,
+    Event,
+    InterceptHandler,
+    Linked,
+    Native,
+    Reached,
+    Ready,
+    Resolver,
+    ReturnHandler,
+    Returning,
+    WatchHandler,
+    check_duration,
+    check_image_names,
+    check_machine_name,
+    check_wait_args,
+    error_prefix,
+    probe_state,
+    ps_of,
+    stack_access,
+    stop_error,
+)
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import (
     LogForwarder,
@@ -124,27 +150,16 @@ from popcorn._stop import FrameReturn, Stop, stop_of
 from popcorn._streams import (
     Board,
     Gated,
-    PtyOpener,
     UartPorts,
     Waited,
-    check_wait,
     deadline_ps,
 )
 from popcorn._supply import SupplyOptions
-from popcorn._unwind import Functions, Read32, return_point
+from popcorn._unwind import return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn._virtual_loop import VirtualLoop
 from popcorn.arm import Registers
-from popcorn.devices import (
-    At25sf,
-    Eeprom24xx,
-    I2CControllerBase,
-    I2CTargetBase,
-    SpiControllerBase,
-    SpiTargetBase,
-    TableTarget,
-)
 from popcorn.model import Model
 from popcorn.plugin._records import Loaded
 from popcorn.trace import TraceKind
@@ -153,422 +168,30 @@ from popcorn.units import VirtualDuration, VirtualTime
 if TYPE_CHECKING:
     from popcorn._system import System
     from popcorn.image.dwarf import DebugInfo, DebugType
-
-
-class Call:
-    """A call arriving at an intercepted function, stopped at its first instruction.
-
-    Valid only while the handler runs.
-    """
-
-    __slots__ = ("_signature", "_view", "machine")
-
-    def __init__(self, machine: Machine, view: _core.InterceptCall, signature: Signature) -> None:
-        """Wrap a native call. Handlers receive it built."""
-        self.machine = machine
-        self._view = view
-        self._signature = signature
-
-    @property
-    def function(self) -> int:
-        """Address of the intercepted function."""
-        return self._view.function()
-
-    @property
-    def occurrence(self) -> int:
-        """Calls of this intercept before this one, 0 for the first."""
-        return self._view.occurrence()
-
-    @property
-    def lr(self) -> int:
-        """Address the function returns to."""
-        return self._view.return_address()
-
-    @property
-    def sp(self) -> int:
-        """Stack pointer at entry."""
-        return self.machine.reg.sp
-
-    def args(
-        self, kinds: Sequence[ValueKind], abi: FloatAbi | None = None
-    ) -> tuple[int | float, ...]:
-        """Arguments of the given kinds, integers signed, floats decoded, under the image's
-        calling convention or `abi`."""
-        native = [_core.ValueKind(k.value) for k in kinds]
-        bits = self._view.args(native, None if abi is None else _core.FloatAbi(abi.value))
-        return tuple(decode(slot_for(k), b) for k, b in zip(kinds, bits, strict=True))
-
-    def args_typed(self, abi: FloatAbi | None = None) -> tuple[int | float, ...]:
-        """Arguments read with the function's DWARF signature, each at its C type.
-
-        Args:
-            abi: Calling convention to read floats with, the image's by default.
-
-        Raises:
-            TypeError: The function has no DWARF signature.
-        """
-        params = self._signature.params
-        if params is None:
-            reason = self._signature.unsupported or f"{self._signature.name} has no DWARF signature"
-            raise TypeError(f"{reason}, use args(kinds)")
-        native = [p.kind for p in params]
-        bits = self._view.args(native, None if abi is None else _core.FloatAbi(abi.value))
-        return tuple(decode(p, b) for p, b in zip(params, bits, strict=True))
-
-    def arg(self, index: int) -> int:
-        """Argument `index` as an integer: from DWARF when known, else the index-th 32-bit
-        integer argument."""
-        if self._signature.params is not None:
-            value = self.args_typed()[index]
-            if not isinstance(value, int):
-                raise TypeError(f"argument {index} of {self._signature.name} is a float")
-            return value
-        value = self.args([ValueKind.I32] * (index + 1))[index]
-        assert isinstance(value, int)
-        return value
-
-    def arg_f(self, index: int) -> float:
-        """Argument `index` as a float, from the DWARF signature."""
-        value = self.args_typed()[index]
-        if not isinstance(value, float):
-            raise TypeError(f"argument {index} of {self._signature.name} is an integer")
-        return value
-
-    def proceed(self) -> Return:
-        """Run the function as if no intercept were there."""
-        return Return(_core.InterceptResult.proceed())
-
-    def returns(
-        self, value: int | float | I64 | F32 | None = None, abi: FloatAbi | None = None
-    ) -> Return:
-        """Skip the function and return `value` to the caller, of the DWARF return type when
-        known, under the image's calling convention or `abi`. None for a void function. From an
-        exception handler, the return is an exception return, as BX LR would be."""
-        if value is None:
-            return Return(_core.InterceptResult.returns(None))
-        slot = self._result_slot(value)
-        number = value.value if isinstance(value, I64 | F32) else value
-        arg = _core.CallArg()
-        arg.kind = slot.kind
-        arg.bits = encode(slot.kind, number, f"the return value of {self._signature.name}")
-        native_abi = None if abi is None else _core.FloatAbi(abi.value)
-        return Return(_core.InterceptResult.returns(arg, native_abi), number)
-
-    def stop(self, reason: StopReason = StopReason.USER) -> Return:
-        """Stop the run at the function, before its body.
-
-        A parked `run` returns the stop. In a free run the stop ends it: a pending `wait_for`
-        returns it, and `halt()` or leaving `running()` raises EmulationError carrying it. A test
-        that cuts power at a function stops there, then calls `power_cycle()`.
-
-        Raises:
-            ValueError: `reason` is FAULT, which only the core raises.
-        """
-        if reason is StopReason.FAULT:
-            raise ValueError("an intercept cannot stop with FAULT")
-        return Return(_core.InterceptResult.stop(_core.StopReason(reason.value)))
-
-    def _result_slot(self, value: int | float | I64 | F32) -> Slot:
-        if isinstance(value, I64):
-            return slot_for(ValueKind.I64)
-        if isinstance(value, F32):
-            return slot_for(ValueKind.F32)
-        if self._signature.params is not None:
-            return self._signature.returns
-        return slot_for(ValueKind.F64 if isinstance(value, float) else ValueKind.I32)
-
-
-type InterceptHandler = Callable[[Call], Return]
-"""An intercept handler: the call in, what to do out."""
-type ReturnHandler = Callable[[Returned], None]
-"""An on_return handler."""
-type WatchHandler = Callable[[WatchHit], WatchAction | None]
-"""A watch handler: STOP, RESUME, or None for RESUME."""
-
-
-DEFAULT_ARENA_BASE = 0x6F00_0000
-"""Default first address of the call arena, an FMC address STM32 parts leave unmapped."""
-DEFAULT_ARENA_SIZE = 1 << 20
-"""Default size of the call arena."""
+__all__ = [
+    "DEFAULT_ARENA_BASE",
+    "DEFAULT_ARENA_SIZE",
+    "AttachedDevice",
+    "Call",
+    "Event",
+    "InterceptHandler",
+    "Machine",
+    "Reached",
+    "ReturnHandler",
+    "WatchHandler",
+    "check_machine_name",
+    "error_prefix",
+    "stack_access",
+    "stop_error",
+]
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
 )
 
-_RUNNING = "the machine is running: await m.read() or m.write(), or halt() it first"
-_FIRST_IRQ = 16
-_SYSTEM_EXCEPTIONS = {2: "NMI", 14: "PendSV", 15: "SysTick"}
-
 atexit.register(_core.shutdown_hosts)
 
 _FIRST_LOOP = threading.RLock()
-
-
-class _ContextCell:
-    """The context the Python models and bus devices of a machine run in, a copy of the one
-    current at `Machine()`, and the exceptions that ended free runs, by token, each while native
-    code holds its end. Native code holds the cell weakly, so a cycle through it is collectable."""
-
-    __slots__ = ("__weakref__", "context", "first", "held")
-
-    def __init__(self, context: contextvars.Context) -> None:
-        self.context = context
-        self.first = context.copy()
-        self.held: dict[int, BaseException] = {}
-
-    def restart(self) -> None:
-        """Run the next callbacks in a new copy of the context current at `Machine()`."""
-        self.context = self.first.copy()
-
-    def run(self, callback: Callable[[], object]) -> None:
-        """Call `callback` in the context, so a callback native code enters inside it nests."""
-        _core.run_in_cell(weakref.ref(self), callback)
-
-
-def _check_duration(for_: VirtualDuration | None) -> None:
-    if for_ is not None and for_.ps < 0:
-        raise ValueError(f"for_ must not be negative, got {for_}")
-
-
-def _check_wait(for_: VirtualDuration | None, deadline: VirtualTime | None) -> None:
-    check_wait(for_, deadline)
-    _check_duration(for_)
-
-
-def _ps(value: VirtualDuration | None) -> int | None:
-    return None if value is None else value.ps
-
-
-def check_machine_name(name: str | None) -> None:
-    """Refuse a machine name `Machine(name=)` would refuse, None passing.
-
-    Raises:
-        ValueError: `name` is empty or holds whitespace or a dot.
-    """
-    if name is None:
-        return
-    if not name or "." in name or any(c.isspace() for c in name):
-        raise ValueError(f"name {name!r} must be non-empty, without whitespace or a dot")
-
-
-def error_prefix(machine: Machine) -> str:
-    """What starts the text of an error a machine raises: `<name>: ` when the machine has a
-    name other than its part, empty otherwise."""
-    return "" if machine.name == machine.description.part else f"{machine.name}: "
-
-
-def stack_access(machine: Machine) -> tuple[Read32, Functions]:
-    """A word reader for the unwinder, None outside the regions of `machine`'s description or
-    on an access error, and the function symbols of its loaded images, every image's own
-    where two define one name."""
-    regions = [(r.start, r.start + r.size) for r in machine.description.regions]
-
-    def read32(address: int) -> int | None:
-        if not any(start <= address and address + 4 <= end for start, end in regions):
-            return None
-        try:
-            return machine.mem.u32[address]
-        except EmulationError:
-            return None
-
-    functions = Functions(
-        (s.name, s.value, s.size) for image in machine.images for s in image.symbols if s.function
-    )
-    return read32, functions
-
-
-@dataclass(frozen=True, slots=True)
-class _Returning:
-    """Where the function running at `pc` returns, a frame-return goal's target."""
-
-    ret: int
-    sp: int
-    name: str
-    start: int
-    pc: int
-
-    @property
-    def exception(self) -> bool:
-        """Whether the function is an exception handler, returning through EXC_RETURN."""
-        return self.ret >> 24 == 0xFF
-
-
-class _Resolver:
-    """Resolves a frame-return target once, when the goal is posted, and keeps it."""
-
-    __slots__ = ("_check", "_resolve", "target")
-
-    def __init__(
-        self,
-        resolve: Callable[[], _Returning],
-        check: Callable[[_Returning], None] | None = None,
-    ) -> None:
-        self._resolve = resolve
-        self._check = check
-        self.target: _Returning | None = None
-
-    def __call__(self) -> tuple[int, int]:
-        target = self._resolve()
-        if self._check is not None:
-            self._check(target)
-        self.target = target
-        return target.ret, target.sp
-
-    def named(self, stop: Stop) -> Stop:
-        """`stop` with the detail `<function> returned` when it is this goal's RETURNED."""
-        if self.target is None or stop.reason is not StopReason.RETURNED:
-            return stop
-        return replace(stop, detail=f"{self.target.name} returned")
-
-
-def _stop_error(
-    stopped: Stop, during: str = "the background run", prefix: str = ""
-) -> EmulationError:
-    message = f"{prefix}{during} stopped with {stopped.reason.name}: {stopped}"
-    if stopped.reason is StopReason.FAULT and stopped.fault is not None:
-        fault = stopped.fault
-        return FaultError(
-            message,
-            kind=fault.kind,
-            address=fault.address,
-            cfsr=fault.cfsr,
-            hfsr=fault.hfsr,
-            pc=stopped.pc,
-            symbol=stopped.location.symbol,
-            stop=stopped,
-        )
-    if stopped.reason is StopReason.BUDGET:
-        return BudgetExceeded(
-            message,
-            budget=stopped.instructions,
-            pc=stopped.pc,
-            symbol=stopped.location.symbol,
-            stop=stopped,
-        )
-    return EmulationError(
-        message,
-        reason=stopped.reason,
-        pc=stopped.pc,
-        symbol=stopped.location.symbol,
-        stop=stopped,
-    )
-
-
-@runtime_checkable
-class Event(Protocol):
-    """Something `Machine.wait_for` waits for.
-
-    `ready` is sync and runs on the machine's thread, never per instruction: at slice ends
-    inside a free run, `start()` or `running()`, after every event and at slice ends otherwise.
-    It may read the machine, which is stopped at an instruction boundary there.
-    """
-
-    def ready(self, machine: Machine) -> bool:
-        """Whether the event happened.
-
-        Args:
-            machine: The machine to test.
-        """
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class Reached:
-    """The core reaching an address or symbol, before executing it.
-
-    `wait_for` stops exactly there, outside `running()`. Inside `running()` and `start()` it is
-    exact too: a probe at the target, `Machine.probe`, sees the arrival at the instruction, also
-    one executed once in the middle of a slice, and the stop is the end of that slice, a USER
-    stop. There a target equal to the current pc counts at its next execution, where a parked
-    wait continues as `run(until=)` does.
-    """
-
-    target: int | str | Symbol
-
-    def ready(self, machine: Machine) -> bool:
-        """Whether pc is at the target.
-
-        Args:
-            machine: The machine to test.
-        """
-        return machine.pc == machine.address_of(self.target)
-
-
-@dataclass(slots=True)
-class _Ready:
-    predicate: Callable[[Machine], bool]
-    fired: bool = False
-    gate: _core.Predicate | None = None
-
-    def ready(self, machine: Machine) -> bool:
-        held = bool(self.predicate(machine))
-        self.fired = self.fired or held
-        return held
-
-
-@dataclass(frozen=True, slots=True)
-class _Native:
-    predicate: _core.Predicate
-
-    def ready(self, machine: Machine) -> bool:
-        return self.predicate.holds()
-
-
-class _Linked(Protocol):
-    """What a member hands its runs to: its `System`."""
-
-    async def _goal(
-        self,
-        machine: Machine,
-        *,
-        until: int | None = None,
-        budget: int | None = None,
-        exact: int | None = None,
-        for_: VirtualDuration | None = None,
-        deadline: VirtualTime | None = None,
-        stop_when: Callable[[], bool] | None = None,
-        gate: _core.Predicate | None = None,
-        run: bool = False,
-        returning: Callable[[], tuple[int, int]] | None = None,
-    ) -> Stop: ...
-
-    def _halt_member(self, machine: Machine) -> None: ...
-
-    async def _open_goal(self, machine: Machine) -> None: ...
-
-    async def _close_open(self, machine: Machine) -> Stop | None: ...
-
-    def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
-
-
-def _check_image_names(images: Sequence[Image]) -> None:
-    seen: set[str] = set()
-    for index, image in enumerate(images):
-        if image.name is None:
-            continue
-        if image.name in seen:
-            raise ConfigError(
-                f"two images are named {image.name}",
-                file="images",
-                key=f"images[{index}].name",
-                expected="a name no other image has",
-            )
-        seen.add(image.name)
-
-
-def _probe_state(state: object, registers: Sequence[str]) -> bool | None:
-    if state is None:
-        return None
-    if state not in ("secure", "nonsecure"):
-        raise ValueError(f'a probe state is "secure", "nonsecure" or None, not {state!r}')
-    if "secure" not in registers:
-        raise ConfigError(
-            "a probe state needs a machine with TrustZone enabled",
-            file="probe",
-            key="state",
-            expected="no state on a machine without TrustZone enabled",
-        )
-    return state == "secure"
 
 
 class Machine:
@@ -851,10 +474,10 @@ class Machine:
         config.config_digest = config_digest
         config.arena_start = arena_base
         config.arena_size = arena_size if arena_base is not None else 0
-        config.python_models = _model_makers(description, models or {})
-        chosen = _chosen_plugin_models(description, models or {}, _plugin_models or {})
+        config.python_models = model_makers(description, models or {})
+        chosen = chosen_plugin_models(description, models or {}, _plugin_models or {})
         config.plugin_models = chosen
-        attached = _checked_devices(description, devices or {}, models or {}, chosen)
+        attached = checked_devices(description, devices or {}, models or {}, chosen)
         config.python_devices = {name: list(targets) for name, targets in attached.items()}
         if rcc is not None:
             config.rcc_hse_hz = rcc.hse_hz
@@ -863,7 +486,7 @@ class Machine:
         if supply is not None:
             config.vdda_mv = supply.vdda_mv
         if option_bytes is not None:
-            config.option_bytes = _option_bytes_config(option_bytes)
+            config.option_bytes = option_bytes_config(option_bytes)
         if rng is not None:
             if not isinstance(cast(object, rng), RngOptions):
                 raise TypeError(f"rng: expected an RngOptions, not {type(rng).__qualname__}")
@@ -877,24 +500,24 @@ class Machine:
         self._system: weakref.ref[System] | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
-        self._model_context = _ContextCell(contextvars.copy_context())
+        self._model_context = ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
         images = (image,) if isinstance(image, Image) else tuple(image)
-        _check_image_names(images)
+        check_image_names(images)
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
         self._refs: Refs | None = None
         self._ports = UartPorts(
-            _uart_attacher(self._handle, attached),
+            uart_attacher(self._handle, attached),
             [name for name in self._handle.uart_names() if name not in attached],
             {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None},
             self._wait_until,
             self._post,
-            _pty_opener(self._handle),
+            pty_opener(self._handle),
         )
         sais = self._handle.audio_names()
-        audio_options = _checked_audio(audio or {}, sais, aliases)
-        self._clocked = _clock_wiring(audio_options, attached, aliases)
+        audio_options = checked_audio(audio or {}, sais, aliases)
+        self._clocked = clock_wiring(audio_options, attached, aliases)
         self._audio = AudioPorts(
             self._handle.attach_audio,
             sais,
@@ -980,7 +603,7 @@ class Machine:
         self._logs: dict[int, list[LogEntry]] = {}
         self._installed: list[Intercept | Probe | Watch] = []
         self._sentinel = (
-            self._arena.sentinel if self._arena is not None else _free_sentinel(description)
+            self._arena.sentinel if self._arena is not None else free_sentinel(description)
         )
         for one in images:
             self.load(one)
@@ -1043,7 +666,7 @@ class Machine:
                 machine: weakref.ReferenceType[Machine] = weakref.ref(self)
                 loop._bind(  # pyright: ignore[reportPrivateUsage]
                     self._handle.virtual_loop_port_of(Relay(self._callback_table, key, quiet=True)),
-                    lambda op, at_ps: _submitted(machine, op, at_ps),
+                    lambda op, at_ps: submitted(machine, op, at_ps),
                 )
                 self._loop = loop
             return loop
@@ -1192,7 +815,7 @@ class Machine:
                 names call symbols by the ids it was opened with.
         """
         self._require_stopped()
-        _check_image_names((*self._images, image))
+        check_image_names((*self._images, image))
         if image.loaded:
             self._handle.load(image.native)
         else:
@@ -1614,7 +1237,7 @@ class Machine:
 
     @default_budget.setter
     def default_budget(self, budget: int | None) -> None:
-        self._default_budget = _checked_budget(budget)
+        self._default_budget = checked_budget(budget)
 
     def remove_hooks(self) -> int:
         """Remove every intercept, return hook, probe and watch of this machine, as `remove()`
@@ -2020,9 +1643,9 @@ class Machine:
         names = {irq.number: irq.name for irq in self._description.irqs}
 
         def named(number: int) -> str:
-            if number < _FIRST_IRQ:
-                return f"{_SYSTEM_EXCEPTIONS.get(number, 'exception')} ({number})"
-            irq = number - _FIRST_IRQ
+            if number < FIRST_IRQ:
+                return f"{SYSTEM_EXCEPTIONS.get(number, 'exception')} ({number})"
+            irq = number - FIRST_IRQ
             return f"{names.get(irq, f'IRQ{irq}')} ({irq})"
 
         shown = ", ".join(named(n) for n in numbers[:4])
@@ -2032,7 +1655,7 @@ class Machine:
 
     def _fault_context(self, values: Sequence[int]) -> Mapping[str, int]:
         read = dict(zip(self._handle.register_names(), values, strict=True))
-        captured = {name: read[name] for name in _FAULT_CONTEXT if name in read}
+        captured = {name: read[name] for name in FAULT_CONTEXT if name in read}
         return types.MappingProxyType(captured)
 
     def _signature(self, fn: int | str | Symbol, entry: int) -> Signature:
@@ -2287,7 +1910,7 @@ class Machine:
                 is a member of a linked system that runs.
             RuntimeError: Called from a callback of another machine.
         """
-        secure = _probe_state(state, self._registers.names())
+        secure = probe_state(state, self._registers.names())
         address = self.address_of(target)
         hook = self._handle.add_probe(address, secure)
         return self._keep(Probe(hook, address, self._probe_hit, self._handle.remove_probe))
@@ -2309,7 +1932,7 @@ class Machine:
             stop = stop_of(raw)
             self._surfaced = stop
             if ended:
-                raise _stop_error(
+                raise stop_error(
                     stop, "the free run, while waiting for a probe hit", error_prefix(self)
                 )
             first = hook.first_ps()
@@ -2323,11 +1946,11 @@ class Machine:
                 else "runs a goal outside a free run"
             )
             raise MachineBusy(f"{self._name} {where}: await a probe hit outside it") from error
-        stop = await self.wait_for(_Native(ready), for_=within)
+        stop = await self.wait_for(Native(ready), for_=within)
         first = hook.first_ps()
         missed = stop.reason is StopReason.USER and first is None
         if missed or stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, "the run waiting for a probe hit", error_prefix(self))
+            raise stop_error(stop, "the run waiting for a probe hit", error_prefix(self))
         return first is not None and first < start.ps + within.ps
 
     def stub_libc(self) -> list[Intercept]:
@@ -2741,8 +2364,8 @@ class Machine:
                 function running now returns. Nothing ran, a pending reset was applied.
             Exception: A kept log filter or handler error, as for `read`.
         """
-        _check_duration(for_)
-        returning = _Resolver(self._frame_return) if isinstance(until, FrameReturn) else None
+        check_duration(for_)
+        returning = Resolver(self._frame_return) if isinstance(until, FrameReturn) else None
         target = None if until is None or isinstance(until, FrameReturn) else self.address_of(until)
         return await self._goal(
             until=target,
@@ -2780,7 +2403,7 @@ class Machine:
             BudgetExceeded: The budget ran out first.
             FaultError: The function faulted.
         """
-        returning = _Resolver(self._frame_return, self._check_returns)
+        returning = Resolver(self._frame_return, self._check_returns)
         stop = await self._goal(
             until=None,
             budget=self._default_budget if budget is None else budget,
@@ -2794,7 +2417,7 @@ class Machine:
         if target is None:
             raise EmulationError(f"{error_prefix(self)}the step out resolved no return point")
         if stop.reason is not StopReason.RETURNED:
-            raise _stop_error(stop, f"the step out of {target.name}", error_prefix(self))
+            raise stop_error(stop, f"the step out of {target.name}", error_prefix(self))
         if target.exception:
             return None
         signature = self._signature(target.name, target.start)
@@ -2804,14 +2427,14 @@ class Machine:
         abi = _core.FloatAbi(self._abi_at(target.start).value)
         return decode(slot, self._handle.result_bits(slot.kind, abi))
 
-    def _check_returns(self, target: _Returning) -> None:
+    def _check_returns(self, target: Returning) -> None:
         if target.exception:
             return
         unsupported = self._signature(target.name, target.start).returns_unsupported
         if unsupported is not None:
             raise NotImplementedError(unsupported)
 
-    def _frame_return(self) -> _Returning:
+    def _frame_return(self) -> Returning:
         regs = self.reg
         pc, lr, sp = int(regs.pc), int(regs.lr), int(regs.sp)
         read32, functions = stack_access(self)
@@ -2823,7 +2446,7 @@ class Machine:
                 f"{error_prefix(self)}{name}: cannot find where the function at {pc:#x} returns"
             )
         start = pc if function is None else function.start
-        return _Returning(point.ret, point.sp, name, start, pc)
+        return Returning(point.ret, point.sp, name, start, pc)
 
     async def _bounded_run(
         self,
@@ -2868,7 +2491,7 @@ class Machine:
         exact: int | None,
         deadline: VirtualTime | None = None,
         run: bool = False,
-        returning: _Resolver | None = None,
+        returning: Resolver | None = None,
     ) -> Stop:
         self._refuse_in_step()
         self._last_stop = None
@@ -2900,7 +2523,7 @@ class Machine:
                 until=until,
                 budget=budget,
                 exact=exact,
-                for_ps=_ps(for_),
+                for_ps=ps_of(for_),
                 deadline_ps=deadline_ps(deadline),
                 stop_when=None if stop_when is None else self._handler(stop_when),
                 until_return=until_return,
@@ -2928,19 +2551,19 @@ class Machine:
             raw, ended = cast(
                 tuple[_core.StopInfo, bool],
                 await awaited(
-                    self._handle.wait_predicate_ended(ready, _ps(for_), deadline_ps(deadline)),
+                    self._handle.wait_predicate_ended(ready, ps_of(for_), deadline_ps(deadline)),
                     lambda got: got,
                 ),
             )
             stop = stop_of(raw)
             if ended:
-                raise _stop_error(
+                raise stop_error(
                     stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
                 )
             return Waited(stop.time, stop.resets)
-        stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
+        stop = await self.wait_for(Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
+            raise stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
         return Waited(stop.time, stop.resets)
 
     async def _wait_gated(
@@ -2950,16 +2573,16 @@ class Machine:
         deadline: VirtualTime | None,
     ) -> Waited:
         ready = gated.ready
-        event = _Ready(lambda _: ready(), gate=gated.gate)
+        event = Ready(lambda _: ready(), gate=gated.gate)
         if not self.busy and self._handler(event.ready)():
             return Waited(self.time, None)
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and not event.fired:
-            raise _stop_error(
+            raise stop_error(
                 stop, "the free run, while waiting for a Python predicate", error_prefix(self)
             )
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
+            raise stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
         return Waited(stop.time, stop.resets)
 
     async def wait_until(
@@ -3009,8 +2632,8 @@ class Machine:
             BaseException: What `predicate` raised, or what a handler of the free run raised.
         """
         self._refuse_on_host()
-        _check_wait(for_, deadline)
-        event = _Ready(predicate)
+        check_wait_args(for_, deadline)
+        event = Ready(predicate)
         if not self.busy and self._handler(event.ready)():
             return self.time
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
@@ -3018,7 +2641,7 @@ class Machine:
             return stop.time
         if stop.reason in (StopReason.TIME, StopReason.IDLE):
             return None
-        raise _stop_error(stop, "the run waiting for the predicate", error_prefix(self))
+        raise stop_error(stop, "the run waiting for the predicate", error_prefix(self))
 
     async def wait_for(
         self,
@@ -3063,7 +2686,7 @@ class Machine:
             ValueError: `for_` is negative, or a `Condition` or `Conditions` of another machine.
             MachineBusy: A run, step, call or wait is active outside a free run.
         """
-        _check_wait(for_, deadline)
+        check_wait_args(for_, deadline)
         if isinstance(event, Condition | Conditions):
             return await self._wait_condition(event, for_, deadline)
         if self._handle.session_open():
@@ -3072,9 +2695,9 @@ class Machine:
             return await self._waited(event, for_, deadline)
         if isinstance(event, Reached):
             return await self._bounded_run(until=event.target, for_=for_, deadline=deadline)
-        if isinstance(event, _Native):
+        if isinstance(event, Native):
             return await self._run_native(event.predicate, for_, deadline)
-        if isinstance(event, _Ready) and event.gate is not None:
+        if isinstance(event, Ready) and event.gate is not None:
             return await self._run_gated(event.gate, event.ready, for_, deadline)
         return await self._bounded_run(for_=for_, deadline=deadline, stop_when=event.ready)
 
@@ -3087,7 +2710,7 @@ class Machine:
         hook = self._handle.add_probe(address, None)
         try:
             return await self._waited(
-                _Native(self._handle.predicate_probe_hit(hook)), for_, deadline
+                Native(self._handle.predicate_probe_hit(hook)), for_, deadline
             )
         finally:
             self._handle.remove_probe(hook)
@@ -3100,7 +2723,7 @@ class Machine:
     ) -> Stop:
         try:
             stop = await awaited(
-                self._wait_future(event, _ps(for_), deadline_ps(deadline)),
+                self._wait_future(event, ps_of(for_), deadline_ps(deadline)),
                 lambda raw: stop_of(cast(_core.StopInfo, raw)),
             )
         except BaseException as error:
@@ -3114,9 +2737,9 @@ class Machine:
     ) -> _core.HostFuture:
         if event is None:
             return self._handle.wait(None, for_ps, deadline_ps)
-        if isinstance(event, _Native):
+        if isinstance(event, Native):
             return self._handle.wait_predicate(event.predicate, for_ps, deadline_ps)
-        if isinstance(event, _Ready) and event.gate is not None:
+        if isinstance(event, Ready) and event.gate is not None:
             return self._handle.wait_gated(
                 event.gate, self._handler(event.ready), for_ps, deadline_ps
             )
@@ -3151,7 +2774,7 @@ class Machine:
             Exception: A kept log filter or handler error, as for `read`.
         """
         self._refuse_on_host()
-        _check_duration(duration)
+        check_duration(duration)
         if self._handle.session_open():
             stop = await self._waited(None, duration)
         else:
@@ -3163,7 +2786,7 @@ class Machine:
                 exact=None,
             )
         if stop.reason is not StopReason.TIME:
-            raise _stop_error(stop, "the run letting time pass", error_prefix(self))
+            raise stop_error(stop, "the run letting time pass", error_prefix(self))
         return stop.time
 
     def now(self) -> Pending[VirtualTime]:
@@ -3200,7 +2823,7 @@ class Machine:
             return stop
         stop = await awaited(
             self._handle.run_predicate(
-                ready, self._default_budget, _ps(for_), deadline_ps(deadline)
+                ready, self._default_budget, ps_of(for_), deadline_ps(deadline)
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
         )
@@ -3232,7 +2855,7 @@ class Machine:
                 gate,
                 self._handler(ready),
                 self._default_budget,
-                _ps(for_),
+                ps_of(for_),
                 deadline_ps(deadline),
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
@@ -3267,8 +2890,8 @@ class Machine:
             return stop
         try:
             stop, mask = await awaited(
-                self._handle.wait_when(native_set(conditions), _ps(for_), deadline_ps(deadline)),
-                _masked_stop,
+                self._handle.wait_when(native_set(conditions), ps_of(for_), deadline_ps(deadline)),
+                masked_stop,
             )
         except BaseException as error:
             self._surfaced = error
@@ -3344,7 +2967,7 @@ class Machine:
         if isinstance(ended, BaseException):
             raise ended
         if ended is not None:
-            raise _stop_error(ended, prefix=error_prefix(self))
+            raise stop_error(ended, prefix=error_prefix(self))
         if self._parked_ends:
             raise self._parked_ends.pop(0)
 
@@ -3372,7 +2995,7 @@ class Machine:
         if ended is None or ended is surfaced:
             return None
         if isinstance(ended, Stop):
-            ended = _stop_error(ended, prefix=error_prefix(self))
+            ended = stop_error(ended, prefix=error_prefix(self))
         self._parked_ends.append(ended)
         return ended
 
@@ -3443,7 +3066,7 @@ class Machine:
                 raise
             stopped = await ending(self)
             if stopped is not None:
-                raise _stop_error(stopped, "the member's run", error_prefix(self))
+                raise stop_error(stopped, "the member's run", error_prefix(self))
             return
         self.start()
         try:
@@ -3464,9 +3087,9 @@ class Machine:
             raise
         self.halt()
 
-    def _linked(self) -> _Linked | None:
+    def _linked(self) -> Linked | None:
         owner = self._system
-        return None if owner is None else cast(_Linked | None, owner())
+        return None if owner is None else cast(Linked | None, owner())
 
     def _refuse_member(self, what: str) -> None:
         owner = self._system
@@ -3478,12 +3101,12 @@ class Machine:
 
     def _refuse_in_step(self) -> None:
         if self._loop is not None and self._loop.is_running():
-            raise MachineRunning(f"{_RUNNING}, handlers included")
+            raise MachineRunning(f"{RUNNING}, handlers included")
 
     def _require_idle(self) -> None:
         self._refuse_in_step()
         if self.busy:
-            raise MachineRunning(f"{_RUNNING}, handlers included")
+            raise MachineRunning(f"{RUNNING}, handlers included")
 
     def _device_audio_clock(self, device: BusDevice, sai: str, block: Block, frame_hz: int) -> None:
         name = self._audio.serving(sai)
@@ -3595,7 +3218,7 @@ class Machine:
 
     def _require_stopped(self) -> None:
         if self.busy and not self._handle.owns_engine():
-            raise MachineRunning(_RUNNING)
+            raise MachineRunning(RUNNING)
 
     def _handler(self, predicate: Callable[[Machine], bool]) -> Callable[[], bool]:
         def call() -> bool:
@@ -3613,363 +3236,3 @@ class Machine:
         if self._name == part:
             return f"Machine({part}, images={len(self._images)})"
         return f"Machine({self._name}, {part}, images={len(self._images)})"
-
-
-def _masked_stop(raw: object) -> tuple[Stop, int]:
-    """The stop and the member mask a native conditions wait resolves to."""
-    info, mask = cast(tuple[_core.StopInfo, int], raw)
-    return stop_of(info), mask
-
-
-def _uart_attacher(
-    handle: _core.MachineHandle, attached: Mapping[str, Sequence[BusDevice]]
-) -> Callable[[str], _core.UartQueue]:
-    """Connect a UART of `handle` to Python, refusing a UART whose far end is a device. Holds the
-    handle and not the `Machine`."""
-    devices = {
-        name for name, targets in attached.items() for t in targets if isinstance(t, UartDevice)
-    }
-
-    def connected(name: str) -> _core.UartQueue:
-        if name in devices:
-            raise ConfigError(
-                f"{name} has a UartDevice as its far end: no stream, pty or link next to it",
-                key=f"devices.{name}",
-                expected="a UART with no UartDevice",
-            )
-        return handle.attach_uart(name)
-
-    return connected
-
-
-def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
-    """Open pty bridges on `handle`, holding the handle and not the `Machine`."""
-
-    def opened(name: str, link: _core.UartQueue | _core.CdcLink) -> _core.PtyBridge:
-        if isinstance(link, _core.CdcLink):
-            return handle.open_cdc_pty(name, link)
-        return handle.open_uart_pty(name, link)
-
-    return opened
-
-
-def _option_bytes_config(option_bytes: OptionBytes) -> _core.OptionBytesConfig:
-    if not isinstance(cast(object, option_bytes), OptionBytes):
-        raise TypeError(
-            f"option_bytes: expected an OptionBytes, not {type(option_bytes).__qualname__}"
-        )
-    config = _core.OptionBytesConfig()
-    config.tzen = option_bytes.tzen
-    config.secwm1_all = option_bytes.secwm1 == "all"
-    config.secwm1 = option_bytes.secwm1 if isinstance(option_bytes.secwm1, tuple) else None
-    config.secwm2_all = option_bytes.secwm2 == "all"
-    config.secwm2 = option_bytes.secwm2 if isinstance(option_bytes.secwm2, tuple) else None
-    config.hdp1 = option_bytes.hdp1
-    config.hdp2 = option_bytes.hdp2
-    config.secboot = option_bytes.secboot
-    config.nsboot = option_bytes.nsboot
-    config.swap_bank = option_bytes.swap_bank
-    config.dualbank = option_bytes.dualbank
-    return config
-
-
-def _submitted(machine: weakref.ReferenceType[Machine], op: Any, at_ps: int) -> Any:
-    held = machine()
-    if held is None:
-        raise RuntimeError("the loop's machine was collected")
-    ops = [] if op is None else [op]
-    handle = held._handle  # pyright: ignore[reportPrivateUsage]
-    return handle.submit_ops(ops, [""] * len(ops), at_ps)
-
-
-def _model_makers(
-    description: PartDescription, models: Mapping[str, Callable[[], Model]]
-) -> dict[str, object]:
-    served = {p.name for p in description.peripherals if p.alias_of is None}
-    for name in models:
-        if name not in served:
-            close = difflib.get_close_matches(name, sorted(served))
-            raise ConfigError(
-                f"models: {description.part} has no peripheral {name}"
-                + (f", close matches: {', '.join(close)}" if close else ""),
-                file=description.part,
-                key=f"models.{name}",
-                expected="a peripheral of the description",
-            )
-    return {name: functools.partial(build_model, maker) for name, maker in models.items()}
-
-
-def _chosen_plugin_models(
-    description: PartDescription,
-    models: Mapping[str, object],
-    plugin_models: Mapping[str, tuple[Loaded, str]],
-) -> dict[str, tuple[Loaded, str]]:
-    served = {p.name for p in description.peripherals if p.alias_of is None}
-    for name in plugin_models:
-        if name not in served or name in models:
-            expected = (
-                "a peripheral of the description" if name not in served else "one board model"
-            )
-            raise ConfigError(
-                f"_plugin_models.{name}: {expected}",
-                file=description.part,
-                key=f"_plugin_models.{name}",
-                expected=expected,
-            )
-    return dict(plugin_models)
-
-
-_FAULT_CONTEXT = (
-    *(f"r{n}" for n in range(13)),
-    "sp",
-    "lr",
-    "pc",
-    "xpsr",
-    "msp",
-    "psp",
-    "primask",
-    "basepri",
-    "faultmask",
-    "control",
-)
-
-type AttachedDevice = (
-    I2CTarget
-    | SpiTarget
-    | SpiController
-    | I2CController
-    | UartDevice
-    | At25sf
-    | Eeprom24xx
-    | TableTarget
-    | I2CTargetBase
-    | SpiTargetBase
-    | SpiControllerBase
-    | I2CControllerBase
-)
-"""A device `Machine(devices=)` takes, of `popcorn.board`, of `popcorn.devices`, or of a native
-plugin, derived from the bases the native bus models serve."""
-
-_BUS_IPS: dict[type, tuple[str, ...]] = {
-    I2CTarget: ("I2C",),
-    SpiTarget: ("SPI",),
-    SpiController: ("SPI",),
-    I2CController: ("I2C",),
-    UartDevice: ("USART", "UART", "LPUART"),
-}
-
-
-_CONTROLLERS: tuple[tuple[type, str], ...] = (
-    (_core.SpiControllerBase, "SpiController"),
-    (_core.I2CControllerBase, "I2CController"),
-    (_core.UartDeviceBase, "UartDevice"),
-)
-
-
-def _device_kind(
-    device: BusDevice,
-) -> (
-    type[I2CTarget] | type[SpiTarget] | type[SpiController] | type[I2CController] | type[UartDevice]
-):
-    if isinstance(device, _core.I2CTargetBase):
-        return I2CTarget
-    if isinstance(device, _core.UartDeviceBase):
-        return UartDevice
-    if isinstance(device, _core.SpiControllerBase):
-        return SpiController
-    if isinstance(device, _core.I2CControllerBase):
-        return I2CController
-    return SpiTarget
-
-
-def _is_u32(value: object, lowest: int) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and lowest <= value < 1 << 32
-
-
-def _checked_audio(
-    audio: Mapping[str, Mapping[Block, AudioOptions]],
-    sais: Sequence[str],
-    aliases: Mapping[str, str],
-) -> dict[str, dict[Block, AudioOptions]]:
-    """`audio` keyed by the SAI serving each key, checked against the built-in SAIs `sais`."""
-    checked: dict[str, dict[Block, AudioOptions]] = {}
-    for key, blocks in audio.items():
-        name = aliases.get(key, key)
-        if name not in sais:
-            raise ConfigError(
-                f"audio.{key}: an SAI with the built-in model, one of {', '.join(sais) or 'none'}",
-                key=f"audio.{key}",
-                expected="an SAI with the built-in model",
-            )
-        if name in checked:
-            raise ConfigError(
-                f"audio.{key}: {name} is listed twice, once through an alias",
-                key=f"audio.{key}",
-                expected="each SAI once",
-            )
-        checked[name] = {}
-        for block, options in blocks.items():
-            at = f"audio.{key}.{block}"
-            if block not in ("A", "B"):
-                raise ConfigError(f"{at}: an audio block A or B", key=at, expected="A or B")
-            for field, value, lowest in (
-                ("decimation", options.decimation, 1),
-                ("external_frame_hz", options.external_frame_hz, 0),
-            ):
-                if not _is_u32(value, lowest):
-                    raise ConfigError(
-                        f"{at}.{field}: an int from {lowest} to 2**32 - 1, not {value!r}",
-                        key=f"{at}.{field}",
-                        expected=f"an int from {lowest} to 2**32 - 1",
-                    )
-            checked[name][block] = options
-    return checked
-
-
-def _clock_wiring(
-    audio: Mapping[str, Mapping[Block, AudioOptions]],
-    attached: Mapping[str, Sequence[BusDevice]],
-    aliases: Mapping[str, str],
-) -> dict[tuple[str, Block], BusDevice]:
-    """The device each `clocked_by` of `audio` names among the `attached` devices, keyed by the
-    bus serving them, by SAI and block. A bus alias, such as `SEC_I2C1`, names the bus serving
-    it. Of two devices matching, the first attached, as on the bus."""
-    wired: dict[tuple[str, Block], BusDevice] = {}
-    for name, blocks in audio.items():
-        for block, options in blocks.items():
-            named = options.clocked_by
-            if named is None:
-                continue
-            at = f"audio.{name}.{block}.clocked_by"
-            found = _device_named(named, attached, aliases)
-            if found is None:
-                raise ConfigError(
-                    f'{at}: a device of devices such as "I2C1:0x38" or "SPI1:PA4", '
-                    f"not {named!r}",
-                    key=at,
-                    expected='a bus device attached to the machine, such as "I2C1:0x38"',
-                )
-            wired[name, block] = found
-    return wired
-
-
-def _device_named(
-    named: object, attached: Mapping[str, Sequence[BusDevice]], aliases: Mapping[str, str]
-) -> BusDevice | None:
-    if not isinstance(named, str):
-        return None
-    bus, colon, where = named.partition(":")
-    if not colon:
-        return None
-    for device in attached.get(aliases.get(bus, bus), ()):
-        if isinstance(device, _core.SpiTargetBase):
-            if (cs_of(device) or "SS") == where:
-                return device
-            continue
-        try:
-            address = int(where, 0)
-        except ValueError:
-            return None
-        if getattr(device, "address", None) == address:
-            return device
-    return None
-
-
-def _checked_devices(
-    description: PartDescription,
-    devices: Mapping[str, Sequence[BusDevice]],
-    models: Mapping[str, object],
-    plugin_models: Mapping[str, object],
-) -> dict[str, tuple[BusDevice, ...]]:
-    peripherals = {p.name: p for p in description.peripherals if p.alias_of is None}
-    seen: set[int] = set()
-    out: dict[str, tuple[BusDevice, ...]] = {}
-
-    def refuse(name: str, expected: str) -> ConfigError:
-        return ConfigError(
-            f"devices.{name}: {expected}",
-            file=description.part,
-            key=f"devices.{name}",
-            expected=expected,
-        )
-
-    for name, targets in devices.items():
-        peripheral = peripherals.get(name)
-        if peripheral is None:
-            raise refuse(name, f"a peripheral of {description.part}")
-        if not any(peripheral.ip in ips for ips in _BUS_IPS.values()):
-            raise refuse(name, "an I2C, SPI or UART peripheral")
-        if name in models:
-            raise refuse(name, "a peripheral without a Python model")
-        if name in plugin_models:
-            raise refuse(name, "a peripheral without a plugin model")
-        listed: list[BusDevice] = []
-        for candidate in cast(Sequence[object], targets):
-            if not isinstance(
-                candidate,
-                _core.I2CTargetBase
-                | _core.SpiTargetBase
-                | _core.SpiControllerBase
-                | _core.I2CControllerBase
-                | _core.UartDeviceBase,
-            ):
-                raise refuse(
-                    name,
-                    "popcorn.board.I2CTarget, SpiTarget, SpiController, I2CController or"
-                    " UartDevice or popcorn.devices instances",
-                )
-            target = candidate
-            kind = _device_kind(target)
-            listed.append(target)
-            if peripheral.ip not in _BUS_IPS[kind]:
-                if kind is UartDevice:
-                    raise refuse(name, "a UART peripheral for a UartDevice")
-                raise refuse(name, f"an {_BUS_IPS[kind][0]} peripheral for an {kind.__name__}")
-            if id(target) in seen:
-                raise refuse(name, f"{target!r} listed once")
-            seen.add(id(target))
-            if serving(target) is not None:
-                raise refuse(name, f"{target!r} not serving another live machine")
-            refuse_shadowed(target)
-            cs = cs_of(target) if isinstance(target, _core.SpiTargetBase) else None
-            if cs is not None:
-                port = f"GPIO{cs[1]}"
-                if port not in peripherals:
-                    raise refuse(name, f"a chip select on a GPIO port of {description.part}")
-        for base, named in _CONTROLLERS:
-            if any(isinstance(d, base) for d in listed) and len(listed) > 1:
-                raise refuse(name, f"one {named} alone on {name}, no other device next to it")
-        if listed:
-            out[name] = tuple(listed)
-    return out
-
-
-def _checked_budget(budget: object) -> int | None:
-    if budget is None:
-        return None
-    if isinstance(budget, bool) or not isinstance(budget, int):
-        raise TypeError(f"the default budget is an int or None, not {type(budget).__name__}")
-    if budget <= 0:
-        raise ValueError(f"the default budget must be above 0, not {budget}")
-    return budget
-
-
-def _free_sentinel(description: PartDescription) -> int:
-    """First 16-byte-aligned address from the default arena base, else from 0x1000, below the
-    Arm system region, that no region or peripheral covers: the return address of a call without
-    an arena."""
-    spans = [(r.start, r.start + r.size) for r in description.regions]
-    spans += [(p.base, p.base + p.size) for p in description.peripherals]
-    for start in (DEFAULT_ARENA_BASE, 0x1000):
-        address = start
-        while address < 0xE000_0000:
-            covering = next((end for low, end in spans if low <= address < end), None)
-            if covering is None:
-                return address
-            address = (covering + 15) & ~15
-    raise ConfigError(
-        "no free address below 0xE0000000 for a call return",
-        file="machine",
-        key="arena",
-        expected="an arena or an unmapped address for call returns",
-    )
