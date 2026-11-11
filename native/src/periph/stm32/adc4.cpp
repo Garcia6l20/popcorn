@@ -238,9 +238,10 @@ using source_ptr = internal_analog_source const*;
  *        and a reset drops it. Two such edges are held. Any other edge is decided against the state
  *        at its arrival, so a source gives it before the conversion end it precedes, as the
  *        timers do from their own events.
- *        A selection no model produces, `tim1_trgo2`, `lptim1_ch1`, `lptim3_ch2` and `exti15`
- *        today, is logged once per selection at the ADSTART, a model_error under
- *        strict_peripherals that keeps ADC_CR, and ADSTART waits for it.
+ *        The `lptim1_ch1` and `lptim3_ch2` selections take the outputs of the LPTIM model, a
+ *        rise and a fall at the instant the output changes. A selection no model produces,
+ *        `tim1_trgo2` and `exti15` today, is logged once per selection at the ADSTART, a
+ *        model_error under strict_peripherals that keeps ADC_CR, and ADSTART waits for it.
  *
  *        DMA, RM0456 34.4.23: DMAEN 1 holds the `adc4_dma` request high while EOC is set and OVR
  *        clear. A DMA read of ADC_DR clears EOC and drops it, and an overrun blocks it until

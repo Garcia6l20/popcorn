@@ -317,3 +317,50 @@ def test_a_wait_mode_conversion_holds_until_eoc_clears_the_same_parked_and_runni
     parked = waited(enabled(u575), running=False)
     assert parked == (int(1.0 * 4096 / 3.0), 0, int(2.0 * 4096 / 3.0), 1)
     assert waited(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+LPTIM1EN = 1 << 11
+EXTSEL_LPTIM1_CH1 = 5 << 6
+LPTIM1SEL_HSI16 = 2 << 10
+
+
+def lptim_scan(m: popcorn.Machine, running: bool) -> tuple[int, int, int]:
+    adc = m.periph.ADC4
+    adc.input(9).volts = 1.5
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.CFGR1.write(OVRMOD | EXTEN_RISING | EXTSEL_LPTIM1_CH1)
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    rcc = m.periph.RCC
+    rcc.RCC_APB3ENR.write(rcc.RCC_APB3ENR.value | LPTIM1EN)
+    rcc.RCC_CCIPR3.write(rcc.RCC_CCIPR3.value | LPTIM1SEL_HSI16)
+    lptim = m.periph.LPTIM1
+    lptim.CCMR1.write(1 << 1)
+    lptim.CFGR.write(0)
+    lptim.CR.write(1)
+    lptim.DIER_output.write(0)
+    settle(m, 2)
+    lptim.ICR_output.write(1 << 24)
+    lptim.ARR.write(200)
+    settle(m, 2)
+    lptim.CCR1.write(2)
+    settle(m, 2)
+    lptim.ICR_output.write((1 << 3) | (1 << 4))
+    lptim.CR.write(1 | (1 << 2))
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 10)
+    return adc.DR.value, adc.ISR.EOS, adc.CR.ADSTART
+
+
+def test_an_lptim_output_starts_a_scan_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = lptim_scan(enabled(u575), running=False)
+    assert parked == (int(1.5 * 4096 / 3.0), 1, 1)
+    assert lptim_scan(enabled(u575, slice_instructions=1_000), running=True) == parked

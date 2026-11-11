@@ -472,8 +472,8 @@ sequence, the ADC clock, the interrupt, the channel sequencer, the conversion ti
 Not modelled, each logged once at the `ADSTART` that uses it, a model_error under
 strict_peripherals that keeps `ADC_CR`:
 
-- The triggers `tim1_trgo2`, `lptim1_ch1`, `lptim3_ch2` and `exti15`, `EXTSEL` 0, 5, 6 and 7: no
-  model produces them, `ADSTART` stays set and nothing converts.
+- The triggers `tim1_trgo2` and `exti15`, `EXTSEL` 0 and 7: no model produces them, `ADSTART`
+  stays set and nothing converts.
 - `AUTOFF` with `DPD`, the autonomous mode of RM0456 34.4.24: its clock requests and LDO
   power-off are not modelled, the conversions run as with `AUTOFF` alone. `DPD` alone is stored.
 - `VIN[12]`, VCORE, and `VIN[14]`, VBAT / 4, with `VBATEN` in the sequence: they convert 0, the
@@ -544,6 +544,10 @@ Triggers and DMA:
   clock. An edge ahead of the machine time is taken at its own time, after the ADC's own events
   due then, inferred. `ADSTART` stays set at the end of a sequence. The `tim1_oc4` selection takes
   the capture/compare event `tim1_cc4`, inferred.
+- `EXTSEL` 5 and 6 take the outputs `lptim1_ch1` and `lptim3_ch2` of the LPTIM model, RM0456
+  Table 329. `EXTEN` 01 takes the rise of the output, 10 its fall and 11 both, each at the instant
+  the output changes, and the sequence starts tLATR after it. The ADC listens from `ADSTART` with
+  the LPTIM running or not.
 - DMAEN holds the `adc4_dma` request high while EOC is set and OVR clear, a DMA read of `ADC_DR`
   drops it. With DMACFG 0 the request stops and `ADC_DR` freezes when the GPDMA channel
   completes, `ADSTART` staying set until it rises again, inferred. A result arriving then leaves

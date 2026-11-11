@@ -1326,7 +1326,7 @@ TEST_CASE(
     std::string_view phrase;
   };
   for(auto const& [reg, value, selection, phrase] : {
-          function{"CFGR1", (1u << 10) | (5u << 6),                1u << pa4, "EXTSEL 5"                },
+          function{"CFGR1", (1u << 10) | (7u << 6),                1u << pa4, "EXTSEL 7"                },
           function{"CFGR2", (1u << 0) | (9u << 5),                 1u << pa4, "OVSS 9 to 15"            },
           function{
                    "CFGR1", (1u << 23) | (1u << 22) | (24u << 26), 1u << pa4,
@@ -1708,7 +1708,7 @@ TEST_CASE(
     f.put("ADC4", "PWR", "VREFPROT", 1);
     f.write("CR", advregen | aden);
     f.write(
-        "CFGR1", (1u << 10) | (5u << 6) | (1u << 23) | (1u << 22) | (24u << 26) | cont | discen);
+        "CFGR1", (1u << 10) | (7u << 6) | (1u << 23) | (1u << 22) | (24u << 26) | cont | discen);
     f.write("CFGR2", (1u << 0) | (9u << 5));
     f.write("CHSELRMOD0", (1u << pa4) | (1u << 12));
   };
@@ -2033,13 +2033,12 @@ TEST_CASE("ADSTP stops the triggers: the timer schedules nothing at its next upd
 }
 
 TEST_CASE(
-    "EXTSEL selecting a signal no model produces logs once per selection and converts nothing, a "
+    "EXTSEL selecting tim1_trgo2 or exti15, which no model produces, logs once per selection and "
+    "converts nothing, a "
     "model_error when strict that keeps ADC_CR")
 {
   for(auto const& [selection, signal] : {
           std::pair{0u, std::string_view{"tim1_trgo2"}},
-          std::pair{5u, std::string_view{"lptim1_ch1"}},
-          std::pair{6u, std::string_view{"lptim3_ch2"}},
           std::pair{7u, std::string_view{"exti15"}    }
   })
   {
@@ -4086,4 +4085,178 @@ TEST_CASE(
   CHECK(f.read("DR") == 2 * 0x300u);
   f.run_until(at + 12 * conversion);
   CHECK(f.dues().empty());
+}
+
+namespace
+{
+constexpr std::uint64_t lptim_idle_unit = 250'000;
+std::uint64_t           lptim_cycle     = lptim_idle_unit;
+constexpr std::uint32_t lptim_cc1e      = 1u << 1;
+constexpr std::uint32_t lptim_cc2e      = 1u << 17;
+constexpr std::uint32_t lptim_dierok    = 1u << 24;
+constexpr std::uint32_t lptim_cmp1ok    = 1u << 3;
+constexpr std::uint32_t lptim_arrok     = 1u << 4;
+constexpr std::uint32_t lptim_cmp2ok    = 1u << 19;
+constexpr std::uint32_t lptim_ccr       = 2;
+constexpr std::uint32_t lptim_arr       = 200;
+
+struct lptim_pins
+{
+  std::string_view unit;
+  std::string_view enable_bit;
+  bool             channel2;
+  std::uint32_t    extsel;
+};
+
+constexpr lptim_pins lptim1_ch1{"LPTIM1", "LPTIM1EN", false, 5};
+constexpr lptim_pins lptim3_ch2{"LPTIM3", "LPTIM3EN", true, 6};
+
+void lptim_idle(adc4_fixture const& f, std::uint64_t cycles)
+{
+  f.run_until(f.now() + cycles * lptim_idle_unit);
+}
+
+[[nodiscard]] auto lptim_run(adc4_fixture const& f, lptim_pins const& pins) -> std::uint64_t
+{
+  f.put("RCC", "RCC_APB3ENR", pins.enable_bit, 1);
+  f.write(pins.unit, "CCMR1", pins.channel2 ? lptim_cc2e : lptim_cc1e);
+  f.write(pins.unit, "CFGR", 0);
+  f.write(pins.unit, "CR", 1);
+  auto const enabled_at = f.now();
+  f.write(pins.unit, "DIER_output", 0);
+  lptim_idle(f, 4);
+  f.write(pins.unit, "ICR_output", lptim_dierok);
+  f.write(pins.unit, "ARR", lptim_arr);
+  lptim_idle(f, 4);
+  f.write(pins.unit, "CCR1", lptim_ccr);
+  if(pins.channel2)
+  {
+    lptim_idle(f, 4);
+    f.write(pins.unit, "CCR2", lptim_ccr + 3);
+  }
+  lptim_idle(f, 4);
+  f.write(pins.unit, "ICR_output", lptim_cmp1ok | lptim_arrok | (pins.channel2 ? lptim_cmp2ok : 0));
+  auto const at = f.now();
+  f.write(pins.unit, "CR", 1u | 1u << 2);
+  return std::max(at + 3 * lptim_cycle, enabled_at + 2 * lptim_cycle);
+}
+
+[[nodiscard]] auto lptim_rise(lptim_pins const& pins, std::uint64_t a) -> std::uint64_t
+{
+  return a + (pins.channel2 ? lptim_ccr + 3 : lptim_ccr) * lptim_cycle + lptim_cycle;
+}
+
+void lptim_scan_setup(
+    adc4_fixture const& f,
+    lptim_pins const&   pins,
+    std::uint32_t       exten,
+    bool                hsi = false)
+{
+  lptim_cycle = hsi ? cycle : lptim_idle_unit;
+  if(hsi)
+  {
+    f.put("RCC", "RCC_CCIPR3", "LPTIM1SEL", 2);
+  }
+  slow_enable(f);
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("CFGR1", ovrmod | exten | extsel(pins.extsel));
+  f.port().drive(pa4, 900'000);
+}
+}
+
+TEST_CASE(
+    "RM0456 Table 329: EXTSEL 5 and 6 take the LPTIM outputs, a scan starts tLATR after an edge")
+{
+  for(auto const* pins : {&lptim1_ch1, &lptim3_ch2})
+  {
+    for(auto const exten : {exten_rising, exten_falling})
+    {
+      for(auto const& [armed_first, hsi] : {
+              std::pair{true,  false},
+              std::pair{false, false},
+              std::pair{true,  true },
+              std::pair{false, true }
+      })
+      {
+        if(hsi and pins != &lptim1_ch1)
+        {
+          continue;
+        }
+        CAPTURE(pins->unit);
+        CAPTURE(exten);
+        CAPTURE(armed_first);
+        CAPTURE(hsi);
+        adc4_fixture const f;
+        lptim_scan_setup(f, *pins, exten, hsi);
+        std::vector<core::log_record> logged;
+        auto const                    sink = recorder(f, logged);
+        if(armed_first)
+        {
+          f.write("CR", advregen | aden | adstart);
+        }
+        auto const a    = lptim_run(f, *pins);
+        auto const rise = lptim_rise(*pins, a);
+        if(not armed_first)
+        {
+          f.write("CR", advregen | aden | adstart);
+        }
+        auto const edge = exten == exten_rising ? rise : a + (lptim_arr + 1) * lptim_cycle;
+        f.run_until(edge - lptim_cycle);
+        CHECK(f.isr("EOC") == 0);
+        f.run_until(edge + us);
+        REQUIRE(f.dues().size() == 1);
+        CHECK(f.dues()[0] == edge + slow_latency);
+        f.run_until(edge + slow_latency + slow_halves(28));
+        CHECK(f.isr("EOS") == 1);
+        CHECK(f.cr("ADSTART") == 1);
+        CHECK(f.read("DR") == code_of(900'000));
+        CHECK(logged.empty());
+      }
+    }
+  }
+}
+
+TEST_CASE("checklist 72: a snapshot between two LPTIM edges restores and scans at the next edge")
+{
+  adc4_fixture const f;
+  lptim_scan_setup(f, lptim1_ch1, exten_rising | exten_falling);
+  f.write("CR", advregen | aden | adstart);
+  auto const a    = lptim_run(f, lptim1_ch1);
+  auto const rise = lptim_rise(lptim1_ch1, a);
+  auto const fall = a + (lptim_arr + 1) * lptim_cycle;
+  f.run_until(rise + slow_latency + slow_halves(28) + us);
+  REQUIRE(f.isr("EOS") == 1);
+  static_cast<void>(f.cpu_read("DR"));
+  f.write("ISR", eoc | eos | eosmp);
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc4_fixture const& g) {
+    g.run_until(fall - lptim_cycle);
+    CHECK(g.dues().size() <= 1);
+    g.run_until(fall + us);
+    REQUIRE_FALSE(g.dues().empty());
+    CHECK(g.dues().back() == fall + slow_latency);
+    g.run_until(fall + slow_latency + slow_halves(28));
+    CHECK(g.isr("EOS") == 1);
+  };
+  f.target->restore(saved);
+  check(f);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(fresh);
+}
+
+TEST_CASE("the ADC4 stops listening to the LPTIM output when ADSTP clears ADSTART")
+{
+  adc4_fixture const f;
+  lptim_scan_setup(f, lptim1_ch1, exten_rising);
+  f.write("CR", advregen | aden | adstart);
+  auto const a    = lptim_run(f, lptim1_ch1);
+  auto const rise = lptim_rise(lptim1_ch1, a);
+  f.run_until(rise + slow_latency + slow_halves(28) + us);
+  REQUIRE(f.isr("EOS") == 1);
+  f.write("CR", advregen | aden | adstp);
+  f.write("ISR", eoc | eos | eosmp);
+  f.run_until(a + (lptim_arr + 4) * lptim_cycle + slow_latency + slow_halves(28));
+  CHECK(f.dues().empty());
+  CHECK(f.isr("EOC") == 0);
 }
