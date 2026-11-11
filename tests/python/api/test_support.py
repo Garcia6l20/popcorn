@@ -20,6 +20,7 @@ U575 = mcu(PART)
 INSTANCES = [p.name for p in U575.peripherals if p.alias_of is None]
 
 U575_BUILTIN = [
+    "ADC4",
     "DAC1",
     "EXTI",
     "FLASH",

@@ -219,7 +219,6 @@ Not modelled, logged once each:
 - The EXTI line 11 and 15 selections, `EXTSEL` 6 and 16: the STM32U5 and STM32H5 EXTI drives no
   trigger signal, so they start nothing.
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
-- ADC4 has no model.
 
 Every family:
 
@@ -461,6 +460,47 @@ On the STM32L47x/L48x, RM0351 section 18, ADC1, ADC2 and ADC3 run the STM32H5 mo
   model_error under strict_peripherals. `JEXTSEL` 6 takes EXTI line 15 from the line input.
 - An `ADC_JSQR` write with JADSTART 1 and JQDIS 1 applies to the next injected sequence and is
   logged once, a model_error under strict_peripherals, RM0351 18.7.16 as corrected by ES0250 2.8.2.
+
+## ADC4
+
+Source: [adc4.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc4.cpp), [adc4_rows.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc4_rows.hpp)
+
+STM32U5 ADC4, RM0456 section 34: the voltage regulator, the calibration, the enable and disable
+sequence, the ADC clock and the interrupt.
+
+Not modelled, logged once, a model_error under strict_peripherals:
+
+- The conversions. ADSTART with ADEN 1 and ADDIS 0 stays set and converts nothing. ADSTP clears
+  it.
+
+Timing and values:
+
+- LDORDY sets 25 us after ADVREGEN, the tADCVREG_STUP maximum of DS13737 Table 106.
+- The calibration takes 123 ADC clock cycles, the typical tOFF_CAL of DS13737 Table 106. The
+  factor it leaves in `ADC_CALFACT` and `ADC_DR` is 0, inferred. The factor leaves the codes
+  unchanged.
+- ADRDY sets 17 ADC clock cycles after ADEN: tSTAB of DS13737 Table 106 is 3 cycles and one
+  conversion, here a 12-bit conversion at SMP 000, inferred. ADEN before LDORDY sets ADRDY tSTAB
+  after LDORDY, inferred.
+- ADEN written with ADVREGEN 0 sets ADVREGEN and starts the regulator, ES0499 2.9.2, with the
+  timing above, inferred.
+- The calibration needs the regulator ready, its LDORDY event, whether software cleared the flag
+  since, inferred.
+- ADDIS clears ADEN and ADDIS 6 ADC clock cycles later, as ES0499 2.9.2 states for its startup
+  sequence, inferred for every other use.
+- A reserved `ADC_CCR.PRESC`, 1100 to 1111, divides by 256, inferred, and is logged once, a
+  model_error under strict_peripherals that keeps the old `ADC_CCR`.
+- Writes that RM0456 34.4.8, 34.7.3, 34.7.13, 34.7.16 and 34.7.18 forbid are ignored and logged
+  once, a model_error under strict_peripherals that keeps the old register.
+
+Errata of ES0499 Rev 12:
+
+- 2.9.1, an ADC4 conversion disturbed by an ADC1 sampling phase on VREF+, is an electrical effect
+  outside the model. The workaround, both prescalers at 0000, applies unchanged.
+- 2.9.2, the ADC clock request active after reset, is a current consumption effect with no
+  counterpart. The timing of its workaround sequence, ADEN then ADDIS, is the model's.
+- 2.2.8, MSIK and HSI16 kept on when ADCDACSEL selects them, is a clock-tree effect outside the
+  model.
 
 ## CRC
 

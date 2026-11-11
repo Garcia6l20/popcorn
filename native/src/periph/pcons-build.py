@@ -40,6 +40,7 @@ stm32 = [
         "otg_fs.cpp",
         "usb_drd.cpp",
         "adc.cpp",
+        "adc4.cpp",
         "adc_l1.cpp",
         "dbgmcu.cpp",
         "crc.cpp",

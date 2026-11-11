@@ -46,6 +46,14 @@ on_write = "one_to_clear"
 source = "RM0456 rev 6, 34.7.1 ADC interrupt and status register (ADC_ISR): EOCAL and LDORDY are rc_w1 on ADC4, unlike ADC1/ADC12 (33.6.1) where LDORDY is plain r and EOCAL does not exist"
 
 [[fields]]
+instances = ["ADC4"]
+registers = ["ADC_CR"]
+fields = ["ADCAL", "ADSTP", "ADSTART", "ADDIS", "ADEN"]
+acc = "read_write"
+on_write = "one_to_set"
+source = "RM0456 Rev 7, 34.7.3 ADC control register (ADC_CR): ADCAL, ADSTP, ADSTART, ADDIS and ADEN of ADC4 are rs, set by software writing 1, a write of 0 keeps them. ST's STM32U5 SVDs give read-only"
+
+[[fields]]
 instances = ["EXTI"]
 registers = ["EXTI_RPR1"]
 fields = ["RPIF0", "RPIF1", "RPIF2", "RPIF3", "RPIF4", "RPIF5", "RPIF6", "RPIF7", "RPIF8", "RPIF9", "RPIF10", "RPIF11", "RPIF12", "RPIF13", "RPIF14", "RPIF15", "RPIF16", "RPIF17", "RPIF18", "RPIF19", "RPIF20", "RPIF21", "RPIF22", "RPIF23", "RPIF24", "RPIF25"]

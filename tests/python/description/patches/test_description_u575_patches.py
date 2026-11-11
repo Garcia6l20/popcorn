@@ -190,6 +190,14 @@ def test_adc4_eocal_and_ldordy_one_to_clear(u575_target_and_report: _TargetAndRe
     assert ldordy.on_write.value == "one_to_clear"
 
 
+def test_adc4_cr_commands_are_read_and_set(u575_target_and_report: _TargetAndReport) -> None:
+    target, _ = u575_target_and_report
+    cr = next(r for r in target_peripheral(target, "ADC4").registers if r.name == "ADC_CR")
+    commands = [f for f in cr.fields if f.name in {"ADCAL", "ADSTP", "ADSTART", "ADDIS", "ADEN"}]
+    assert len(commands) == 5
+    assert all((f.acc, f.on_write.value) == (Access.READ_WRITE, "one_to_set") for f in commands)
+
+
 def test_exti_rpr1_fields_one_to_clear(u575_target_and_report: _TargetAndReport) -> None:
     target, _ = u575_target_and_report
     exti = target_peripheral(target, "EXTI")
@@ -220,7 +228,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     _, report = u575_target_and_report
     assert report.ip_renamed == 26
     assert report.aliased == 98
-    assert report.fields_touched == 424
+    assert report.fields_touched == 444
     assert report.cross_rules_added == 584
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
