@@ -420,6 +420,8 @@ struct status_fields
  *        keep their loaded value at every other reset and at every pulse. OPTVERR and OPTVERRUSR
  *        set again at every reset and pulse after a load that set them, RM0038 3.9.7, the
  *        write-1 clear lasting until then, inferred.
+ *
+ * @limits flash
  */
 class flash_l1 final : public dispatch_model<flash_l1, flash_l1_state>,
                        public clock_listener,

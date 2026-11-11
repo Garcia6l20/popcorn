@@ -108,8 +108,8 @@ ST's `HAL_FLASHEx_DATAEEPROM_Program` and `HAL_FLASHEx_DATAEEPROM_Erase` run on 
 never written byte reads 0, and the host reads the EEPROM through `machine.mem`.
 
 A double word erase or write locks its bank against reads until the programming time ends, as a
-half page sequence does. [Limits](limits/index.md) lists the timing, the lock rules and the RDP level 1
-regression that erases the data EEPROM.
+half page sequence does. [FLASH limits](generated/limits/flash.md) lists the timing, the lock
+rules and the RDP level 1 regression that erases the data EEPROM.
 
 ## Memory map
 

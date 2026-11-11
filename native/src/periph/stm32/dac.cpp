@@ -231,6 +231,179 @@ using selection = std::array<std::optional<std::uint32_t>, channels>;
  *        Table 131 states for the sample and hold mode.
  *        DAC1RST and a machine reset restore the claimed registers, drop the pending loads and
  *        the DMA requests, and lower the interrupt.
+ *
+ * @limits dac DAC
+ *
+ * @group l4 rule "STM32L4 DAC1, RM0351 section 19, two 12-bit channels on the APB1 clock"
+ * - A holding register write stores DHR1 and DHR2 by the shifts of RM0351 19.4.3. Every holding
+ *   register reads its view of DHR1 and DHR2, inferred.
+ * - With TENx 0, DHRx loads into `DAC_DORx` one APB1 cycle after the write, RM0351 19.4.4. The
+ *   cycle counts from the access time at the APB1 rate of the write, inferred. With TENx 1 and
+ *   TSELx 111, each SWTRIGx write loads `DAC_DORx` one APB1 cycle later, RM0351 19.4.6. SWTRIGx
+ *   follows the `w` access of RM0351 19.7.2 and reads 0, inferred against the 19.4.6 text of a bit
+ *   reset by hardware at the load. Written with TENx 0 or another TSELx, it loads nothing,
+ *   inferred. Loads and triggers run with ENx 0, RM0351 19.4.2 note.
+ * - With TENx 1 and TSELx below 111, each rising edge of the RM0351 Table 128 source loads
+ *   `DAC_DORx` three APB1 cycles after the edge, RM0351 19.4.4 and 19.4.6: `tim6_trgo`,
+ *   `tim8_trgo`, `tim7_trgo`, `tim5_trgo`, `tim2_trgo`, `tim4_trgo` and `exti9`. A falling edge
+ *   loads nothing. The three cycles count from the exact instant the source gives the edge. Each
+ *   load takes DHRx as it is at the load, inferred.
+ * - The model keeps three pending loads per channel, in order. A fourth before the first load moves
+ *   the third to its own due. Three cover the APB1 timer sources TIM2, TIM4, TIM5, TIM6 and TIM7:
+ *   an update needs ARR 1 or more, RM0351 33.4.8, so it comes at most once per APB1 cycle. TIM8 on
+ *   APB2 and EXTI9 can give edges closer than that, and then the fourth-edge rule applies.
+ * - Popcorn charges no APB wait states, so writes closer than one APB1 cycle happen only in the
+ *   model. In that window a load takes DHRx as it is at the load, and a write while a load is
+ *   pending takes the next of the three slots.
+ * - While ENx is 1, a `DAC_CR` write keeps the old TSELx, RM0351 19.4.6 note, the old MAMPx, RM0351
+ *   19.4.9, and the old CENx, RM0351 19.7.1. `DAC_MCR` keeps the old MODEx while ENx or CENx is 1,
+ *   RM0351 19.7.16. ENx set while CENx is 1, which RM0351 19.4.11 does not allow, and WAVEx 11,
+ *   reserved by RM0351 19.7.1, keep the write. Each logs one `model_warning` per rule. Under
+ *   strict_peripherals it raises `ModelError` and leaves the register as before the write.
+ * - With CENx 1, CAL_FLAGx reads 1 once OTRIMx is at or above the factory trim and MODEx enables
+ *   the buffer, RM0351 19.4.11. It sets at the `DAC_CCR` write, with no tTRIM delay. With a
+ *   buffer-off MODEx it reads 0, and with CENx 0 it keeps its value, inferred. The factory trim is
+ *   16 on both channels, inferred, as RM0351 19.7.15 gives 0x00XX 00XX. `DAC_CCR` resets to it.
+ * - With DMAENx 1, a load from a hardware trigger raises `dac1_ch<x>_dma` at the load instant,
+ *   RM0351 19.4.7, the instant inferred. A load from a holding register write or SWTRIGx raises
+ *   none. The request drops when a DMA transfer serving it acknowledges it, or when DMAENx is
+ *   cleared, inferred. A hardware load while the request is high raises no new request and sets
+ *   DMAUDRx, RM0351 19.4.7, decided at the load, inferred, and `DAC_DORx` still loads DHRx.
+ * - DMAUDRx with DMAUDRIEx holds the DAC's share of `TIM6_DAC_IRQn`, position 54, which TIM6 also
+ *   drives.
+ * - ES0250 2.9.1, the DMA underrun flag missed for an internal trigger on the cycle of the DMA
+ *   acknowledge, applies only with software and hardware triggers mixed. Popcorn sets DMAUDRx by
+ *   the rule above.
+ * - WAVEx 01 adds the LFSR of RM0351 Figure 141, masked to the MAMPx + 1 low bits, at each SWTRIGx
+ *   or hardware load, then steps it, RM0351 19.4.8 and 19.4.12, from the preload 0xAAA. WAVEx 1x
+ *   adds the triangle counter, then steps it up to 2^(MAMPx + 1) - 1 and back down to 0, RM0351
+ *   19.4.9, 19.4.12 and Figure 144. RM0351 19.4.9 reads the increment before the add, and the model
+ *   follows 19.4.12 and Figure 144. A MAMPx above 1011 acts as 1011. The sum saturates at 0xFFF,
+ *   the reading of "without overflow", inferred. WAVEx 00 resets both generators.
+ * - The LFSR runs the 4095 states from 0xAAA and never reaches 0, so the antilock-up injection of
+ *   RM0351 19.4.8 never applies.
+ * - The RM0351 19.4.8 and 19.4.9 notes require TENx for a wave. A holding register write with TENx
+ *   0 and WAVEx set logs one `model_warning` and loads DHRx with no wave, the load inferred. Under
+ *   strict_peripherals it raises `ModelError` and leaves the holding registers as before the write.
+ *   A `DAC_CR` write that sets WAVEx with TENx 0 is accepted, as `LL_DAC_Init` writes WAVEx before
+ *   `LL_DAC_EnableTrigger` sets TENx.
+ * - Each accepted `DAC_SHSRx` write sets BWSTx, RM0351 19.7.14, and so does a `DAC_MCR` write that
+ *   sets MODEx 1xx, the sample and hold mode, the MCR write as the instant inferred. BWSTx clears 3
+ *   LSI periods later, RM0351 19.7.14 "about 3 LSI periods", the 3 inferred. While the LSI is off
+ *   BWSTx stays set, a count already running included, and it clears 3 LSI periods after the LSI
+ *   starts.
+ * - A `DAC_SHSRx` write while ENx and BWSTx are both 1 is ignored, RM0351 19.7.17. A THOLDx or
+ *   TREFRESHx write while ENx or CENx is 1 is ignored, RM0351 19.7.19 and 19.7.20. MODEx 1xx set
+ *   with the LSI off is not allowed, RM0351 19.4.10. Each logs one `model_warning` per rule. Under
+ *   strict_peripherals it raises `ModelError` and leaves the register as before the write. The LSI
+ *   stopping while a MODEx is 1xx logs the same warning once, under strict_peripherals too, since
+ *   the stop comes from an RCC write whose clock change every other listener also sees.
+ * - A sample and hold channel loads `DAC_DORx` as a normal one does, and runs the phases of RM0351
+ *   19.4.10 in LSI periods: a sample phase of TSAMPLEx + 1, RM0351 19.7.17, then hold phases of
+ *   THOLDx and refresh phases of TREFRESHx in turn, the alternation inferred. The sample phase
+ *   starts at ENx set, at each DHRx change, RM0351 19.4.10, and at each `DAC_DORx` load, inferred.
+ *   A write of the value DHRx already holds is no change, inferred. Each phase length counts from
+ *   the end of the one before. A phase of length 0 is skipped, and with THOLDx and TREFRESHx both 0
+ *   the channel stays in refresh with no further phase. While the LSI is off the phase in progress
+ *   holds, and it restarts at its full length when the LSI starts, inferred. ENx 0 stops the
+ *   phases.
+ * - The DAC stays enabled through a Stop 2 entry with no diagnostic, though RM0351 19.5 Table 131
+ *   asks for it to be disabled first. The PWR model logs the low-power mode and models no Stop
+ *   entry for a peripheral to see.
+ * - With ENx 1 a channel drives its pad, PA4 or PA5, RM0351 19.3, when MODEx connects the pad, 000,
+ *   001, 010, 100, 101 or 110, RM0351 Table 130, at `DAC_DORx` x VDDA / 4096, rounded up to the
+ *   next microvolt so that an ADC at the same VDDA converts `DAC_DORx` back, VDDA from
+ *   `SupplyOptions` taken as VREF+. The level follows each `DAC_DORx` load at once, with no
+ *   tSETTLING or tWAKEUP, and the buffer state changes no level, inferred.
+ * - A sample and hold channel drives the `DAC_DORx` value held at the end of each sample and
+ *   refresh phase, through the hold phase, in which RM0351 19.4.10 tri-states the output and the
+ *   hold capacitor keeps the voltage, inferred. From ENx set to the end of its first sample phase
+ *   it leaves the pad, inferred. The RM0351 Table 129 settling formulas do not enter the level.
+ * - MODEx 011 and 111, ENx 0, DAC1RST and a machine reset release the pad. The ADC channels on the
+ *   pad convert the DAC level, and it wins over a board drive of the pin with one warning per pin.
+ * - MODEx 001, 011, 101, 110 and 111 connect the channel on chip, RM0351 Table 130: ADC2 channels
+ *   17 and 18 and ADC3 channels 14 and 15 convert the same level, the held one in sample and hold
+ *   mode, MODEx 111 holding it on the internal CLint. MODEx 000, 010, 100, ENx 0, DAC1RST and a
+ *   machine reset disconnect it, and those channels then read 0.
+ * - In Stop 0 and Stop 1 a channel keeps its level and a sample and hold channel runs its phases,
+ *   as RM0351 Table 131 states for the sample and hold mode, since popcorn models no Stop entry.
+ *
+ * @group l1 rule "STM32L1 DAC, RM0038 section 13"
+ * STM32L1 DAC, RM0038 section 13, the same model as a subset of the STM32L4 one. It has no
+ * self-calibration (`CENx`, `DAC_CCR`, `CAL_FLAGx`), no `DAC_MCR` and no sample and hold, and its
+ * software trigger register is `DAC_SWTRIGR`.
+ *
+ * - With ENx 1 the channel drives its pad, PA4 or PA5, with `DAC_DORx` x VDDA / 4096 from each load
+ *   on. The output drives the pad only. BOFFx is stored and has no effect on the level, inferred.
+ * - TSELx follows RM0038 Table 68: 000 `tim6_trgo`, 010 `tim7_trgo`, 011 `tim9_trgo`, 100
+ *   `tim2_trgo`, 101 `tim4_trgo`, 110 `exti9`, 111 SWTRIGx. TSELx 001 is reserved: a `DAC_CR` write
+ *   with TENx set that selects it loads on no source, logs one `model_warning`, and raises
+ *   `ModelError` under strict_peripherals, leaving `DAC_CR` as before the write.
+ * - The loads, the waves, the holding register views, DMAENx with `dac_ch1_dma` and `dac_ch2_dma`
+ *   on DMA1 channels 2 and 3, DMAUDRx and the interrupt line `DAC_IRQn` follow the STM32L4 rules
+ *   above with RM0038 13.3 in place of RM0351 19.4.
+ * - ES0125, ES0224, ES0240, ES0241, ES0242 and ES0578 hold the same three DAC items, 2.6.1 to 2.6.3
+ *   in ES0125, ES0240 and ES0241 and 2.5.1 to 2.5.3 in the others. 2.x.1, the DMA request not
+ *   cleared by clearing DMAENx or the DAC clock, status A, is reproduced: a high `dac_chx_dma`
+ *   stays high until a DMA transfer acknowledges it. 2.x.2, DMAUDRx not set when an internal
+ *   trigger lands on the cycle of the DMA acknowledge, status N: silicon decides at the trigger
+ *   detection, popcorn decides DMAUDRx at the load, three APB1 cycles after the trigger, RM0038
+ *   13.3.6, and sets the flag when a hardware load finds `dac_chx_dma` still high. A trigger that
+ *   lands on the cycle of the acknowledge follows that rule, where silicon does not set the flag,
+ *   so a firmware that mixes software and hardware triggers can see DMAUDRx that silicon does not
+ *   show. 2.x.3, the spurious activation of the output buffer on PA4 and PA5 by a fast falling
+ *   edge, status A, is an electrical effect outside the model.
+ *
+ * @group u5,h5 rule "STM32U5 DAC1, RM0456 section 35, and STM32H5 DAC1, RM0481 section 30"
+ * STM32U5 DAC1, RM0456 section 35, and STM32H5 DAC1, RM0481 section 30, the L4 model with another
+ * register layout. The digital interface runs on the AHB clock, `dac_hclk`: loads take one cycle
+ * with TENx 0 and three cycles after a trigger, RM0456 35.4.6. The clock selection of RCC ADCDACSEL
+ * does not change the load timing.
+ *
+ * - TSELx 0000 is SWTRIGx and 0001 to 1111 listen to `dac_chx_trg1` to `trg15`, RM0456 Table 342
+ *   and RM0481 Table 306: `tim1_trgo`, `tim2_trgo`, `tim4_trgo`, `tim5_trgo`, `tim6_trgo`,
+ *   `tim7_trgo`, `tim8_trgo`, `tim15_trgo`, trg9 and trg10 reserved, trg11 `lptim1_ch1`, trg12
+ *   `lptim3_ch1` on the STM32U5 and `lptim2_ch1` on the STM32H5, trg13 `exti9`, trg14 and trg15
+ *   reserved. The STM32H5 trg14 and trg15 are `play_out11` and `play_out12` of the STM32H533 and
+ *   STM32H543 only. A reserved TSELx, or on the STM32H5 an LPTIM source, with TENx set logs one
+ *   `model_warning` and loads on no source. The STM32U5 LPTIM1 and LPTIM3 produce their sources.
+ *   Under strict_peripherals it raises `ModelError` and leaves `DAC_CR` as before the write.
+ * - DACxRDY sets the typical `tWAKEUP` of the datasheet after ENx rises and clears with ENx, RM0456
+ *   35.4.4: 4.2 us with the output buffer on and 2 us with it off on the STM32U5, 5 us and 2 us on
+ *   the STM32H5, DS13737 and DS14121. The datasheet value is the analog settling time, so the
+ *   DACxRDY duration is inferred. A holding register write or a SWTRIGx write with ENx 1 and
+ *   DACxRDY 0, which RM0456 35.4.4 does not allow, logs one `model_warning`. Under
+ *   strict_peripherals it raises `ModelError` and leaves the register. A hardware trigger in that
+ *   window loads DAC_DORx and logs nothing, inferred, since the manual gives no effect. ENx cleared
+ *   before DACxRDY sets cancels the wake-up.
+ * - SINFORMATx inverts bit 11 of the data when it loads into `DAC_DORx`, RM0456 35.4.5 Table 343.
+ *   The inversion is applied to the holding value before the wave is added, inferred.
+ * - `DACCxDHRB` of `DAC_DHR12Rx`, `DAC_DHR12Lx` and `DAC_DHR8Rx` store what is written and read
+ *   back through the three views.
+ * - With DMAENx 1 a hardware load raises `dac1_ch1_dma` or `dac1_ch2_dma`, the GPDMA1 requests of
+ *   RM0456 Table 137 and the RM0481 GPDMA request table, and a DHRx write, SWTRIGx or a load with
+ *   DMAENx 0 raises none. The request drops at the GPDMA acknowledge or when DMAENx clears,
+ *   inferred. A hardware load that finds the request high sets DMAUDRx and still loads DORx.
+ *   DMAUDRx with DMAUDRIEx holds `DAC1_IRQn`, the DAC's own line.
+ * - With DMADOUBLEx and DMAENx 1, RM0456 35.4.9 and RM0481 30.4.9, a hardware trigger alternates:
+ *   the first loads DORx from DHRx, keeps DHRBx as DORBx and raises the request, the second makes
+ *   DORBx the output, sets DORSTATx and raises no request, and the next one loads DORx and clears
+ *   DORSTATx. DORx reads its own value while DORSTATx is 1. SINFORMATx inverts DORBx as it does
+ *   DORx. The underrun check runs at the first trigger of a pair only, inferred. A DHRx write that
+ *   loads, a trigger with DMAENx 0 and ENx 0 load DORx, clear DORSTATx and restart the alternation,
+ *   inferred. The wave term is added at the first trigger only, inferred.
+ * - STM32U5 `DAC_AUTOCR` is storage: a firmware write logs one `model_warning` and raises
+ *   `ModelError` under strict_peripherals before the store. The autonomous mode of RM0456 35.4.16
+ *   is not modelled, and a hardware trigger with AUTOMODE set behaves as without.
+ * - DMADOUBLEx written while ENx or DMAENx is 1 keeps the old bit, RM0456 35.4.9. It logs one
+ *   `model_warning` and raises `ModelError` under strict_peripherals, leaving `DAC_MCR`.
+ * - HFSEL is stored. It has no effect: the model has no conversion delay.
+ * - STM32U5 `DAC_MCR.MODEx` drives the pad and the on-chip peripherals as the STM32L4 table does.
+ *   On the STM32H5 MODEx 000, 010, 100 and 110 connect the external pin only, and 001, 011, 101 and
+ *   111 are reserved, RM0481 30.7.16: a write of a reserved value keeps the old MODEx, logs one
+ *   `model_warning` and raises `ModelError` under strict_peripherals.
+ * - ES0499 2.2.8 and ES0565 2.2.31, kernel clock request and output voltage with another ADCDACSEL,
+ *   are clock-tree and electrical effects outside the model.
  */
 class dac final : public dispatch_model<dac, dac_state>,
                   public bus_reset_listener,

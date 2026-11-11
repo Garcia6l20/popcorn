@@ -2194,6 +2194,264 @@ static_assert(flag_matches_roles(
  *   flash. A bank 2 page erase or MER2 alone erases nothing, warns once and raises under
  *   strict_peripherals, inferred.
  * - Timings default to DS10198 Rev 11 Table 63, l4_flash_timing.
+ *
+ * @limits flash FLASH
+ *
+ * @group u5,h5 unmodelled "Not modelled"
+ * - Single ECC errors. ECCC never sets and ECCIE has no effect.
+ *
+ * @group u5 deviation "Differs from RM0456"
+ * - OPTSTRT programs the FLASH_WRPxyR registers only and completes at once, with no BSY. The
+ *   protection follows OBL_LAUNCH, a power-on or a brown-out reset. FLASH_OPTR, the boot addresses
+ *   and the SECWM registers keep the machine's option bytes, and a write to one of them logs a
+ *   warning once at the next OPTSTRT.
+ * - A store while BSY is set completes at once and is applied when BSY clears. Silicon stalls the
+ *   bus until then.
+ * - Host and debugger reads, instruction fetches and vector table reads never detect an ECC error.
+ * - An unprivileged fetch of a privileged page is a BusFault. RM0456 Table 73 gives zeros.
+ * - A Secure bank erase over a bank with mixed pages is refused whole, by Table 70, not by 3.5.5.
+ * - Without TrustZone the FLASH_PRIVxBBRy bits are stored and gate no access. RM0456 3.6.3 keeps
+ *   the privileged protection with TZEN = 0.
+ *
+ * @group h5 unmodelled "Not modelled on the STM32H5"
+ * - OBK key storage, the high-cycle data area, OTP and read-only area programming. Their registers
+ *   are storage.
+ * - FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
+ *   OTPBLR_CUR locks no OTP block.
+ * - The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
+ *   whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
+ *   warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
+ *   model error under `strict`. LATENCY is checked against the same table.
+ *
+ * @group h5 rule "HDP areas"
+ * The HDP area of each bank closes by the SBS HDPL level of RM0481 Table 63, with TrustZone on and
+ * off, RM0481 7.6.2 and Table 72 note 1. A closed sector reads zero to a load, a fetch from it is a
+ * BusFault, and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area at
+ * HDPL 3. Without TrustZone the rule needs machine option bytes, which set the HDP areas.
+ *
+ * @group h5 deviation "Differs from RM0481"
+ * - OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers at once, with no
+ *   BSY. The other _PRG registers are storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and
+ *   FLASH_SECWM2R_PRG, which read 0 and ignore writes while TrustZone is off. A write to a storage
+ *   register logs a warning once at the next OPTSTRT.
+ * - Without machine option bytes the OPTSR, OPTSR2, NSBOOTR, SECWM and HDP _CUR registers read the
+ *   delivery values of RM0481 Table 55, FLASH_SECBOOTR_CUR reads 0 on the bus while TrustZone is
+ *   off, and the WRP _CUR registers read 0xFFFFFFFF. With them every reset loads the encoded
+ *   values. FLASH_NSEPOCHR_CUR, FLASH_SECEPOCHR_CUR and the _PRG registers reset to 0.
+ * - On the STM32H562, H563 and H573 FLASH_OPTSR_CUR reads the delivery value 0x2D30EDF8 read from
+ *   silicon, which differs from RM0481 Table 55 in bit 5. The STM32H523, H533, H543 and H553 read
+ *   the Table 55 value.
+ * - A program over a word that is not erased writes the new data as given.
+ * - Without TrustZone the FLASH_PRIVBBxRy bits are stored and gate no access. RM0481 3.7.2 keeps
+ *   the privileged protection with TZEN = 0xC3.
+ *
+ * @group l1 rule "On the STM32L1, RM0038 section 3"
+ * - A program memory word write, page erase or half page write holds BSY for one tprog of 3.28 ms,
+ *   the typical of the STM32L15x datasheets and inferred for the 2.1 MHz MSI clock, and the memory
+ *   reads its new content from the last store of the operation on. During a word write or a page
+ *   erase, code and data reads of the bank complete and the core keeps running from it. RM0038
+ *   3.4.3 stalls code run from the bank for one tprog.
+ * - From the first store of a half page sequence to the end of its tprog, a CPU or DMA load of the
+ *   bank written, its program memory and its half of the data EEPROM, is a bus error and a fetch
+ *   from it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. The bus error of a load from SRAM
+ *   code and of a DMA read, and the start of the lock at the first store, are inferred from those
+ *   notes. A data EEPROM double word erase or write locks its bank the same way, inferred from
+ *   RM0038 3.4.3 note 2 and 3.7.3. A parallel page erase or parallel half page locks both banks the
+ *   same way, from the first store, inferred from RM0038 3.4.2 and 3.4.3, which run them from SRAM
+ *   only. Host and debugger reads complete. A vector read from a locked bank is a bus error too, so
+ *   an exception entry with VTOR in that bank escalates to HardFault with HFSR.VECTTBL, inferred
+ *   from RM0038 Table 15 note 3. Firmware runs these operations from SRAM with VTOR in SRAM or in
+ *   the other bank.
+ * - A store while BSY is set is decided against FLASH_PECR at its own time and writes at once. An
+ *   operation it completes adds its tprogs to BSY. EOP sets once at the end of each operation.
+ *   Silicon stalls the store until the operation before it ends. While a half page or a data EEPROM
+ *   double word of one bank is BSY, a program memory or data EEPROM store to the other bank sets
+ *   WRPERR and writes nothing, RM0038 3.4.4 and 3.7.3, inferred. A Cat.5 data EEPROM store to bank
+ *   2 during a bank 1 half page does the same.
+ * - A program memory word written over a word that is not erased holds the word as given, inferred
+ *   from RM0038 3.4.3, and Table 15 covers the data EEPROM only. A page erase writes 0, and a
+ *   never-programmed word reads 0, the erased value.
+ * - A store with FLASH_PECR.ERASE or FPRG set and PROG clear, or with both set, programs nothing,
+ *   logs one `model_warning` and raises `ModelError` under `strict`.
+ * - A data EEPROM byte, halfword or word write takes one tprog when FTDW is clear and the word
+ *   reads 0, else two, RM0038 Table 15. A word store of 0 is a word erase of one tprog. With ERASE
+ *   or FPRG set, DATA set and PROG clear, two word stores from an 8-byte boundary erase or program
+ *   a double word in one tprog. A never written data EEPROM byte reads 0.
+ * - The option words of the information block, offsets 0x00 to 0x1F and 0x80 to 0x9F on Cat.4 to
+ *   Cat.6, take a word store with PELOCK and OPTLOCK clear, timed as the data EEPROM. A power-on,
+ *   brown-out or option load reset loads FLASH_OBR and FLASH_WRPRx from them, FLASH_PECR.OBL_LAUNCH
+ *   requests that reset. A write protected sector, one FLASH_WRPRx bit per 4 KB counted over the
+ *   Flash regions in address order, refuses a program or erase with WRPERR. RDP level 2 refuses
+ *   every option store with WRPERR. At level 1, a store of RDP 0xAA erases the Flash regions, the
+ *   data EEPROM, the option words and the RTC backup registers to 0, then programs the word, in
+ *   three tprog. A part starts with the virgin option words: FLASH_OBR 0x00F800AA, FLASH_WRPRx 0.
+ * - At RDP level 1 every read, program and erase completes, the user flash boot of RM0038 3.7.1.
+ *   BOR_LEV, IWDG_SW, nRST_STOP, nRST_STDBY and nBFB2 read in FLASH_OBR as loaded, and the BOR
+ *   threshold, the watchdog start, Stop, Standby and the boot address follow the machine's own
+ *   configuration.
+ * - PCROP on STM32L151, L152 and L162 Cat.2 and Cat.3 on DIE427, RM0038 3.7.4: SPRMOD loads with
+ *   RDP against nSPRMOD and nRDP. With SPRMOD set a FLASH_WRPRx bit at 0 protects its sector
+ *   against program and erase, WRPERR, and against a CPU, DMA or filtered debugger data read, which
+ *   reads 0 and sets FLASH_SR.RDERR. A fetch from it runs. Host and unfiltered debugger reads
+ *   return the content. An option store programs with SPRMOD and every protected WRPx bit kept. The
+ *   RDP level 1 to 0 store programs the SPRMOD bit it carries, and its mass erase clears the WRPx
+ *   words. The value a PCROP read returns and the absence of a fault are inferred. So are the
+ *   option store rule that keeps every protected WRPx bit, the words read back before the next
+ *   reload, and the load of SPRMOD 1, OPTVERR and WRPR1 and WRPR2 at 0 after an RDP 1 to 0 store
+ *   and a power-on, RM0038 3.7.4. On every other category and part FLASH_WRPRx bits at 1 are write
+ *   protection.
+ * - `Machine(option_bytes=)` selects the boot bank: address 0, the flash alias, or with `swap_bank`
+ *   on Cat.4 to Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19
+ *   boots the system bootloader, which jumps to bank 2 when its first word is an SRAM address.
+ *   FLASH_OBR.nBFB2 then loads as the inverse of `swap_bank` at every option load, whatever the
+ *   USER word holds. Any other field away from its default is refused as `option_bytes.<field>`.
+ * - OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
+ *   set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
+ * - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
+ *   `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only. That the program completes is
+ *   inferred.
+ * - FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
+ *   FLASH_SR.READY reads the inverse of RUN_PD. SLEEP_PD and PRFTEN are storage.
+ * - An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, inferred
+ *   from RM0038 6.3.5, and keeps FLASH_OBR and FLASH_WRPRx at their loaded values. While FLITFRST
+ *   is held, FLASH register writes are ignored whatever RUN_PD holds.
+ * - A supply cut during a program leaves the word as the store wrote it.
+ * - Inferred rules: a wrong key, a third key write after the unlock, or a write to FLASH_PRGKEYR or
+ *   FLASH_OPTKEYR while PELOCK is set is a bus error that sets the lock it targets until the next
+ *   reset, a rejected FLASH_PEKEYR write also sets PRGLOCK and OPTLOCK, a wrong FLASH_PDKEYR key
+ *   restarts the sequence, RUN_PD takes only the first FLASH_ACR write after the PDKEYR pair, a
+ *   FLASH_ACR write that changes ACC64 keeps LATENCY and PRFTEN, so ACC64 clears while LATENCY or
+ *   PRFTEN is 1, a byte or halfword store to program memory sets SIZERR and an unaligned word store
+ *   PGAERR, a store to a page start with ERASE and PROG set erases the page whatever value it
+ *   writes, an erase store away from a page start sets PGAERR, a half page store that skips a word
+ *   inside the half page sets PGAERR, BSY stays 0 while the first 31 half page words load, a
+ *   parallel operation takes a bank 1 page or half page first and a bank 2 one second and sets
+ *   PGAERR for any other order, a FLASH_PECR write that ends a half page sequence early, setting
+ *   PELOCK included, sets PGAERR, a byte or halfword store inside a sequence sets SIZERR and drops
+ *   it, FLASH_SR.READY reads 1 after a reset, where RM0038 3.9.7 gives 0, the virgin option words
+ *   hold 0xFF in the upper byte of the RDP and USER words and complement 0xFFFF of WRPx 0, an
+ *   option word whose complement is wrong loads 0, so after an RDP 1 to 0 regression FLASH_OBR
+ *   reads USER 0 with OPTVERR and OPTVERRUSR set, a write of 1 to OPTVERR or OPTVERRUSR clears it
+ *   until the next reset, an option store with OPTVERR or OPTVERRUSR set programs, a data EEPROM
+ *   store that spans two words counts the tprogs of each word, RM0038 Table 20 note 5, a store to
+ *   the factory information or at RDP level 2 sets WRPERR, an unaligned or a byte or halfword
+ *   option store sets PGAERR or SIZERR, a byte or halfword store of 0 to the Cat.1 data EEPROM
+ *   programs nothing and logs one `model_warning`, `ModelError` under `strict`.
+ *
+ * @group l4 rule "On the STM32L47x/L48x, RM0351 section 3"
+ * - One register set, FLASH_KEYR, FLASH_CR and FLASH_SR, and no TrustZone. KEY1 then KEY2 clear
+ *   LOCK, any other key write is a bus error and keeps FLASH_CR locked until the next reset.
+ *   FLASH_OPTKEYR clears OPTLOCK with LOCK clear. A wrong option key is a bus error that keeps
+ *   OPTLOCK set until the next reset, inferred from the U5 rule: RM0351 3.7.6 states the lock only.
+ * - A double word programs when its second word is stored, BSY set for
+ *   `flash_options.quad_word_program`, 81.69 us by default, the DS10198 Table 63 tprog. A double
+ *   word that does not read 0xFFFFFFFF sets PROGERR, except when the data is zero: zeros program
+ *   over any double word. A page erase holds BSY for 22.02 ms, a bank or two-bank mass erase for
+ *   22.13 ms, the DS10198 typical values. A PNB at or above the pages of a bank, 64 on a 256-Kbyte
+ *   part, erases nothing and logs one warning, a `model_error` under `strict_peripherals`.
+ * - A read of the bank under program or erase returns its stored data at once, with no bus stall.
+ *   With `FLASH_ACR.DCEN` set such a read returns the stored data too, a popcorn rule for ES0250
+ *   2.2.14.
+ * - `PRFTEN`, `ICEN`, `DCEN`, `ICRST`, `DCRST` and `SLEEP_PD` are storage, the flash reads at once.
+ *   `RUN_PD` takes a write only after PDKEY1 then PDKEY2 in `FLASH_PDKEYR`, RM0351 3.7.1. Inferred:
+ *   the pair unlocks only the next `FLASH_ACR` write, and any other `FLASH_PDKEYR` value restarts
+ *   the sequence. A CPU or DMA write after the pair that sets `RUN_PD` logs one warning per machine
+ *   life and stores it, and under `strict_peripherals` it is a `model_error` with `FLASH_ACR` kept.
+ *   The flash stays readable, so ES0250 2.2.15 does not arise.
+ * - `LATENCY` is checked against RM0351 Table 11 for HCLK in the voltage range PWR applies: a lower
+ *   value, or an HCLK above 80 MHz in range 1 or 26 MHz in range 2, logs one warning per HCLK,
+ *   range and value, a `model_error` under `strict_peripherals`. `LATENCY` 5 to 7 counts as that
+ *   many wait states.
+ * - Fast programming, RM0351 3.3.7: with `FSTPG` set each double word of a row of 32 programs for
+ *   1/32 of the DS10198 Table 63 fast row time, 1.91 ms, so 59.69 us, where RM0351 3.3.7 gives
+ *   about 20 us between double words. BSY is set from the first double word to the 32nd and EOP
+ *   after the 32nd. `flash_options` sets no fast row time. A double word not complete when the one
+ *   before it ends sets MISERR and FASTERR. PGAERR, SIZERR and WRPERR of a store with `FSTPG` set
+ *   come with FASTERR, inferred for the first store of a row. `FSTPG` set for 7 ms sets FASTERR,
+ *   counted from each `FSTPG` 0 to 1, and a store after it sets PGSERR, inferred.
+ * - A CPU or DMA load of the bank under a fast row ends the row with no flag: the double word in
+ *   flight and the rest of the row stay unprogrammed, inferred, and one warning per machine life is
+ *   logged, a `model_error` under `strict_peripherals`. Code fetched from that bank runs and the
+ *   row goes on, where RM0351 3.3.7 aborts it.
+ * - A fast row on a bank with no `MER1`, `MER2` or two-bank mass erase since the last reset, or
+ *   with HCLK below 8 MHz, logs one warning per machine life for each rule, a `model_error` under
+ *   `strict_peripherals`, and programs. RM0351 3.3.7 sets PGSERR without the mass erase, which the
+ *   model does not set. Counting the mass erase from the last reset is inferred.
+ * - A fast row programs over any content, clearing only the bits it programs, with no PROGERR,
+ *   inferred.
+ * - Option bytes, RM0351 3.4: `FLASH_OPTR`, `FLASH_PCROPxSR`, `FLASH_PCROPxER`, `FLASH_WRPxAR` and
+ *   `FLASH_WRPxBR` read their ST production values, `FLASH_OPTR` 0xFFEFF8AA. Writes are stored
+ *   while `OPTLOCK` is clear and ignored while it is set, inferred, and reserved bits keep their
+ *   production value. `OPTSTRT` programs the nine registers at once, with no BSY, inferred. A
+ *   power-on, brown-out or option byte loader reset loads them, `OBL_LAUNCH` requests the last, and
+ *   every other reset puts the loaded words back. The construction and every `OPTSTRT` write the
+ *   programmed words into the option byte area of RM0351 3.4.1 Table 13, bank 1 from 0x1FFF7800,
+ *   bank 2 from 0x1FFFF808, each double word the word in its low half and its complement in its
+ *   high half. The Unused fields hold the register's reserved bits and their complement, and the
+ *   double word at 0x1FFFF800 stays erased, inferred. The loaded `WRPxy_STRT` to `WRPxy_END` pages
+ *   of bank x refuse a store, a page erase and a bank erase with WRPERR. `RDP`, the PCROP words and
+ *   `DUALBANK` act as below. The other option fields take no effect. `OPTVERR` stays 0.
+ * - Read protection, RM0351 3.5.1: the loaded `RDP` gives level 0 for 0xAA, level 2 for 0xCC and
+ *   level 1 for any other value, from `FLASH_OPTR` alone, whatever the complement in the option
+ *   byte area holds. A debug port access is an access through `m.mem.secure` or `m.mem.nonsecure`.
+ *   At level 1 such an access to the flash main memory, the OTP area or SRAM2 is a bus error, a
+ *   `BusAccessError` in Python, inferred for the OTP area and SRAM2 from RM0351 Table 15. The
+ *   option bytes, the system memory, the other memory and the peripherals stay open. At level 2
+ *   every such access is a bus error. `m.mem` and the CPU keep every access at every level: the
+ *   model runs the boot from flash user mode. The RTC backup registers stay open to the debug port
+ *   at level 1.
+ * - At level 2 `OPTSTRT` sets `WRPERR`, programs nothing and puts the programmed words back in the
+ *   option registers, inferred.
+ * - `OPTSTRT` with the loaded level 1 and `RDP` 0xAA in `FLASH_OPTR` erases the flash at once, with
+ *   no BSY time, inferred. With `PCROP_RDP` set both banks are erased and the PCROP words program
+ *   their production values. With `PCROP_RDP` clear, a bank with a PCROP area, `PCROPx_END` not
+ *   below `PCROPx_STRT` (inferred), keeps the pages that hold part of the area and the PCROP words
+ *   keep their programmed values. The other bank is erased, inferred. The OTP area and the system
+ *   memory are kept. The other option words program as written. The SYSCFG model writes 0 to the
+ *   whole SRAM2 at once, inferred, with no SRAM2BSY. The RTC model writes 0 to every RTC backup
+ *   register, RM0351 3.5.1. The new level takes effect at the next option byte load.
+ * - PCROP, RM0351 3.5.2: the loaded `PCROPx_STRT` and `PCROPx_END` of each bank give an area from
+ *   STRT x 8 to (END + 1) x 8 in the bank. A CPU, DMA or debug port load from it reads 0 and sets
+ *   `RDERR`, 0 is inferred, and `RDERRIE` raises `FLASH_IRQn`, 3.6 Table 16. A debug port store to
+ *   it is dropped. A fetch from it runs. `m.mem` reads its content. A program of a double word in
+ *   it, an erase of a page holding part of it and the erase of its bank or of both banks set
+ *   `WRPERR`, the bank erase rule inferred. An `OPTSTRT` that clears or shrinks a bank's area keeps
+ *   that bank's two PCROP words and programs the rest, an `OPTSTRT` that grows it programs it.
+ * - OTP, RM0351 3.3.1: a double word of 0x1FFF7000 to 0x1FFF73FF programs once with `PG`. A program
+ *   of a double word with any bit at 0 sets `PROGERR`, also with zeros, inferred flag. A store to
+ *   the rest of the information block, the option bytes and the signature, and a `FSTPG` store to
+ *   the OTP area, set `WRPERR`, inferred.
+ * - `DUALBANK`, RM0351 3.7.8: on a 256 KB or 512 KB part a loaded `DUALBANK` 0 makes the flash one
+ *   bank, pages 0 up to the flash size, `MER1` erases all of it. `BKER` 1 and `MER2` alone erase
+ *   nothing, log one warning per machine life and raise `model_error` under `strict_peripherals`,
+ *   inferred. The bank 2 WRP and PCROP words protect nothing then. On a 1 MB part the flash is
+ *   always two banks.
+ * - `Machine(option_bytes=)` programs and loads `FLASH_OPTR` at construction, the option byte area
+ *   with it: `swap_bank` sets `BFB2`, `dualbank=False` clears `DUALBANK` on a 256 KB or 512 KB
+ *   part. A BFB2 boot runs bank 2 code at its own address: the core boots from the bank 2 base,
+ *   0x08020000 on a 256 KB part, and the banks keep their addresses. Without `swap_bank` the core
+ *   boots from address 0, the flash alias. An image linked at 0x08000000 for a bank-swap boot runs
+ *   only from bank 1. The core boots the bank 2 base whatever bank 2 holds. On silicon, AN2606 Rev
+ *   71 79.1.2 Figure 102 and 79.2.2 Figure 104, the system bootloader boots bank 2 only when its
+ *   first word is an internal SRAM address, else bank 1 when bank 1's first word is one, else bank
+ *   1 at RDP level 2, else it runs its own command loop. `RDP` and the other user option bits keep
+ *   their production values, firmware programs them with `OPTSTRT`. A `BFB2` that firmware programs
+ *   is loaded only. Any other field away from its default, `dualbank=False` on a 1 MB part and
+ *   `swap_bank` with `dualbank=False` are refused as `option_bytes.<field>`.
+ *
+ * @group l4 note "STM32L47x/L48x errata and the power cut"
+ * - ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as RM0351
+ *   3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
+ * - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a
+ *   `model_error` under `strict_peripherals` with `FLASH_CR` kept, and loads the option bytes.
+ * - ECC, RM0351 3.3.2: a power cut tears the double word in flight, its first 4 data bytes ANDed
+ *   into the old ones and its last 4 kept. A CPU or DMA load of it sets `ECCD`, `BK_ECC` and
+ *   `ADDR_ECC`, the offset in its bank, and takes the NMI. Clearing `ECCD` keeps `ADDR_ECC` and
+ *   `BK_ECC`. `ECCC` and `SYSF_ECC` stay 0, and `ECCIE` is storage. A reset clears `FLASH_ECCR`.
+ * - ES0250 2.2.9: on silicon a read of a location a reset or power-down hit during its program or
+ *   erase may corrupt `FLASH_ECCR`. The model records that read's `ECCD`, `BK_ECC` and
+ *   `ADDR_ECC` exactly, and only a power cut tears a location: a reset of another kind drops the
+ *   operation.
  */
 template <typename Traits>
 class flash_model final : public dispatch_model<flash_model<Traits>, flash_state>,

@@ -39,7 +39,11 @@ inline constexpr auto h5_dac_triggers = std::to_array<std::string_view>(
     {"tim1_trgo", "tim2_trgo", "tim4_trgo", "tim5_trgo", "tim6_trgo", "tim7_trgo", "tim8_trgo",
      "tim15_trgo", "", "", "lptim1_ch1", "lptim2_ch1", "exti9", "", ""});
 
-/** @brief Differences between the DAC peripherals the model rows serve. */
+/**
+ * @brief Differences between the DAC peripherals the model rows serve.
+ *
+ * @limits dac
+ */
 struct dac_variant
 {
   /** @brief DAC_CR.TSELx value that selects the software trigger SWTRIGx. */
