@@ -1683,7 +1683,8 @@ public:
    * @param ranges Code ranges, empty for every executable segment of the loaded images.
    * @param record_unmodelled Whether to also count CPU accesses to unmodelled registers, which
    *        takes the exact-pc hook on the MMIO ranges until coverage is disabled.
-   * @throws config_error when a range is empty or leaves the 32-bit address space.
+   * @throws config_error when a range is empty, starts at an odd address or leaves the 32-bit
+   *         address space.
    * @throws machine_running while a slice runs, handlers included.
    */
   [[= py::doc{"Start collecting coverage over ranges, all code when empty, and CPU accesses to "

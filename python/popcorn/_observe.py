@@ -61,7 +61,8 @@ class MachineCoverage:
 
         Raises:
             SymbolError: No loaded or symbols-only image has a function name.
-            ConfigError: A range is empty or leaves the 32-bit address space.
+            ConfigError: A range is empty, starts at an odd address or leaves the 32-bit address
+                space.
             MachineRunning: The machine is busy, outside its handlers.
         """
         self._check()

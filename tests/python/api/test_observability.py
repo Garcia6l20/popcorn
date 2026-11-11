@@ -110,6 +110,48 @@ def test_coverage_ranges_are_checked() -> None:
     assert names == {"branches", f"{m.sym('branch_top') & ~1:#010x}"}
 
 
+def test_an_odd_coverage_range_start_is_refused_and_leaves_coverage_off() -> None:
+    m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(BRANCHES_ELF))
+    m.reset()
+    asyncio.run(m.run(budget=1_000))
+    top = m.sym("branch_top") & ~1
+    with pytest.raises(popcorn.ConfigError) as caught:
+        m.coverage.enable(ranges=[(top + 1, 16)])
+    assert caught.value.key == f"{top + 1:#010x}"
+    assert caught.value.expected == f"a halfword aligned start, not {top + 1:#010x}"
+    assert not m.coverage.enabled
+    with pytest.raises(popcorn.ConfigError):
+        m.coverage.enable(ranges=[(top, 8), (top + 9, 8)])
+    assert not m.coverage.enabled
+    m.coverage.enable(ranges=[(top, 8)])
+    assert m.coverage.enabled
+    m.reg.pc = top
+    m.reg.r0 = 4
+    run(m)
+    assert {r.name for r in m.coverage.collect().groups[0].ranges} == {f"{top:#010x}"}
+
+
+def test_an_odd_trace_range_start_still_opens(tmp_path: Path) -> None:
+    m = branches()
+    top = m.sym("branch_top") & ~1
+    with m.trace(ALL, tmp_path / "odd.pctr", ranges=[(top + 1, 16)]):
+        pass
+
+
+def test_a_function_range_collects_after_the_odd_start_refusal() -> None:
+    m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(BRANCHES_ELF))
+    m.reset()
+    asyncio.run(m.run(budget=1_000))
+    with pytest.raises(popcorn.ConfigError):
+        m.coverage.enable(ranges=[(m.sym("branch_top") | 1, 8)])
+    assert not m.coverage.enabled
+    m.coverage.enable(functions=["branches"])
+    m.reg.pc = m.sym("branches") & ~1
+    m.reg.r0 = 4
+    run(m)
+    assert m.coverage.collect().groups[0].ranges
+
+
 def test_enabling_nothing_counts_nothing() -> None:
     m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(BRANCHES_ELF))
     m.coverage.enable(ranges=[], functions=[])

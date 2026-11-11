@@ -40,6 +40,19 @@ auto native_ranges(std::vector<detail::range_row> const& rows) -> std::vector<ad
   return out;
 }
 
+void refuse_odd_starts(std::vector<detail::range_row> const& rows)
+{
+  for(auto const& [name, start, size] : rows)
+  {
+    if((start & 1U) != 0)
+    {
+      throw config_error(
+          "ranges", 0, name.empty() ? std::format("{:#010x}", start) : name,
+          std::format("a halfword aligned start, not {:#010x}", start));
+    }
+  }
+}
+
 consteval auto kinds_are_bits() -> bool
 {
   template for(constexpr auto e :
@@ -176,6 +189,7 @@ void machine_handle::enable_coverage(
     bool                                  record_unmodelled)
 {
   auto native = native_ranges(ranges);
+  refuse_odd_starts(ranges);
   access(
       [&](core::machine& target) { target.enable_coverage(std::move(native), record_unmodelled); });
 }
