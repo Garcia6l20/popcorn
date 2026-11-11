@@ -40,6 +40,8 @@ struct exti_state
  *        Non-secure access is RAZ/WI with the event, and its set-only LOCK freezes both until a
  *        reset. A line's interrupt still reaches the NVIC line, whose target state is its
  *        NVIC_ITNS bit. Under TZEN=0 these registers are storage.
+ *
+ * @limits exti
  */
 class exti final : public dispatch_model<exti, exti_state>, public exti_input
 {

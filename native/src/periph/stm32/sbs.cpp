@@ -72,6 +72,45 @@ constexpr std::uint8_t                 top_level    = 3;
  *        it is stored, as the U5 SYSCFG. Firmware reads are silent. `SBS_PMCR` takes every
  *        access, the bits RM0481 14.5.9 makes Secure with a GPIOB pin, ADC12SEC or ETHSEC
  *        included. The level lives in `SBS_HDPLSR`, so the model is stateless.
+ *
+ * @limits sbs SBS
+ *
+ * @group h5 rule
+ * - The SBS model holds the temporal isolation level and the bus rules of RM0481 14.3.4 and 14.5,
+ *   with TrustZone on and off. Under TrustZone `SBS_SECCFGR` and `SBS_RSSCMDR` are Secure,
+ *   `SBS_EPOCHSELCR`, `SBS_ECCNMIR` and `SBS_CSLCKR` Secure and privileged, `SBS_CNSLCKR`
+ *   privileged, `SBS_FPUIMR` privileged and Secure with FPUSEC, `SBS_MESR`, `SBS_CCCSR`,
+ *   `SBS_CCVALR` and `SBS_CCSWCR` Secure with SBSSEC, `SBS_CFGR2` Secure with CLASSBSEC. A
+ *   Non-secure access to a Secure register is RAZ/WI and sets SBSF in `GTZC1_TZIC_SR4`, on a read
+ *   and on a write. An unprivileged access to a privileged register is RAZ/WI and sets no flag.
+ * - SBSSEC makes `RCC_APB3ENR.SBSEN` Secure, so a Non-secure write of it is ignored while SBSSEC is
+ *   set.
+ * - FPUSEC takes privileged writes and reads for every Secure transaction, after the register
+ *   description of RM0481 14.5.8. RM0481 14.3.4 lists FPUSEC among the privileged registers, whose
+ *   unprivileged reads are RAZ.
+ * - Without TrustZone `SBS_SECCFGR`, `SBS_RSSCMDR` and `SBS_CSLCKR` are RAZ/WI, RM0481 14.5.6 gives
+ *   `SBS_RSSCMDR` "always secure (RAZ/WI if nonsecure)". `SBS_EPOCHSELCR`, `SBS_ECCNMIR`,
+ *   `SBS_FPUIMR` and `SBS_CNSLCKR` take privileged accesses only.
+ * - `SBS_DBGCR` and `SBS_DBGLOCKR` take any access at HDPL0 and HDPL1 and are RAZ/WI above it,
+ *   RM0481 14.5.4 and 14.5.5.
+ * - The SBS has no RCC reset bit, RM0481 11.8.25. `RCC_APB3RSTR` bit 1, which the STM32H562, H563
+ *   and H573 SVDs name SBSRST, is reserved and reads 0, and a write of it leaves every SBS register
+ *   as it was, as read back on an STM32H573.
+ * - A power-on or brown-out reset restores every SBS register. Every other machine reset restores
+ *   all but `SBS_RSSCMDR` and MCLR of `SBS_MESR`, RM0481 14.5.6 and 14.5.12.
+ * - `SBS_MESR` reads MCLR 1 from the power-on: the memory erase after a power-on is done at once.
+ *   MCLR and IPMEE clear on a written 1. IPMEE stays 0, the erase after a tamper or a product state
+ *   regression is outside the model. The power-on value and the MCLR clear are read on an
+ *   STM32H573.
+ * - Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR` and `SBS_MESR` is storage: the
+ *   functions of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, compensation cell, Class B and lock
+ *   registers are not modelled. Coverage reports a firmware access to them as `storage_only`. A
+ *   firmware write that lands on one logs one `model_warning` per register. Under `strict` it
+ *   raises `ModelError` before the store. Firmware reads are silent.
+ * - `SBS_PMCR` takes every access. RM0481 14.5.9 makes its PBx_FMP bits Secure with their GPIOB
+ *   pin, ANASWVDD and IO_ANA_BOOST_EN with ADC12SEC and ETH_SEL_PHY with ETHSEC.
+ * - HDPL starts at HDPL1 after every reset, the level of a user flash boot. The RSS boot at HDPL0
+ *   is outside the model.
  */
 class sbs final : public dispatch_model<sbs, sbs_state>,
                   public temporal_isolation,

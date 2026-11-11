@@ -62,6 +62,40 @@ struct syscfg_classic_state
  *        STM32L1, RM0038 8.5.1, `MEMRMP`, `SCSR`, `CFGR2` and `SWPR` on the STM32L4, inferred, and
  *        a running erase completes. The state, the key stage, is saved on a family with the erase
  *        only, the STM32L1 model is stateless.
+ *
+ * @limits syscfg
+ *
+ * @group l1 rule "STM32L1 memory remap"
+ * - STM32L1: `SYSCFG_MEMRMP` is storage. The machine boots from main flash, BOOT_MODE and MEM_MODE
+ *   read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write logs one
+ *   `model_warning`. Under `strict` it raises `ModelError` before the store.
+ *
+ * @group l4 rule "STM32L4 rules and errata"
+ * - STM32L4: `SYSCFG_EXTICR1` to `EXTICR4` select PA to PG on every line and PH on lines 0 and 1,
+ *   code 7, RM0351 9.2.3 to 9.2.6. `SYSCFG_MEMRMP` with FB_MODE, `CFGR1` with BOOSTEN and the I2C
+ *   fast-mode plus bits, `CFGR2` with its parity flag and locks, and `SWPR` are storage: a firmware
+ *   write logs one `model_warning` per register, and under `strict` raises `ModelError` before the
+ *   store. SRAM2 takes every write whatever `SWPR` holds.
+ * - STM32L4: the SRAM2 erase, RM0351 9.2.7 and 9.2.10. `SYSCFG_SKR` written 0xCA then 0x53 unlocks
+ *   `SCSR.SRAM2ER`, another value locks it, SKR reads 0. A write of SRAM2ER 1 while unlocked sets
+ *   SRAM2ER and SRAM2BSY at once and locks SRAM2ER again, inferred. The erase takes 8192 HCLK
+ *   periods at the HCLK of the write, one word per cycle, inferred, then SRAM2 reads 0 and both
+ *   bits clear. A write to SCSR during the erase changes nothing. A CPU or DMA write to SRAM2
+ *   during the erase lands and is zeroed at its end, inferred.
+ * - STM32L4: ES0250 2.2.19, an SRAM2 read during the hardware erase: the read returns the current
+ *   content, with no stall.
+ * - STM32L4: a SYSCFGRST pulse resets the EXTI selection, `CFGR1` and the key, and keeps
+ *   `SYSCFG_MEMRMP`, `SCSR`, `CFGR2` and `SWPR` with a running erase, inferred from their "System
+ *   reset value" in RM0351 9.2.
+ * - STM32L4: SRAM2 keeps its content across a system reset, whatever the `SRAM2_RST` option bit
+ *   holds, RM0351 2.4.4.
+ * - STM32L4: ES0250 2.2.7, the analog switch booster current injection, is electrical: `CFGR1`
+ *   BOOSTEN stays storage. ES0250 2.2.12, the SRAM write error at a reset, has no register effect.
+ *
+ * @group l1 rule "STM32L1 USB and LCD"
+ * - STM32L1: `SYSCFG_PMC.USB_PU` drives the USB D+ pull-up. `LCD_CAPA` is storage: a firmware write
+ *   that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError` before
+ *   the store.
  */
 class syscfg_classic final : public dispatch_model<syscfg_classic, syscfg_classic_state>,
                              public exti_selector,

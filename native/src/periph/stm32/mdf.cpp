@@ -342,6 +342,29 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        snapshot does the same through periph::snapshot_listener, so the saved chains hold every
  *        bit clocked before the snapshot's time and a restore never takes them from the sources
  *        again.
+ *
+ * @limits mdf MDF and ADF
+ *
+ * @group u5 unmodelled "These settings raise `UnmodelledConfig` naming the register and the field
+ *       when they take effect"
+ * - CKGMOD 1, and an input-direction CCKy used by an enabled serial interface with CKGDEN 1.
+ * - Manchester modes and the MDF_CKIx clocks.
+ * - The ADCITF sources, the window and snapshot modes, and triggers other than TRGO.
+ * - A reserved SCALE code.
+ * - An ADF CICMOD other than Sinc4 and Sinc5, and ILVNB above the last filter.
+ * - OLDEN and SCDEN.
+ * - In the ADF, SCKSRC 1x, BSSEL above 1, TRGSRC other than 0000 and ACQMOD 100.
+ * - A reserved SNTHR at SADEN 0 to 1.
+ *
+ * ACQMOD 110 and 111 run as 000, MDF CICMOD 110 and 111 as Sinc5, and ADF ACQMOD 101 as 000.
+ *
+ * @group u5 deviation "Choices where RM0456 is silent or the model differs"
+ * - With a generated CCK, CKABF stays 0 at SITFEN. Silicon holds it until the first clock
+ *   transition.
+ * - With CKGDEN 0, CKABF sets at SITFEN, and STH cycles at the PROCDIV rate after CKGDEN goes to 0.
+ * - The sound activity detector sees only the samples NBDIS keeps. RM0456 taps it at the DFLT0
+ *   output.
+ * - A partial SAD frame carries across a DFLT0 stop and start.
  */
 class mdf final : public dispatch_model<mdf, mdf_state>,
                   public pdm_port,

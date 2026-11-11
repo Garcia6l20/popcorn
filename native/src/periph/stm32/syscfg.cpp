@@ -49,6 +49,15 @@ static_assert(std::is_empty_v<syscfg_state>);
  *        it. Deviation: RM0456 Table 131 makes `SYSCFG_CSLCKR` RAZ/WI at TZEN=0, the model
  *        keeps it storage, P1 covers `SYSCFG_SECCFGR` only. The model is stateless: a save
  *        made by a machine without it restores it from the register storage.
+ *
+ * @limits syscfg SYSCFG
+ *
+ * @group u5 rule
+ * - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
+ *   firmware write lands and logs one `model_warning` per register. Under `strict` it raises
+ *   `ModelError` before the store. A write while SYSCFGRST holds the unit raises the illegal access
+ *   event the TrustZone rules give and is not noted.
+ * - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
  */
 class syscfg final : public dispatch_model<syscfg, syscfg_state>,
                      public trustzone_aware,

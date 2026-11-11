@@ -36,6 +36,8 @@ struct owned_bits
  *        pin configuration register, when set, such as `SYSCFG_CFGR1`, the Fast-mode Plus bit of
  *        PB6 to PB9 is Secure while that pin is Secure in GPIOB, and each owned group is
  *        Secure while its owner is, RAZ/WI to a Non-secure access with no event.
+ *
+ * @limits syscfg
  */
 struct secure_config_rules
 {
@@ -159,6 +161,8 @@ struct secure_config_rules
  *        the `OTG_FS` ADP: a firmware write that lands on one logs one model_warning per
  *        register, and raises model_error under strict_peripherals before it is stored.
  *        Debugger writes and writes the bus rules refuse whole are not noted.
+ *
+ * @limits sbs
  */
 struct storage_notes
 {

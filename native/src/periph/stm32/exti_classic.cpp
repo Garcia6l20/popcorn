@@ -59,6 +59,39 @@ static_assert(std::is_empty_v<exti_classic_state>);
  *        line to a pin of another level, whatever IMR, RTSR and FTSR hold, inferred. Its level is
  *        the selected pin's. RM0038 Tables 61 and 62 name lines 11 and 15 as ADC triggers. The
  *        model is stateless.
+ *
+ * @limits exti EXTI
+ *
+ * @group l1 rule
+ * - STM32L1: `EXTI_EMR` is storage, and an EXTI event wakes no WFE.
+ * - STM32L1: lines 16, 17, 18, 20 and 23 set their PR bit only, from `EXTI_SWIER`. The description
+ *   gives `PVD_IRQn`, `RTC_Alarm_IRQn`, `USB_FS_WKUP_IRQn`, `RTC_WKUP_IRQn` and `COMP_ACQ_IRQn` to
+ *   PWR, RTC, USB and COMP. Lines 16 to 23 take their edges from `EXTI_SWIER` only, the PVD, the
+ *   RTC, the USB and the comparators drive none.
+ * - STM32L1: lines 0 to 15 drive the trigger signals `exti0` to `exti15` the ADC selects, the input
+ *   of the line before its edge detection: an edge at each change of the selected pin, at the pin
+ *   edge's own time, and at a `SYSCFG_EXTICRn` write that moves the line to a pin of another level,
+ *   whatever `EXTI_IMR`, `RTSR` and `FTSR` hold, inferred.
+ * - STM32L1: line 23 exists on Cat.3 to Cat.6, so `EXTI_IMR` takes 0x00FFFFFF there and 0x007FFFFF
+ *   on Cat.1 and Cat.2, inferred from RM0038 chapter 10.
+ * - STM32L1, inferred rules: an edge or a SWIER write sets PR only while the `EXTI_IMR` bit is set,
+ *   the NVIC line follows PR whatever IMR holds, a SWIER write of 0 clears the SWIER bit, a write
+ *   of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a `SYSCFG_EXTICRn`
+ *   write that moves a line to a pin of another level is an edge on the line, and a selector code
+ *   RM0038 8.5.3 to 8.5.6 does not list selects no pin.
+ *
+ * @group l4 rule
+ * - STM32L4: lines 0 to 31 sit in `EXTI_IMR1` to `EXTI_PR1`, lines 32 to 39 in `EXTI_IMR2` to
+ *   `EXTI_PR2`, RM0351 14.5. Both banks follow the STM32L1 rules above, the inferred ones inferred
+ *   on the STM32L4 too.
+ * - STM32L4: the direct lines 17, 23 to 34 and 39, RM0351 Table 62, have an `EXTI_IMRx` and an
+ *   `EXTI_EMRx` bit, storage with the reset value. A direct line sets no PR bit and raises no NVIC
+ *   line, as RM0351 14.3 gives while the system runs. Its source raises its own NVIC line. A
+ *   deep-sleep WFI idles as a plain WFI, so a direct line wakes nothing.
+ * - STM32L4: lines 16 and 35 to 38, the PVD and PVM1 to PVM4, raise `PVD_PVM_IRQn`, lines 18 to 22
+ *   `RTC_Alarm_IRQn`, `TAMP_STAMP_IRQn`, `RTC_WKUP_IRQn` and `COMP_IRQn`. These lines take their
+ *   edges from `EXTI_SWIERx` only.
+ * - STM32L4: `EXTI_EMR1` and `EXTI_EMR2` are storage, and an EXTI event wakes no WFE.
  */
 class exti_classic final : public dispatch_model<exti_classic, exti_classic_state>,
                            public exti_input,

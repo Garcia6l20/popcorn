@@ -141,6 +141,54 @@ enum class unsupported : std::uint8_t
  *        and raises model_error under strict_peripherals before it is stored, popcorn policy
  *        after RM0351 11.6, "The DMA registers have to be accessed by words (32-bit)". Without
  *        strict the write lands as the bus merges it.
+ *
+ * @limits dma DMA
+ *
+ * @group l1,l4 rule
+ * - STM32L1 DMA1 and DMA2, RM0038 section 11. One transfer runs at a time per controller, 4 HCLK
+ *   cycles after the previous one, inferred. RM0038 gives no transfer time.
+ * - `GIFx` reads as the OR of `TEIFx`, `HTIFx` and `TCIFx`, inferred.
+ * - `HTIFx` sets once per pass, when the items left are at most half the count latched at the
+ *   enable. For an odd count the rounding is inferred.
+ * - `CPARx` and `CMARx` take writes while the channel runs, and the running transfer keeps the
+ *   addresses it latched at the enable until the next circular reload reads them again. `CCRx`
+ *   fields take writes while the channel runs and apply from the next item, inferred. `CNDTRx`
+ *   ignores writes while `EN` is set, RM0038 11.4.4.
+ * - A transfer error leaves the count and the current addresses at the failed item, inferred. A
+ *   circular channel disabled mid-copy and enabled again with no `CNDTRx` write restarts from the
+ *   count left at the disable, inferred.
+ * - A reserved `PSIZE` or `MSIZE` of 3 transfers words, inferred from RM0038 11.4.3, and `CIRC`
+ *   with `MEM2MEM` runs the copy once, inferred from RM0038 11.3.3. Each logs one `model_warning`.
+ * - A byte or halfword DMA write to an APB1 or APB2 address is a word write at the address aligned
+ *   down to 4, with the item repeated on every lane, RM0038 11.3.4. A CPU byte or halfword store to
+ *   the same address writes its own lanes only, inferred.
+ * - The requests of a channel are ORed, RM0038 11.3.7. Each item acknowledges every request of the
+ *   channel that is high, and the end of a non-circular transfer tells every request of the
+ *   channel, inferred.
+ * - A peripheral-requested transfer that leaves one item tells every request of the channel, once
+ *   per pass of a circular channel. This is the EOT_1 signal the I2C reads with CR2.LAST, RM0038
+ *   26.3.7. A memory-to-memory copy tells none.
+ * - The channels run whatever `RCC_AHBENR.DMAxEN` holds, which gates only their register access,
+ *   see RCC.
+ *
+ * @group l4 rule
+ * - STM32L4 DMA1 and DMA2, RM0351 section 11, follow the STM32L1 rules above, the inferred ones
+ *   inferred on the STM32L4 too, with the APB windows of RM0351 Table 1 and `RCC_AHB1ENR`.
+ * - STM32L4: `DMA_CSELR` routes each request of RM0351 Tables 46 and 47 to its channel while the
+ *   channel's `CxS` holds the request's code. A request with another code reaches nothing. A signal
+ *   the tables list on two channels, such as `SAI1_A` on DMA2 channels 1 and 6, reaches both. The
+ *   I2C4, DCMI and HASH requests of the STM32L49x/L4Ax have no row.
+ * - STM32L4: a firmware byte or halfword write to a DMA register logs one `model_warning` per
+ *   controller and, under `strict`, raises `ModelError` before the store, after RM0351 11.6 "The
+ *   DMA registers have to be accessed by words (32-bit)". Without `strict` it lands. ES0250 2.4.2
+ *   states the same as a description correction.
+ *
+ * @group l4 note
+ * - STM32L4: ES0250 2.4.1. A transfer error sets `TEIFx` and clears `EN` whatever `CGIFx` the
+ *   firmware writes in the same cycle.
+ * - STM32L4: ES0250 2.8.14, 2.8.16 and 2.8.17. The ADC2 and ADC3 requests on DMA2 channels 4 and 5
+ *   need no request 0 on channels 2 and 3, and DMA2 channels 4 and 5 hand their acknowledge and end
+ *   of transfer to their own requests only, while DMA1 serves ADC2 or ADC3.
  */
 class dma_classic final : public dispatch_model<dma_classic, dma_classic_state>,
                           public dma_controller

@@ -206,6 +206,63 @@ struct watch_table
  *        `GPIOI_SECCFGR` 0x00FF on the STM32U575 and STM32U585, RM0456 13.4.13, whose port I has 8
  *        pins. Under TZEN=0 `GPIOx_SECCFGR` is RAZ/WI, its storage keeps the description's reset. A
  *        `GPIOx_SECCFGR` write with the port clock off lands, the model has no RCC clock gating.
+ *
+ * @limits gpio GPIO
+ *
+ * @group l1 rule
+ * - STM32L1: `GPIOx_BRR` exists on Cat.4, Cat.5 and Cat.6, RM0038 7.4.11. On Cat.1 to Cat.3 a
+ *   firmware store to offset 0x28 is an unmodelled access and changes no pin. The absence on Cat.3
+ *   is inferred from RM0038 7.4.11 and its revision history.
+ * - STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
+ *
+ * @group all rule
+ * - Every family: the analog level of a pin, which an ADC channel on its pad converts, is the chip
+ *   slot a peripheral output drives, else the board slot, else 0, in every pin mode. A push-pull
+ *   output driving high reads 0 there unless a slot holds VDD. With both slots set the chip slot
+ *   wins and the first overlap on a pin logs one `model_warning` per machine life, also under
+ *   `strict_peripherals`. The chip slot is kept through a machine reset and its driver's reset
+ *   releases it, inferred: the reference manuals describe no pad state of their own.
+ *
+ * @group u5 rule
+ * - STM32U575 and STM32U585 LPGPIO1, RM0456 section 14: `LPGPIO_MODER`, `LPGPIO_IDR`, `LPGPIO_ODR`,
+ *   `LPGPIO_BSRR` and `LPGPIO_BRR` are modelled, a BSRR set wins over a reset of the same bit. Pin
+ *   y controls the pad that carries `LPGPIO1_Py` on AF11 in DS13737 Rev 10. An output pin drives
+ *   its pad while the pad is in alternate function mode, as push-pull or open-drain by the pad's
+ *   `GPIOx_OTYPER`, DS13737 3.14, and an input pin releases it. A Non-secure access to a bit of a
+ *   pin whose pad has its `GPIOx_SECCFGR` bit set reads 0 and cannot write it, RM0456 14.3.5, and
+ *   the LPGPIO1 RCC clock and reset bits are Secure while any pad is, RM0456 14.3.6. A description
+ *   with no `lpgpio1_p<y>` AF11 alternate, such as the other STM32U5 lines, keeps LPGPIO1 as plain
+ *   storage with no model. Stop 2 operation through LPDMA1 is not modelled. ES0499 Rev 12 has no
+ *   LPGPIO item. The SVDs of the STM32U575 and STM32U585 declare the `LPGPIO_BRR` fields read-only
+ *   and a patch gives them the write-only access of RM0456 14.4.5, the register itself keeps
+ *   `read_only` in the description. Inferred, for a board check, because the manuals state none of
+ *   them:
+ *   - IDR reads the pad level only for a pad in alternate function mode with AFSEL 11 and 0
+ *     otherwise, RM0456 14.3.1 states the configuration needed and not the reading without it.
+ *   - The drive of an output pin acts while the pad is in alternate function mode with any AFSEL,
+ *     and stops in the other modes.
+ *   - The pad's `GPIOx_PUPDR` pull-up decides an open-drain high, and a push-pull level of the
+ *     LPGPIO wins over a board drive of the pad, the precedence of a GPIO output pin.
+ *   - IDR of an output pin reads the pad level, the loopback.
+ *   - A pin whose pad the package does not bond stores its MODER and ODR bits and reads 0 in IDR.
+ *
+ * @group l4 rule
+ * - STM32L4: `GPIOx_ASCR`, RM0351 8.5.12, stores the switch between each pin and its ADC input,
+ *   which the GPIO model gives its peers. `GPIOx_OSPEEDR` is storage.
+ * - STM32L4: PG2 to PG15 are powered by VDDIO2, RM0351 5.4.2. A CPU or DMA write that changes a
+ *   bonded one of these pins while `PWR_CR2.IOSV` is 0 logs one `model_warning` per machine life,
+ *   and under `strict_peripherals` raises `ModelError` with the register kept. Without strict the
+ *   register takes the write and the pin behaves as a powered one, where RM0351 5.1.2 isolates the
+ *   pins until IOSV is set. What the isolated register reads and drives is inferred.
+ * - STM32L4: port H carries PH0 and PH1, its `GPIOH_MODER` resets to 0x0000000F, RM0351 8.5.1,
+ *   inferred against Table 42.
+ *
+ * @group l4 note
+ * - STM32L4 errata, no register effect: ES0250 2.2.6, the full JTAG configuration without NJTRST
+ *   pin, ES0250 2.2.16, unbonded WLCSP I/Os stay configurable by software, as the register model
+ *   does, ES0250 2.2.17, an I/O used as output with VDDA or VDDUSB above VDD + 0.6 V, and ES0250
+ *   2.2.20, PH0 and PH1 driven by the GPIOH registers while HSE runs, which can stop the HSE
+ *   oscillator when they leave analog mode.
  */
 class gpio final : public dispatch_model<gpio, gpio_state>,
                    public gpio_port,
