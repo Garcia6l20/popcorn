@@ -107,7 +107,7 @@ auto frame_start(std::span<spi_port_entry const> entries, std::uint64_t posted, 
   return entry_start(entries, posted, unit);
 }
 
-struct spi_state
+struct spi_u5h5_state
 {
   std::uint32_t                       generation{};
   std::vector<std::uint32_t>          tx_fifo;
@@ -139,7 +139,7 @@ struct spi_state
   std::uint64_t                       refused{};
   spi_port                            port;
 
-  friend auto operator==(spi_state const&, spi_state const&) -> bool = default;
+  friend auto operator==(spi_u5h5_state const&, spi_u5h5_state const&) -> bool = default;
 };
 
 struct spi_link_attachment
@@ -172,25 +172,26 @@ struct spi_link_attachment
  *        the controller at the start of the frame, before its end. The model stays consistent
  *        and a resumed run is not refused again for that transfer. Which checks a transfer has
  *        run is saved with the model. A device declaring none is never checked.
- *        FIFOs of 16 bytes, 8 on the spi_variant's limited instances, SPI3 of the STM32U5 and SPI4
- *        to SPI6 of the STM32H5, RM0456 Table 696 and RM0481 Table 645, a frame taking 1 to 4
- *        bytes, packed by the access size. A 17 to 24-bit frame takes 3 FIFO bytes, as
- *        RM0456 68.4.12 "Data packet control" states. TSIZE frames per transfer, then EOT, CSTART
- *        cleared, and TXTF once TSIZE frames were written, which clears TXPIE and DXPIE. TSIZE 0
- *        runs until SPE clears. TXC copies EOT when TSIZE is set, and otherwise is set while the TX
- * FIFO and the shifter are empty. TXP, RXP, DXP by the FTHLV packet, TXP by the remaining frames
- * for the last packet, RXWNE, RXPLVL, CTSIZE except on the instances the spi_variant gives no
- *        counter, SPI3 of the STM32U5. `SPI_I2SCFGR` of the STM32H5 SPI1 to SPI3 is plain storage.
- * A full RX FIFO sets OVR and drops the frame, or with CR1.MASRX suspends the clock and sets SUSP
- * until IFCR.SUSPC. CSUSP stops after the current frame and sets SUSP. IFCR clears its flags,
- * re-enabling clears EOT, OVR, UDR and CRCE, the SPI IRQ follows SR and IER while SPE is set, EOTIE
- * covering EOT, SUSP and TXC, and only MODF with MODFIE while SPE is clear, RM0456 section 68.7. A
- * device is selected by its GPIO chip select pin, active low, or by the hardware SS output from
- * CSTART to the end of the transfer while CFG2.SSOE is set. With no device selected MISO reads all
- * ones, a pulled-up line. The devices are saved and loaded with the model. With CFG1.TXDMAEN the
- *        `<instance>_tx_dma` request follows TXP, with CFG1.RXDMAEN the `<instance>_rx_dma` request
- *        follows RXP, or a partial last packet left in the RX FIFO once EOT is set, RM0456 section
- *        68.4.14, through the GPDMA peer, both low while SPE is clear.
+ *        FIFOs of 16 bytes, 8 on the spi_u5h5_variant's limited instances, SPI3 of the STM32U5 and
+ *        SPI4 to SPI6 of the STM32H5, RM0456 Table 696 and RM0481 Table 645, a frame taking 1 to 4
+ *        bytes, packed by the access size. A 17 to 24-bit frame takes 3 FIFO bytes, as RM0456
+ *        68.4.12 "Data packet control" states. TSIZE frames per transfer, then EOT, CSTART cleared,
+ *        and TXTF once TSIZE frames were written, which clears TXPIE and DXPIE. TSIZE 0 runs until
+ *        SPE clears. TXC copies EOT when TSIZE is set, and otherwise is set while the TX FIFO and
+ *        the shifter are empty. TXP, RXP, DXP by the FTHLV packet, TXP by the remaining frames for
+ *        the last packet, RXWNE, RXPLVL, CTSIZE except on the instances the spi_u5h5_variant gives
+ *        no counter, SPI3 of the STM32U5. `SPI_I2SCFGR` of the STM32H5 SPI1 to SPI3 is plain
+ *        storage. A full RX FIFO sets OVR and drops the frame, or with CR1.MASRX suspends the clock
+ *        and sets SUSP until IFCR.SUSPC. CSUSP stops after the current frame and sets SUSP. IFCR
+ *        clears its flags, re-enabling clears EOT, OVR, UDR and CRCE, the SPI IRQ follows SR and
+ *        IER while SPE is set, EOTIE covering EOT, SUSP and TXC, and only MODF with MODFIE while
+ *        SPE is clear, RM0456 section 68.7. A device is selected by its GPIO chip select pin,
+ *        active low, or by the hardware SS output from CSTART to the end of the transfer while
+ *        CFG2.SSOE is set. With no device selected MISO reads all ones, a pulled-up line. The
+ *        devices are saved and loaded with the model. With CFG1.TXDMAEN the `<instance>_tx_dma`
+ *        request follows TXP, with CFG1.RXDMAEN the `<instance>_rx_dma` request follows RXP, or a
+ *        partial last packet left in the RX FIFO once EOT is set, RM0456 section 68.4.14, through
+ *        the GPDMA peer, both low while SPE is clear.
  *
  *        Target mode, MASTER 0: the spi_controller_sink of the instance clocks it through
  *        spi_controller_port::transfer, one queued transfer after the other, each frame time fixed
@@ -312,24 +313,25 @@ struct spi_link_attachment
  *   model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
  * - SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
  */
-class spi final : public dispatch_model<spi, spi_state>,
-                  public spi_controller_port,
-                  public spi_target_port,
-                  public reset_listener,
-                  public bus_reset_listener,
-                  public spi_link_port
+class spi_u5h5 final : public dispatch_model<spi_u5h5, spi_u5h5_state>,
+                       public spi_controller_port,
+                       public spi_target_port,
+                       public reset_listener,
+                       public bus_reset_listener,
+                       public spi_link_port
 {
 public:
-  spi(model_context&                       ctx,
+  spi_u5h5(
+      model_context&                       ctx,
       peripheral_desc const&               desc,
       std::vector<spi_attachment>          attachments,
       std::shared_ptr<spi_controller_sink> controller,
-      spi_variant                          variant);
-  spi(spi const&)                    = delete;
-  auto operator=(spi const&) -> spi& = delete;
-  spi(spi&&)                         = delete;
-  auto operator=(spi&&) -> spi&      = delete;
-  ~spi() override;
+      spi_u5h5_variant                     variant);
+  spi_u5h5(spi_u5h5 const&)                    = delete;
+  auto operator=(spi_u5h5 const&) -> spi_u5h5& = delete;
+  spi_u5h5(spi_u5h5&&)                         = delete;
+  auto operator=(spi_u5h5&&) -> spi_u5h5&      = delete;
+  ~spi_u5h5() override;
 
   void before_reset(reset_kind kind) override;
   void reset(register_file& regs, reset_kind kind) override;
@@ -434,7 +436,7 @@ private:
   std::shared_ptr<spi_controller_sink>         controller_;
   std::vector<spi_link_attachment>             links_;
   std::shared_ptr<spi_link_controller>         link_controller_;
-  spi_attachments<spi_state>                   attachments_;
+  spi_attachments<spi_u5h5_state>              attachments_;
   bool                                         limited_;
   bool                                         counted_;
   std::size_t                                  fifo_bytes_;
@@ -500,28 +502,28 @@ private:
   std::optional<std::uint64_t>                 reset_at_;
 };
 
-constexpr std::array<write_entry<spi>, 10> spi_writes{
+constexpr std::array<write_entry<spi_u5h5>, 10> spi_u5h5_writes{
     {
-     {"SPI_CR1", &spi::control_written},
-     {"SPI_CR2", &spi::plain_written},
-     {"SPI_CFG1", &spi::plain_written},
+     {"SPI_CR1", &spi_u5h5::control_written},
+     {"SPI_CR2", &spi_u5h5::plain_written},
+     {"SPI_CFG1", &spi_u5h5::plain_written},
      {"SPI_CFG2", nullptr},
-     {"SPI_IER", &spi::plain_written},
-     {"SPI_SR", &spi::status_written},
-     {"SPI_IFCR", &spi::clear_written},
-     {"SPI_TXDR", &spi::plain_written},
-     {"SPI_RXDR", &spi::plain_written},
-     {"SPI_UDRDR", &spi::plain_written},
+     {"SPI_IER", &spi_u5h5::plain_written},
+     {"SPI_SR", &spi_u5h5::status_written},
+     {"SPI_IFCR", &spi_u5h5::clear_written},
+     {"SPI_TXDR", &spi_u5h5::plain_written},
+     {"SPI_RXDR", &spi_u5h5::plain_written},
+     {"SPI_UDRDR", &spi_u5h5::plain_written},
      }
 };
 
-spi::spi(
+spi_u5h5::spi_u5h5(
     model_context&                       ctx,
     peripheral_desc const&               desc,
     std::vector<spi_attachment>          attachments,
     std::shared_ptr<spi_controller_sink> controller,
-    spi_variant                          variant)
-    : dispatch_model{ctx, desc, "SPI", spi_writes}, regs_{ctx.regs},
+    spi_u5h5_variant                     variant)
+    : dispatch_model{ctx, desc, "SPI", spi_u5h5_writes}, regs_{ctx.regs},
       controller_{std::move(controller)}, attachments_{state_, std::move(attachments)},
       limited_{std::ranges::contains(variant.limited, std::string_view{desc.name})},
       counted_{not limited_ or variant.limited_counter}, fifo_bytes_{limited_ ? 8u : 16u},
@@ -625,7 +627,7 @@ spi::spi(
   }
 }
 
-spi::~spi()
+spi_u5h5::~spi_u5h5()
 {
   for(auto const& attached : attachments_)
   {
@@ -641,64 +643,64 @@ spi::~spi()
   }
 }
 
-auto spi::frame_bits() const -> std::uint32_t
+auto spi_u5h5::frame_bits() const -> std::uint32_t
 {
   return get(regs_, data_size_) + 1;
 }
 
-auto spi::frame_bytes() const -> std::uint32_t
+auto spi_u5h5::frame_bytes() const -> std::uint32_t
 {
   auto const bits = frame_bits();
   return bits <= 8 ? 1 : bits <= 16 ? 2 : 4;
 }
 
-auto spi::frame_mask() const -> std::uint32_t
+auto spi_u5h5::frame_mask() const -> std::uint32_t
 {
   return spi_mask(frame_bits());
 }
 
-auto spi::frame_occupancy() const -> std::uint32_t
+auto spi_u5h5::frame_occupancy() const -> std::uint32_t
 {
   return (frame_bits() + 7) / 8;
 }
 
-auto spi::packet_frames() const -> std::size_t
+auto spi_u5h5::packet_frames() const -> std::size_t
 {
   return std::size_t{get(regs_, threshold_)} + 1;
 }
 
-auto spi::capacity() const -> std::size_t
+auto spi_u5h5::capacity() const -> std::size_t
 {
   return std::max<std::size_t>(fifo_bytes_ / frame_occupancy(), 1);
 }
 
-auto spi::transfer_size() const -> std::uint32_t
+auto spi_u5h5::transfer_size() const -> std::uint32_t
 {
   return get(regs_, size_);
 }
 
-auto spi::communication() const -> std::uint32_t
+auto spi_u5h5::communication() const -> std::uint32_t
 {
   return get(regs_, comm_);
 }
 
-auto spi::power_on_offset() const -> std::uint64_t
+auto spi_u5h5::power_on_offset() const -> std::uint64_t
 {
   return ctx_.clock.since_power_on().ps - ctx_.clock.time().ps;
 }
 
-auto spi::wire_frame(std::uint32_t value) const -> std::uint32_t
+auto spi_u5h5::wire_frame(std::uint32_t value) const -> std::uint32_t
 {
   auto const frame = value & frame_mask();
   return get(regs_, lsb_first_) != 0 ? spi_reversed(frame, frame_bits()) : frame;
 }
 
-auto spi::bus_mode() const -> std::uint8_t
+auto spi_u5h5::bus_mode() const -> std::uint8_t
 {
   return static_cast<std::uint8_t>(get(regs_, polarity_) << 1 | get(regs_, phase_));
 }
 
-void spi::rethrow_refused()
+void spi_u5h5::rethrow_refused()
 {
   hooks_.rethrow();
   if(mismatched_.empty())
@@ -718,21 +720,21 @@ void spi::rethrow_refused()
           get(regs_, polarity_), get(regs_, phase_)));
 }
 
-auto spi::board_use() const -> spi_board_use
+auto spi_u5h5::board_use() const -> spi_board_use
 {
   return {
       .controller = controller_ != nullptr and link_controller_ == nullptr,
       .devices    = not attachments_.empty()};
 }
 
-auto spi::frame_time() const -> std::uint64_t
+auto spi_u5h5::frame_time() const -> std::uint64_t
 {
   auto const hz  = ctx_.clock.hz(kernel_);
   auto const div = get(regs_, bypass_) != 0 ? 1u : 2u << get(regs_, baud_);
   return hz == 0 ? 0 : std::uint64_t{frame_bits()} * div * ps_per_second / hz;
 }
 
-auto spi::frame_ps() -> std::uint64_t
+auto spi_u5h5::frame_ps() -> std::uint64_t
 {
   auto const ps = frame_time();
   if(ps == 0 and not std::exchange(no_clock_logged_, true))
@@ -742,7 +744,7 @@ auto spi::frame_ps() -> std::uint64_t
   return ps;
 }
 
-void spi::hardware_select(bool selected)
+void spi_u5h5::hardware_select(bool selected)
 {
   if(get(regs_, ss_output_) == 0 and selected)
   {
@@ -760,22 +762,22 @@ void spi::hardware_select(bool selected)
   }
 }
 
-void spi::before_reset(reset_kind)
+void spi_u5h5::before_reset(reset_kind)
 {
   reset_at_ = ctx_.clock.time().ps;
 }
 
-void spi::reset(register_file&, reset_kind kind)
+void spi_u5h5::reset(register_file&, reset_kind kind)
 {
   restore_reset_values(kind);
 }
 
-void spi::on_bus_reset()
+void spi_u5h5::on_bus_reset()
 {
   restore_reset_values(std::nullopt);
 }
 
-void spi::restore_reset_values(std::optional<reset_kind> kind)
+void spi_u5h5::restore_reset_values(std::optional<reset_kind> kind)
 {
   auto const ss_was = ss_output();
   for(auto const& name : claims())
@@ -826,7 +828,7 @@ void spi::restore_reset_values(std::optional<reset_kind> kind)
   hooks_.rethrow();
 }
 
-void spi::power_cut()
+void spi_u5h5::power_cut()
 {
   auto const         at = ctx_.clock.since_power_on();
   std::exception_ptr first;
@@ -857,7 +859,7 @@ void spi::power_cut()
   }
 }
 
-void spi::start_frame(std::uint64_t from_ps)
+void spi_u5h5::start_frame(std::uint64_t from_ps)
 {
   if(state_.busy != 0 or state_.running == 0 or state_.auto_suspended != 0)
   {
@@ -899,7 +901,7 @@ void spi::start_frame(std::uint64_t from_ps)
   ctx_.events.schedule_at(vtime{state_.frame_end_ps}, frame_done, ++state_.generation, ctx_.clock);
 }
 
-void spi::finish_frame()
+void spi_u5h5::finish_frame()
 {
   auto const at   = vtime{state_.frame_end_ps + power_on_offset()};
   auto const out  = wire_frame(state_.shift);
@@ -950,7 +952,7 @@ void spi::finish_frame()
   }
 }
 
-void spi::completion_due(std::uint64_t ticket)
+void spi_u5h5::completion_due(std::uint64_t ticket)
 {
   auto of_ticket = state_.completions | std::views::filter([ticket](spi_completion const& record) {
                      return record.ticket == ticket;
@@ -975,7 +977,7 @@ void spi::completion_due(std::uint64_t ticket)
   }
 }
 
-void spi::land_frame()
+void spi_u5h5::land_frame()
 {
   state_.busy   = 0;
   auto const in = std::exchange(state_.reply, 0);
@@ -1007,7 +1009,7 @@ void spi::land_frame()
   start_frame(state_.frame_end_ps);
 }
 
-void spi::stop(bool completed, vtime at)
+void spi_u5h5::stop(bool completed, vtime at)
 {
   auto const ss_was     = ss_output();
   state_.running        = 0;
@@ -1021,7 +1023,7 @@ void spi::stop(bool completed, vtime at)
   link_ss_changed(ss_was, at);
 }
 
-void spi::flags()
+void spi_u5h5::flags()
 {
   auto const size    = transfer_size();
   auto const all_in  = size != 0 and state_.written >= size;
@@ -1074,7 +1076,7 @@ void spi::flags()
   rx_dma_.set(up and get(regs_, rx_dma_enable_) != 0 and (rx_full or remainder));
 }
 
-void spi::warn_unsupported()
+void spi_u5h5::warn_unsupported()
 {
   auto const used = communication() == 3 or std::ranges::any_of(unsupported_, [&](field_ref bits) {
                       return get(regs_, bits) != 0;
@@ -1088,7 +1090,7 @@ void spi::warn_unsupported()
   }
 }
 
-void spi::disable()
+void spi_u5h5::disable()
 {
   ++state_.generation;
   state_.tx_fifo.clear();
@@ -1105,7 +1107,7 @@ void spi::disable()
   stop(false, ctx_.clock.since_power_on());
 }
 
-void spi::control_written(std::uint32_t old, std::uint32_t now)
+void spi_u5h5::control_written(std::uint32_t old, std::uint32_t now)
 {
   if(enable_.of(old) != 0 and enable_.of(now) == 0)
   {
@@ -1169,7 +1171,7 @@ void spi::control_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void spi::clear_written(std::uint32_t, std::uint32_t now)
+void spi_u5h5::clear_written(std::uint32_t, std::uint32_t now)
 {
   for(auto const& [clear, flag] : clears_)
   {
@@ -1189,16 +1191,19 @@ void spi::clear_written(std::uint32_t, std::uint32_t now)
   }
 }
 
-void spi::status_written(std::uint32_t old, std::uint32_t)
+void spi_u5h5::status_written(std::uint32_t old, std::uint32_t)
 {
   regs_.poke(status_.offset, old);
 }
 
-void spi::plain_written(std::uint32_t, std::uint32_t)
+void spi_u5h5::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-auto spi::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
-    -> std::expected<std::uint32_t, bus_error>
+auto spi_u5h5::on_read(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    access_ctx     access) -> std::expected<std::uint32_t, bus_error>
 {
   if((offset & ~3u) != receive_.offset or access.by == initiator::debugger)
   {
@@ -1218,7 +1223,7 @@ auto spi::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return size >= 4 ? value : value & ((std::uint32_t{1} << (8u * size)) - 1u);
 }
 
-auto spi::on_write(
+auto spi_u5h5::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1278,7 +1283,7 @@ auto spi::on_write(
   return result;
 }
 
-void spi::on_event(std::uint32_t kind, std::uint64_t payload)
+void spi_u5h5::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind == port_due)
   {
@@ -1314,7 +1319,7 @@ void spi::on_event(std::uint32_t kind, std::uint64_t payload)
   rethrow_refused();
 }
 
-auto spi::transfer(
+auto spi_u5h5::transfer(
     vtime                          start,
     std::uint64_t                  frame_ps,
     std::uint8_t                   bits,
@@ -1345,7 +1350,7 @@ auto spi::transfer(
   return from;
 }
 
-void spi::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane)
+void spi_u5h5::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane)
 {
   if(lane == 0)
   {
@@ -1365,7 +1370,7 @@ void spi::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint
   ctx_.events.schedule_at(vtime{due}, completed, ticket, lane, ctx_.clock);
 }
 
-auto spi::port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const -> std::uint64_t
+auto spi_u5h5::port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const -> std::uint64_t
 {
   check_port_entry(ctx_, desc_.name, controller_ != nullptr, state_.port, max_frames, lane, unit);
   if(not state_.host.empty())
@@ -1375,22 +1380,22 @@ auto spi::port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const ->
   return at.ps;
 }
 
-void spi::schedule_port(spi_port_entry const& entry)
+void spi_u5h5::schedule_port(spi_port_entry const& entry)
 {
   stm32::schedule_port(ctx_, port_due, state_.port, entry);
 }
 
-void spi::queue_port(spi_port_entry entry)
+void spi_u5h5::queue_port(spi_port_entry entry)
 {
   stm32::queue_port(ctx_, port_due, state_.port, entry);
 }
 
-auto spi::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
+auto spi_u5h5::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
 {
   return std::max(due_ps, state_.port.reset_ps.value_or(0));
 }
 
-void spi::select(vtime at, std::uint32_t lane, std::uint64_t unit)
+void spi_u5h5::select(vtime at, std::uint32_t lane, std::uint64_t unit)
 {
   auto const posted = port_due_ps(at, lane, unit);
   queue_port(
@@ -1401,7 +1406,7 @@ void spi::select(vtime at, std::uint32_t lane, std::uint64_t unit)
        .kind      = port_select});
 }
 
-void spi::deselect(vtime at, std::uint32_t lane, std::uint64_t unit)
+void spi_u5h5::deselect(vtime at, std::uint32_t lane, std::uint64_t unit)
 {
   auto const posted = port_due_ps(at, lane, unit);
   queue_port(
@@ -1412,7 +1417,7 @@ void spi::deselect(vtime at, std::uint32_t lane, std::uint64_t unit)
        .kind      = port_deselect});
 }
 
-void spi::drop(vtime at, std::uint32_t lane, std::uint64_t unit)
+void spi_u5h5::drop(vtime at, std::uint32_t lane, std::uint64_t unit)
 {
   queue_port(
       {.due_ps = after_model_reset(port_due_ps(at, lane, unit)),
@@ -1422,7 +1427,7 @@ void spi::drop(vtime at, std::uint32_t lane, std::uint64_t unit)
        .kind   = port_dropped});
 }
 
-void spi::frame(
+void spi_u5h5::frame(
     std::uint32_t word,
     std::uint8_t  bits,
     std::uint64_t frame_ps,
@@ -1467,7 +1472,7 @@ void spi::frame(
        .bits      = bits});
 }
 
-void spi::port_selected()
+void spi_u5h5::port_selected()
 {
   if(std::exchange(state_.port.level, 1) != 0)
   {
@@ -1484,7 +1489,7 @@ void spi::port_selected()
   state_.host_synced = get(regs_, enable_) != 0 and get(regs_, master_) == 0 ? 1 : 0;
 }
 
-void spi::port_deselected(spi_port_entry const& entry)
+void spi_u5h5::port_deselected(spi_port_entry const& entry)
 {
   state_.port.level  = 0;
   state_.host_synced = 0;
@@ -1515,7 +1520,7 @@ void spi::port_deselected(spi_port_entry const& entry)
   }
 }
 
-void spi::run_port(std::uint32_t lane)
+void spi_u5h5::run_port(std::uint32_t lane)
 {
   auto const now = ctx_.clock.time().ps;
   for(;;)
@@ -1571,7 +1576,7 @@ void spi::run_port(std::uint32_t lane)
   }
 }
 
-void spi::rearm_port(
+void spi_u5h5::rearm_port(
     spi_port                              port,
     std::vector<spi_host_transfer> const& transfers,
     std::uint32_t                         host_next,
@@ -1656,17 +1661,17 @@ void spi::rearm_port(
   }
 }
 
-auto spi::ss_output() const -> bool
+auto spi_u5h5::ss_output() const -> bool
 {
   return state_.running != 0 and get(regs_, ss_output_) != 0;
 }
 
-auto spi::link_selected(spi_link_attachment const& link) const -> bool
+auto spi_u5h5::link_selected(spi_link_attachment const& link) const -> bool
 {
   return link.cs != nullptr ? not link.cs->level(link.pin) : ss_output();
 }
 
-void spi::link_ss_changed(bool was, vtime at)
+void spi_u5h5::link_ss_changed(bool was, vtime at)
 {
   auto const now = ss_output();
   if(now == was)
@@ -1682,7 +1687,7 @@ void spi::link_ss_changed(bool was, vtime at)
   }
 }
 
-auto spi::link_of(this auto& self, spi_link_target const& target) -> auto&
+auto spi_u5h5::link_of(this auto& self, spi_link_target const& target) -> auto&
 {
   auto const found = std::ranges::find(
       self.links_, &target, [](spi_link_attachment const& link) { return link.device.get(); });
@@ -1694,7 +1699,7 @@ auto spi::link_of(this auto& self, spi_link_target const& target) -> auto&
   return *found;
 }
 
-void spi::attach_target(
+void spi_u5h5::attach_target(
     std::shared_ptr<spi_link_target> target,
     std::string                      cs_port,
     std::optional<std::uint8_t>      cs_pin)
@@ -1757,7 +1762,7 @@ void spi::attach_target(
   }
 }
 
-void spi::detach_target(spi_link_target& target) noexcept
+void spi_u5h5::detach_target(spi_link_target& target) noexcept
 {
   auto const found = std::ranges::find(
       links_, &target, [](spi_link_attachment const& link) { return link.device.get(); });
@@ -1772,7 +1777,7 @@ void spi::detach_target(spi_link_target& target) noexcept
   }));
 }
 
-void spi::attach_controller(std::shared_ptr<spi_link_controller> controller)
+void spi_u5h5::attach_controller(std::shared_ptr<spi_link_controller> controller)
 {
   if(not controller)
   {
@@ -1808,7 +1813,7 @@ void spi::attach_controller(std::shared_ptr<spi_link_controller> controller)
   }
 }
 
-void spi::detach_controller(spi_link_controller& controller) noexcept
+void spi_u5h5::detach_controller(spi_link_controller& controller) noexcept
 {
   if(link_controller_.get() != &controller)
   {
@@ -1839,31 +1844,31 @@ void spi::detach_controller(spi_link_controller& controller) noexcept
   gone->unlinked();
 }
 
-void spi::mute(spi_link_target const& target)
+void spi_u5h5::mute(spi_link_target const& target)
 {
   link_of(target).muted = true;
 }
 
-auto spi::unmute(spi_link_target const& target) -> bool
+auto spi_u5h5::unmute(spi_link_target const& target) -> bool
 {
   auto& link = link_of(target);
   link.muted = false;
   return not link_selected(link);
 }
 
-auto spi::muted(spi_link_target const& target) const -> bool
+auto spi_u5h5::muted(spi_link_target const& target) const -> bool
 {
   return link_of(target).muted;
 }
 
-auto spi::faults_on_select() const -> bool
+auto spi_u5h5::faults_on_select() const -> bool
 {
   return get(regs_, master_) != 0
      and get(regs_, software_select_) == 0
      and get(regs_, ss_output_) == 0;
 }
 
-auto spi::host_selects() const -> bool
+auto spi_u5h5::host_selects() const -> bool
 {
   if(get(regs_, enable_) == 0 or get(regs_, master_) != 0)
   {
@@ -1876,12 +1881,12 @@ auto spi::host_selects() const -> bool
   return nss_active() and state_.host_synced != 0;
 }
 
-auto spi::nss_active() const -> bool
+auto spi_u5h5::nss_active() const -> bool
 {
   return state_.host_selected != 0 or state_.port.level != 0;
 }
 
-void spi::begin_host_frame()
+void spi_u5h5::begin_host_frame()
 {
   state_.host_busy   = 1;
   state_.host_taking = 0;
@@ -1915,7 +1920,7 @@ void spi::begin_host_frame()
   state_.tx_fifo.erase(state_.tx_fifo.begin());
 }
 
-void spi::end_host_frame(std::uint8_t bits, std::uint32_t word)
+void spi_u5h5::end_host_frame(std::uint8_t bits, std::uint32_t word)
 {
   state_.host_busy = 0;
   if(state_.host_taking == 0)
@@ -1952,7 +1957,7 @@ void spi::end_host_frame(std::uint8_t bits, std::uint32_t word)
   }
 }
 
-void spi::host_edge_reached()
+void spi_u5h5::host_edge_reached()
 {
   if(state_.host.empty())
   {
@@ -2014,16 +2019,16 @@ void spi::host_edge_reached()
   }
 }
 
-void spi::save(std::vector<std::byte>& out) const
+void spi_u5h5::save(std::vector<std::byte>& out) const
 {
   auto copy = state_;
   attachments_.save_devices(copy.devices);
   reflex::serde::bson::serializer{out}.dump(copy);
 }
 
-void spi::load(std::span<std::byte const> in)
+void spi_u5h5::load(std::span<std::byte const> in)
 {
-  auto loaded = reflex::serde::bson::deserializer{in}.template load<spi_state>();
+  auto loaded = reflex::serde::bson::deserializer{in}.template load<spi_u5h5_state>();
   if(not controller_ and (not loaded.port.entries.empty() or not loaded.host.empty()))
   {
     throw config_error(
@@ -2050,16 +2055,16 @@ void spi_link_controller::unit_frame(
 
 spi_link_port::~spi_link_port() = default;
 
-auto spi_factory(
+auto spi_u5h5_factory(
     decltype(board::spi) const&             devices_,
     decltype(board::spi_controllers) const& controllers_,
-    spi_variant                             variant) -> model_factory
+    spi_u5h5_variant                        variant) -> model_factory
 {
   return [devices = devices_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = devices.find(desc.name);
     auto const controller = controllers.find(desc.name);
-    return std::make_shared<spi>(
+    return std::make_shared<spi_u5h5>(
         ctx, desc, found != devices.end() ? found->second : std::vector<spi_attachment>{},
         controller != controllers.end() ? controller->second : nullptr, variant);
   };
@@ -2068,9 +2073,9 @@ auto spi_factory(
 namespace
 {
 constexpr auto spi_u5h5_row_table = std::to_array<builtin>({
-    row_of<^^spi_factory, ^^u5_spi, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_u5h5_factory, ^^u5_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s3_v1*", .families = family::u5}),
-    row_of<^^spi_factory, ^^h5_spi, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_u5h5_factory, ^^h5_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s3_v2*", .families = family::h5}),
 });
 }

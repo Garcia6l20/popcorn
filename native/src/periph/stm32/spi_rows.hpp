@@ -13,7 +13,7 @@
 namespace popcorn::periph::stm32
 {
 /** @brief Differences between the SPI peripherals the model rows serve. */
-struct spi_variant
+struct spi_u5h5_variant
 {
   /** @brief Instances with an 8-byte FIFO, the others hold 16 bytes. */
   std::span<std::string_view const> limited;
@@ -29,13 +29,13 @@ struct spi_variant
 inline constexpr auto u5_limited = std::to_array<std::string_view>({"SPI3"});
 /** @brief STM32U5 SPI, RM0456 68.3: SPI3 has an 8-byte FIFO and no `CTSIZE`. RM0456 68.8.3:
  *         `SPI_CFG1` is write-protected while SPE = 1 except TXDMAEN and RXDMAEN. */
-inline constexpr spi_variant u5_spi{u5_limited};
+inline constexpr spi_u5h5_variant u5_spi{u5_limited};
 
 inline constexpr auto h5_limited = std::to_array<std::string_view>({"SPI4", "SPI5", "SPI6"});
 /** @brief STM32H5 SPI, RM0481 Table 645: SPI4 to SPI6 have an 8-byte FIFO and keep TSIZE up to
  *         65535, so `CTSIZE` counts there. RM0481 section 58.11 has no `SPI_AUTOCR`. RM0481
  *         58.11.3: the whole `SPI_CFG1` is write-protected while SPE = 1. */
-inline constexpr spi_variant h5_spi{
+inline constexpr spi_u5h5_variant h5_spi{
     .limited              = h5_limited,
     .limited_counter      = true,
     .autocr               = false,
@@ -71,10 +71,10 @@ inline constexpr spi_l1l4_variant l4_spi{
  * @param controllers Board `spi_controllers`, each instance's controller, shared.
  * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto spi_factory(
+[[nodiscard]] auto spi_u5h5_factory(
     decltype(board::spi) const&             devices,
     decltype(board::spi_controllers) const& controllers,
-    spi_variant                             variant) -> model_factory;
+    spi_u5h5_variant                        variant) -> model_factory;
 
 /**
  * @brief Factory of the classic SPI model, RM0038 section 28.
