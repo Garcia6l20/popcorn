@@ -141,6 +141,9 @@ constexpr std::array<timer_names<signal>, 14> timers{
 };
 
 constexpr std::array<timer_names<signal>, 1> bus_gated{{{"WWDG", "WWDGEN", pclk1}}};
+constexpr std::array<timic_tap<signal>, 2>   timic_taps{
+    {{"timic_hsi", hsi, hsi, -1}, {"timic_csi", csi, csi, -1}}
+};
 
 constexpr std::array<std::string_view, 7> enable_registers{
     "RCC_AHB1ENR",  "RCC_AHB2ENR", "RCC_AHB4ENR", "RCC_APB1LENR",
@@ -444,6 +447,8 @@ struct h5_rcc
   static constexpr auto const& rtc_sources      = h5::rtc_sources;
   static constexpr auto const& timers           = h5::timers;
   static constexpr auto const& bus_gated        = h5::bus_gated;
+  static constexpr auto const& timic_taps       = h5::timic_taps;
+  static constexpr field_name  timic            = {"RCC_CCIPR1", "TIMICSEL"};
   static constexpr field_name  wwdg_option      = {"OPTSR_CUR", "WWDG_SW"};
   static constexpr field_name  wwdg_sleep       = {};
   static constexpr auto const& enable_registers = h5::enable_registers;

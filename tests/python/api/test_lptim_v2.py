@@ -27,6 +27,12 @@ def test_every_u5_lptim_has_a_builtin_model(part: str) -> None:
     assert [models[name] for name in INSTANCES] == ["builtin"] * len(INSTANCES)
 
 
+def test_every_h5_lptim_has_a_builtin_model() -> None:
+    models = {p.name: p.model for p in support(mcu("STM32H573AIIx"))}
+    names = ("LPTIM1", "LPTIM2", "LPTIM3", "LPTIM4", "LPTIM5", "LPTIM6")
+    assert [models[name] for name in names] == ["builtin"] * len(names)
+
+
 def matches_of(m: popcorn.Machine) -> list[tuple[str, int]]:
     seen: list[tuple[str, int]] = []
 

@@ -290,6 +290,18 @@ for _, target in h573_firmwares.values():
     if target is not None:
         dac_h573.depends(target)
 
+lptim_v2_h573 = add_doctest(
+    "stm32-lptim-v2-h5",
+    [here / "test_lptim_v2_h5.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+lptim_v2_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        lptim_v2_h573.depends(target)
+
 flash_h573 = add_doctest(
     "stm32-flash-h573",
     [here / "test_flash_h573.cpp"],

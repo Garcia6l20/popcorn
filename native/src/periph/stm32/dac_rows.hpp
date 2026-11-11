@@ -39,11 +39,6 @@ inline constexpr auto h5_dac_triggers = std::to_array<std::string_view>(
     {"tim1_trgo", "tim2_trgo", "tim4_trgo", "tim5_trgo", "tim6_trgo", "tim7_trgo", "tim8_trgo",
      "tim15_trgo", "", "", "lptim1_ch1", "lptim2_ch1", "exti9", "", ""});
 
-/** @brief STM32H5 trigger sources the model knows by name and no model produces, until the H5
- *         LPTIM rows exist. */
-inline constexpr auto h5_unproduced_triggers =
-    std::to_array<std::string_view>({"lptim1_ch1", "lptim2_ch1"});
-
 /** @brief Differences between the DAC peripherals the model rows serve. */
 struct dac_variant
 {
@@ -54,9 +49,6 @@ struct dac_variant
   /** @brief Trigger signal of each hardware DAC_CR.TSELx value, from @ref first_hardware. An empty
    *         name is a reserved value. */
   std::span<std::string_view const> hardware_triggers = l4_dac_triggers;
-  /** @brief Trigger signals of @ref hardware_triggers that no model produces: a channel that
-   *         selects one with TENx set never triggers. */
-  std::span<std::string_view const> unproduced = {};
   /** @brief Clock domain of the digital interface, the `dac_hclk` cycles of RM0456 35.4.6 on the
    *         STM32U5 and STM32H5, the APB1 clock on the STM32L1 and STM32L4. */
   std::string_view bus_clock = "pclk1";
@@ -175,7 +167,6 @@ inline constexpr dac_variant h5_dac{
     .software_trigger    = 0,
     .first_hardware      = 1,
     .hardware_triggers   = h5_dac_triggers,
-    .unproduced          = h5_unproduced_triggers,
     .bus_clock           = "hclk",
     .dma_prefix          = "dac1",
     .ready_flags         = true,

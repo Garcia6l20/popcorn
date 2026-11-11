@@ -3,22 +3,22 @@
     "aliases": 100,
     "alternates": 1010,
     "cross_rules": 877,
-    "fields": 38903,
+    "fields": 38881,
     "irqs": 128,
     "patched_fields": 412,
     "peripherals": 201,
     "regions": 12,
-    "registers": 4480
+    "registers": 4476
   },
   "part": "STM32H563IITxQ",
   "svd_sha256": "3daa2bdf5fab3e6995c050489e6033326628fb6471d81e922bd3639b579e740f",
   "tables": {
     "alternates": "81fc3f33e0f5e0d744dcfe89ad5a3ff960be778b31b8045c1a6212590ddd896b",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "ac64b213c807c0b86ec2ccdfa9d7c9a31c4b4a26753bd0f690216582d9c3a5e3",
+    "fields": "9cf1f4b5d9c14a948dbc79a4fc1fafb5f60991727d19fe2303024fb03bd62311",
     "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
     "peripherals": "2f8c347de0a99e49a5b171463c854ea0c0854d333c7c4ef273769a89920798e3",
     "regions": "a7c56aa4d5d56b6e79d32175eea3adbf48d135b2609b81ebaba0de798bc98781",
-    "registers": "3da04fc7592dabe474944cf28e99be497517424397e53a0545ad60a21964783f"
+    "registers": "9296e048f719c94033294ef27b3efe631043c32fcacb8d7fbcf81eb9eff7b472"
   }
 }

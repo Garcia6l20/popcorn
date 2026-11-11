@@ -3,22 +3,22 @@
     "aliases": 100,
     "alternates": 273,
     "cross_rules": 584,
-    "fields": 48120,
+    "fields": 48098,
     "irqs": 128,
     "patched_fields": 456,
     "peripherals": 201,
     "regions": 14,
-    "registers": 4836
+    "registers": 4832
   },
   "part": "STM32U585CITx",
   "svd_sha256": "722e5a40b1f07c11e28417b3438da1eaa2017835cfdebcb41f9a41abacf4bd3e",
   "tables": {
     "alternates": "832b90aaa82cd9d17d750f08f4eaab5c8543c1ca400fc90d22b3130807297f5f",
     "core": "b3670836dc9d6be886bf59e3220dd97aaece14de3970c6ea09acef64cca6938c",
-    "fields": "6d494c12da11b72c13dfb69eb8267310965233e41f892f03db3d06ec5b12d943",
+    "fields": "542589f94bd83e90adf1162c81970b6e60469de896d7d58deb023019a3270716",
     "irqs": "dd7dadcefc8962285e9defab79d899d232aad31ecf7ee22e7eaf550ce2a1277b",
     "peripherals": "c4421a500775217c716f115ccbfbbb9a96522dddf9409178eb711e15ee178a2d",
     "regions": "d9adc9e4cd628c992b8500ebd206a3510e20c3fd59dbd01bba49ac6cd8e7488f",
-    "registers": "db6fa97210eec6d97cd0b1ff4a12adc4d471c8ba7a5f2cfd85ff85fd4f348a14"
+    "registers": "9b467d09aa5d416044c21df353241e22011a39e0554c4be0a8bcc8824b0296cf"
   }
 }

@@ -3,22 +3,22 @@
     "aliases": 103,
     "alternates": 831,
     "cross_rules": 877,
-    "fields": 38417,
+    "fields": 38395,
     "irqs": 131,
     "patched_fields": 412,
     "peripherals": 207,
     "regions": 12,
-    "registers": 4428
+    "registers": 4424
   },
   "part": "STM32H573ZITxQ",
   "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
   "tables": {
     "alternates": "f80a9144de062f582a8a57d5a06d27eee52fd754366f549790682c4f650f0a42",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "fb45a2b5ff8b920576f09ce7e7d3308cdc917379df01a67d6b36fe9abe1aadda",
+    "fields": "7ca6f9cc8aa5f7ae199a9a63102fff6efab85f3ddeb813fac5614aae4aa63485",
     "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
     "peripherals": "b5f1a74a1dbed3d7247583c796d3ff61ae1a1b73992f69aab52c5337abc91178",
     "regions": "736622c87c74f82ade2d1ecdcb475a208021c133f0ab73010d6335e41816a9f0",
-    "registers": "d597fb230220be35b6755dc59a44f5751ad5ef02f34cfff1116adf9840c68267"
+    "registers": "d613d279955409fadc3b89d1ef7836fa0e8fd0f19218029d5fd2826b3763c33f"
   }
 }

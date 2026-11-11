@@ -338,7 +338,7 @@ TEST_CASE(
   for(std::uint32_t select = 1; select <= 15; ++select)
   {
     auto const name = r.triggers[select - 1];
-    if(name.empty() or std::ranges::contains(r.variant->unproduced, name))
+    if(name.empty())
     {
       continue;
     }
@@ -384,14 +384,14 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 Table 342 and RM0481 Table 306: a reserved TSEL and a source no model produces log one "
+    "RM0456 Table 342 and RM0481 Table 306: a reserved TSEL logs one "
     "warning with TEN set, a model_error when strict that leaves DAC_CR")
 {
   auto const& r = dac_ur::the_rig();
   for(std::uint32_t select = 1; select <= 15; ++select)
   {
     auto const name = r.triggers[select - 1];
-    if(not name.empty() and not std::ranges::contains(r.variant->unproduced, name))
+    if(not name.empty())
     {
       continue;
     }

@@ -3,22 +3,22 @@
     "aliases": 98,
     "alternates": 628,
     "cross_rules": 584,
-    "fields": 47922,
+    "fields": 47900,
     "irqs": 121,
     "patched_fields": 456,
     "peripherals": 197,
     "regions": 14,
-    "registers": 4742
+    "registers": 4738
   },
   "part": "STM32U575VITxQ",
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
   "tables": {
     "alternates": "ccc188f67ba0ef6d77937b216cfabe160ff4fb946bcf25891a6cba6918b8ee66",
     "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
-    "fields": "3c59aebc51d5baf12b633c87eca1c964a50141e7df104a19d81e22f2966d8c7c",
+    "fields": "78841982179485ede80db28177b3777bef8c03c5f08d605f4379082ed77a9b8a",
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
     "peripherals": "f4197e03088315c37f83f34efd8ce356e94daa29aa5d662503995f5287f9f667",
     "regions": "9e1fcb1a188920dd29b9fc5a39f5e10034af167cb91b9252fa7e9be1636d5870",
-    "registers": "f1ee2219c240d5d0225781445d5d05ad5e393a9a8fcdcc6e5f584ea67a5ca963"
+    "registers": "a8eeefc935b7365e0a2ce6f4e168478a9c94a28f00e86dda16bd06e7c48c707a"
   }
 }

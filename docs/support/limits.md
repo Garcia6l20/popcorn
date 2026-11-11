@@ -1442,8 +1442,8 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
 STM32U5 LPTIM1 to LPTIM4, RM0456 section 58, count the kernel clock of RCC_CCIPR1 LPTIM2SEL or
 RCC_CCIPR3 LPTIM1SEL and LPTIM34SEL through the prescaler, started by CNTSTRT or SNGSTRT. LPTIM1
 to LPTIM3 have the ISR, ICR and DIER of RM0456 58.7.2, 58.7.5 and 58.7.8, LPTIM4 those of 58.7.1,
-58.7.4 and 58.7.7. The model leaves the CCMR1 and CCR2 of the STM32U5 LPTIM4 description
-unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
+58.7.4 and 58.7.7. A description patch removes the CCMR1 and CCR2 the STM32U5 SVDs list on
+LPTIM4, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
 
 - The counter starts at the later of the CNTSTRT or SNGSTRT write plus 3 kernel clocks, RM0456
   58.4.7, and the ENABLE write plus two prescaled clocks, RM0456 58.4.13, the prescaled reading
@@ -1657,6 +1657,16 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   sampling, inferred. A kernel rate change during the hold applies from the
   release. The hold is kept across LPTIMxRST. At a machine reset the model reads DBG_LPTIMx_STOP
   again, which a system reset keeps and a power-on reset clears.
+- The internal input capture 2 clocks of LPTIM2 come from the RCC domains `timic_hsi`,
+  `timic_msi_1024` and `timic_msi_4`, each the undivided oscillator rate with the divider in the
+  LPTIM row, which run only with RCC_CCIPR1 TIMICSEL[2] set, RM0456 11.8.46. With it 0, the reset
+  value, the input stays low, no capture happens and nothing is logged. TIMICSEL 001 to 011 are
+  closed, inferred from the register text, which says 0xx disables the dividers, while the RM0456
+  11.4 calibration note reads TIMICSEL[2:0] not 0. TIMICSEL bit 1 takes the /1024 tap from MSIK and
+  bit 0 the /4 tap, else MSIS, the codes 100 to 111 of RM0456 11.8.46. Setting or clearing TIMICSEL
+  starts or stops the clock at the write.
+- The DIER bits LPTIM4 reserves, RM0456 58.7.7, read 0 and are not stored, inferred from "must be kept
+  at reset value".
 - A pin edge driven between two instructions applies at the next instruction instant, after the
   model events of that instant, because the scheduler orders by instruction count.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
@@ -1666,12 +1676,47 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   not set at the end of a one-shot REP cycle with an odd REP and an APB clock slower than the
   kernel clock, unless {ARR, CMP} >= KER_CLK / (2 * APB_CLK), is probabilistic: the model always
   sets them and logs nothing. ES0499 2.17.4, the over-capture lost when CCxOF clears with a capture
-  pulse active, is reproduced in the capture bullet above.
+  pulse active, is reproduced in the capture bullet above, on every silicon revision although the
+  erratum lists revision A only.
 - ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, is outside the model: the GPIO
   model passes an alternate function input to its peripheral whatever the security of the pin and of
   the peripheral, so neither the GTZC rule of RM0456 nor the erratum applies. ES0499 2.3.2, TIMICSEL
   not protected by LPTIM2SEC, is reproduced: the RCC model secures TIMICSEL while TIM16 or TIM17 is
   Secure, and a Non-secure TIMICSEL write with only LPTIM2 Secure is taken.
+
+### STM32H5 LPTIM1 to LPTIM6
+
+STM32H562, H563 and H573 LPTIM1 to LPTIM6, RM0481 section 48, use the model of the STM32U5 LPTIM
+above with the rows of RM0481 48.3 Table 527. LPTIM1, 2, 3, 5 and 6 have the encoder mode, the input
+capture, two channels and three DMA requests, LPTIM4 has no channel and no DMA request and drives
+`lptim4_out` from WAVPOL. The STM32H5 SVDs give LPTIM4 the layout of LPTIM1, so its CCMR1 and CCR2 are
+removed by a description patch, RM0481 48.7.19 Table 544 notes 4 and 5. LPTIM1 sits on APB3 with
+LPTIM3 to LPTIM6, LPTIM2 on APB1. The STM32H523, H533, H543 and H553 implement LPTIM1 and LPTIM2
+only and ship no description.
+
+- The trigger inputs of TRIGSEL follow RM0481 Table 532: LPTIM1 tamp_trg2 and gpdma1_ch1_tcf at 4 and
+  5, LPTIM2 gpdma1_ch0_tcf and gpdma1_ch4_tcf, the other instances reserved there. No model
+  produces the RTC, TAMP or GPDMA triggers, so a start armed with such a TRIGSEL logs one
+  `model_warning`, raises `ModelError` under `strict` and leaves the counter stopped.
+- Input 1, input 2 and input capture 1 read the GPIO pin, the other multiplexer inputs of RM0481
+  Tables 533 to 535 are reserved. Input capture 2 takes LSI and LSE on LPTIM1, HSI/1024, CSI/128 and
+  HSI/8 on LPTIM2, Tables 536 and 537, and only the pin on LPTIM3, 5 and 6, Table 538.
+- The internal input capture 2 clocks of LPTIM2 come from the RCC domains `timic_hsi` and
+  `timic_csi`, which run only with RCC_CCIPR1 TIMICSEL set, RM0481 11.8.40. With it 0, the reset value,
+  the input stays low, no capture happens and nothing is logged. Setting or clearing TIMICSEL starts or
+  stops the clock at the write. The DIER bits LPTIM4 reserves, RM0481 48.7.7, read 0, inferred. The
+  GPDMA block request rule of RM0481 Table 143 for `lptimN_ue_dma` is not checked.
+- The DMA requests are `lptimN_ic1_dma`, `lptimN_ic2_dma` and `lptimN_ue_dma` of the GPDMA1 request
+  table, N from 1 to 3, 5 and 6, and the debug hold reads DBG_LPTIM1_STOP to DBG_LPTIM6_STOP, as on
+  the STM32U5. The STM32H5 has no autonomous mode, RM0481 Table 527.
+- ES0565 2.11.3, a DIER bit change clearing its flag, and 2.11.4, the over-capture lost when CCxOF
+  clears with a capture pulse active, are reproduced as ES0499 2.17.3 and 2.17.4 above, 2.11.4 on
+  every silicon revision although the erratum lists revision A only. ES0565
+  2.11.1, the interrupt stuck at Stop entry, is probabilistic and outside the model. ES0565 2.11.2,
+  ARRM and CMPM not set with an APB clock slower than the kernel clock, is probabilistic: the model
+  always sets them. ES0565 2.11.5, pll2_p_ck as kernel clock, is an RCC item outside the model: the
+  kernel clock of LPTIMxSEL 001 is delivered as selected. ES0565 2.2.32, LPTIM2_CH1 holding off the
+  low-power modes through EXTI input 49, is outside the model.
 
 ## MDF and ADF
 

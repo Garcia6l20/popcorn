@@ -291,21 +291,28 @@ struct lptim_v2_state
  *        LSE on LPTIM1, HSI16/256, MSIS/1024 and MSIS/4 on LPTIM2: the input toggles every half
  *        period of the divided rate, rounded up to a whole ps, from its level when the channel
  *        starts to capture, the phase inferred, and a rate change takes effect from the last
- *        toggle, inferred. With ICxF not 00 a level change counts once it has held for 2, 4 or 8
- *        clocks of the RCC kernel clock, a shorter pulse rejected, RM0456 58.7.17, the sampling
- *        phase taken as the change, inferred. ICxF applies per channel as CCMR1 holds it, inferred,
- *        where RM0456 58.4.5 sets the capture filters as one group. CCxP selects the rising, the
- *        falling or both edges and ICxPSC captures every 1, 2, 4 or 8 edges, RM0456 58.7.17, the
- *        prescaler counting only with CCxE 1 and reset by CCxE written to 0, inferred. With CCxE 1
- *        a capture latches CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613 latency in counter
- *        steps after the counter clock of the edge, so CCRx minus the offset is the count at the
- *        edge, and CCxIF sets at the latch, inferred. A capture while CCxIF is set also sets CCxOF,
- *        RM0456 58.4.18, and CCxOIE arms the IRQ. ES0499 2.17.4: a CCxOCF write from one counter
- *        clock before a capture up to the capture leaves CCxOF unset at every later over-capture,
- *        the window inferred, even when CCxOF is clear at the write. With no counter tick, an
- *        external clock or a stopped kernel clock, the window shrinks to the capture instant
- *        itself, inferred. The fault stays until CCxE is written to 0 and back to 1 at least PRESC
- *        x 3 kernel clocks later, the erratum's workaround, or ENABLE is written to 0, inferred.
+ *        toggle, inferred. The LPTIM2 internal clocks are the RCC domains `timic_hsi`, `timic_csi`,
+ *        `timic_msi_1024` and `timic_msi_4`, at 0 Hz while RCC TIMICSEL is closed, RM0456 11.8.46
+ *        and RM0481 11.8.40, each the undivided oscillator rate with the divider in the row: with
+ *        no clock the input stays low, no capture happens and nothing is logged. The U5 taps
+ *        follow MSIK or MSIS by the TIMICSEL codes 100 to 111 of RM0456 11.8.46, TIMICSEL 001 to
+ *        011 being closed, inferred from the register text.
+ *        With ICxF not 00 a level change counts once it has held for 2, 4 or 8 clocks of the RCC
+ *        kernel clock, a shorter pulse rejected, RM0456 58.7.17, the sampling phase taken as the
+ *        change, inferred. ICxF applies per channel as CCMR1 holds it, inferred, where RM0456
+ *        58.4.5 sets the capture filters as one group. CCxP selects the rising, the falling or both
+ *        edges and ICxPSC captures every 1, 2, 4 or 8 edges, RM0456 58.7.17, the prescaler counting
+ *        only with CCxE 1 and reset by CCxE written to 0, inferred. With CCxE 1 a capture latches
+ *        CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613 latency in counter steps after the
+ *        counter clock of the edge, so CCRx minus the offset is the count at the edge, and CCxIF
+ *        sets at the latch, inferred. A capture while CCxIF is set also sets CCxOF, RM0456 58.4.18,
+ *        and CCxOIE arms the IRQ. ES0499 2.17.4: a CCxOCF write from one counter clock before a
+ *        capture up to the capture leaves CCxOF unset at every later over-capture, the window
+ *        inferred, even when CCxOF is clear at the write. With no counter tick, an external clock
+ *        or a stopped kernel clock, the window shrinks to the capture instant itself, inferred.
+ *        ES0499 2.17.4 and ES0565 2.11.4 list silicon revision A only, the fault is reproduced on
+ *        every revision. The fault stays until CCxE is written to 0 and back to 1 at least PRESC x
+ *        3 kernel clocks later, the erratum's workaround, or ENABLE is written to 0, inferred.
  *        With the counter stopped the capture comes the same latency on the prescaled kernel
  *        clock counted from ENABLE and latches the stopped CNT, inferred. Captures in flight apply
  *        in the order of their instants, and edges whose captures fall on the same counter
@@ -321,9 +328,9 @@ struct lptim_v2_state
  *        model_error under strict_peripherals, RM0456 58.7.17 reserving it: both edges then
  *        capture. A CCMR1 write that changes CCxSEL, ICxF, CCxP or ICxPSC of a capture channel
  *        with CCxE 1 logs one model_warning and raises model_error under strict_peripherals,
- *        RM0456 58.7.17, the new setting taking effect at the
- *        write. Two CCMR1 writes closer than PRESC x 3 kernel clocks both apply at once, where
- *        RM0456 58.7.17 calls the result unpredictable.
+ *        RM0456 58.7.17, the new setting taking effect at the write. Two CCMR1 writes closer
+ *        than PRESC x 3 kernel clocks both apply at once, where RM0456 58.7.17 calls the result
+ *        unpredictable.
  *        With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on input 1,
  *        rising, falling or both, instead of the kernel clock, RM0456 58.4.12 and 58.7.10. Input 1
  *        is the pin signal `lptim<n>_in1` with CFGR2 IN1SEL 00, RM0456 58.4.3 Table 605, and a
@@ -1997,7 +2004,7 @@ void lptim_v2::on_clock_change()
   auto const hz = kernel_hz();
   if(hz == state_.hz)
   {
-    if(state_.source_live != 0)
+    if(state_.source_live != 0 or (variant_.capture and variant_.channels != 0))
     {
       catch_up(now_ps());
       refresh();
@@ -2035,6 +2042,11 @@ void lptim_v2::clear_written(std::uint32_t, std::uint32_t now)
 
 void lptim_v2::interrupts_written(std::uint32_t old, std::uint32_t now)
 {
+  if(auto const kept = now & variant_.interrupt_mask; kept != now)
+  {
+    now = kept;
+    regs_.poke(dier_.offset, kept);
+  }
   if(not enabled())
   {
     regs_.poke(dier_.offset, old);
@@ -2733,11 +2745,12 @@ auto lptim_v2_factory(lptim_v2_variant variant) -> model_factory
 
 namespace
 {
-constexpr auto lptim1_instance = std::to_array<std::string_view>({"LPTIM1"});
-constexpr auto lptim2_instance = std::to_array<std::string_view>({"LPTIM2"});
-constexpr auto lptim3_instance = std::to_array<std::string_view>({"LPTIM3"});
-constexpr auto lptim4_instance = std::to_array<std::string_view>({"LPTIM4"});
-constexpr auto lptim_v2_table  = std::to_array<builtin>({
+constexpr auto lptim1_instance    = std::to_array<std::string_view>({"LPTIM1"});
+constexpr auto lptim2_instance    = std::to_array<std::string_view>({"LPTIM2"});
+constexpr auto lptim3_instance    = std::to_array<std::string_view>({"LPTIM3"});
+constexpr auto lptim4_instance    = std::to_array<std::string_view>({"LPTIM4"});
+constexpr auto lptim356_instances = std::to_array<std::string_view>({"LPTIM3", "LPTIM5", "LPTIM6"});
+constexpr auto lptim_v2_table     = std::to_array<builtin>({
     row_of<^^lptim_v2_factory, ^^u5_lptim1>(
         {.ip              = "LPTIM",
          .ip_version_glob = "U5_lptimer1_v2*",
@@ -2758,6 +2771,26 @@ constexpr auto lptim_v2_table  = std::to_array<builtin>({
          .ip_version_glob = "U5_lptimer1_v2*",
          .instance_globs  = lptim4_instance,
          .families        = family::u5}),
+    row_of<^^lptim_v2_factory, ^^h5_lptim1>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "H5_lptimer1_v2*",
+         .instance_globs  = lptim1_instance,
+         .families        = family::h5}),
+    row_of<^^lptim_v2_factory, ^^h5_lptim2>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "H5_lptimer1_v2*",
+         .instance_globs  = lptim2_instance,
+         .families        = family::h5}),
+    row_of<^^lptim_v2_factory, ^^h5_lptim_full>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "H5_lptimer1_v2*",
+         .instance_globs  = lptim356_instances,
+         .families        = family::h5}),
+    row_of<^^lptim_v2_factory, ^^h5_lptim4>(
+        {.ip              = "LPTIM",
+         .ip_version_glob = "H5_lptimer1_v2*",
+         .instance_globs  = lptim4_instance,
+         .families        = family::h5}),
 });
 }
 

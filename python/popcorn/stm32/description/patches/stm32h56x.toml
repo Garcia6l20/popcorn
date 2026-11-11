@@ -542,3 +542,8 @@ instances = ["RCC"]
 registers = ["RCC_AHB2ENR"]
 add = { name = "SRAM3EN", lsb = 31, width = 1, acc = "read_write", reset = 1 }
 source = "RM0481 Rev 5, 11.8.27 RCC_AHB2ENR bit 31 SRAM3EN, reset 1. See the drop rule above"
+
+[[register_drops]]
+peripheral = "LPTIM4"
+names = ["LPTIM_CCMR1", "LPTIM_CCR2"]
+source = "RM0481 Rev 5, 48.3 Table 527 and 48.7.19 Table 544 notes 4 and 5: LPTIM4 implements no channel, so LPTIM_CCMR1 is reserved, and with less than 2 channels LPTIM_CCR2 is reserved. The SVDs of the STM32H562, H563 and H573 give LPTIM4 the layout of LPTIM1"

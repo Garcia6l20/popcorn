@@ -105,7 +105,6 @@ enum class rule : std::uint8_t
   refresh_locked,
   wave_untriggered,
   trigger_reserved,
-  trigger_unproduced,
   not_ready,
   mode_reserved,
   double_locked,
@@ -664,12 +663,6 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
         refuse(
             rule::trigger_reserved, "CR", control_, old,
             std::format("TSEL{} selects a reserved trigger with TEN{} set", n, n));
-      }
-      else if(std::ranges::contains(variant_.unproduced, name))
-      {
-        refuse(
-            rule::trigger_unproduced, "CR", control_, old,
-            std::format("TSEL{} selects {}, which no model produces, with TEN{} set", n, name, n));
       }
     }
     if(unit.wave.of(word) == 3)

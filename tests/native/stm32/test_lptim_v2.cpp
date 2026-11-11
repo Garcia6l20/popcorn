@@ -1519,6 +1519,13 @@ TEST_CASE(
   CHECK_FALSE(std::ranges::contains(claims, std::string{"CCMR1"}));
   CHECK_FALSE(std::ranges::contains(claims, std::string{"CCR2"}));
   CHECK(std::ranges::contains(r.f->target->model("LPTIM3")->claims(), std::string{"CCMR1"}));
+  for(auto const& which : units)
+  {
+    CAPTURE(which.name);
+    auto const& desc = r.f->target->peripheral(which.name).description();
+    CHECK((popcorn::find_register(desc, "CCMR1") != nullptr) == (which.name != "LPTIM4"));
+    CHECK((popcorn::find_register(desc, "CCR2") != nullptr) == (which.name != "LPTIM4"));
+  }
 }
 
 TEST_CASE("a description without CCMR1.CC1E on LPTIM1 is refused at construction")
@@ -1531,6 +1538,22 @@ TEST_CASE("a description without CCMR1.CC1E on LPTIM1 is refused at construction
       std::ranges::find(found->registers, std::string_view{"CCMR1"}, &popcorn::register_desc::name);
   REQUIRE(owner != found->registers.end());
   REQUIRE(std::erase_if(owner->fields, [](auto const& one) { return one.name == "CC1E"; }) == 1);
+  CHECK_THROWS_AS(rig(units[0], false, desc), popcorn::config_error);
+}
+
+TEST_CASE("a description without RCC_CCIPR1.TIMICSEL is refused at construction")
+{
+  auto desc = u575();
+  auto rcc =
+      std::ranges::find(desc.peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != desc.peripherals.end());
+  auto owner = std::ranges::find_if(rcc->registers, [](auto const& one) {
+    return one.name == "RCC_CCIPR1"
+        or (one.aliases and std::ranges::contains(*one.aliases, std::string{"RCC_CCIPR1"}));
+  });
+  REQUIRE(owner != rcc->registers.end());
+  REQUIRE(
+      std::erase_if(owner->fields, [](auto const& one) { return one.name == "TIMICSEL"; }) == 1);
   CHECK_THROWS_AS(rig(units[0], false, desc), popcorn::config_error);
 }
 
@@ -4386,6 +4409,7 @@ TEST_CASE(
     CAPTURE(which.name);
     CAPTURE(select);
     rig r{which};
+    r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
     if(which.name == "LPTIM1")
     {
       auto const on    = select == 1 ? "LSION" : "LSEON";
@@ -4466,6 +4490,7 @@ TEST_CASE(
     "and a CC1E pause restores into a machine with no reset, the captures and the fault equal")
 {
   rig r{units[1]};
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
   r.write(cfgr2, 3u << 20);
   auto&      pins = capture_input(r, 0);
   auto const t    = captured_with(r, cc1sel | cc1e | both_edges | cc2sel | cc2e);
@@ -4507,6 +4532,7 @@ TEST_CASE(
     "its first toggle half a period after CC2E is written to 1")
 {
   rig r{units[1]};
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
   r.write(cfgr2, 3u << 20);
   r.write(ccmr1, cc2sel | cc2e);
   r.enable_with();
@@ -4629,7 +4655,7 @@ TEST_CASE(
 TEST_CASE(
     "RM0456 58.4.21: CC1DE and CC2DE raise lptim1_ic1_dma and lptim1_ic2_dma when the capture sets "
     "CCxIF, a capture before the ack and a CCR read leave the request, the ack drops it, and "
-    "CCxDE 0, CCxE 0 and ENABLE 0 reset it, inferred")
+    "CCxDE 0 at its write, CCxE 0 and ENABLE 0 reset it, inferred")
 {
   for(auto leg = 0; leg < 4; ++leg)
   {
@@ -4820,8 +4846,7 @@ TEST_CASE(
   }
 }
 
-TEST_CASE(
-    "RM0456 58.4.22: DBG_LPTIMx_STOP freezes LPTIMx alone, on each of the four instances")
+TEST_CASE("RM0456 58.4.22: DBG_LPTIMx_STOP freezes LPTIMx alone, on each of the four instances")
 {
   for(auto const& which : units)
   {
@@ -5010,4 +5035,125 @@ TEST_CASE(
     r.idle_to(again + 4 * cycle);
     CHECK((r.read(isr) & cc1if) == cc1if);
   }
+}
+
+TEST_CASE("RM0456 58.3 Table 599: SNGSTRT with ENC 1 warns on LPTIM1 and LPTIM2, not on LPTIM3")
+{
+  for(auto const& which : units)
+  {
+    CAPTURE(which.name);
+    rig r{which};
+    r.write(cfgr, enc);
+    r.write(cr, enable);
+    r.idle_to(r.now_ps() + 8 * cycle);
+    r.write(cr, enable | sngstrt);
+    CHECK(r.warnings("SNGSTRT with ENC 1") == (which.name == "LPTIM1" or which.name == "LPTIM2"));
+  }
+}
+
+TEST_CASE(
+    "RM0456 11.8.46: LPTIM2 internal IC2 clocks run only with TIMICSEL[2] set, closed with 000 to "
+    "011, silently, the gate read from the register text, inferred")
+{
+  for(std::uint32_t gate : {0u, 1u, 2u, 3u})
+  {
+    CAPTURE(gate);
+    rig r{units[1], true};
+    r.rcc("RCC_CCIPR1", "TIMICSEL", gate);
+    r.write(cfgr2, 3u << 20);
+    auto const t = captured_with(r, cc2sel | cc2e);
+    r.idle_to(t + 300 * cycle);
+    CHECK((r.read(isr) & cc2if) == 0);
+    CHECK(r.logged.empty());
+  }
+  rig r{units[1], true};
+  r.write(cfgr2, 3u << 20);
+  auto const t = captured_with(r, cc2sel | cc2e);
+  r.idle_to(t + 100 * cycle);
+  CHECK((r.read(isr) & cc2if) == 0);
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
+  r.idle_to(r.now_ps() + 20 * cycle);
+  CHECK((r.read(isr) & cc2if) == cc2if);
+  r.write(icr, cc2if | cc2of);
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 0);
+  r.idle_to(r.now_ps() + 40 * cycle);
+  CHECK((r.read(isr) & cc2if) == 0);
+  rig ungated{units[0], true};
+  ungated.write(cfgr2, 1u << 20);
+  CHECK_NOTHROW(static_cast<void>(captured_with(ungated, cc2sel | cc2e)));
+}
+
+TEST_CASE(
+    "RM0456 11.8.46: TIMICSEL bit 0 takes the /4 tap from MSIK and bit 1 the /1024 tap, MSIS "
+    "otherwise, the captures one tap period apart in counts at MSIKRANGE 5 and 7, the first "
+    "capture "
+    "of the stopped counter left out")
+{
+  struct tap
+  {
+    std::uint32_t gate;
+    std::uint32_t select;
+    std::uint32_t counts;
+    bool          msik;
+  };
+  for(auto const range : {5u, 7u})
+  {
+    auto const factor = range == 5 ? 2u : 4u;
+    for(auto const& [gate, select, counts, msik] : {
+            tap{4, 3, 4,    false},
+            tap{5, 3, 4,    true },
+            tap{6, 3, 4,    false},
+            tap{7, 3, 4,    true },
+            tap{4, 2, 1024, false},
+            tap{5, 2, 1024, false},
+            tap{6, 2, 1024, true },
+            tap{7, 2, 1024, true },
+    })
+    {
+      CAPTURE(range);
+      CAPTURE(gate);
+      CAPTURE(select);
+      auto const expected = msik ? counts * factor : counts;
+      rig        r{units[1]};
+      r.rcc("RCC_ICSCR1", "MSISRANGE", 4);
+      r.rcc("RCC_ICSCR1", "MSIKRANGE", range);
+      r.rcc("RCC_ICSCR1", "MSIRGSEL", 1);
+      r.rcc("RCC_CCIPR1", "TIMICSEL", gate);
+      r.write(cfgr2, select << 20);
+      auto const t    = captured_with(r, cc2sel | cc2e);
+      auto       seen = capture_times(
+          r, t + 2 * cycle, t + 2 * cycle + 7 * expected * cycle,
+          select == 3 ? cycle : 200 * cycle);
+      REQUIRE(seen.size() >= 4);
+      seen.erase(seen.begin());
+      for(auto const gap : gaps_of(seen))
+      {
+        CAPTURE(gap);
+        CHECK(gap == expected % 1001u);
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "checklist 31: a system reset closes the TIMICSEL gate, the LPTIM2 internal clock then needs "
+    "TIMICSEL written again")
+{
+  rig r{units[1]};
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
+  r.write(cfgr2, 3u << 20);
+  auto const t = captured_with(r, cc2sel | cc2e);
+  r.idle_to(t + 100 * cycle);
+  REQUIRE((r.read(isr) & cc2if) == cc2if);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym(firmware, "idle"));
+  r.rcc(r.u.clock_reg, r.u.clock_bit, 1);
+  CHECK(r.f->field("RCC", "RCC_CCIPR1", "TIMICSEL") == 0);
+  r.write(cfgr2, 3u << 20);
+  auto const again = captured_with(r, cc2sel | cc2e);
+  r.idle_to(again + 300 * cycle);
+  CHECK((r.read(isr) & cc2if) == 0);
+  r.rcc("RCC_CCIPR1", "TIMICSEL", 4);
+  r.idle_to(r.now_ps() + 20 * cycle);
+  CHECK((r.read(isr) & cc2if) == cc2if);
 }

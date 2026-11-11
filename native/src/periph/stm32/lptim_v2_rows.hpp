@@ -90,6 +90,8 @@ struct lptim_v2_variant
   bool encoder = true;
   /** @brief The instance has the input capture mode, CCMR1.CC1SEL and CC2SEL. */
   bool capture = true;
+  /** @brief DIER bits the instance implements, the others are reserved and read 0. */
+  std::uint32_t interrupt_mask = 0xFFFF'FFFFu;
   /** @brief RCC clock domain of the APB bus the instance sits on, which the RCR write crosses
    *         before the kernel clock domain. */
   std::string_view bus_clock = "pclk3";
@@ -108,13 +110,15 @@ inline constexpr lptim_v2_variant u5_lptim1{
     .capture2_inputs = {{"lsi"}, {"lse"}, {}}
 };
 /** @brief STM32U5 LPTIM2: LPTIM1 on APB1, its clock enable in RCC_APB1ENR2, the GPDMA triggers of
- *         RM0456 Table 604, HSI16/256, MSIS/1024 and MSIS/4 on input capture 2, Table 609. */
+ *         RM0456 Table 604, the RCC domains timic_hsi, timic_msi_1024 and timic_msi_4, the
+ *         undivided oscillator rates the dividers 256, 1024 and 4 of Table 609 apply to, on input
+ *         capture 2. */
 inline constexpr lptim_v2_variant u5_lptim2{
     .bus_clock = "pclk1",
     .triggers =
         {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "gpdma_ch0_tc", "gpdma_ch4_tc",
                    "comp1_out", "comp2_out"},
-    .capture2_inputs = {{"hsi16", 256}, {"msis", 1024}, {"msis", 4}}
+    .capture2_inputs = {{"timic_hsi", 256}, {"timic_msi_1024", 1024}, {"timic_msi_4", 4}}
 };
 /** @brief STM32U5 LPTIM3: LPTIM1 without the encoder mode, RM0456 58.3 Table 599, and its own
  *         triggers of Table 604. */
@@ -128,15 +132,56 @@ inline constexpr lptim_v2_variant u5_lptim3{
 /** @brief STM32U5 LPTIM4, RM0456 58.3 Table 599 and 58.7.1: no channel, no encoder, no input
  *         capture, the `ISR`, `ICR` and `DIER` layout of 58.7.1, 58.7.4 and 58.7.7. */
 inline constexpr lptim_v2_variant u5_lptim4{
-    .status     = "ISR",
-    .clear      = "ICR",
-    .interrupts = "DIER",
-    .channels   = 0,
-    .encoder    = false,
-    .capture    = false,
+    .status         = "ISR",
+    .clear          = "ICR",
+    .interrupts     = "DIER",
+    .channels       = 0,
+    .encoder        = false,
+    .capture        = false,
+    .interrupt_mask = 0x19F,
     .triggers =
         {"etr", "rtc_alra_trg", "rtc_alrb_trg", "lpdma_ch0_tc", "tamp_trg2", "tamp_trg3",
                    "comp1_out", "comp2_out"},
+    .capture2_inputs = {{}, {}, {}}
+};
+
+/** @brief STM32H5 LPTIM1 on APB3, RM0481 48.3 Table 527: encoder, input capture, two channels,
+ *         the triggers of Table 532 and LSI and LSE on input capture 2, Table 536. */
+inline constexpr lptim_v2_variant h5_lptim1{
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "tamp_trg2", "gpdma1_ch1_tcf",
+                   "reserved", "reserved"},
+    .capture2_inputs = {{"lsi"}, {"lse"}, {}}
+};
+/** @brief STM32H5 LPTIM2 on APB1: LPTIM1 with the GPDMA1 triggers of RM0481 Table 532 and
+ *         HSI/1024, CSI/128 and HSI/8 on input capture 2, Table 537. */
+inline constexpr lptim_v2_variant h5_lptim2{
+    .bus_clock = "pclk1",
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "gpdma1_ch0_tcf", "gpdma1_ch4_tcf",
+                   "reserved", "reserved"},
+    .capture2_inputs = {{"timic_hsi", 1024}, {"timic_csi", 128}, {"timic_hsi", 8}}
+};
+/** @brief STM32H5 LPTIM3, LPTIM5 and LPTIM6 on APB3: LPTIM1 with the reserved trigger inputs of
+ *         RM0481 Table 532 and no internal input on input capture 2, Table 538. */
+inline constexpr lptim_v2_variant h5_lptim_full{
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "reserved", "reserved", "reserved",
+                   "reserved"},
+    .capture2_inputs = {{}, {}, {}}
+};
+/** @brief STM32H5 LPTIM4, RM0481 48.3 Table 527: no channel, no encoder, no input capture, the
+ *         output on `lptim4_out` with WAVPOL. The SVD gives it the ISR, ICR and DIER views of
+ *         the other instances, which the defaults name, so the DIER bits RM0481 48.7.7 reserves
+ *         are masked by `interrupt_mask`. */
+inline constexpr lptim_v2_variant h5_lptim4{
+    .channels       = 0,
+    .encoder        = false,
+    .capture        = false,
+    .interrupt_mask = 0x19F,
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "reserved", "reserved", "reserved",
+                   "reserved"},
     .capture2_inputs = {{}, {}, {}}
 };
 

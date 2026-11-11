@@ -3,22 +3,22 @@
     "aliases": 92,
     "alternates": 435,
     "cross_rules": 815,
-    "fields": 36237,
+    "fields": 36215,
     "irqs": 125,
     "patched_fields": 412,
     "peripherals": 185,
     "regions": 12,
-    "registers": 3944
+    "registers": 3940
   },
   "part": "STM32H562RGVx",
   "svd_sha256": "c868fff8bc10dc6dabcf06b205f175dbf71db240c0d0a484cc0070c62e916882",
   "tables": {
     "alternates": "2fa0aa2d02049b9a5fed9bfdbdd48110adf585c9c5e7a24c11c47b223823e2a4",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "d77fe73416cc1e21f78f4afb2ac4b240f250ad79e246890b1e994b8661b5f9ec",
+    "fields": "702e3e275e1a7191b8382aab2a22cfb083ed4d219a78be17936e03e7101e3760",
     "irqs": "d341d08eaf9cf0a649296b79e672a60a1ff56200de3e399adb1d7ba8499dba98",
     "peripherals": "c7a83a4a40b15311d352aac73712471772c8ef7634b506051c2b89d2514b72aa",
     "regions": "e8c64323d42c8bb2d5ad56ac1bdf9c9d02c95161dfa529a5ec615b4de9055a3e",
-    "registers": "1258f8d8d71726e570e4ce320ff5b8c216e4c8618aca615743dcb14dd3f1d513"
+    "registers": "013f6c19baa28919437fdcd5b8499693e41eccae408a6be037a16a4df4b34525"
   }
 }
