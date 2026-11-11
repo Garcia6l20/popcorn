@@ -823,11 +823,11 @@ auto uart_wire::inject(
   if(not stopped)
   {
     core::link_guard const held{inject_mutex_};
-    if(at < state_.drained_through)
+    auto const             floor = std::max(state_.drained_through, latency_);
+    if(at < floor)
     {
       return std::unexpected{
-          inject_refusal{
-                         .reason = inject_refusal_reason::before_drained, .bound = state_.drained_through}
+          inject_refusal{.reason = inject_refusal_reason::before_drained, .bound = floor}
       };
     }
     for(auto& frame : frames)

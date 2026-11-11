@@ -1765,7 +1765,9 @@ TEST_CASE("a receiver reset drops an injection queued within L after it at any w
   REQUIRE(all.size() == 64);
   REQUIRE(all[0].start.ps > static_cast<std::int64_t>(200 * us_ps));
   auto const at       = static_cast<std::uint64_t>(all[0].start.ps) - 200 * us_ps;
-  auto const injected = static_cast<std::int64_t>(at + 9 * latency / 10);
+  auto const injected = static_cast<std::int64_t>(latency + 10 * us_ps);
+  REQUIRE(static_cast<std::uint64_t>(injected) > at);
+  REQUIRE(static_cast<std::uint64_t>(injected) < at + latency);
   REQUIRE(
       injected + static_cast<std::int64_t>(declared().frame_ps())
       < all[0].start.ps + static_cast<std::int64_t>(latency));

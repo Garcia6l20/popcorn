@@ -2517,3 +2517,86 @@ TEST_CASE("a strict fault on a frame starting in the last cycle before a barrier
     }
   }
 }
+
+TEST_CASE("a running injection below the link latency is refused with it as the bound")
+{
+  constexpr std::int64_t            latency = 1 * ms_ps;
+  std::optional<std::vector<entry>> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[3]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("link_rx");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(how);
+    std::vector<std::uint16_t> const data{0x7e};
+    auto const early = w.wires[0]->inject(data, core::sys_time{700 * us_ps}, std::nullopt);
+    REQUIRE_FALSE(early.has_value());
+    CHECK(early.error().reason == stm32::inject_refusal_reason::before_drained);
+    CHECK(early.error().bound.ps == latency);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    auto const inside = w.wires[0]->inject(data, core::sys_time{600 * us_ps}, std::nullopt);
+    REQUIRE_FALSE(inside.has_value());
+    CHECK(inside.error().reason == stm32::inject_refusal_reason::before_drained);
+    CHECK(inside.error().bound.ps == latency);
+    REQUIRE(w.wires[0]->inject(data, core::sys_time{latency}, std::nullopt).has_value());
+    REQUIRE(w.resume(4 * ms_ps).reason == core::pause_reason::system_time);
+    auto const got = entries(w.nodes[1]->log());
+    CHECK(
+        std::ranges::count_if(
+            got, [](entry const& one) { return one.kind == link_byte and one.data == 0x7e; })
+        == 1);
+    if(reference)
+    {
+      CHECK(got.size() == reference->size());
+      CHECK(std::ranges::equal(got, *reference, [](entry const& left, entry const& right) {
+        return left.kind == right.kind and left.data == right.data and left.cycles == right.cycles;
+      }));
+    }
+    reference = got;
+  }
+}
+
+TEST_CASE("a running injection and a stopped one at the same time give the same receiver log")
+{
+  constexpr std::int64_t          latency = 1 * ms_ps;
+  std::vector<std::vector<entry>> logs;
+  for(auto const running : {true, false})
+  {
+    CAPTURE(running);
+    world w;
+    w.add("link_rx");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(variants()[0]);
+    REQUIRE(w.resume(100 * us_ps).reason == core::pause_reason::system_time);
+    std::vector<std::uint16_t> const data{0x7e};
+    auto const                       at = core::sys_time{1500 * us_ps};
+    {
+      auto const held = w.sys->lock();
+      if(running)
+      {
+        REQUIRE(w.wires[0]->inject(data, at, std::nullopt).has_value());
+      }
+      else
+      {
+        auto const now   = w.sys->time_of(held, 1);
+        auto const local = static_cast<std::int64_t>(core::access(
+            *w.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+        REQUIRE(w.wires[0]
+                    ->inject(
+                        data, at,
+                        stm32::stopped_receiver{
+                            .now = now, .map = core::time_map{core::sys_time{now.ps - local}}})
+                    .has_value());
+      }
+    }
+    REQUIRE(w.resume(4 * ms_ps).reason == core::pause_reason::system_time);
+    logs.push_back(entries(w.nodes[1]->log()));
+  }
+  REQUIRE(logs[0].size() == logs[1].size());
+  CHECK(std::ranges::equal(logs[0], logs[1], [](entry const& left, entry const& right) {
+    return left.kind == right.kind and left.data == right.data and left.cycles == right.cycles;
+  }));
+}

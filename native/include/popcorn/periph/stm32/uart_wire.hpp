@@ -151,7 +151,8 @@ enum class[[= reflex::derive{reflex::Format}]] inject_refusal_reason
 {
   /** @brief The first start bit lies before the stopped receiver's time. */
   before_receiver,
-  /** @brief While the system runs, the first start bit lies before the next drain's reach. */
+  /** @brief While the system runs, the first start bit lies before the larger of the reach of
+   * the drains so far and the link latency. */
   before_drained,
   /** @brief A frame overlaps a frame already on the receiver's line, delivered or posted. */
   overlaps,
@@ -549,11 +550,12 @@ public:
    *        queued and delivered at the next drain, on time, as a running injection is, so a
    *        cut registered after the call still keeps it off the line. An earlier frame is
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
-   *        after the reach of the drains so far, then delivered by the drain whose reach covers
-   *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
-   *        is found at the drain, a system error at the later frame's start for two injected
-   *        frames, at the later of the injected frame's start and the peer frame's sender start
-   *        for a peer frame. Either error faults the receiver.
+   *        after the reach of the drains so far and at or after the link latency, then delivered
+   *        by the drain whose reach covers it. Below the reach of the drains so far, acceptance
+   *        depends on wall timing. No overlap check at the call: an overlap is found at the
+   *        drain, a system error at the later frame's start for two injected frames, at the later
+   *        of the injected frame's start and the peer frame's sender start for a peer frame.
+   *        Either error faults the receiver.
    * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
    *        in place of the MSB of its word.
    * @param at Start-bit edge of the first frame at the receiver, system time.

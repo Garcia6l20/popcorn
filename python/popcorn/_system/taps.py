@@ -257,11 +257,11 @@ class UartTap:
         Stopped or paused, they are checked at the call: `at` must be at or after the
         receiver's system time, and no frame may overlap one already on the receiver's line.
         While the system runs, from a `running()` body or another thread, `at` must be at or
-        after the reach of the deliveries done so far, which depends on wall timing, and an
-        overlap is found later: the system stops with an error at a time fixed by the frames,
-        the later frame's start for two injected frames, and the later of the injected frame's
-        start and the peer frame's sender start for an injected frame and a peer frame. The
-        error is the receiving member's.
+        after the link's latency and at or after the reach of the deliveries done so far, which
+        depends on wall timing, and an overlap is found later: the system stops with an error at
+        a time fixed by the frames, the later frame's start for two injected frames, and the
+        later of the injected frame's start and the peer frame's sender start for an injected
+        frame and a peer frame. The error is the receiving member's.
 
         Raises:
             TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.

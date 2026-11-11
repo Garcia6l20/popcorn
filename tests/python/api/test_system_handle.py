@@ -477,6 +477,15 @@ def test_an_injection_while_running_is_refused_before_the_drained_reach(
     assert refused is not None and refused[0] == "before_drained"
 
 
+def test_a_running_injection_below_the_link_latency_is_refused_with_it_as_the_bound(
+    ping: Callable[[int, int | None], Linked],
+) -> None:
+    linked = ping(1_000_000, None)
+    refused = linked.handle.inject(0, [0x31], LATENCY - 1, False)
+    assert refused == ("before_drained", LATENCY)
+    assert linked.handle.inject(0, [0x31], LATENCY, False) is None
+
+
 def test_a_replaced_frame_reaches_the_receiver_with_its_new_data(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
