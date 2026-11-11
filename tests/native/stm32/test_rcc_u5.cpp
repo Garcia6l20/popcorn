@@ -4,6 +4,7 @@
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
@@ -259,6 +260,23 @@ auto idle_fixture(core::machine_options options = with_listener()) -> stm32_fixt
   stm32_fixture f{u575(), "rcc_ll", std::move(options)};
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   return f;
+}
+
+void set_range(stm32_fixture const& f, std::uint32_t vos)
+{
+  auto const& desc  = f.target->peripheral("PWR").description();
+  auto const* found = popcorn::find_register(desc, std::string_view{"PWR_VOSR"});
+  auto const  bits =
+      std::ranges::find(found->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, vos << bits->lsb).has_value());
+  idle_until(f, std::chrono::microseconds{100});
+}
+
+auto range_level(stm32_fixture const& f) -> std::uint32_t
+{
+  auto* const source = f.model_of<stm32::voltage_range_source>("PWR");
+  REQUIRE(source != nullptr);
+  return source->active_level();
 }
 
 auto booted_log(core::machine_options options = with_listener()) -> std::vector<std::uint32_t>
@@ -756,8 +774,9 @@ TEST_CASE("a switch to a PLL1 output that is off keeps the core clock and warns 
   std::vector<core::log_record> logged;
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  set_range(f, 3);
   write(f, "RCC_PLL1CFGR", bit_of("RCC_PLL1CFGR", "PLL1SRC"));
-  write(f, "RCC_PLL1DIVR", 7u * bit_of("RCC_PLL1DIVR", "PLL1N"));
+  write(f, "RCC_PLL1DIVR", 31u * bit_of("RCC_PLL1DIVR", "PLL1N"));
   write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
   idle_until(f, std::chrono::microseconds{150});
   REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
@@ -1848,4 +1867,153 @@ TEST_CASE("coverage classifies RCC_CIER as served, the model reads its enables")
       f.target->run_slice({.max_instructions = popcorn::icount{1'000'000}, .until_time = until});
   REQUIRE(result.stopped.has_value());
   CHECK(f.target->coverage().unmodelled.empty());
+}
+
+namespace
+{
+void set_field(
+    stm32_fixture const& f,
+    std::string_view     reg,
+    std::string_view     field,
+    std::uint32_t        value)
+{
+  auto const& rcc = *std::ranges::find(
+      u575().peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+  auto const* found = popcorn::find_register(rcc, reg);
+  auto const  bits  = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  auto const mask = ((std::uint32_t{1} << bits->width) - 1u) << bits->lsb;
+  write(f, reg, (peek(f, reg) & ~mask) | ((value << bits->lsb) & mask));
+}
+
+struct pll_leg
+{
+  std::string_view title;
+  std::int32_t     vos;
+  std::uint32_t    m;
+  std::uint32_t    n;
+  std::uint32_t    p;
+  bool             output;
+  bool             warns;
+};
+
+void run_leg(pll_leg const& one, bool strict)
+{
+  CAPTURE(one.title);
+  auto options                    = with_listener();
+  options.strict_peripherals      = strict;
+  auto                          f = idle_fixture(std::move(options));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  write(f, "RCC_CR", bit_of("RCC_CR", "HSION") | bit_of("RCC_CR", "MSISON"));
+  idle_until(f, std::chrono::microseconds{150});
+  if(one.vos >= 0)
+  {
+    set_range(f, static_cast<std::uint32_t>(one.vos));
+  }
+  set_field(f, "RCC_PLL3CFGR", "PLL3SRC", 2);
+  set_field(f, "RCC_PLL3CFGR", "PLL3M", one.m - 1);
+  set_field(f, "RCC_PLL3DIVR", "PLL3N", one.n - 1);
+  set_field(f, "RCC_PLL3DIVR", "PLL3P", one.p - 1);
+  set_field(f, "RCC_PLL3CFGR", "PLL3PEN", one.output ? 1 : 0);
+  REQUIRE(range_level(f) == (one.vos >= 0 ? 3u - static_cast<std::uint32_t>(one.vos) : 3u));
+  auto&      regs   = f.target->peripheral("RCC");
+  auto const cr     = peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL3ON");
+  auto const offset = [&] {
+    auto const* found = popcorn::find_register(regs.description(), std::string_view{"RCC_CR"});
+    return found->offset;
+  }();
+  if(strict and one.warns)
+  {
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->model("RCC")->on_write(
+            regs, offset, 4, regs.peek(offset), cr, {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(f.field("RCC", "RCC_CR", "PLL3ON") == 0);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(regs.description().base + offset, 4, cr)),
+        popcorn::model_error);
+    CHECK(f.field("RCC", "RCC_CR", "PLL3ON") == 0);
+  }
+  else
+  {
+    write(f, "RCC_CR", cr);
+    idle_until(f, std::chrono::microseconds{150});
+    CHECK(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
+  }
+  auto const limits = std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  });
+  CHECK(limits == (one.warns ? 1 : 0));
+  if(one.warns and not strict)
+  {
+    auto const named = std::format("at range {},", one.vos >= 0 ? 4 - one.vos : 4);
+    CHECK(std::ranges::any_of(logged, [&](core::log_record const& record) {
+      return record.message.contains(named);
+    }));
+  }
+}
+}
+
+TEST_CASE(
+    "RM0456 11.4.10 Table 115 and 11.4.6: a PLL enabled outside its limits warns once, the PLL "
+    "still locks, inferred")
+{
+  constexpr std::array legs{
+      pll_leg{"range 4 and a 192 MHz VCO",        -1, 1, 12, 3, false, true },
+      pll_leg{"range 4 and a 512 MHz VCO",        -1, 1, 32, 3, false, true },
+      pll_leg{"range 1 and a 544 MHz VCO",        3,  1, 34, 3, false, false},
+      pll_leg{"range 1 and a 128 MHz VCO",        3,  1, 8,  3, false, false},
+      pll_leg{"range 1 and a 96 MHz VCO",         3,  1, 6,  3, false, true },
+      pll_leg{"range 3 and a 328 MHz VCO",        1,  4, 82, 8, false, false},
+      pll_leg{"range 3 and a 400 MHz VCO",        1,  1, 25, 8, false, true },
+      pll_leg{"range 2 and a 100 MHz P output",   2,  1, 25, 4, true,  false},
+      pll_leg{"range 2 and a 120 MHz P output",   2,  1, 30, 4, true,  true },
+      pll_leg{"range 3 and a 54 MHz P output",    1,  4, 82, 6, true,  false},
+      pll_leg{"range 3 and an 82 MHz P output",   1,  4, 82, 4, true,  true },
+      pll_leg{"range 1 and a 232 MHz P output",   3,  1, 29, 2, true,  true },
+      pll_leg{"range 1 and a 154 MHz P output",   3,  1, 29, 3, true,  false},
+      pll_leg{"range 1, P output off at 232 MHz", 3,  1, 29, 2, false, false},
+      pll_leg{"range 1 and a 4 MHz reference",    3,  4, 32, 3, false, false},
+      pll_leg{"range 1 and a 3.2 MHz reference",  3,  5, 40, 3, false, true },
+      pll_leg{"range 1 and a 16 MHz reference",   3,  1, 8,  3, false, false},
+  };
+  for(auto const& one : legs)
+  {
+    run_leg(one, false);
+    run_leg(one, true);
+  }
+}
+
+TEST_CASE("a VOS write that lowers the range under a running PLL warns once at the new range")
+{
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  write(f, "RCC_CR", bit_of("RCC_CR", "HSION") | bit_of("RCC_CR", "MSISON"));
+  idle_until(f, std::chrono::microseconds{150});
+  set_range(f, 3);
+  set_field(f, "RCC_PLL3CFGR", "PLL3SRC", 2);
+  set_field(f, "RCC_PLL3CFGR", "PLL3M", 0);
+  set_field(f, "RCC_PLL3DIVR", "PLL3N", 25);
+  set_field(f, "RCC_PLL3DIVR", "PLL3P", 1);
+  set_field(f, "RCC_PLL3CFGR", "PLL3PEN", 1);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL3ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
+  auto const limits = [&] {
+    return std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.message.contains("outside its limits");
+    });
+  };
+  CHECK(limits() == 0);
+  set_range(f, 1);
+  REQUIRE(range_level(f) == 2);
+  CHECK(limits() == 1);
+  set_range(f, 3);
+  set_range(f, 1);
+  CHECK(limits() == 1);
+  CHECK(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
 }

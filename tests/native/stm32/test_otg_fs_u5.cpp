@@ -161,8 +161,21 @@ struct clock_rig
     REQUIRE(f.target->mem().write(desc.base + found->offset, 4, word).has_value());
   }
 
+  void range_1() const
+  {
+    auto const& desc  = f.target->peripheral("PWR").description();
+    auto const  found = popcorn::find_register(desc, std::string_view{"PWR_VOSR"});
+    REQUIRE(found != nullptr);
+    auto const bits =
+        std::ranges::find(found->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+    REQUIRE(bits != found->fields.end());
+    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, 3u << bits->lsb).has_value());
+    f.run_for(100'000'000);
+  }
+
   void iclk_from_pll1_q(std::uint32_t n) const
   {
+    range_1();
     set("RCC_PLL1CFGR", "PLL1SRC", 1);
     set("RCC_PLL1CFGR", "PLL1RGE", 3);
     set("RCC_PLL1CFGR", "PLL1M", 0);

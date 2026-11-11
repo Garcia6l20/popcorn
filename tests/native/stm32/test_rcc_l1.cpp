@@ -635,3 +635,17 @@ TEST_CASE("every RCC reset bit of the L1 parts names an instance and holds it in
   CHECK(f.target->held_in_reset("WWDG"));
   CHECK(f.target->held_in_reset("ADC"));
 }
+
+TEST_CASE("a PLL enabled at any VCO logs no limit warning on the STM32L1")
+{
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  set(f, "CR", "HSION", 1);
+  set(f, "CR", "HSEON", 1);
+  pll_on(f, 0, 8, 1);
+  CHECK(std::ranges::none_of(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  }));
+}

@@ -856,3 +856,19 @@ TEST_CASE(
     }
   }
 }
+
+TEST_CASE("a PLL enabled at any VCO and range logs no limit warning on the STM32L4, ES0250 2.2.25")
+{
+  rig const                     r;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  r.start("HSEON");
+  r.write("PLLCFGR", pll_hse | 86u << 8 | p_en | q_en | r_en);
+  r.set("CR", "PLLON", 1);
+  r.idle();
+  CHECK(r.field("CR", "PLLRDY") == 1);
+  CHECK(std::ranges::none_of(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  }));
+}

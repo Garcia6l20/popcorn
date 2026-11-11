@@ -235,6 +235,27 @@ constexpr std::array<bus_node<signal>, 3> buses{
     {{pclk1, rcc_role::ppre1}, {pclk2, rcc_role::ppre2}, {pclk3, rcc_role::ppre3}}
 };
 
+/**
+ * @brief The wide and medium VCO range tables of the PLL characteristics, DS14258 5.3.10 and the
+ *        same tables in the datasheet of every shipped H5 part, indexed by
+ *        `PLLxVCOSEL`: the wide VCO range, reference clock 2 to 16 MHz and VCO 128 to 560 MHz,
+ *        outputs 250, 200, 150 and 100 MHz in VOS0 to VOS3, and the medium VCO range, reference
+ *        clock 1 to 2 MHz and VCO 150 to 420 MHz, outputs 210, 210, 160 and 88 MHz. The
+ *        performance levels 0 to 3 are VOS0 to VOS3, the reset level is VOS3, RM0481 10.5.2.
+ */
+constexpr std::array<pll_limit_table, 2> pll_limits{
+    {
+     {{{2'000'000, 16'000'000, 128'000'000, 560'000'000, 250'000'000},
+          {2'000'000, 16'000'000, 128'000'000, 560'000'000, 200'000'000},
+          {2'000'000, 16'000'000, 128'000'000, 560'000'000, 150'000'000},
+          {2'000'000, 16'000'000, 128'000'000, 560'000'000, 100'000'000}}},
+     {{{1'000'000, 2'000'000, 150'000'000, 420'000'000, 210'000'000},
+          {1'000'000, 2'000'000, 150'000'000, 420'000'000, 210'000'000},
+          {1'000'000, 2'000'000, 150'000'000, 420'000'000, 160'000'000},
+          {1'000'000, 2'000'000, 150'000'000, 420'000'000, 88'000'000}}},
+     }
+};
+
 constexpr std::array<pll_node<signal>, 3> pll_nodes{
     {
      {.config                = "RCC_PLL1CFGR",
@@ -253,7 +274,8 @@ constexpr std::array<pll_node<signal>, 3> pll_nodes{
          .m_decode              = &direct,
          .n_decode              = &plus_one,
          .output_decode         = {&plus_one, &plus_one, &plus_one},
-         .outputs_held_while_on = true},
+         .outputs_held_while_on = true,
+         .vcosel                = "PLL1VCOSEL"},
      {.config        = "RCC_PLL2CFGR",
          .dividers      = "RCC_PLL2DIVR",
          .fraction      = "RCC_PLL2FRACR",
@@ -269,7 +291,8 @@ constexpr std::array<pll_node<signal>, 3> pll_nodes{
          .outputs       = 3,
          .m_decode      = &direct,
          .n_decode      = &plus_one,
-         .output_decode = {&plus_one, &plus_one, &plus_one}},
+         .output_decode = {&plus_one, &plus_one, &plus_one},
+         .vcosel        = "PLL2VCOSEL"},
      {.config        = "RCC_PLL3CFGR",
          .dividers      = "RCC_PLL3DIVR",
          .fraction      = "RCC_PLL3FRACR",
@@ -285,7 +308,8 @@ constexpr std::array<pll_node<signal>, 3> pll_nodes{
          .outputs       = 3,
          .m_decode      = &direct,
          .n_decode      = &plus_one,
-         .output_decode = {&plus_one, &plus_one, &plus_one}},
+         .output_decode = {&plus_one, &plus_one, &plus_one},
+         .vcosel        = "PLL3VCOSEL"},
      }
 };
 
@@ -457,13 +481,17 @@ struct h5_rcc
   static constexpr auto const& system_inputs    = h5::system_inputs;
   static constexpr auto const& system_sources   = h5::system_sources;
   static constexpr auto const& pll_nodes        = h5::pll_nodes;
-  static constexpr auto const& buses            = h5::buses;
-  static constexpr auto const& reset_flags      = h5::reset_flags;
-  static constexpr auto const& secured          = h5::rcc_secured;
-  static constexpr auto const& unit_registers   = h5::rcc_unit_registers;
-  static constexpr auto const& unit_aliases     = h5::rcc_unit_aliases;
-  static constexpr auto const& unit_suffixes    = h5::rcc_unit_suffixes;
-  static constexpr auto const& backup_secured   = h5::rcc_backup_secured;
+  static constexpr auto const& pll_limit_tables = h5::pll_limits;
+  /** @brief How a message names the VCORE level: VOS0 is the level 0. */
+  static constexpr std::string_view pll_level_label = "VOS";
+  static constexpr std::uint32_t    pll_level_first = 0;
+  static constexpr auto const&      buses           = h5::buses;
+  static constexpr auto const&      reset_flags     = h5::reset_flags;
+  static constexpr auto const&      secured         = h5::rcc_secured;
+  static constexpr auto const&      unit_registers  = h5::rcc_unit_registers;
+  static constexpr auto const&      unit_aliases    = h5::rcc_unit_aliases;
+  static constexpr auto const&      unit_suffixes   = h5::rcc_unit_suffixes;
+  static constexpr auto const&      backup_secured  = h5::rcc_backup_secured;
 
   static constexpr bool                              css_held = true;
   static constexpr std::array<kept_fields, 0>        system_reset_kept{};

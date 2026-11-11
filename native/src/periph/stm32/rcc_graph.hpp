@@ -220,7 +220,30 @@ template <typename Signal> struct pll_node
   bool outputs_held_while_on{};
   /** @brief Register of the output enables, `config` when empty. */
   std::string_view enables{};
+  /** @brief Field of `config` selecting the VCO range, empty when the PLL has one table. */
+  std::string_view vcosel{};
 };
+
+/** @brief Limits of a PLL at one VCORE performance level, in Hz. */
+struct pll_limits
+{
+  /** @brief Lowest PLL reference clock. */
+  std::uint64_t input_min_hz;
+  /** @brief Highest PLL reference clock. */
+  std::uint64_t input_max_hz;
+  /** @brief Lowest VCO frequency. */
+  std::uint64_t vco_min_hz;
+  /** @brief Highest VCO frequency. */
+  std::uint64_t vco_max_hz;
+  /** @brief Highest frequency of an enabled output, 0 for a level the PLL is not allowed at. */
+  std::uint64_t output_max_hz;
+};
+
+/** @brief Number of VCORE performance levels a limits table holds, 0 the highest. */
+inline constexpr std::size_t pll_limit_levels = 4;
+
+/** @brief The limits of a PLL at each performance level. */
+using pll_limit_table = std::array<pll_limits, pll_limit_levels>;
 
 constexpr auto plus_one(std::uint32_t code) -> std::uint64_t
 {

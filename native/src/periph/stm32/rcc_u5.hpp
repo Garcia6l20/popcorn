@@ -252,6 +252,21 @@ constexpr std::array<bus_node<signal>, 3> buses{
     {{pclk1, rcc_role::ppre1}, {pclk2, rcc_role::ppre2}, {pclk3, rcc_role::ppre3}}
 };
 
+/**
+ * @brief RM0456 11.4.10 Table 115 and 11.4.6, the PLL limits of the range 1 to 4, which are the
+ *        performance levels 0 to 3: reference clock 4 to 16 MHz, VCO 128 to 544 MHz in the ranges
+ *        1 and 2 and 128 to 330 MHz in the range 3, outputs 208, 110 and 55 MHz, not allowed in
+ *        the range 4. A reset leaves the regulator in the range 4, RM0456 10.5.2.
+ */
+constexpr std::array<pll_limit_table, 1> pll_limits{
+    {
+     {{{4'000'000, 16'000'000, 128'000'000, 544'000'000, 208'000'000},
+          {4'000'000, 16'000'000, 128'000'000, 544'000'000, 110'000'000},
+          {4'000'000, 16'000'000, 128'000'000, 330'000'000, 55'000'000},
+          {4'000'000, 16'000'000, 128'000'000, 330'000'000, 0}}},
+     }
+};
+
 constexpr std::array<pll_node<signal>, 3> pll_nodes{
     {
      {.config        = "RCC_PLL1CFGR",
@@ -457,13 +472,17 @@ struct u5_rcc
   static constexpr auto const& system_inputs    = u5::system_inputs;
   static constexpr auto const& system_sources   = u5::system_sources;
   static constexpr auto const& pll_nodes        = u5::pll_nodes;
-  static constexpr auto const& buses            = u5::buses;
-  static constexpr auto const& reset_flags      = u5::reset_flags;
-  static constexpr auto const& secured          = u5::rcc_secured;
-  static constexpr auto const& unit_registers   = u5::rcc_unit_registers;
-  static constexpr auto const& unit_aliases     = u5::rcc_unit_aliases;
-  static constexpr auto const& unit_suffixes    = u5::rcc_unit_suffixes;
-  static constexpr auto const& backup_secured   = u5::rcc_backup_secured;
+  static constexpr auto const& pll_limit_tables = u5::pll_limits;
+  /** @brief How a message names the VCORE level: range 1 is the level 0. */
+  static constexpr std::string_view pll_level_label = "range ";
+  static constexpr std::uint32_t    pll_level_first = 1;
+  static constexpr auto const&      buses           = u5::buses;
+  static constexpr auto const&      reset_flags     = u5::reset_flags;
+  static constexpr auto const&      secured         = u5::rcc_secured;
+  static constexpr auto const&      unit_registers  = u5::rcc_unit_registers;
+  static constexpr auto const&      unit_aliases    = u5::rcc_unit_aliases;
+  static constexpr auto const&      unit_suffixes   = u5::rcc_unit_suffixes;
+  static constexpr auto const&      backup_secured  = u5::rcc_backup_secured;
 
   /**
    * @brief Fields of RCC_CR that need the LSE: a write keeps them 0 while LSERDY is 0 and they

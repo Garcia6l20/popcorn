@@ -14,6 +14,7 @@
 #include "rcc_rows.hpp"
 #include "rcc_u5.hpp"
 #include "secure_config.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -238,6 +239,7 @@ struct pll_fields
   std::optional<field_ref>                              range;
   std::optional<field_ref>                              m;
   std::optional<field_ref>                              fracen;
+  std::optional<field_ref>                              vcosel;
   field_ref                                             n;
   std::optional<field_ref>                              frac;
   std::array<field_ref, max_pll_outputs>                divider{};
@@ -478,6 +480,23 @@ template <typename Signal> struct bus_gate
  *   RM0456 11.4.6 and RM0481 11.4.5, unmeasured. The new fraction applies at once, where silicon
  *   takes it three reference clock periods later.
  *
+ * @group u5,h5 rule "PLL limits"
+ * - STM32U5: a PLL checks its reference clock against 4 to 16 MHz, RM0456 11.4.6, and its VCO and
+ *   enabled outputs against the VCORE range, Table 115: VCO 128 to 544 MHz with outputs up to 208
+ *   MHz in range 1 and 110 MHz in range 2, VCO 128 to 330 MHz with outputs up to 55 MHz in range
+ *   3. A PLL is not allowed in range 4, the range after a reset, RM0456 10.5.2.
+ * - STM32H5: the limits follow `PLLxVCOSEL`, the wide and medium VCO range tables of the PLL
+ *   characteristics in the datasheet, the same in the datasheet of every shipped part. The wide VCO
+ * range, 0, takes a reference clock of 2 to 16 MHz, a VCO of 128 to 560 MHz and outputs up to 250,
+ * 200, 150 and 100 MHz in VOS0 to VOS3. The medium range, 1, takes 1 to 2 MHz, 150 to 420 MHz and
+ * outputs up to 210, 210, 160 and 88 MHz. VOS3 is the range after a reset, RM0481 10.5.2.
+ * - A PLL enabled outside its limits logs one model warning per PLL per machine life, naming the
+ *   numbers, and the PLL still locks. Under `strict_peripherals` the write that sets `PLLxON`
+ *   raises `model_error` and `PLLxON` reads 0. A VOS write that lowers the range under a running
+ *   PLL logs the same warning when the new range applies. The outputs and dividers read are
+ *   those of the `PLLxON` write and of the range change. The manuals say the PLL output is not
+ *   guaranteed outside the limits and do not say `PLLxRDY` stays low, inferred.
+ *
  * @group h5 rule "STM32H5 HSIDIV"
  * - STM32H5: `RCC_CR.HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI and takes a write in
  *   every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
@@ -583,6 +602,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
                         public hsi16_source,
                         public kernel_gate,
                         public clock_output_port,
+                        public voltage_range_listener,
                         public trustzone_aware
 {
   using base   = dispatch_model<rcc_model<Traits>, rcc_state<Traits>>;
@@ -643,6 +663,7 @@ public:
     return true;
   }
   void               force_lsi() override;
+  void               on_voltage_range_change() override;
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
   [[nodiscard]] auto clock_hz(std::string_view port, std::uint8_t pin) const
@@ -691,6 +712,12 @@ private:
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
   [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t;
+  [[nodiscard]] auto pll_violations(std::size_t pll) const -> std::string;
+  void               check_pll_enable(
+      std::string_view reg,
+      std::uint32_t    word,
+      std::uint32_t    old,
+      std::uint32_t    now);
 
   void oscillators_written(
       std::string_view reg,
@@ -716,6 +743,7 @@ private:
   [[nodiscard]] auto wwdg_hardware() const -> bool;
 
   bool                                            core_stop_logged_{};
+  std::array<bool, Traits::pll_nodes.size()>      pll_range_logged_{};
   rcc_options                                     options_;
   register_file&                                  regs_;
   std::array<oscillator, source_count>            osc_{};
@@ -1139,6 +1167,7 @@ rcc_model<Traits>::rcc_model(
     fields.range  = named(node.config, node.range);
     fields.m      = named(node.config, node.m);
     fields.fracen = named(node.config, node.fracen);
+    fields.vcosel = named(node.config, node.vcosel);
     fields.n      = field(node.dividers, node.n);
     fields.frac   = named(node.fraction, node.frac);
     for(std::size_t output = 0; output < node.outputs; ++output)
@@ -1398,6 +1427,7 @@ void rcc_model<Traits>::oscillators_written(
       now = osc.on.with(now, 1);
     }
   }
+  check_pll_enable(reg, word, old, now);
   regs_.poke(word, now);
   for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
@@ -1421,6 +1451,133 @@ void rcc_model<Traits>::oscillators_written(
     }
   }
   settle(true);
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::pll_violations(std::size_t pll) const -> std::string
+{
+  if constexpr(requires { Traits::pll_limit_tables; })
+  {
+    std::optional<std::uint32_t> level;
+    for(auto* const peer : this->ctx_.peers.all())
+    {
+      if(auto const* const range = dynamic_cast<voltage_range_source const*>(peer))
+      {
+        level = range->active_level();
+      }
+    }
+    auto const& fields = pll_[pll];
+    auto const& node   = Traits::pll_nodes[pll];
+    auto const  table  = fields.vcosel ? get(regs_, *fields.vcosel) : 0u;
+    auto const  origin = std::to_underlying(pll_input(pll));
+    if(not level
+       or *level >= pll_limit_levels
+       or table >= Traits::pll_limit_tables.size()
+       or origin >= std::to_underlying(source::pll1)
+       or Traits::oscillators[origin].rate == nullptr)
+    {
+      return {};
+    }
+    auto const&       limits = Traits::pll_limit_tables[table][*level];
+    rate_inputs const inputs{
+        .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
+    auto const input   = Traits::oscillators[origin].rate(inputs);
+    auto const divisor = fields.m ? node.m_decode(get(regs_, *fields.m)) : 1;
+    if(input == 0 or divisor == 0)
+    {
+      return {};
+    }
+    auto const fraction  = fields.fracen and fields.frac and get(regs_, *fields.fracen) != 0
+                             ? get(regs_, *fields.frac)
+                             : 0;
+    auto const reference = input / divisor;
+    auto const vco =
+        input * (node.n_decode(get(regs_, fields.n)) * frac_one + fraction) / (divisor * frac_one);
+    std::string text;
+    auto const  add = [&](std::string const& what) { text += (text.empty() ? "" : ", ") + what; };
+    if(limits.output_max_hz == 0)
+    {
+      add("a PLL is not allowed at this level");
+    }
+    if(reference < limits.input_min_hz or reference > limits.input_max_hz)
+    {
+      add(std::format(
+          "reference clock {} Hz outside {} to {} Hz", reference, limits.input_min_hz,
+          limits.input_max_hz));
+    }
+    if(vco < limits.vco_min_hz or vco > limits.vco_max_hz)
+    {
+      add(std::format("VCO {} Hz outside {} to {} Hz", vco, limits.vco_min_hz, limits.vco_max_hz));
+    }
+    for(std::size_t output = 0; output < node.outputs; ++output)
+    {
+      auto const& enable  = fields.output_enable[output];
+      auto const  divider = node.output_decode[output](get(regs_, fields.divider[output]));
+      if(limits.output_max_hz != 0
+         and (not enable or get(regs_, *enable) != 0)
+         and divider != 0
+         and vco / divider > limits.output_max_hz)
+      {
+        add(std::format(
+            "output {} at {} Hz above {} Hz", output, vco / divider, limits.output_max_hz));
+      }
+    }
+    if(text.empty())
+    {
+      return text;
+    }
+    return std::format(
+        "PLL{} is on at {}{}, outside its limits: {}", pll + 1, Traits::pll_level_label,
+        *level + Traits::pll_level_first, text);
+  }
+  return {};
+}
+
+template <typename Traits>
+void rcc_model<Traits>::check_pll_enable(
+    std::string_view reg,
+    std::uint32_t    word,
+    std::uint32_t    old,
+    std::uint32_t    now)
+{
+  for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
+  {
+    auto const at = static_cast<std::size_t>(index);
+    if(names.reg != reg
+       or at < std::to_underlying(source::pll1)
+       or osc_[at].on.of(old) != 0
+       or osc_[at].on.of(now) == 0)
+    {
+      continue;
+    }
+    auto const pll  = at - std::to_underlying(source::pll1);
+    auto       text = pll_violations(pll);
+    if(text.empty())
+    {
+      continue;
+    }
+    if(this->ctx_.strict_peripherals)
+    {
+      regs_.poke(word, old);
+    }
+    this->warn_once_or_refuse(pll_range_logged_[pll], reg, word, std::move(text));
+  }
+}
+
+template <typename Traits> void rcc_model<Traits>::on_voltage_range_change()
+{
+  for(std::size_t pll = 0; pll < pll_.size(); ++pll)
+  {
+    if(not is_on(static_cast<source>(std::to_underlying(source::pll1) + pll)))
+    {
+      continue;
+    }
+    if(auto text = pll_violations(pll);
+       not text.empty() and not std::exchange(pll_range_logged_[pll], true))
+    {
+      this->warn(Traits::oscillators[std::to_underlying(source::pll1) + pll].reg, std::move(text));
+    }
+  }
 }
 
 template <typename Traits>

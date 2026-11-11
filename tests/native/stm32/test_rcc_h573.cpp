@@ -4,6 +4,7 @@
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
@@ -830,11 +831,13 @@ TEST_CASE("RM0481 11.8.1: the oscillator feeding an enabled PLL1 stays on while 
     std::string_view on;
     std::uint32_t    pll_source;
     std::uint32_t    sw;
+    std::uint32_t    m;
+    std::uint32_t    n;
   };
-  for(auto const& [on, pll_source, sw] : std::to_array<leg>({
-          {"HSEON", 3, 0},
-          {"HSION", 1, 1},
-          {"CSION", 2, 0},
+  for(auto const& [on, pll_source, sw, m, n] : std::to_array<leg>({
+          {"HSEON", 3, 0, 1, 10},
+          {"HSION", 1, 1, 4, 20},
+          {"CSION", 2, 0, 1, 40},
   }))
   {
     CAPTURE(on);
@@ -848,7 +851,7 @@ TEST_CASE("RM0481 11.8.1: the oscillator feeding an enabled PLL1 stays on while 
     idle_until(f, delay);
     set(f, "RCC_CFGR1", "SW", sw);
     REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == sw);
-    pll1_from(f, pll_source, 1, 8);
+    pll1_from(f, pll_source, m, n);
     set(f, "RCC_PLL1DIVR", "PLL1Q", 1);
     set(f, "RCC_PLL1CFGR", "PLL1QEN", 1);
     set(f, "RCC_CR", "PLL1ON", 1);
@@ -917,7 +920,7 @@ TEST_CASE("RM0481 11.8.5: a switch to a PLL1 P output that is off keeps the core
   std::vector<core::log_record> logged;
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
-  pll1_from(f, 1, 4, 8);
+  pll1_from(f, 1, 4, 32);
   set(f, "RCC_CR", "PLL1ON", 1);
   idle_until(f, delay);
   REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
@@ -1391,4 +1394,155 @@ TEST_CASE("H573 board: the SystemInit that clears HSIDIV keeps it until PLL1 sto
   CHECK(clocks.hz("hclk") == 64 * mhz);
   CHECK(f.target->virtual_clock().core_hz() == 64 * mhz);
   CHECK(warnings.empty());
+}
+
+namespace
+{
+void set_range(stm32_fixture const& f, std::uint32_t vos)
+{
+  auto const& desc  = f.target->peripheral("PWR").description();
+  auto const* found = popcorn::find_register(desc, std::string_view{"PWR_VOSCR"});
+  auto const  bits =
+      std::ranges::find(found->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, vos << bits->lsb).has_value());
+  idle_until(f, std::chrono::microseconds{100});
+}
+
+auto range_level(stm32_fixture const& f) -> std::uint32_t
+{
+  auto* const source = f.model_of<stm32::voltage_range_source>("PWR");
+  REQUIRE(source != nullptr);
+  return source->active_level();
+}
+
+struct pll_leg
+{
+  std::string_view title;
+  std::uint32_t    vcosel;
+  std::int32_t     vos;
+  std::uint32_t    m;
+  std::uint32_t    n;
+  std::uint32_t    p;
+  bool             output;
+  bool             warns;
+};
+
+void run_leg(pll_leg const& one, bool strict)
+{
+  CAPTURE(one.title);
+  auto options                    = with_listener();
+  options.strict_peripherals      = strict;
+  auto                          f = idle_fixture(std::move(options));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  if(one.vos >= 0)
+  {
+    set_range(f, static_cast<std::uint32_t>(one.vos));
+  }
+  REQUIRE(range_level(f) == (one.vos >= 0 ? 3u - static_cast<std::uint32_t>(one.vos) : 3u));
+  set(f, "RCC_PLL1CFGR", "PLL1SRC", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1VCOSEL", one.vcosel);
+  set(f, "RCC_PLL1CFGR", "DIVM1", one.m);
+  set(f, "RCC_PLL1DIVR", "PLL1N", one.n - 1);
+  set(f, "RCC_PLL1DIVR", "PLL1P", one.p - 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", one.output ? 1 : 0);
+  auto&      regs = f.target->peripheral("RCC");
+  auto const at   = offset_of("RCC_CR");
+  auto const cr   = peek(f, "RCC_CR") | lsb_of("RCC_CR", "PLL1ON");
+  if(strict and one.warns)
+  {
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->model("RCC")->on_write(
+            regs, at, 4, regs.peek(at), cr, {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->mem().write(regs.description().base + at, 4, cr)),
+        popcorn::model_error);
+    CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  }
+  else
+  {
+    write(f, "RCC_CR", cr);
+    idle_until(f, delay);
+    CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  }
+  auto const limits = std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  });
+  CHECK(limits == (one.warns ? 1 : 0));
+  if(one.warns and not strict)
+  {
+    auto const named = std::format("at VOS{},", one.vos >= 0 ? 3 - one.vos : 3);
+    CHECK(std::ranges::any_of(logged, [&](core::log_record const& record) {
+      return record.message.contains(named);
+    }));
+  }
+}
+}
+
+TEST_CASE(
+    "The H5 datasheet PLL characteristics, inferred: a PLL enabled outside the limits of its "
+    "PLLxVCOSEL table warns once, the PLL still locks")
+{
+  constexpr std::array legs{
+      pll_leg{"wide, VOS3, a 320 MHz VCO",        0, -1, 4,  40,  3, false, false},
+      pll_leg{"wide, a 128 MHz VCO",              0, -1, 4,  16,  3, false, false},
+      pll_leg{"wide, a 120 MHz VCO",              0, -1, 4,  15,  3, false, true },
+      pll_leg{"wide, a 560 MHz VCO",              0, -1, 4,  70,  3, false, false},
+      pll_leg{"wide, a 576 MHz VCO",              0, -1, 2,  36,  3, false, true },
+      pll_leg{"wide, a 16 MHz reference",         0, -1, 2,  20,  3, false, false},
+      pll_leg{"wide, a 1 MHz reference",          0, -1, 32, 150, 3, false, true },
+      pll_leg{"wide, VOS3, a 200 MHz P output",   0, -1, 4,  50,  2, true,  true },
+      pll_leg{"wide, VOS3, a 100 MHz P output",   0, -1, 4,  50,  4, true,  false},
+      pll_leg{"wide, VOS0, a 200 MHz P output",   0, 3,  4,  50,  2, true,  false},
+      pll_leg{"wide, VOS2, a 140 MHz P output",   0, 1,  4,  70,  4, true,  false},
+      pll_leg{"wide, VOS2, a 160 MHz P output",   0, 1,  4,  40,  2, true,  true },
+      pll_leg{"wide, VOS1, a 200 MHz P output",   0, 2,  4,  50,  2, true,  false},
+      pll_leg{"wide, VOS1, a 220 MHz P output",   0, 2,  4,  55,  2, true,  true },
+      pll_leg{"wide, VOS0, a 266 MHz P output",   0, 3,  4,  64,  1, true,  true },
+      pll_leg{"medium, a 200 MHz VCO",            1, -1, 16, 100, 3, false, false},
+      pll_leg{"medium, a 420 MHz VCO",            1, -1, 16, 210, 3, false, false},
+      pll_leg{"medium, a 450 MHz VCO",            1, -1, 16, 225, 3, false, true },
+      pll_leg{"wide, the same 450 MHz VCO",       0, -1, 16, 225, 3, false, false},
+      pll_leg{"medium, a 4 MHz reference",        1, -1, 8,  40,  3, false, true },
+      pll_leg{"medium, VOS3, a 100 MHz P output", 1, -1, 16, 100, 2, true,  true },
+      pll_leg{"medium, VOS3, an 66 MHz P output", 1, -1, 16, 100, 3, true,  false},
+  };
+  for(auto const& one : legs)
+  {
+    run_leg(one, false);
+    run_leg(one, true);
+  }
+}
+
+TEST_CASE("a VOS write that lowers the range under a running PLL1 warns once at the new range")
+{
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  set_range(f, 3);
+  set(f, "RCC_PLL1CFGR", "PLL1SRC", 1);
+  set(f, "RCC_PLL1CFGR", "DIVM1", 4);
+  set(f, "RCC_PLL1DIVR", "PLL1N", 49);
+  set(f, "RCC_PLL1DIVR", "PLL1P", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  auto const limits = [&] {
+    return std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.message.contains("outside its limits");
+    });
+  };
+  CHECK(limits() == 0);
+  set_range(f, 0);
+  REQUIRE(range_level(f) == 3);
+  CHECK(limits() == 1);
+  set_range(f, 3);
+  set_range(f, 0);
+  CHECK(limits() == 1);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
 }
