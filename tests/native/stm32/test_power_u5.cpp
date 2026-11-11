@@ -493,6 +493,146 @@ TEST_CASE("a power-on reset after a switch to SMPS leaves REGSEL and REGS 0, the
   CHECK(r.regs() == 0);
 }
 
+TEST_CASE(
+    "RM0456 10.10.3, 10.10.9 and 10.10.10: FSTEN and PWR_BDCR2 survive a system reset, PWR_BDCR1 "
+    "every reset but a power-on one")
+{
+  using popcorn::reset_kind;
+  struct row
+  {
+    reset_kind kind;
+    bool       system;
+    bool       backup;
+  };
+  constexpr std::array rows{
+      row{reset_kind::pin,             true,  true },
+      row{reset_kind::software,        true,  true },
+      row{reset_kind::watchdog,        true,  true },
+      row{reset_kind::window_watchdog, true,  true },
+      row{reset_kind::low_power,       true,  true },
+      row{reset_kind::option_load,     true,  true },
+      row{reset_kind::peripheral,      false, true },
+      row{reset_kind::brown_out,       false, true },
+      row{reset_kind::power_on,        false, false},
+  };
+  for(auto const& one : rows)
+  {
+    CAPTURE(static_cast<int>(one.kind));
+    supply_rig r{u575_with_smps()};
+    r.write("PWR_CR3", 2 | 4);
+    r.write("PWR_BDCR1", 0x11);
+    r.write("PWR_BDCR2", 0x3);
+    r.write("PWR_WUCR1", 0x1);
+    REQUIRE(field(r.f, "PWR_CR3", "FSTEN") == 1);
+    REQUIRE(field(r.f, "PWR_BDCR2", "VBE") == 1);
+    REQUIRE(field(r.f, "PWR_BDCR1", "BREN") == 1);
+    if(one.kind == reset_kind::peripheral)
+    {
+      r.f.target->model("PWR")->reset(r.f.target->peripheral("PWR"), one.kind);
+    }
+    else
+    {
+      r.f.target->reset(one.kind);
+    }
+    CHECK(field(r.f, "PWR_CR3", "REGSEL") == 0);
+    CHECK(field(r.f, "PWR_CR3", "FSTEN") == (one.system ? 1u : 0u));
+    CHECK(field(r.f, "PWR_BDCR2", "VBE") == (one.system ? 1u : 0u));
+    CHECK(field(r.f, "PWR_BDCR2", "VBRS") == (one.system ? 1u : 0u));
+    CHECK(field(r.f, "PWR_BDCR1", "BREN") == (one.backup ? 1u : 0u));
+    CHECK(field(r.f, "PWR_BDCR1", "MONEN") == (one.backup ? 1u : 0u));
+    if(one.kind != reset_kind::peripheral)
+    {
+      CHECK(field(r.f, "PWR_WUCR1", "WUPEN1") == 0);
+    }
+  }
+}
+
+namespace
+{
+constexpr auto backup_functions = std::to_array<std::pair<std::string_view, std::string_view>>({
+    {"PWR_BDCR1", "BREN" },
+    {"PWR_BDCR1", "MONEN"},
+    {"PWR_BDCR2", "VBE"  },
+});
+
+auto field_word(supply_rig const& r, std::string_view reg, std::string_view name) -> std::uint32_t
+{
+  auto const& regs  = r.f.target->peripheral("PWR");
+  auto const* found = popcorn::find_register(regs.description(), reg);
+  auto const  it    = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
+  return (1u << it->lsb) * ((1u << it->width) - 1u);
+}
+}
+
+TEST_CASE(
+    "RM0456 10.10.9 and 10.10.10: a firmware enable of a backup function warns once per field")
+{
+  for(auto const& [reg, name] : backup_functions)
+  {
+    CAPTURE(name);
+    supply_rig                    r{u575()};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    r.write(reg, field_word(r, reg, name));
+    r.write(reg, 0);
+    CHECK(logged.empty());
+    r.cpu_write(reg, field_word(r, reg, name));
+    CHECK(field(r.f, reg, name) == 1);
+    r.cpu_write(reg, 0);
+    r.cpu_write(reg, field_word(r, reg, name));
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].kind == core::log_kind::model_warning);
+    CHECK(logged[0].reg == reg);
+    CHECK(logged[0].message.starts_with(name));
+  }
+}
+
+TEST_CASE("RM0456 10.10.9 and 10.10.10: a strict backup function enable raises and keeps the word")
+{
+  for(auto const& [reg, name] : backup_functions)
+  {
+    CAPTURE(name);
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = true;
+    supply_rig r{u575(), std::move(options)};
+    auto&      regs  = r.f.target->peripheral("PWR");
+    auto const found = popcorn::find_register(regs.description(), reg);
+    CHECK_THROWS_AS(
+        static_cast<void>(r.f.target->model("PWR")->on_write(
+            regs, found->offset, 4, 0, field_word(r, reg, name), {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(field(r.f, reg, name) == 0);
+    r.write(reg, field_word(r, reg, name));
+    CHECK(field(r.f, reg, name) == 1);
+    auto const seen = r.f.target->mem().read(r.at(reg), 4);
+    REQUIRE(seen.has_value());
+    CHECK((*seen & field_word(r, reg, name)) == field_word(r, reg, name));
+  }
+}
+
+TEST_CASE("RM0456 11.3.3: RCC_BDCR.BDRST clears PWR_BDCR1 and leaves PWR_CR3 and PWR_BDCR2")
+{
+  supply_rig r{u575_with_smps()};
+  r.write("PWR_CR3", 4);
+  r.write("PWR_BDCR1", 0x11);
+  r.write("PWR_BDCR2", 0x3);
+  auto&      rcc   = r.f.target->peripheral("RCC");
+  auto const found = popcorn::find_register(rcc.description(), std::string_view{"RCC_BDCR"});
+  auto const bdrst =
+      std::ranges::find(found->fields, std::string_view{"BDRST"}, &popcorn::field_desc::name);
+  auto const at = rcc.description().base + found->offset;
+  REQUIRE(r.f.target->mem().write(at, 4, 1u << bdrst->lsb).has_value());
+  CHECK(field(r.f, "PWR_BDCR1", "BREN") == 0);
+  CHECK(field(r.f, "PWR_BDCR1", "MONEN") == 0);
+  CHECK(field(r.f, "PWR_CR3", "FSTEN") == 1);
+  CHECK(field(r.f, "PWR_BDCR2", "VBE") == 1);
+  CHECK(field(r.f, "PWR_BDCR2", "VBRS") == 1);
+  REQUIRE(r.f.target->mem().write(at, 4, 0).has_value());
+  r.write("PWR_BDCR1", 0x11);
+  CHECK(field(r.f, "PWR_BDCR1", "BREN") == 1);
+}
+
 TEST_CASE("a snapshot taken while REGS is pending restores the switch at its due time")
 {
   supply_rig r{u575_with_smps()};

@@ -11,10 +11,13 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <ranges>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -35,8 +38,10 @@ struct rig
 {
   stm32_fixture f;
 
-  explicit rig(std::string_view firmware = "h573_pwr_ll")
-      : f{h573(), firmware, popcorn::testing::stm32_options()}
+  explicit rig(
+      std::string_view      firmware = "h573_pwr_ll",
+      core::machine_options options  = popcorn::testing::stm32_options())
+      : f{h573(), firmware, std::move(options)}
   {
     REQUIRE(f.target->mem().write(loop_at, 4, 0xE7FD'BF30).has_value());
     f.set("pc", loop_at | 1u);
@@ -258,6 +263,125 @@ TEST_CASE("a snapshot taken between two ACTVOS steps restores to the same run")
   CHECK(r.read("PWR_VOSSR") == 0x4000);
   r.run_for(40 * us);
   CHECK(r.read("PWR_VOSSR") == 0xE008);
+}
+
+TEST_CASE("RM0481 10.11.7: PWR_BDCR survives every reset but a power-on one")
+{
+  using popcorn::reset_kind;
+  for(auto const [tzen, kind] : std::views::cartesian_product(
+          std::array{false, true},
+          std::array{
+              reset_kind::pin, reset_kind::software, reset_kind::watchdog,
+              reset_kind::window_watchdog, reset_kind::low_power, reset_kind::option_load,
+              reset_kind::peripheral, reset_kind::brown_out, reset_kind::power_on}))
+  {
+    CAPTURE(tzen);
+    CAPTURE(static_cast<int>(kind));
+    rig r{
+        "h573_pwr_ll", tzen ? popcorn::testing::h573_secure_rig::options({.tzen = true})
+                            : popcorn::testing::stm32_options()};
+    r.write("PWR_BDCR", 0x303);
+    r.write("PWR_WUCR", 0x1);
+    if(kind == reset_kind::peripheral)
+    {
+      r.f.target->model("PWR")->reset(r.f.target->peripheral("PWR"), kind);
+    }
+    else
+    {
+      r.f.target->reset(kind);
+    }
+    auto const kept = kind == reset_kind::power_on ? 0u : 1u;
+    CHECK(r.get("PWR_BDCR", "BREN") == kept);
+    CHECK(r.get("PWR_BDCR", "MONEN") == kept);
+    CHECK(r.get("PWR_BDCR", "VBE") == kept);
+    CHECK(r.get("PWR_BDCR", "VBRS") == kept);
+    if(kind != reset_kind::peripheral)
+    {
+      CHECK(r.get("PWR_WUCR", "WUPEN1") == 0);
+    }
+  }
+}
+
+namespace
+{
+constexpr auto backup_functions = std::to_array<std::pair<std::string_view, std::uint32_t>>({
+    {"BREN",  1u << 0},
+    {"MONEN", 1u << 1},
+    {"VBE",   1u << 8},
+});
+}
+
+TEST_CASE("RM0481 10.11.7: a firmware enable of a backup function warns once per field")
+{
+  for(auto const& [name, bit] : backup_functions)
+  {
+    CAPTURE(name);
+    rig                           r;
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto&      regs   = r.f.target->peripheral("PWR");
+    auto const offset = r.at("PWR_BDCR") - r.f.target->peripheral("PWR").description().base;
+    auto const cpu    = [&](std::uint32_t value) {
+      REQUIRE(r.f.target->model("PWR")
+                  ->on_write(regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}})
+                  .has_value());
+    };
+    r.write("PWR_BDCR", bit);
+    r.write("PWR_BDCR", 0);
+    CHECK(logged.empty());
+    cpu(bit);
+    CHECK(r.get("PWR_BDCR", name) == 1);
+    cpu(0);
+    cpu(bit);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].kind == core::log_kind::model_warning);
+    CHECK(logged[0].reg == "PWR_BDCR");
+    CHECK(logged[0].message.starts_with(name));
+  }
+}
+
+TEST_CASE("RM0481 10.11.7: a strict backup function enable raises and keeps the word")
+{
+  for(auto const& [name, bit] : backup_functions)
+  {
+    CAPTURE(name);
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = true;
+    rig        r{"h573_pwr_ll", std::move(options)};
+    auto&      regs   = r.f.target->peripheral("PWR");
+    auto const offset = r.at("PWR_BDCR") - regs.description().base;
+    CHECK_THROWS_AS(
+        static_cast<void>(r.f.target->model("PWR")->on_write(
+            regs, offset, 4, 0, bit, {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(r.get("PWR_BDCR", name) == 0);
+    r.write("PWR_BDCR", bit);
+    CHECK(r.get("PWR_BDCR", name) == 1);
+    auto const seen = r.f.target->mem().read(r.at("PWR_BDCR"), 4);
+    REQUIRE(seen.has_value());
+    CHECK((*seen & bit) == bit);
+  }
+}
+
+TEST_CASE("RM0481 10.11.7: RCC_BDCR.VSWRST clears every field of PWR_BDCR")
+{
+  rig        r;
+  auto&      rcc   = r.f.target->peripheral("RCC");
+  auto const found = popcorn::find_register(rcc.description(), std::string_view{"RCC_BDCR"});
+  auto const vswrst =
+      std::ranges::find(found->fields, std::string_view{"VSWRST"}, &popcorn::field_desc::name);
+  auto const at = rcc.description().base + found->offset;
+  r.write("PWR_BDCR", 0x303);
+  REQUIRE(r.f.target->mem().write(at, 4, 1u << vswrst->lsb).has_value());
+  for(auto const name : {"BREN", "MONEN", "VBE", "VBRS"})
+  {
+    CAPTURE(name);
+    CHECK(r.get("PWR_BDCR", name) == 0);
+  }
+  REQUIRE(r.f.target->mem().write(at, 4, 0).has_value());
+  r.write("PWR_BDCR", 0x303);
+  CHECK(r.get("PWR_BDCR", "BREN") == 1);
 }
 
 TEST_CASE("RM0481 10.11.1: the first PWR_PMCR write logs its LPMS mode, 1 is standby")

@@ -1,3 +1,4 @@
+#include "backup_domain.hpp"
 #include "family_names.hpp"
 #include "gpio_peers.hpp"
 #include "gtzc.hpp"
@@ -200,6 +201,11 @@ struct pwr_variant
   std::span<field_name const> system_clock_fields;
   /** @brief Fields a peripheral reset of the unit, RCC PWRRST, leaves at their value. */
   std::span<field_name const> peripheral_reset_kept;
+  /** @brief Fields a pin, software, watchdog, window watchdog, low-power or option-load reset
+   *         leaves at their value. A power-on or brown-out reset clears them. */
+  std::span<field_name const> system_reset_kept{};
+  /** @brief Fields of the backup domain, every reset but a power-on reset leaves at their value. */
+  std::span<field_name const> backup_reset_kept{};
   /** @brief Enables of functions the model does not run. A firmware write that sets one from 0
    *         logs one warning per field per machine life and stores it. Under strict_peripherals
    *         it raises model_error and the register keeps its value before the write. */
@@ -281,6 +287,11 @@ struct pwr_variant
  * @group u5,h5 unmodelled
  * - The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
  *   modelled. A deep-sleep WFI idles as a plain WFI.
+ * - The backup regulator, the backup domain monitoring and the VBAT charging that `BREN`, `MONEN`
+ *   and `VBE` enable are not modelled, in `PWR_BDCR1` and `PWR_BDCR2` on the U5 and `PWR_BDCR` on
+ *   the H5. A firmware write that sets one from 0 logs one warning per field per machine life and
+ *   stores the bit. Under `strict_peripherals` it is a `model_error` and the register keeps its
+ *   value before the write.
  *
  * @group u5 rule
  * - STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50
@@ -298,6 +309,8 @@ struct pwr_variant
  * - STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
  *   part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
  *   read-only. The supply the model runs is the board's.
+ * - STM32H5: every reset but a power-on one keeps the fields of `PWR_BDCR`, RM0481 10.11.7. A
+ *   `RCC_BDCR.VSWRST` reset clears them.
  *
  * @group u5 rule "STM32U5 PWR_CR3 and supply selection"
  * - STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value of
@@ -309,7 +322,12 @@ struct pwr_variant
  *   firmware write that changes REGSEL from 0 to 1 logs one warning per machine life. Under
  *   `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
  *   Otherwise the firmware REGSEL write is stored, an inferred rule.
- * - STM32U5: `PWR_CR3.FSTEN` is storage.
+ * - STM32U5: `PWR_CR3.FSTEN` is storage. A pin, software, watchdog, window watchdog, low-power or
+ *   option-load reset keeps FSTEN and the fields of `PWR_BDCR2`, RM0456 10.10.3 and 10.10.10, a
+ *   power-on or brown-out reset clears them. REGSEL clears on every reset.
+ * - STM32U5: every reset but a power-on one keeps the fields of `PWR_BDCR1`, RM0456 10.10.9. A
+ *   backup domain reset, `RCC_BDCR.BDRST`, clears them, RM0456 11.3.3, and leaves `PWR_CR3` and
+ *   `PWR_BDCR2` as they are.
  *
  * @group l1 rule
  * - STM32L1: a VOS write to another range sets `PWR_CSR.VOSF` for the board's `ready_delay`, 50 us
@@ -348,6 +366,7 @@ class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
                   public io_supply_source,
                   public usb_supply_source,
+                  public backup_domain,
                   public trustzone_aware
 {
 public:
@@ -370,6 +389,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
+  void backup_reset() override;
   void tell_usb_supply(bool before);
   void cr1_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
@@ -405,9 +425,12 @@ private:
   std::optional<std::size_t> unit_;
   illegal_event              illegal_;
   std::vector<field_ref>     peripheral_kept_;
+  std::vector<field_ref>     system_kept_;
+  std::vector<field_ref>     backup_kept_;
+  std::vector<std::uint32_t> backup_defaults_;
 };
 
-constexpr std::array<write_entry<pwr>, 6> u5_writes{
+constexpr std::array<write_entry<pwr>, 8> u5_writes{
     {
      {"PWR_CR1", &pwr::cr1_written},
      {"PWR_CR3", &pwr::cr3_written},
@@ -415,6 +438,8 @@ constexpr std::array<write_entry<pwr>, 6> u5_writes{
      {"PWR_SVMCR", nullptr},
      {"PWR_SVMSR", nullptr},
      {"PWR_SECCFGR", nullptr},
+     {"PWR_BDCR1", &pwr::functions_written},
+     {"PWR_BDCR2", &pwr::functions_written},
      }
 };
 
@@ -423,8 +448,6 @@ constexpr auto u5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_WUCR1",    nullptr},
     {"PWR_WUCR2",    nullptr},
     {"PWR_WUCR3",    nullptr},
-    {"PWR_BDCR1",    nullptr},
-    {"PWR_BDCR2",    nullptr},
     {"PWR_DBPR",     nullptr},
     {"PWR_UCPDR",    nullptr},
     {"PWR_PRIVCFGR", nullptr},
@@ -518,7 +541,6 @@ constexpr std::array<std::uint8_t, 4> h5_vos_levels{3, 2, 1, 0};
 
 constexpr auto h5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_USBSCR",   nullptr},
-    {"PWR_BDCR",     nullptr},
     {"PWR_DBPCR",    nullptr},
     {"PWR_IORETR",   nullptr},
     {"PWR_SCCR",     nullptr},
@@ -550,12 +572,13 @@ constexpr auto h5_system_clock_fields = std::to_array<field_name>({
     {.reg = "PWR_VOSCR", .field = "VOS"},
 });
 
-constexpr std::array<write_entry<pwr>, 4> h5_writes{
+constexpr std::array<write_entry<pwr>, 5> h5_writes{
     {
      {"PWR_PMCR", &pwr::cr1_written},
      {"PWR_VOSCR", &pwr::vosr_written},
      {"PWR_VOSSR", nullptr},
      {"PWR_SECCFGR", nullptr},
+     {"PWR_BDCR", &pwr::functions_written},
      }
 };
 
@@ -587,6 +610,15 @@ constexpr std::array<write_entry<pwr>, 2> l1_writes{
      {"CSR", nullptr},
      }
 };
+
+constexpr auto kept_by_system_reset = std::to_array<reset_kind>({
+    reset_kind::pin,
+    reset_kind::software,
+    reset_kind::watchdog,
+    reset_kind::window_watchdog,
+    reset_kind::low_power,
+    reset_kind::option_load,
+});
 
 constexpr auto l1_peripheral_reset_kept = std::to_array<field_name>({
     {"CR", "FWU"},
@@ -674,6 +706,36 @@ constexpr pwr_variant l4_pwr{
     .unmodelled            = l4_unmodelled,
 };
 
+constexpr auto u5_system_reset_kept = std::to_array<field_name>({
+    {"PWR_CR3",   "FSTEN"},
+    {"PWR_BDCR2", "VBE"  },
+    {"PWR_BDCR2", "VBRS" },
+});
+
+constexpr auto u5_unmodelled = std::to_array<field_name>({
+    {"PWR_BDCR1", "BREN" },
+    {"PWR_BDCR1", "MONEN"},
+    {"PWR_BDCR2", "VBE"  },
+});
+
+constexpr auto u5_backup_reset_kept = std::to_array<field_name>({
+    {"PWR_BDCR1", "BREN" },
+    {"PWR_BDCR1", "MONEN"},
+});
+
+constexpr auto h5_unmodelled = std::to_array<field_name>({
+    {"PWR_BDCR", "BREN" },
+    {"PWR_BDCR", "MONEN"},
+    {"PWR_BDCR", "VBE"  },
+});
+
+constexpr auto h5_backup_reset_kept = std::to_array<field_name>({
+    {"PWR_BDCR", "BREN" },
+    {"PWR_BDCR", "MONEN"},
+    {"PWR_BDCR", "VBE"  },
+    {"PWR_BDCR", "VBRS" },
+});
+
 constexpr pwr_variant h5_pwr{
     .fields           = h5_names,
     .modes            = h5_modes_by_lpms,
@@ -692,6 +754,8 @@ constexpr pwr_variant h5_pwr{
     .wakeup_fields         = h5_wakeup_fields,
     .system_clock_fields   = h5_system_clock_fields,
     .peripheral_reset_kept = {                                         },
+    .backup_reset_kept     = h5_backup_reset_kept,
+    .unmodelled            = h5_unmodelled,
 };
 
 constexpr pwr_variant u5_pwr{
@@ -707,6 +771,9 @@ constexpr pwr_variant u5_pwr{
     .wakeup_fields         = u5_wakeup_fields,
     .system_clock_fields   = u5_system_clock_fields,
     .peripheral_reset_kept = {},
+    .system_reset_kept     = u5_system_reset_kept,
+    .backup_reset_kept     = u5_backup_reset_kept,
+    .unmodelled            = u5_unmodelled,
 };
 
 /** @brief DS13737 Rev 10 Table 75, typical tSMPS and tLDO at 3 V and 25 C, to the REGS change. */
@@ -754,6 +821,15 @@ pwr::pwr(
   for(auto const& kept : variant.peripheral_reset_kept)
   {
     peripheral_kept_.push_back(field(kept.reg, kept.field));
+  }
+  for(auto const& kept : variant.system_reset_kept)
+  {
+    system_kept_.push_back(field(kept.reg, kept.field));
+  }
+  for(auto const& kept : variant.backup_reset_kept)
+  {
+    backup_kept_.push_back(field(kept.reg, kept.field));
+    backup_defaults_.push_back(backup_kept_.back().of(describe(kept.reg).reset));
   }
   for(auto const& function : variant.unmodelled)
   {
@@ -970,17 +1046,29 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
 
 void pwr::reset(register_file& regs, reset_kind kind)
 {
-  auto const supplied = usb_supply_valid();
-  auto const kept     = kind == reset_kind::peripheral
-                          ? peripheral_kept_ | std::views::transform([&](field_ref const& bits) {
-                          return bits.of(regs.peek(bits.offset));
-                            }) | std::ranges::to<std::vector>()
-                          : std::vector<std::uint32_t>{};
+  auto const             supplied = usb_supply_valid();
+  std::vector<field_ref> keeping;
+  if(kind == reset_kind::peripheral)
+  {
+    keeping.append_range(peripheral_kept_);
+  }
+  if(std::ranges::contains(kept_by_system_reset, kind))
+  {
+    keeping.append_range(system_kept_);
+  }
+  if(kind != reset_kind::power_on)
+  {
+    keeping.append_range(backup_kept_);
+  }
+  auto const kept = keeping
+                  | std::views::transform(
+                        [&](field_ref const& bits) { return bits.of(regs.peek(bits.offset)); })
+                  | std::ranges::to<std::vector>();
   for(auto const& name : claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
   }
-  for(auto const& [bits, value] : std::views::zip(peripheral_kept_, kept))
+  for(auto const& [bits, value] : std::views::zip(keeping, kept))
   {
     regs.poke(bits.offset, bits.with(regs.peek(bits.offset), value));
   }
@@ -988,6 +1076,14 @@ void pwr::reset(register_file& regs, reset_kind kind)
   if(kind == reset_kind::peripheral)
   {
     tell_usb_supply(supplied);
+  }
+}
+
+void pwr::backup_reset()
+{
+  for(auto const& [bits, value] : std::views::zip(backup_kept_, backup_defaults_))
+  {
+    regs_.poke(bits.offset, bits.with(regs_.peek(bits.offset), value));
   }
 }
 
