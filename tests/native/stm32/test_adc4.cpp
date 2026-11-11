@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <ranges>
 #include <string_view>
@@ -67,6 +68,8 @@ constexpr std::uint32_t ovr       = 1u << 4;
 constexpr std::uint32_t pa4       = 9;
 constexpr std::uint32_t pa5       = 10;
 constexpr std::uint32_t pa6       = 11;
+constexpr std::uint32_t awd1en    = 1u << 23;
+constexpr std::uint32_t awd1sgl   = 1u << 22;
 
 [[nodiscard]] constexpr auto halves(std::uint64_t count) -> std::uint64_t
 {
@@ -76,6 +79,21 @@ constexpr std::uint32_t pa6       = 11;
 [[nodiscard]] constexpr auto code_of(std::uint64_t microvolts) -> std::uint32_t
 {
   return static_cast<std::uint32_t>(std::min<std::uint64_t>(microvolts * 4096 / 3'000'000, 4095));
+}
+
+[[nodiscard]] constexpr auto level_of(std::uint32_t code) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>((std::uint64_t{code} * 3'000'000 + 4095) / 4096);
+}
+
+[[nodiscard]] constexpr auto window(std::uint32_t high, std::uint32_t low) -> std::uint32_t
+{
+  return high << 16 | low;
+}
+
+[[nodiscard]] constexpr auto awd1ch(std::uint32_t channel) -> std::uint32_t
+{
+  return channel << 26;
 }
 
 auto options_with(popcorn::part_description const& description, bool strict, double cpi = 1.0)
@@ -302,6 +320,19 @@ void check_refused(
   CHECK_THROWS_AS(
       static_cast<void>(f.target->mem().write(f.at("ADC4", reg), 4, value)), popcorn::model_error);
   CHECK(f.read(reg) == kept);
+}
+
+void guard_pa4(adc4_fixture const& f, std::uint32_t watchdog)
+{
+  if(watchdog == 1)
+  {
+    f.write("CFGR1", awd1en | awd1sgl | awd1ch(pa4));
+  }
+  else
+  {
+    f.write(watchdog == 2 ? "AWD2CR" : "AWD3CR", 1u << pa4);
+  }
+  f.write(std::format("AWD{}TR", watchdog), window(0x800, 0x400));
 }
 }
 
@@ -1288,15 +1319,15 @@ TEST_CASE(
     std::string_view phrase;
   };
   for(auto const& [reg, value, selection, phrase] : {
-          function{"CFGR1",  (1u << 10) | (5u << 6), 1u << pa4, "EXTSEL 5"        },
-          function{"CFGR1",  1u << 14,               1u << pa4, "WAIT"            },
-          function{"CFGR2",  1u << 0,                1u << pa4, "OVSE"            },
-          function{"CFGR2",  1u << 29,               1u << pa4, "LFTRIG"          },
-          function{"CFGR1",  1u << 23,               1u << pa4, "AWD1EN"          },
-          function{"AWD2CR", 1u << pa4,              1u << pa4, "AWD1EN"          },
-          function{"AWD3CR", 1u << pa4,              1u << pa4, "AWD1EN"          },
-          function{"CFGR1",  cont | discen,          1u << pa4, "DISCEN with CONT"},
-          function{"CFGR1",  0,                      1u << 13,  "internal channel"}
+          function{"CFGR1", (1u << 10) | (5u << 6),                1u << pa4, "EXTSEL 5"        },
+          function{"CFGR1", 1u << 14,                              1u << pa4, "WAIT"            },
+          function{"CFGR2", 1u << 0,                               1u << pa4, "OVSE"            },
+          function{"CFGR2", 1u << 29,                              1u << pa4, "LFTRIG"          },
+          function{
+                   "CFGR1", (1u << 23) | (1u << 22) | (24u << 26), 1u << pa4,
+                   "AWD1CH 18 to 21 and 24 to 31"                                               },
+          function{"CFGR1", cont | discen,                         1u << pa4, "DISCEN with CONT"},
+          function{"CFGR1", 0,                                     1u << 13,  "internal channel"}
   })
   {
     CAPTURE(reg);
@@ -1553,10 +1584,10 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0456 34.7.4 to 34.7.10: ADC_CFGR1, ADC_SMPR or ADC_CHSELR written with ADSTART 1 keeps the "
-    "old register, logs once, a model_error when strict")
+    "RM0456 34.7.4 to 34.7.15: ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_AWD2CR or ADC_AWD3CR "
+    "written with ADSTART 1 keeps the old register, logs once, a model_error when strict")
 {
-  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0"})
+  for(auto const* reg : {"CFGR1", "SMPR", "CHSELRMOD0", "AWD2CR", "AWD3CR"})
   {
     CAPTURE(std::string_view{reg});
     {
@@ -1659,7 +1690,7 @@ TEST_CASE("ADSTART with DISCEN after CHSELR shrank below the rank restarts at th
 }
 
 TEST_CASE(
-    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSE, LFTRIG, AWD1EN, "
+    "ADSTART with DISCEN with CONT, an unproduced EXTSEL, WAIT, AUTOFF, OVSE, LFTRIG, AWD1CH 24, "
     "VREFPROT and an internal channel logs nine times, one model_error when "
     "strict that keeps ADC_CR")
 {
@@ -1668,7 +1699,15 @@ TEST_CASE(
     f.put("ADC4", "PWR", "AUTOFF", 1);
     f.put("ADC4", "PWR", "VREFPROT", 1);
     f.write("CR", advregen | aden);
-    f.write("CFGR1", (1u << 10) | (5u << 6) | (1u << 14) | (1u << 23) | cont | discen);
+    f.write(
+        "CFGR1", (1u << 10)
+                     | (5u << 6)
+                     | (1u << 14)
+                     | (1u << 23)
+                     | (1u << 22)
+                     | (24u << 26)
+                     | cont
+                     | discen);
     f.write("CFGR2", (1u << 0) | (1u << 29));
     f.write("CHSELRMOD0", (1u << pa4) | (1u << 13));
   };
@@ -2382,4 +2421,387 @@ TEST_CASE(
   CHECK(f.dues().empty());
   f.write("TIM15", "EGR", 1);
   CHECK(f.dues() == std::vector<std::uint64_t>{at + slow_latency});
+}
+
+TEST_CASE(
+    "RM0456 34.4.25: a result below LT1 or above HT1 sets AWD1 with EOC, one at either "
+    "threshold does not, the set time inferred")
+{
+  struct row
+  {
+    std::uint32_t code;
+    bool          flagged;
+  };
+  for(auto const& [code, flagged] : {
+          row{0x3FF, true },
+          row{0x400, false},
+          row{0x800, false},
+          row{0x801, true }
+  })
+  {
+    CAPTURE(code);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(code));
+    f.write("AWD1TR", window(0x800, 0x400));
+    f.write("CFGR1", awd1en);
+    f.write("CHSELRMOD0", 1u << pa4);
+    auto const begin = f.start();
+    f.run_until(begin + halves(28) - early);
+    CHECK(f.isr("AWD1") == 0);
+    f.run_until(begin + halves(28));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("AWD1") == (flagged ? 1u : 0u));
+    CHECK(f.isr("AWD2") == 0);
+    CHECK(f.isr("AWD3") == 0);
+  }
+}
+
+TEST_CASE("RM0456 34.4.25: an LT above HT flags every result")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x600));
+  f.write("AWD1TR", window(0x400, 0x800));
+  f.write("CFGR1", awd1en);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  CHECK(f.isr("AWD1") == 1);
+}
+
+TEST_CASE(
+    "RM0456 34.4.25, Table 334: AWD1SGL 0 guards every channel of the sequence, AWD1SGL 1 "
+    "only the channel AWD1CH names")
+{
+  struct row
+  {
+    std::uint32_t config;
+    std::uint32_t code4;
+    std::uint32_t code5;
+    bool          flagged;
+  };
+  for(auto const& [config, code4, code5, flagged] : {
+          row{awd1en,                         0x600, 0x900, true },
+          row{awd1en,                         0x900, 0x600, true },
+          row{awd1en | awd1sgl | awd1ch(pa5), 0x600, 0x900, true },
+          row{awd1en | awd1sgl | awd1ch(pa5), 0x900, 0x600, false},
+          row{awd1en | awd1sgl | awd1ch(pa4), 0x900, 0x600, true },
+          row{awd1en | awd1sgl | awd1ch(pa4), 0x600, 0x900, false},
+          row{awd1en | awd1sgl | awd1ch(pa6), 0x900, 0x900, false},
+          row{awd1sgl | awd1ch(pa5),          0x900, 0x900, false},
+          row{awd1en,                         0x600, 0x600, false}
+  })
+  {
+    CAPTURE(config);
+    CAPTURE(code4);
+    CAPTURE(code5);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(code4));
+    f.port().drive(pa5, level_of(code5));
+    f.write("AWD1TR", window(0x800, 0x400));
+    f.write("CFGR1", config);
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+    auto const begin = f.start();
+    f.run_until(begin + 2 * halves(28));
+    CHECK(f.isr("EOS") == 1);
+    CHECK(f.isr("AWD1") == (flagged ? 1u : 0u));
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.25: AWD2 and AWD3 guard the channels of ADC_AWD2CR and ADC_AWD3CR, a "
+    "neighbour channel out of the window sets nothing")
+{
+  for(std::uint32_t watchdog : {2u, 3u})
+  {
+    CAPTURE(watchdog);
+    auto const         mask = watchdog == 2 ? "AWD2CR" : "AWD3CR";
+    auto const         flag = watchdog == 2 ? "AWD2" : "AWD3";
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x900));
+    f.port().drive(pa5, level_of(0x600));
+    f.port().drive(pa6, level_of(0x900));
+    f.write(std::format("AWD{}TR", watchdog), window(0x800, 0x400));
+    f.write(mask, 1u << pa5);
+    f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5) | (1u << pa6));
+    auto const first = f.start();
+    f.run_until(first + 3 * halves(28));
+    CHECK(f.isr("EOS") == 1);
+    CHECK(f.isr(flag) == 0);
+    f.write("ISR", eos | eoc | ovr);
+    f.port().drive(pa5, level_of(0x401 - 2));
+    auto const second = f.start();
+    f.run_until(second + 3 * halves(28));
+    CHECK(f.isr(flag) == 1);
+  }
+}
+
+TEST_CASE("RM0456 34.7.7 to 34.7.15: each watchdog compares with its own thresholds and mask")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x500));
+  f.write("AWD2TR", window(0x800, 0x400));
+  f.write("AWD3TR", window(0xC00, 0x600));
+  f.write("AWD2CR", 1u << pa4);
+  f.write("AWD3CR", 1u << pa4);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  CHECK(f.isr("AWD1") == 0);
+  CHECK(f.isr("AWD2") == 0);
+  CHECK(f.isr("AWD3") == 1);
+}
+
+TEST_CASE("RM0456 34.7.1 and 34.6: AWD1 to AWD3 with their AWDxIE raise ADC4_IRQn until cleared")
+{
+  for(std::uint32_t watchdog : {1u, 2u, 3u})
+  {
+    CAPTURE(watchdog);
+    auto const         bit  = 1u << (6 + watchdog);
+    auto const         flag = std::format("AWD{}", watchdog);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x900));
+    guard_pa4(f, watchdog);
+    f.write("CHSELRMOD0", 1u << pa4);
+    f.write("IER", bit);
+    auto const begin = f.start();
+    f.run_until(begin + halves(28) - early);
+    CHECK_FALSE(f.pending(irq));
+    f.run_until(begin + halves(28));
+    CHECK(f.isr(flag) == 1);
+    CHECK(f.pending(irq));
+    f.write("ISR", bit);
+    CHECK(f.isr(flag) == 0);
+    REQUIRE(f.target->mem().write(0xe000'e280u + 4 * (irq / 32), 4, 1u << (irq % 32)).has_value());
+    CHECK_FALSE(f.pending(irq));
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.25, Table 333: the comparison uses the raw result left aligned, a 10, 8 or 6 "
+    "bit result is shifted left 2, 4 or 6 bits")
+{
+  struct row
+  {
+    std::uint32_t resolution;
+    std::uint32_t code;
+    bool          flagged;
+  };
+  for(auto const& [resolution, code, flagged] : {
+          row{1, 0x804, true },
+          row{1, 0x801, false},
+          row{2, 0x810, true },
+          row{2, 0x80F, false},
+          row{3, 0x840, true },
+          row{3, 0x83F, false},
+          row{0, 0x801, true }
+  })
+  {
+    CAPTURE(resolution);
+    CAPTURE(code);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(code));
+    f.write("AWD1TR", window(0x800, 0x400));
+    f.write("CFGR1", awd1en | (resolution << 2));
+    f.write("CHSELRMOD0", 1u << pa4);
+    auto const begin = f.start();
+    f.run_until(begin + halves(28));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("AWD1") == (flagged ? 1u : 0u));
+  }
+}
+
+TEST_CASE("RM0456 34.4.25: a result an overrun discards is compared, AWD1 sets for it")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x600));
+  f.port().drive(pa5, level_of(0x900));
+  f.write("AWD1TR", window(0x800, 0x400));
+  f.write("CFGR1", awd1en);
+  f.write("CHSELRMOD0", (1u << pa4) | (1u << pa5));
+  auto const begin = f.start();
+  f.run_until(begin + halves(28) + halves(3) + early);
+  CHECK(f.isr("AWD1") == 0);
+  f.run_until(begin + 2 * halves(28));
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.read("DR") == code_of(level_of(0x600)));
+  CHECK(f.isr("AWD1") == 1);
+}
+
+TEST_CASE(
+    "RM0456 34.4.25: a threshold write during the conversion masks that watchdog for it, the "
+    "next conversion compares with the new thresholds, the start of conversion taken as the "
+    "start of sampling, inferred")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x800));
+  f.write("AWD1TR", window(0xA00, 0x100));
+  f.write("AWD2TR", window(0xA00, 0x100));
+  f.write("CFGR1", awd1en | cont);
+  f.write("AWD2CR", 1u << pa4);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(1));
+  f.write("AWD1TR", window(0x200, 0x100));
+  f.run_until(begin + halves(28));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("AWD1") == 0);
+  f.write("AWD2TR", window(0x200, 0x100));
+  f.run_until(begin + 2 * halves(28));
+  CHECK(f.isr("AWD1") == 1);
+  CHECK(f.isr("AWD2") == 0);
+  f.run_until(begin + 3 * halves(28));
+  CHECK(f.isr("AWD2") == 1);
+}
+
+TEST_CASE("RM0456 34.4.25: a threshold write while idle or in the tLATR applies to the next result")
+{
+  adc4_fixture const f;
+  slow_enable(f);
+  f.port().drive(pa4, level_of(0x800));
+  f.write("CFGR1", awd1en);
+  f.write("CHSELRMOD0", 1u << pa4);
+  f.write("AWD1TR", window(0x200, 0x100));
+  auto const first = f.now();
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(first + slow_latency + slow_halves(28));
+  CHECK(f.isr("AWD1") == 1);
+  f.write("ISR", eos | eoc | (1u << 7));
+  f.write("AWD1TR", window(0xA00, 0x100));
+  auto const second = f.now();
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(second + slow_latency / 2);
+  f.write("AWD1TR", window(0x200, 0x100));
+  f.run_until(second + slow_latency + slow_halves(28));
+  CHECK(f.isr("AWD1") == 1);
+}
+
+TEST_CASE(
+    "RM0456 34.7.4: an AWD1CH of 18 to 21 or 24 to 31 guards no channel and logs once at "
+    "ADSTART, a valid code or AWD1SGL 0 logs nothing")
+{
+  struct row
+  {
+    std::uint32_t config;
+    bool          reserved;
+  };
+  for(auto const& [config, reserved] : {
+          row{awd1en | awd1sgl | awd1ch(18), true },
+          row{awd1en | awd1sgl | awd1ch(19), true },
+          row{awd1en | awd1sgl | awd1ch(20), true },
+          row{awd1en | awd1sgl | awd1ch(21), true },
+          row{awd1en | awd1sgl | awd1ch(24), true },
+          row{awd1en | awd1sgl | awd1ch(31), true },
+          row{awd1en | awd1sgl | awd1ch(17), false},
+          row{awd1en | awd1sgl | awd1ch(22), false},
+          row{awd1en | awd1sgl | awd1ch(23), false},
+          row{awd1en | awd1ch(24),           false},
+          row{awd1en | awd1ch(19),           false}
+  })
+  {
+    CAPTURE(config);
+    adc4_fixture const f;
+    static_cast<void>(f.enable());
+    f.port().drive(pa4, level_of(0x900));
+    f.write("AWD1TR", window(0x800, 0x400));
+    f.write("CFGR1", config);
+    f.write("CHSELRMOD0", 1u << pa4);
+    std::vector<core::log_record> logged;
+    auto const                    sink  = recorder(f, logged);
+    auto const                    begin = f.start();
+    f.run_until(begin + halves(28));
+    CHECK(f.isr("AWD1") == ((config & awd1sgl) == 0 ? 1u : 0u));
+    REQUIRE(logged.size() == (reserved ? 1u : 0u));
+    if(reserved)
+    {
+      CHECK(logged[0].message.contains("AWD1CH 18 to 21 and 24 to 31"));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 34.4.25: a threshold write of AWD3 during the conversion masks AWD3 only, "
+    "AWD2 keeps comparing")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x800));
+  f.write("AWD2TR", window(0xA00, 0x100));
+  f.write("AWD3TR", window(0xA00, 0x100));
+  f.write("CFGR1", cont);
+  f.write("AWD2CR", 1u << pa4);
+  f.write("AWD3CR", 1u << pa4);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(1));
+  f.write("AWD3TR", window(0x200, 0x100));
+  f.write("AWD2TR", window(0xA00, 0x100));
+  f.run_until(begin + halves(28));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("AWD3") == 0);
+  CHECK(f.isr("AWD2") == 0);
+  f.run_until(begin + 2 * halves(28));
+  CHECK(f.isr("AWD3") == 1);
+  CHECK(f.isr("AWD2") == 0);
+}
+
+TEST_CASE(
+    "RM0456 34.7.7: an RCC reset of ADC4 restores the thresholds, the channel masks and the flags")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x900));
+  guard_pa4(f, 2);
+  f.write("AWD3TR", window(0x111, 0x222));
+  f.write("AWD3CR", 1u << pa5);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(28));
+  REQUIRE(f.isr("AWD2") == 1);
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 1);
+  f.put("RCC", "RCC_AHB3RSTR", "ADC4RST", 0);
+  for(auto const* reg : {"AWD1TR", "AWD2TR", "AWD3TR"})
+  {
+    CAPTURE(std::string_view{reg});
+    CHECK(f.read(reg) == 0x0FFF'0000);
+  }
+  CHECK(f.read("AWD2CR") == 0);
+  CHECK(f.read("AWD3CR") == 0);
+  CHECK(f.read("ISR") == 0);
+}
+
+TEST_CASE(
+    "checklist 66 and 72: a snapshot after a threshold write mid-conversion keeps the mask, a "
+    "fresh machine restored from it compares the next result with the new thresholds")
+{
+  adc4_fixture const f;
+  static_cast<void>(f.enable());
+  f.port().drive(pa4, level_of(0x800));
+  f.write("AWD1TR", window(0xA00, 0x100));
+  f.write("CFGR1", awd1en | cont);
+  f.write("CHSELRMOD0", 1u << pa4);
+  auto const begin = f.start();
+  f.run_until(begin + halves(1));
+  f.write("AWD1TR", window(0x200, 0x100));
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc4_fixture const& g) {
+    g.run_until(begin + halves(28));
+    CHECK(g.isr("EOC") == 1);
+    CHECK(g.isr("AWD1") == 0);
+    g.run_until(begin + 2 * halves(28));
+    CHECK(g.isr("AWD1") == 1);
+  };
+  f.target->restore(saved);
+  check(f);
+  adc4_fixture const fresh{no_reset};
+  fresh.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(fresh);
 }

@@ -33,6 +33,9 @@ struct adc4_variant
   std::uint32_t enable_lockout_cycles = 4;
   /** @brief External channels, bit n for ADC4_INn, RM0456 Figure 283. */
   std::uint32_t external = 0x00DF'8FFE;
+  /** @brief Channels ADC_CFGR1.AWD1CH can name, bit n for channel n, RM0456 34.7.4. The other
+   *         codes are reserved. */
+  std::uint32_t awd1_channels = 0x00C3'FFFF;
   /** @brief Internal channels, bit n for VIN[n]: VREFINT, VCORE, VSENSE, VBAT / 4 and the DAC1
    *         output, RM0456 Table 329. */
   std::uint32_t internal = 0x0020'7001;

@@ -40,6 +40,9 @@ constexpr std::uint32_t ranks              = 8;
 constexpr std::uint32_t sequence_end       = 0xF;
 constexpr std::uint32_t calibration_factor = 0;
 constexpr std::uint16_t reserved_divider   = 256;
+constexpr std::uint32_t watchdogs          = 3;
+constexpr std::uint32_t threshold_mask     = 0xFFF;
+constexpr std::uint32_t high_shift         = 16;
 
 using wide = unsigned __int128;
 
@@ -82,6 +85,7 @@ struct adc4_state
   std::uint64_t            regulator_ps{};
   std::uint64_t            calibration_ps{};
   std::uint8_t             selected{};
+  std::uint8_t             masked{};
   bool                     dma_stopped{};
   std::uint32_t            edge_generation{};
   std::array<adc4_edge, 2> edges{};
@@ -96,6 +100,10 @@ struct adc4_pad
   std::uint8_t pin{};
   gpio_port*   gpio{};
 };
+
+using threshold_regs = std::array<reg_ref, watchdogs>;
+using mask_regs      = std::array<reg_ref, 2>;
+using flag_fields    = std::array<field_ref, watchdogs>;
 
 struct kernel_select
 {
@@ -183,13 +191,12 @@ struct refusal
  *        VDDA, floored and saturated, then shifted right two bits per RES step. The level is held
  *        at the end of sampling. ADC_DR holds the result right-aligned, or with ALIGN 1 on bit 15,
  *        a 6-bit result on bit 7, Figure 291. A CPU or DMA read of ADC_DR clears EOC. A result
- *        finding EOC set sets OVR, and replaces ADC_DR with OVRMOD 1. With OVRMOD 0 every result
- *        is lost while EOC or OVR is set: ADC_DR and EOC keep their values and OVR is set. A
- *        write changing ADC_CFGR1, ADC_SMPR or ADC_CHSELR with ADSTART set keeps the old register,
- *        RM0456 34.7.4 to 34.7.10, logged once for the three, a model_error under
- *        strict_peripherals. ADC_IER, ADC_CFGR2, ADC_AWD2CR, ADC_AWD3CR and ADC_CCR accept writes
- *        while ADSTART is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18
- *        asks for ADEN 0.
+ *        finding EOC set sets OVR, and replaces ADC_DR with OVRMOD 1. With OVRMOD 0 every result is
+ *        lost while EOC or OVR is set: ADC_DR and EOC keep their values and OVR is set. A write
+ *        changing ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_AWD2CR or ADC_AWD3CR with ADSTART set keeps
+ *        the old register, RM0456 34.7.4 to 34.7.15, logged once for the five, a model_error under
+ *        strict_peripherals. ADC_IER, ADC_CFGR2, ADC_AWDxTR and ADC_CCR accept writes while ADSTART
+ *        is set. RES is accepted with ADEN 1 and ADSTART 0, where RM0456 34.4.18 asks for ADEN 0.
  *        `analog_port` drive and input act on the pad's board slot. Without a pad, drive and input
  *        throw config_error naming `channel_pins.<c>`, and the channel converts 0. A description
  *        with `channel_pins` holds a pad for every external channel, or construction throws
@@ -228,12 +235,27 @@ struct refusal
  *        result of a sequence sets EOS, inferred. The calibration order of the DMAEN note is not
  *        checked.
  *
+ *        Analog watchdogs, RM0456 34.4.25: at the end of each conversion the 12-bit raw result,
+ *        left aligned, so the result of a RES 10, 8 or 6 bit conversion shifted left 2, 4 or 6
+ *        bits, is compared with ADC_AWDxTR, and AWDx sets when it is below LTx or above HTx, an LTx
+ *        above HTx flagging every result. AWD1 guards every channel of the sequence with AWD1EN and
+ *        AWD1SGL 0, or the channel AWD1CH names with AWD1SGL 1. AWD2 and AWD3 guard the channels
+ *        set in ADC_AWD2CR and ADC_AWD3CR. A result an overrun discards is compared too. AWDx sets
+ *        with EOC, no figure gives a delay, inferred. A write to ADC_AWDxTR while a conversion
+ *        samples or converts masks that watchdog for that conversion, the conversion starting with
+ *        its sampling, inferred, and the new thresholds apply from the next one. An AWDx flag with
+ *        its AWDxIE of ADC_IER raises ADC4_IRQn. ADC_AWDx_OUT, the signal to the timers' ETR
+ *        inputs, is not produced. ADC_AWD2CR and ADC_AWD3CR follow the lock of ADC_CFGR1. An AWD1CH
+ *        of 18 to 21 or 24 to 31 with AWD1EN and AWD1SGL, reserved in RM0456 34.7.4, guards no
+ *        channel and is logged once at ADSTART. A result arriving while ADC_DR is frozen after a
+ *        one-shot DMA end is compared, and a threshold write at the exact end instant of a
+ *        conversion masks the next one, both inferred.
+ *
  *        Not modelled, each logged once at an ADSTART that uses it, a model_error under
  *        strict_peripherals that keeps the old ADC_CR. The wait mode WAIT, the auto-off mode
- *        AUTOFF, the oversampler OVSE, the low-frequency trigger mode LFTRIG and the analog
- *        watchdogs, AWD1EN or a channel of ADC_AWD2CR or ADC_AWD3CR: the conversions run without
- *        them. VREFPROT and VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. The internal
- *        channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
+ *        AUTOFF, the oversampler OVSE and the low-frequency trigger mode LFTRIG: the conversions
+ *        run without them. VREFPROT and VREFSECSMP of ADC_PWRR: tCONV stays at its DS minimum. The
+ *        internal channels VIN[0], VIN[12], VIN[13], VIN[14] and VIN[21]: they convert 0.
  */
 class adc4_model final : public dispatch_model<adc4_model, adc4_state>,
                          public analog_port,
@@ -301,6 +323,26 @@ public:
   {
     config_written("CHSELRMOD0", old, now);
   }
+  void awd1tr_written(std::uint32_t, std::uint32_t)
+  {
+    mask_watchdog(0);
+  }
+  void awd2tr_written(std::uint32_t, std::uint32_t)
+  {
+    mask_watchdog(1);
+  }
+  void awd3tr_written(std::uint32_t, std::uint32_t)
+  {
+    mask_watchdog(2);
+  }
+  void awd2cr_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("AWD2CR", old, now);
+  }
+  void awd3cr_written(std::uint32_t old, std::uint32_t now)
+  {
+    config_written("AWD3CR", old, now);
+  }
 
 private:
   void               restore_reset_values();
@@ -332,6 +374,8 @@ private:
   void               end_conversion();
   void               abort();
   void               hold();
+  void               mask_watchdog(std::uint32_t index);
+  void               compare(std::uint32_t channel, std::uint32_t value);
   [[nodiscard]] auto code(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto external(analog_channel channel) const -> std::uint32_t;
   [[nodiscard]] auto pad_port(char letter) const -> gpio_port*;
@@ -375,8 +419,11 @@ private:
   reg_ref                      sampling_;
   reg_ref                      selection_;
   reg_ref                      config2_;
-  reg_ref                      watchdog2_;
-  reg_ref                      watchdog3_;
+  threshold_regs               thresholds_;
+  mask_regs                    guard_masks_;
+  flag_fields                  flags_;
+  field_ref                    watchdog1_single_;
+  field_ref                    watchdog1_channel_;
   field_ref                    trigger_;
   field_ref                    continuous_;
   field_ref                    discontinuous_;
@@ -424,7 +471,7 @@ private:
   bool                         internal_logged_{};
 };
 
-constexpr std::array<write_entry<adc4_model>, 10> writes{
+constexpr std::array<write_entry<adc4_model>, 15> writes{
     {
      {"ISR", &adc4_model::isr_written},
      {"IER", &adc4_model::ier_written},
@@ -436,6 +483,11 @@ constexpr std::array<write_entry<adc4_model>, 10> writes{
      {"PWR", &adc4_model::pwrr_written},
      {"CALFACT", &adc4_model::calfact_written},
      {"CCR", &adc4_model::ccr_written},
+     {"AWD1TR", &adc4_model::awd1tr_written},
+     {"AWD2TR", &adc4_model::awd2tr_written},
+     {"AWD3TR", &adc4_model::awd3tr_written},
+     {"AWD2CR", &adc4_model::awd2cr_written},
+     {"AWD3CR", &adc4_model::awd3cr_written},
      }
 };
 
@@ -456,12 +508,15 @@ adc4_model::adc4_model(
       sampled_{field("ISR", "EOSMP")}, converted_{field("ISR", "EOC")},
       overrun_{field("ISR", "OVR")}, overrun_mode_{field("CFGR1", "OVRMOD")},
       sequenced_{field("ISR", "EOS")}, config_{reg("CFGR1")}, sampling_{reg("SMPR")},
-      selection_{reg("CHSELRMOD0")}, config2_{reg("CFGR2")}, watchdog2_{reg("AWD2CR")},
-      watchdog3_{reg("AWD3CR")}, trigger_{field("CFGR1", "EXTEN")},
-      continuous_{field("CFGR1", "CONT")}, discontinuous_{field("CFGR1", "DISCEN")},
-      ordered_{field("CFGR1", "CHSELRMOD")}, backward_{field("CFGR1", "SCANDIR")},
-      resolution_{field("CFGR1", "RES")}, align_{field("CFGR1", "ALIGN")},
-      wait_{field("CFGR1", "WAIT")}, dma_{field("CFGR1", "DMAEN")},
+      selection_{reg("CHSELRMOD0")}, config2_{reg("CFGR2")},
+      thresholds_{reg("AWD1TR"), reg("AWD2TR"), reg("AWD3TR")},
+      guard_masks_{reg("AWD2CR"), reg("AWD3CR")},
+      flags_{field("ISR", "AWD1"), field("ISR", "AWD2"), field("ISR", "AWD3")},
+      watchdog1_single_{field("CFGR1", "AWD1SGL")}, watchdog1_channel_{field("CFGR1", "AWD1CH")},
+      trigger_{field("CFGR1", "EXTEN")}, continuous_{field("CFGR1", "CONT")},
+      discontinuous_{field("CFGR1", "DISCEN")}, ordered_{field("CFGR1", "CHSELRMOD")},
+      backward_{field("CFGR1", "SCANDIR")}, resolution_{field("CFGR1", "RES")},
+      align_{field("CFGR1", "ALIGN")}, wait_{field("CFGR1", "WAIT")}, dma_{field("CFGR1", "DMAEN")},
       watchdog1_{field("CFGR1", "AWD1EN")}, smp1_{field("SMPR", "SMP1")},
       smp2_{field("SMPR", "SMP2")}, oversampler_{field("CFGR2", "OVSE")},
       low_frequency_{field("CFGR2", "LFTRIG")}, trigger_select_{field("CFGR1", "EXTSEL")},
@@ -609,6 +664,7 @@ void adc4_model::restore_reset_values()
   state_.edges = {};
   ++state_.edge_generation;
   state_.dma_stopped         = false;
+  state_.masked              = 0;
   state_.regulator_ready     = false;
   state_.ready_waiting       = false;
   state_.calibration_waiting = false;
@@ -1057,8 +1113,8 @@ void adc4_model::config_written(std::string_view name, std::uint32_t old, std::u
   regs_.poke(reg(name).offset, old);
   forbidden(
       config_refused_logged_, name,
-      "ADC_CFGR1, ADC_SMPR or ADC_CHSELR written with ADSTART 1, RM0456 34.7.4 to 34.7.10: the "
-      "write is ignored");
+      "ADC_CFGR1, ADC_SMPR, ADC_CHSELR, ADC_AWD2CR or ADC_AWD3CR written with ADSTART 1, RM0456 "
+      "34.7.4 to 34.7.15: the write is ignored");
 }
 
 auto adc4_model::length() const -> std::uint32_t
@@ -1120,9 +1176,10 @@ auto adc4_model::unmodelled_at_start() -> std::vector<refusal>
   add(get(regs_, low_frequency_) != 0, low_frequency_logged_,
       "LFTRIG: the low-frequency trigger mode not modelled");
   add(get(regs_, watchdog1_) != 0
-          or regs_.peek(watchdog2_.offset) != 0
-          or regs_.peek(watchdog3_.offset) != 0,
-      watchdog_logged_, "AWD1EN, ADC_AWD2CR or ADC_AWD3CR: the analog watchdogs not modelled");
+          and get(regs_, watchdog1_single_) != 0
+          and (variant_.awd1_channels >> get(regs_, watchdog1_channel_) & 1u) == 0,
+      watchdog_logged_,
+      "AWD1CH 18 to 21 and 24 to 31 are reserved, RM0456 34.7.4: AWD1 guards no channel");
   add(get(regs_, vref_protection_) != 0 or get(regs_, vref_sampling_) != 0, vref_logged_,
       "VREFPROT or VREFSECSMP: the extra conversion cycles not modelled, tCONV at its minimum");
   auto internal = false;
@@ -1186,12 +1243,42 @@ void adc4_model::begin(std::uint64_t start_ps)
   auto const sampling = variant_.sampling_halves[get(regs_, second ? smp2_ : smp1_)];
   auto const sar      = variant_.sar_halves[get(regs_, resolution_)];
   state_.converting   = true;
+  state_.masked       = 0;
 
   ++state_.generation;
   ctx_.events.schedule_at(
       vtime{start_ps + cycles_ps(sampling, 2 * hz)}, sampling_end, state_.generation, ctx_.clock);
   state_.end_ps = start_ps + cycles_ps(std::uint64_t{sampling} + sar, 2 * hz);
   ctx_.events.schedule_at(vtime{state_.end_ps}, conversion_end, state_.generation, ctx_.clock);
+}
+
+void adc4_model::mask_watchdog(std::uint32_t index)
+{
+  if(state_.converting)
+  {
+    state_.masked |= static_cast<std::uint8_t>(1u << index);
+  }
+}
+
+void adc4_model::compare(std::uint32_t channel, std::uint32_t value)
+{
+  auto const single = get(regs_, watchdog1_single_) != 0;
+  auto const first =
+      get(regs_, watchdog1_) != 0 and (not single or get(regs_, watchdog1_channel_) == channel);
+  for(std::uint32_t index = 0; index < watchdogs; ++index)
+  {
+    auto const guarded =
+        index == 0 ? first : (regs_.peek(guard_masks_[index - 1].offset) >> channel & 1u) != 0;
+    if(not guarded or (state_.masked >> index & 1u) != 0)
+    {
+      continue;
+    }
+    auto const word = regs_.peek(thresholds_[index].offset);
+    if(value < (word & threshold_mask) or value > (word >> high_shift & threshold_mask))
+    {
+      update(regs_, flags_[index], 1);
+    }
+  }
 }
 
 void adc4_model::hold()
@@ -1224,6 +1311,7 @@ void adc4_model::end_conversion()
   auto const result = get(regs_, align_) == 0
                         ? std::uint32_t{state_.held_code}
                         : std::uint32_t{state_.held_code} << (res < 3 ? 4u + 2u * res : 2u);
+  compare(channel_at(state_.rank), std::uint32_t{state_.held_code} << (2u * res));
   auto const keeps =
       get(regs_, overrun_mode_) == 0 and (get(regs_, converted_) != 0 or get(regs_, overrun_) != 0);
   if(not frozen())

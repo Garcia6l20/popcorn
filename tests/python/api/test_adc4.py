@@ -176,3 +176,36 @@ def test_a_triggered_scan_converts_the_same_parked_and_running(
     parked = triggered_scan(enabled(u575), running=False)
     assert parked == (int(1.5 * 4096 / 3.0), 1, 1)
     assert triggered_scan(enabled(u575, slice_instructions=1_000), running=True) == parked
+
+
+AWD1EN = 1 << 23
+
+
+def watched_scan(m: popcorn.Machine, running: bool) -> tuple[int, int]:
+    adc = m.periph.ADC4
+    adc.SMPR.write(7)
+    adc.CFGR1.write(AWD1EN)
+    adc.AWD1TR.write((0x800 << 16) | 0x400)
+    adc.CHSELRMOD0.write(1 << 9)
+    adc.input(9).volts = 1.0
+    adc.CR.write(ADVREGEN | ADEN | ADSTART)
+    driven = m.write((m.ref.periph.ADC4.input(9).volts, 2.0), at=m.time + VirtualDuration(1))
+    if running:
+
+        async def body() -> None:
+            async with m.running():
+                await driven
+                await m.wait_for(SequenceEnded())
+
+        asyncio.run(body())
+    else:
+        settle(m, 60)
+    return adc.DR.value, adc.ISR.AWD1
+
+
+def test_a_drive_out_of_the_window_sets_awd1_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    parked = watched_scan(enabled(u575), running=False)
+    assert parked == (int(2.0 * 4096 / 3.0), 1)
+    assert watched_scan(enabled(u575, slice_instructions=1_000), running=True) == parked
