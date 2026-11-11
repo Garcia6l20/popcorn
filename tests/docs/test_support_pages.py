@@ -541,7 +541,7 @@ L1_MODEL_SOURCES = (
     "i2c_v1.cpp",
     "rtc_classic.cpp",
     "spi_classic.cpp",
-    "syscfg_classic.cpp",
+    "syscfg_l1l4.cpp",
     "crc.cpp",
     "dbgmcu.cpp",
     "gpio.cpp",

@@ -49,8 +49,8 @@ stm32 = [
         "hash.cpp",
         "rng.cpp",
         "gtzc.cpp",
-        "syscfg.cpp",
-        "syscfg_classic.cpp",
+        "syscfg_u5.cpp",
+        "syscfg_l1l4.cpp",
         "sbs.cpp",
     )
 ]
