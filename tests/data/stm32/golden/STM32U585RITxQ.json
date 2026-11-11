@@ -3,22 +3,22 @@
     "aliases": 100,
     "alternates": 360,
     "cross_rules": 584,
-    "fields": 48120,
+    "fields": 48098,
     "irqs": 128,
     "patched_fields": 456,
     "peripherals": 201,
     "regions": 14,
-    "registers": 4836
+    "registers": 4832
   },
   "part": "STM32U585RITxQ",
   "svd_sha256": "722e5a40b1f07c11e28417b3438da1eaa2017835cfdebcb41f9a41abacf4bd3e",
   "tables": {
     "alternates": "6ee70ad2a7c1654bda43572b315445dc3c0aeed5d96d13765db325dc6b1ef177",
     "core": "b3670836dc9d6be886bf59e3220dd97aaece14de3970c6ea09acef64cca6938c",
-    "fields": "6d494c12da11b72c13dfb69eb8267310965233e41f892f03db3d06ec5b12d943",
+    "fields": "542589f94bd83e90adf1162c81970b6e60469de896d7d58deb023019a3270716",
     "irqs": "dd7dadcefc8962285e9defab79d899d232aad31ecf7ee22e7eaf550ce2a1277b",
     "peripherals": "c4432bf75f29854633efdc3a04032827a63ea97ae7ecfc2a492888bce1c9e31b",
     "regions": "fbd3bde0177731dad26aa9a5639d271cf27d0f4948a899f33eb6177de6626777",
-    "registers": "db6fa97210eec6d97cd0b1ff4a12adc4d471c8ba7a5f2cfd85ff85fd4f348a14"
+    "registers": "9b467d09aa5d416044c21df353241e22011a39e0554c4be0a8bcc8824b0296cf"
   }
 }

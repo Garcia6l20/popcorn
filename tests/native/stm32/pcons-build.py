@@ -59,6 +59,7 @@ firmwares = {
         "irq_ll",
         "hash_ll",
         "rng_ll",
+        "lptim_ll",
     )
 }
 h573_firmwares = {
@@ -199,6 +200,7 @@ u575_programs = [
         ("stm32-iwdg", "test_iwdg.cpp"),
         ("stm32-wwdg-u5", "test_wwdg_u5.cpp"),
         ("stm32-dac-u5", "test_dac_u5.cpp"),
+        ("stm32-lptim-v2", "test_lptim_v2.cpp"),
         ("stm32-rtc", "test_rtc.cpp"),
         ("stm32-spi", "test_spi.cpp"),
         ("stm32-i2c", "test_i2c.cpp"),
@@ -287,6 +289,18 @@ dac_h573.private.include_dirs.append(private_dir)
 for _, target in h573_firmwares.values():
     if target is not None:
         dac_h573.depends(target)
+
+lptim_v2_h573 = add_doctest(
+    "stm32-lptim-v2-h5",
+    [here / "test_lptim_v2_h5.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+lptim_v2_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        lptim_v2_h573.depends(target)
 
 flash_h573 = add_doctest(
     "stm32-flash-h573",

@@ -3,22 +3,22 @@
     "aliases": 98,
     "alternates": 273,
     "cross_rules": 584,
-    "fields": 47922,
+    "fields": 47900,
     "irqs": 121,
     "patched_fields": 456,
     "peripherals": 197,
     "regions": 14,
-    "registers": 4742
+    "registers": 4738
   },
   "part": "STM32U575CITx",
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
   "tables": {
     "alternates": "832b90aaa82cd9d17d750f08f4eaab5c8543c1ca400fc90d22b3130807297f5f",
     "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
-    "fields": "3c59aebc51d5baf12b633c87eca1c964a50141e7df104a19d81e22f2966d8c7c",
+    "fields": "78841982179485ede80db28177b3777bef8c03c5f08d605f4379082ed77a9b8a",
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
     "peripherals": "46f591ea8ec5074352604a45989a3d2c7bddd9f4f5b0be1fcbf46bf9fd8c4f42",
     "regions": "d9adc9e4cd628c992b8500ebd206a3510e20c3fd59dbd01bba49ac6cd8e7488f",
-    "registers": "f1ee2219c240d5d0225781445d5d05ad5e393a9a8fcdcc6e5f584ea67a5ca963"
+    "registers": "a8eeefc935b7365e0a2ce6f4e168478a9c94a28f00e86dda16bd06e7c48c707a"
   }
 }

@@ -137,7 +137,8 @@ Not modelled:
   GTZCn, AES, SAES and SHSI. The MPCBB INVSECSTATE rule of RM0456 5.4 is not modelled. Not
   tested, no rule to pin.
 - A kernel clock selection shared by several peripherals, such as SDMMCSEL, OCTOSPISEL,
-  ADCDACSEL, LPTIM34SEL and TIMICSEL, is Secure while any of them is. `stm32/test_tz_aware.cpp`
+  ADCDACSEL, LPTIM34SEL and TIMICSEL, is Secure while any of them is, TIMICSEL while TIM16 or
+  TIM17 is, ES0499 2.3.2. `stm32/test_tz_aware.cpp`
   "RM0456 11.5.1: a kernel clock selection shared by several peripherals is Secure while any of
   them is".
 - SYSCFG `CSLCKR` and `CNSLCKR` are stored and lock nothing. `RSSCMDR` and the OTG_HS PHY

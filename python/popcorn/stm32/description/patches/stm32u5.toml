@@ -469,3 +469,8 @@ instances = ["TIM15"]
 registers = ["SMCR"]
 rename = { SMS_3 = "SMS_1", TS_4_3 = "TS_1" }
 source = "RM0456 rev 6, 56.7.3 TIM15 slave mode control register: the STM32U575 SVD spells SMS bit 3 SMS_3 and TS[4:3] TS_4_3 on TIM15, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[register_drops]]
+peripheral = "LPTIM4"
+names = ["CCMR1", "CCR2"]
+source = "RM0456 Rev 7, 58.3 Table 599 and 58.7.19 register map: LPTIM4 implements no channel, so LPTIM_CCMR1 is reserved, and with less than 2 channels LPTIM_CCR2 is reserved. The SVDs of every STM32U5 line list both registers on LPTIM4"

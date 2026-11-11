@@ -3,22 +3,22 @@
     "aliases": 95,
     "alternates": 641,
     "cross_rules": 861,
-    "fields": 37159,
+    "fields": 37137,
     "irqs": 125,
     "patched_fields": 412,
     "peripherals": 191,
     "regions": 12,
-    "registers": 4050
+    "registers": 4046
   },
   "part": "STM32H562VITx",
   "svd_sha256": "c868fff8bc10dc6dabcf06b205f175dbf71db240c0d0a484cc0070c62e916882",
   "tables": {
     "alternates": "fc3ae1630601181779bf17a05b107df63daa14b33eae83e30ed8190567d537e5",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "7f7096beaf08cd8d73c81ae0940de49fbe3b5a31a7b92596735fc01ec30825c4",
+    "fields": "ed9df5d5b4d9425ed49453804209afdbbdac93d993f613072699b9cd417fada7",
     "irqs": "d341d08eaf9cf0a649296b79e672a60a1ff56200de3e399adb1d7ba8499dba98",
     "peripherals": "37f2194d5e562ee8a8e9cc1c131430ed80bb181b00c1cdf46dbddb92111c87e0",
     "regions": "dcbaf08deafeb0917e89db193634b0071914a2b7e0ba0666ace79bb9d0b89de9",
-    "registers": "d0d8a384614000268ac42e6e0bc492f740926eaed7ad65b09d4599bda760c772"
+    "registers": "c5e9a4e51a949dc2bb1c5c89436aa5718332c0669b568b5c6ab6074513a95ab6"
   }
 }

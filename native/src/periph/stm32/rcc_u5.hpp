@@ -134,6 +134,11 @@ constexpr std::array<timer_names<signal>, 11> timers{
 };
 
 constexpr std::array<timer_names<signal>, 1> bus_gated{{{"WWDG", "WWDGEN", pclk1}}};
+constexpr std::array<timic_tap<signal>, 3>   timic_taps{
+    {{"timic_hsi", hsi16, hsi16, -1},
+     {"timic_msi_1024", msis, msik, 1},
+     {"timic_msi_4", msis, msik, 0}}
+};
 
 constexpr std::array<std::string_view, 8> enable_registers{
     "RCC_AHB1ENR",  "RCC_AHB2ENR1", "RCC_AHB2ENR2", "RCC_AHB3ENR",
@@ -384,6 +389,9 @@ constexpr auto rcc_backup_secured = std::to_array<secured_group>({
     {"", "RCC_BDCR", "BDRST"},
 });
 
+/** @brief The peripherals behind each shared RCC unit name, whose Secure state secures the unit's
+ *         bits. `TIMIC` lists TIM16 and TIM17 only: a Secure LPTIM2 leaves `TIMICSEL` Non-secure,
+ *         ES0499 2.3.2. */
 constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
     {"ADCDAC",    "ADC1"    },
     {"ADCDAC",    "ADC2"    },
@@ -397,7 +405,6 @@ constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
     {"SDMMC",     "SDMMC2"  },
     {"TIMIC",     "TIM16"   },
     {"TIMIC",     "TIM17"   },
-    {"TIMIC",     "LPTIM2"  },
     {"DCMI_PSSI", "DCMI"    },
     {"FSMC",      "FMC"     },
     {"OTG",       "OTG_FS"  },
@@ -438,6 +445,8 @@ struct u5_rcc
   static constexpr auto const& rtc_sources      = u5::rtc_sources;
   static constexpr auto const& timers           = u5::timers;
   static constexpr auto const& bus_gated        = u5::bus_gated;
+  static constexpr auto const& timic_taps       = u5::timic_taps;
+  static constexpr field_name  timic            = {"RCC_CCIPR1", "TIMICSEL"};
   static constexpr field_name  wwdg_option      = {"OPTR", "WWDG_SW"};
   static constexpr field_name  wwdg_sleep       = {"RCC_APB1SMENR1", "WWDGSMEN"};
   static constexpr auto const& enable_registers = u5::enable_registers;

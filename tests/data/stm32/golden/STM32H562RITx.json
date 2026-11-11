@@ -3,22 +3,22 @@
     "aliases": 92,
     "alternates": 395,
     "cross_rules": 815,
-    "fields": 36237,
+    "fields": 36215,
     "irqs": 125,
     "patched_fields": 412,
     "peripherals": 185,
     "regions": 12,
-    "registers": 3944
+    "registers": 3940
   },
   "part": "STM32H562RITx",
   "svd_sha256": "c868fff8bc10dc6dabcf06b205f175dbf71db240c0d0a484cc0070c62e916882",
   "tables": {
     "alternates": "a78ab4171616defbe53da3cbe48444cd578299df370a08dd8c24116240e7a48a",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "d77fe73416cc1e21f78f4afb2ac4b240f250ad79e246890b1e994b8661b5f9ec",
+    "fields": "702e3e275e1a7191b8382aab2a22cfb083ed4d219a78be17936e03e7101e3760",
     "irqs": "d341d08eaf9cf0a649296b79e672a60a1ff56200de3e399adb1d7ba8499dba98",
     "peripherals": "9dbd543c65e7f7003f32dd8a37611a0f08f30de15fc7eb137cce34f07d7f45e4",
     "regions": "3d4e477ae2ae1288eb37e7623a1a3df9ac771bc75dc0b1eb38d979bee0261525",
-    "registers": "1258f8d8d71726e570e4ce320ff5b8c216e4c8618aca615743dcb14dd3f1d513"
+    "registers": "013f6c19baa28919437fdcd5b8499693e41eccae408a6be037a16a4df4b34525"
   }
 }

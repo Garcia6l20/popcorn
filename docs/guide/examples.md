@@ -55,6 +55,12 @@ Periodic timer interrupt and a one-pulse timer, LL. [Sources and tests](https://
 
 --8<-- "stm32u575/tim/README.md:3:6"
 
+### lptim
+
+LPTIM1 on MSIK with an autoreload and a compare match, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32u575/lptim).
+
+--8<-- "stm32u575/lptim/README.md:3:6"
+
 ## Analog
 
 ### adc

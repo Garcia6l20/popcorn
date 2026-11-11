@@ -336,14 +336,22 @@ template <typename Signal> struct bus_gate
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
  *        FLASH by RM0456 Table 62. A bit shared by several peripherals, such as `ADCDACSEL` or
  *        `LPTIM34SEL`, is Secure while any of them is, as "its related clock source selection"
- *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. A bit whose name gives no
- *        peripheral of the part stays Non-secure, such as the GTZCn. Deviation: SRAMnEN
- *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
- *        modelled. `BDRST` is Secure while the RTC or the TAMP has a secure function, RM0456
- *        11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way, through the H5
- *        traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and `RTCSEL` Secure
- *        in place of `BDRST`. `SPRIV` makes the Secure bits privileged, `NSPRIV` the others,
- *        RAZ/WI to an unprivileged access.
+ *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. On the STM32U5 `TIMICSEL`
+ *        follows TIM16 and TIM17 only, a Secure LPTIM2 leaving it Non-secure, ES0499 2.3.2.
+ *        The internal clocks the timer input captures divide are published as the domains
+ *        `timic_hsi`, `timic_csi` (STM32H5), `timic_msi_1024` and `timic_msi_4` (STM32U5): the
+ *        undivided rate of the oscillator the tap divides, 1024 and 4 being the tap names, 0 while
+ *        the most significant bit of `RCC_CCIPR1.TIMICSEL` is 0, RM0456 11.8.46 and RM0481 11.8.40.
+ *        On the STM32U5 bit 1 of TIMICSEL takes the 1024 tap from MSIK, bit 0 the 4 tap, else from
+ *        MSIS, the codes 100 to 111 of RM0456 11.8.46. TIMICSEL 001 to 011 are closed, inferred
+ *        from the register text, RM0456 11.4 reads the gate as TIMICSEL[2:0] not 0.
+ *        A bit whose name gives no peripheral of the part stays Non-secure, such as the GTZCn.
+ *        Deviation: SRAMnEN and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of
+ *        RM0456 5.4 is not modelled. `BDRST` is Secure while the RTC or the TAMP has a secure
+ *        function, RM0456 11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way,
+ *        through the H5 traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and
+ *        `RTCSEL` Secure in place of `BDRST`. `SPRIV` makes the Secure bits privileged,
+ *        `NSPRIV` the others, RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
  *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the
@@ -552,6 +560,15 @@ private:
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer<signal>>                           timers_;
   std::vector<bus_gate<signal>>                        bus_gates_;
+  struct timic_entry
+  {
+    core::clock_domain domain;
+    signal             clear;
+    signal             set;
+    std::int8_t        select_bit;
+  };
+  field_ref                                            timic_;
+  std::vector<timic_entry>                             timic_taps_;
   std::optional<option_bits>                           wwdg_option_;
   field_ref                                            wwdg_enable_;
   field_ref                                            wwdg_sleep_;
@@ -1014,6 +1031,18 @@ rcc_model<Traits>::rcc_model(
           {.domain = clock.domain(lower(entry.instance)),
            .bus    = entry.bus,
            .enable = enable_field(entry.enable)});
+    }
+  }
+  if(not Traits::timic.reg.empty())
+  {
+    timic_ = field(Traits::timic.reg, Traits::timic.field);
+    for(auto const& tap : Traits::timic_taps)
+    {
+      timic_taps_.push_back(
+          {.domain     = clock.domain(tap.domain),
+           .clear      = tap.clear,
+           .set        = tap.set,
+           .select_bit = tap.select_bit});
     }
   }
   if(not Traits::wwdg_option.reg.empty() and present("WWDG"))
@@ -1803,6 +1832,17 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
   for(auto const& entry : bus_gates_)
   {
     set(entry.domain, get(regs_, entry.enable) != 0 ? hz[std::to_underlying(entry.bus)] : 0);
+  }
+  if(not timic_taps_.empty())
+  {
+    auto const value = get(regs_, timic_);
+    auto const open  = ((value >> (timic_.width - 1)) & 1u) != 0;
+    for(auto const& tap : timic_taps_)
+    {
+      auto const from =
+          tap.select_bit >= 0 and ((value >> tap.select_bit) & 1u) != 0 ? tap.set : tap.clear;
+      set(tap.domain, open ? hz[std::to_underlying(from)] : 0);
+    }
   }
   follow_outputs(hz, notify);
   auto const core = hz[std::to_underlying(signal::hclk)];

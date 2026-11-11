@@ -3,22 +3,22 @@
     "aliases": 98,
     "alternates": 496,
     "cross_rules": 785,
-    "fields": 38005,
+    "fields": 37983,
     "irqs": 131,
     "patched_fields": 412,
     "peripherals": 197,
     "regions": 12,
-    "registers": 4484
+    "registers": 4480
   },
   "part": "STM32H573MIYxQ",
   "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
   "tables": {
     "alternates": "73840186019b16bdfd10a51a42cbbf707c7716eb3eb171e8896c3da2a29a8c24",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "67eda4699eb8b9d4780127caa18785f4a7d8a8abfcd9df186704a58eacaded7d",
+    "fields": "20bd3688e4c61fafb11aef5b185b3761b3483f70bb0c5dea7493f9bf73e54a95",
     "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
     "peripherals": "fa150997c4377445fb36e92e0d6e6ca52ca846f3ec3d4ac5b925a32d099da098",
     "regions": "02be73c299ed6699e62d697003bfc8bebf9caecd9b69c21b4909ae41f5b036f9",
-    "registers": "8bc5cf7735c854a45ac93000be1bd92504006e617fd68ba285708091b02a3130"
+    "registers": "e57539d44533124275bccedca06369eef7c95f60c5a60536cbbe956a65cdbfa0"
   }
 }

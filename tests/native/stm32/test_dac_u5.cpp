@@ -92,3 +92,35 @@ TEST_CASE("RM0456 Table 137: LPDMA1 serves dac1_ch1_dma as request 8 into DHR12R
   CHECK((b.read("DHR12R1") & 0xFFF) == 0x333);
   CHECK(b.dma_left("LPDMA1") == 0);
 }
+
+TEST_CASE(
+    "RM0456 Table 342 and 58.4.19: TSEL 1011 takes lptim1_ch1, the DAC loads DOR1 three dac_hclk "
+    "cycles after the LPTIM1 output rises at CNT CCR1 + 1")
+{
+  auto const&   r = dac_ur::the_rig();
+  dac_ur::bench b{r};
+  popcorn::testing::enable_clocks(
+      *b.f->target, {
+                        {"RCC_APB3ENR", "LPTIM1EN"}
+  });
+  constexpr std::uint64_t msik_hz = 4'000'000;
+  auto const              kernel  = dac_ur::cycles(1, msik_hz);
+  auto const              hclk    = dac_ur::cycles(1, r.hclk_hz);
+  b.write_of("LPTIM1", "CCMR1", 1u << 1);
+  b.write_of("LPTIM1", "CR", 1);
+  b.write_of("LPTIM1", "ARR", 5);
+  b.idle_to(b.now_ps() + 4 * kernel);
+  b.write_of("LPTIM1", "CCR1", 2);
+  b.idle_to(b.now_ps() + 4 * kernel);
+  b.write_of("LPTIM1", "ICR_output", 0x18);
+  b.write("CR", dac_ur::ten1 | dac_ur::tsel1(11));
+  b.write("DHR12R1", 0x2A5);
+  CHECK(b.logged.empty());
+  auto const at = b.now_ps();
+  b.write_of("LPTIM1", "CR", 1u | 1u << 2);
+  auto const rise = at + 3 * kernel + 3 * kernel;
+  b.idle_to(rise + 2 * hclk);
+  CHECK(b.read("DOR1") == 0);
+  b.idle_to(rise + 3 * hclk);
+  CHECK(b.read("DOR1") == 0x2A5);
+}

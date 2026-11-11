@@ -177,6 +177,17 @@ template <typename Signal> struct timer_names
   Signal           bus;
 };
 
+/** @brief One internal clock the timer input captures divide, published by the RCC as the domain
+ *         @ref domain: the undivided rate of @ref clear, or of @ref set when bit @ref select_bit
+ *         of the gate field is 1, and 0 while the gate is closed. */
+template <typename Signal> struct timic_tap
+{
+  std::string_view domain;
+  Signal           clear;
+  Signal           set;
+  std::int8_t      select_bit;
+};
+
 template <typename Signal> struct bus_node
 {
   Signal   out;
