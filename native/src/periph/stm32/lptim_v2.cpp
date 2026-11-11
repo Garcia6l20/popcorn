@@ -1,6 +1,7 @@
 #include "lptim_v2_rows.hpp"
 #include "model_base.hpp"
 #include "secure_config.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
@@ -53,13 +54,14 @@ enum class term : std::uint8_t
   counter_reset,
   compare,
   reload,
+  update_flag,
   update,
   mode_switch,
+  output,
 };
 
 enum class use : std::uint8_t
 {
-  wave,
   external_clock,
   trigger,
   encoder,
@@ -71,15 +73,14 @@ enum class use : std::uint8_t
 };
 
 constexpr auto unmodelled_table = std::to_array<std::string_view>({
-    "WAVE 1, the set-once mode, at a counter start: not modelled, every start runs the counter",
     "CKSEL 1 or COUNTMODE 1, a count of input 1 edges, at a counter start: not modelled, the "
     "counter counts the kernel clock",
     "TRIGEN not 00, a start by an external trigger, at a CNTSTRT or SNGSTRT write: not modelled, "
     "no trigger starts the counter",
     "ENC 1, the encoder mode, at a counter start: not modelled, the counter counts the "
     "kernel clock up",
-    "CC1E or CC2E 1 with the channel as output, the PWM outputs, at a counter start: not modelled, "
-    "no output drives a pin",
+    "CC2E 1 with channel 2 as output, the channel 2 PWM output, at a counter start: not "
+    "modelled, channel 2 drives no signal",
     "CC1SEL or CC2SEL 1, the input capture mode, at a counter start: not modelled, channel 1 "
     "compares CCR1 and nothing is captured",
     "a CCR2 write, the channel 2 compare: not modelled, CMP2OK and CC2IF never set",
@@ -97,11 +98,13 @@ struct lptim_v2_state
   std::uint64_t settled_ps{};
   std::uint64_t floor_ps{};
   std::uint64_t compare_due{};
+  std::uint64_t update_flag_due{};
   std::uint64_t reload_due{};
   std::uint64_t interrupts_due{};
   std::uint64_t repetition_due{};
   std::uint64_t reset_due{};
   std::uint64_t switch_due{};
+  std::uint64_t out_ps{};
   std::uint64_t paused_units{};
   std::uint64_t generation{};
   std::uint64_t queued{};
@@ -124,6 +127,10 @@ struct lptim_v2_state
   std::uint8_t  single{};
   std::uint8_t  paused_counting{};
   std::uint8_t  switch_single{};
+  std::uint8_t  raw{};
+  std::uint8_t  out{};
+  std::uint8_t  latched{};
+  std::uint8_t  started_once{};
 
   friend auto operator==(lptim_v2_state const&, lptim_v2_state const&) -> bool = default;
 };
@@ -138,15 +145,21 @@ struct lptim_v2_state
  *        58.4.7, also when the same write sets ENABLE, inferred. They read 0 at once, inferred.
  *        The counter counts 0 to ARR and overflows to 0. The repetition counter, loaded with
  *        REP at the start, inferred, counts the overflows down, and an overflow with it at 0 is
- *        the update event: UE sets and it reloads REP, RM0456 58.4.16. One-shot mode stops at 0
- *        at the update event, RM0456 58.4.8. CC1IF and ARRM set at the kernel clock edge where
- *        the counter reaches CCR1 and ARR, RM0456 58.7.2, the instant inferred. CCR1 above ARR
- *        never matches, CCR1 equal to ARR sets CC1IF with ARRM, and a counter above a lowered
- *        ARR runs to 0xFFFF before it overflows, inferred. A CCR1 or ARR write with ENABLE 1
- *        sets CMP1OK or ARROK 3 kernel clocks later, inferred: RM0456 58.4.11 states a latency
- *        with no number. With PRELOAD 0, or with the counter stopped, the value takes effect at
- *        the flag, and counter ticks up to it compare with the old values, inferred. With
- *        PRELOAD 1 and the counter started, from the CNTSTRT or SNGSTRT write on, inferred, it
+ *        the update event: it transfers the preloaded values and reloads REP, RM0456 58.4.16.
+ *        One-shot mode stops at 0 at the update event, RM0456 58.4.8. CC1IF and ARRM set one
+ *        counter cycle after the counter reaches CCR1 and ARR, so CC1IF reads CNT CCR1 + 1 and ARRM
+ *        reads CNT 0, RM0456 58.4.19. A counter cycle is one prescaled tick. UE sets one counter
+ *        cycle after the update event, the instant inferred from the same note, which lists the
+ *        update event flag. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with ARRM,
+ *        and a counter above a lowered ARR runs to 0xFFFF before it overflows, inferred. A CCR1
+ *        value the counter holds at the instant the value takes effect matches one counter cycle
+ *        later, a smaller one in the next period, inferred. A match flag in flight when its value
+ *        takes effect at or after its match instant and before the flag sets at that instant,
+ *        inferred. COUNTRST and a RSTARE read lose a flag in flight. A CCR1 or ARR write
+ *        with ENABLE 1 sets CMP1OK or ARROK 3 kernel clocks later, inferred: RM0456 58.4.11 states
+ *        a latency with no number. With PRELOAD 0, or with the counter stopped, the value takes
+ *        effect at the flag, and counter ticks up to it compare with the old values, inferred.
+ *        With PRELOAD 1 and the counter started, from the CNTSTRT or SNGSTRT write on, inferred, it
  *        takes effect at the first update event at or after the flag, RM0456 58.4.11. ENABLE
  *        written to 0 and the one-shot stop apply such a value at once, inferred. An RCR write
  *        with ENABLE 1 sets REPOK 4 APB clocks plus 3 kernel clocks later, RM0456 58.4.16, the
@@ -159,8 +172,9 @@ struct lptim_v2_state
  *        A DIER write with ENABLE 1 sets DIEROK, and takes effect, 3 kernel clocks
  *        later, inferred: RM0456 58.7.8 states the flag with no latency. Each DIER bit
  *        the write changes then clears its ISR flag, ES0499 2.17.3, at that instant,
- *        inferred. Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK,
- *        REPOK, COUNTRST, CC1IF, ARRM, update event, mode switch, inferred.
+ *        inferred. Terms due at the same time apply in the order CC1IF, ARRM, CMP1OK, ARROK,
+ *        DIEROK, REPOK, COUNTRST, UE, update event, mode switch, inferred. A match flag due with a
+ *        value that takes effect at the same instant belongs to the old value.
  *        COUNTRST written with ENABLE 1 resets CNT 3 kernel clocks later and reads 1 until then,
  *        RM0456 58.4.14 and 58.7.11, the count restarting at that instant with the update event
  *        due then dropped, inferred. A COUNTRST write with ENABLE 0 is discarded, RM0456 58.7.11.
@@ -192,26 +206,45 @@ struct lptim_v2_state
  *        the start latency, and the kernel clocks left before each pending OK flag, COUNTRST and
  *        mode switch, inferred. A stopped kernel clock freezes all of them until it runs again,
  *        inferred. LPTIMxRST resets the registers and the state and withdraws the pending event.
- *        The functions below are logged as not modelled: each logs one model_warning at its
- *        first use and raises model_error under strict_peripherals at every use, after the
- *        write has taken the effect stated. At a counter start: WAVE, CKSEL or COUNTMODE, ENC on
- *        an encoder instance, CC1E or CC2E with the channel as output and CC1SEL or CC2SEL on a
- *        capture instance, also at a CCMR1 write while the counter runs. At the write: CNTSTRT
- *        or SNGSTRT with TRIGEN not 00, which leaves the counter stopped, CCR2 and a DIER bit
- *        other than CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE.
+ *        The output of channel 1, or of LPTIM4, is the trigger signal `lptim<n>_ch1`, or
+ *        `lptim4_out`, and drives no pin. OC1REF is high while CNT is above CCR1, so the output
+ *        rises at CNT CCR1 + 1 with CC1IF, CCR1 0 at CNT 1, and falls at CNT 0 with ARRM, RM0456
+ *        58.4.19 and Figures 747 and 748. A signal edge carries the whole ps at or after its
+ *        instant, so a kernel clock that is not a whole ps puts it up to 1 ps late. CCR1 at or
+ *        above ARR keeps it inactive, RM0456 58.4.10 requires ARR above CCR1. A CCR1 value that
+ *        takes effect moves the level at its CMP1OK, inferred. A one-pulse run gives one pulse.
+ *        With WAVE 1 it rises once and keeps its level until ENABLE is written to 0, and a CNTSTRT
+ *        or SNGSTRT after the first start is discarded until then, the software restart inferred.
+ *        The level is OC1REF xor CC1P bit 0 with CC1E 1 and CC1SEL 0, 0 otherwise, inferred, and
+ *        WAVPOL on LPTIM4. A polarity or CC1E change takes effect at the register write, also
+ *        with ENABLE 0, RM0456 58.4.10.
+ *        ENABLE written to 0 and LPTIMxRST drop the level to inactive at the write, inferred. A
+ *        sink that starts listening sees the edges from then on. The functions below
+ *        are logged as not modelled: each logs one model_warning at its first use and
+ *        raises model_error under strict_peripherals at every use, after the write has
+ *        taken the effect stated. At a counter start: CKSEL or COUNTMODE, ENC on an
+ *        encoder instance, CC2E with the channel as output and CC1SEL or CC2SEL on a
+ *        capture instance, also at a CCMR1 write while the counter runs. At the write:
+ *        CNTSTRT or SNGSTRT with TRIGEN not 00, which leaves the counter stopped, CCR2
+ *        and a DIER bit other than CC1IE, ARRMIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE.
  *        Deviation: CNT reads exact, without the double-read rule of RM0456 58.7.14.
  */
 class lptim_v2 final : public dispatch_model<lptim_v2, lptim_v2_state>,
                        public clock_listener,
-                       public bus_reset_listener
+                       public bus_reset_listener,
+                       public trigger_source
 {
 public:
   lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_variant const& variant);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_bus_reset() override;
-  void on_clock_change() override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               load(std::span<std::byte const> in) override;
+  void               on_bus_reset() override;
+  void               interest_changed() override;
+  [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
+  void               on_clock_change() override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
       -> std::expected<std::uint32_t, bus_error> override;
   auto on_write(
@@ -252,6 +285,7 @@ private:
   [[nodiscard]] auto ticks_to(std::uint32_t value) const -> std::uint64_t;
   [[nodiscard]] auto match_due(std::uint32_t value) const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto next_term() const -> std::optional<due_term>;
+  [[nodiscard]] auto in_flight(std::uint32_t value, std::uint64_t ps) const -> bool;
   [[nodiscard]] auto kernel_due(std::uint64_t ps, std::uint64_t cycles) const -> std::uint64_t;
   [[nodiscard]] auto repetition_ok_due(std::uint64_t ps) const -> std::uint64_t;
   [[nodiscard]] auto period() const -> std::uint64_t;
@@ -260,6 +294,10 @@ private:
   [[nodiscard]] auto update_ticks() const -> std::uint64_t;
   [[nodiscard]] auto update_due() const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto preload() const -> bool;
+  [[nodiscard]] auto wave() const -> bool;
+  [[nodiscard]] auto raw_at(std::uint64_t ps) const -> bool;
+  [[nodiscard]] auto drive(bool raw) const -> bool;
+  [[nodiscard]] auto out_due() const -> std::optional<std::uint64_t>;
 
   void               set_anchor(wide at);
   void               reanchor(std::uint64_t ps, std::uint64_t ticks);
@@ -276,6 +314,7 @@ private:
   void               unmodelled(use which, std::string_view reg);
   void               refuse_at_start();
   void               refuse_channels();
+  void               sync_out(std::uint64_t ps);
   void               refresh();
   void               reschedule();
   void               rebase(std::uint64_t ps, std::uint64_t hz);
@@ -299,12 +338,16 @@ private:
   field_ref                                 encoder_;
   field_ref                                 preload_;
   field_ref                                 wave_;
+  field_ref                                 polarity_;
+  field_ref                                 channel_polarity_;
   field_ref                                 trigger_enable_;
   std::array<field_ref, 2>                  channel_enable_{};
   std::array<field_ref, 2>                  channel_select_{};
   core::clock_domain                        kernel_;
   core::clock_domain                        bus_;
   irq_line*                                 line_ = nullptr;
+  trigger_output                            out_;
+  std::optional<bool>                       listened_;
   std::array<bool, unmodelled_table.size()> unmodelled_logged_{};
   std::array<bool, 5>                       locked_logged_{};
   std::array<bool, 4>                       pending_logged_{};
@@ -320,8 +363,10 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
       clock_select_{field("CFGR", "CKSEL")}, count_mode_{field("CFGR", "COUNTMODE")},
       encoder_{variant.encoder ? field("CFGR", "ENC") : field_ref{}},
       preload_{field("CFGR", "PRELOAD")}, wave_{field("CFGR", "WAVE")},
+      polarity_{variant.channels == 0 ? field("CFGR", "WAVPOL") : field_ref{}},
       trigger_enable_{field("CFGR", "TRIGEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      bus_{ctx.clock.domain(variant.bus_clock)}, line_{&irq(desc.name + "_IRQn")}
+      bus_{ctx.clock.domain(variant.bus_clock)}, line_{&irq(desc.name + "_IRQn")},
+      out_{ctx.peers, lower(desc.name) + (variant.channels != 0 ? "_ch1" : "_out")}
 {
   auto const writes = std::to_array<write_entry<lptim_v2>>({
       {variant.status,     &lptim_v2::plain_written                       },
@@ -343,8 +388,9 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
         {"CCR2",  &lptim_v2::compare2_written},
     });
     bind(channel_writes);
-    channel_enable_ = {field("CCMR1", "CC1E"), field("CCMR1", "CC2E")};
-    channel_select_ = {field("CCMR1", "CC1SEL"), field("CCMR1", "CC2SEL")};
+    channel_enable_   = {field("CCMR1", "CC1E"), field("CCMR1", "CC2E")};
+    channel_select_   = {field("CCMR1", "CC1SEL"), field("CCMR1", "CC2SEL")};
+    channel_polarity_ = field("CCMR1", "CC1P");
   }
   state_.reload = describe("ARR").reset;
   state_.hz     = ctx.clock.hz(kernel_);
@@ -430,7 +476,7 @@ auto lptim_v2::match_due(std::uint32_t value) const -> std::optional<std::uint64
   auto const step    = wide{std::uint64_t{state_.reload} + 1u} * tick_unit();
   auto const floor   = wide{state_.floor_ps} * state_.hz;
   auto const settled = wide{state_.settled_ps} * state_.hz;
-  auto       at      = anchor() + wide{ticks_to(value)} * tick_unit();
+  auto       at      = anchor() + wide{ticks_to(value) + 1u} * tick_unit();
   if(at <= floor)
   {
     at += ((floor - at) / step + 1) * step;
@@ -512,6 +558,121 @@ auto lptim_v2::preload() const -> bool
   return get(regs_, preload_) != 0;
 }
 
+auto lptim_v2::wave() const -> bool
+{
+  return get(regs_, wave_) != 0;
+}
+
+auto lptim_v2::drive(bool raw) const -> bool
+{
+  if(variant_.channels == 0)
+  {
+    return raw != (get(regs_, polarity_) != 0);
+  }
+  return get(regs_, channel_enable_[0]) != 0
+     and get(regs_, channel_select_[0]) == 0
+     and raw != ((get(regs_, channel_polarity_) & 1u) != 0);
+}
+
+auto lptim_v2::raw_at(std::uint64_t ps) const -> bool
+{
+  if(state_.latched != 0)
+  {
+    return true;
+  }
+  if(state_.running == 0)
+  {
+    return false;
+  }
+  if(state_.hz == 0)
+  {
+    return state_.raw != 0;
+  }
+  auto const ticks = ticks_at(ps);
+  if(not ticks)
+  {
+    return false;
+  }
+  auto const count = position(*ticks);
+  return state_.compare < count and count <= state_.reload;
+}
+
+auto lptim_v2::out_due() const -> std::optional<std::uint64_t>
+{
+  if(state_.running == 0
+     or state_.hz == 0
+     or state_.latched != 0
+     or not(listened_.value_or(false) or wave()))
+  {
+    return std::nullopt;
+  }
+  auto const step  = wide{std::uint64_t{state_.reload} + 1u} * tick_unit();
+  auto const after = wide{state_.out_ps} * state_.hz;
+  auto       best  = std::optional<std::uint64_t>{};
+  for(auto const value : {state_.compare, state_.reload})
+  {
+    if(value > state_.reload)
+    {
+      continue;
+    }
+    auto at = anchor() + wide{ticks_to(value) + 1u} * tick_unit();
+    if(at <= after)
+    {
+      at += ((after - at) / step + 1) * step;
+    }
+    best = std::min(best.value_or(ceil_ps(at)), ceil_ps(at));
+  }
+  return best;
+}
+
+void lptim_v2::sync_out(std::uint64_t ps)
+{
+  auto const raw = raw_at(ps);
+  if(raw and wave() and state_.running != 0)
+  {
+    state_.latched = 1;
+  }
+  state_.raw       = raw ? 1 : 0;
+  auto const level = static_cast<std::uint8_t>(drive(raw) ? 1u : 0u);
+  if(level != state_.out)
+  {
+    state_.out = level;
+    if(listened_.value_or(false))
+    {
+      out_.edge(level != 0 ? trigger_edge::rising : trigger_edge::falling, ps);
+    }
+  }
+  state_.out_ps = std::max(state_.out_ps, ps);
+}
+
+void lptim_v2::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  listened_.reset();
+}
+
+void lptim_v2::interest_changed()
+{
+  catch_up(now_ps());
+  refresh();
+  listened_ = out_.wanted();
+  reschedule();
+}
+
+auto lptim_v2::produces(std::string_view signal) const -> bool
+{
+  return signal == out_.signal();
+}
+
+auto lptim_v2::level(std::string_view signal) const -> std::optional<bool>
+{
+  if(signal != out_.signal())
+  {
+    return std::nullopt;
+  }
+  return drive(raw_at(now_ps()));
+}
+
 auto lptim_v2::next_term() const -> std::optional<due_term>
 {
   auto best = std::optional<due_term>{};
@@ -525,11 +686,6 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
       best = due_term{*due, which};
     }
   };
-  offer(state_.compare_due, term::compare_written);
-  offer(state_.reload_due, term::reload_written);
-  offer(state_.interrupts_due, term::interrupts_written);
-  offer(state_.repetition_due, term::repetition_written);
-  offer(state_.reset_due, term::counter_reset);
   if((state_.isr & compare_match) == 0)
   {
     offer(match_due(state_.compare), term::compare);
@@ -538,11 +694,18 @@ auto lptim_v2::next_term() const -> std::optional<due_term>
   {
     offer(match_due(state_.reload), term::reload);
   }
+  offer(state_.compare_due, term::compare_written);
+  offer(state_.reload_due, term::reload_written);
+  offer(state_.interrupts_due, term::interrupts_written);
+  offer(state_.repetition_due, term::repetition_written);
+  offer(state_.reset_due, term::counter_reset);
+  offer(state_.update_flag_due, term::update_flag);
   if(state_.single != 0 or state_.preloaded != 0 or (state_.isr & update_event) == 0)
   {
     offer(update_due(), term::update);
   }
   offer(state_.switch_due, term::mode_switch);
+  offer(out_due(), term::output);
   return best;
 }
 
@@ -568,12 +731,21 @@ void lptim_v2::apply(due_term const& next)
     {
       reanchor(next.due, *ticks);
     }
-    raise_flag(update_event);
+    if((state_.isr & update_event) == 0 and state_.update_flag_due == 0)
+    {
+      state_.update_flag_due = ceil_ps(wide{next.due} * state_.hz + tick_unit());
+    }
     transfer_preloaded();
     if(state_.single != 0)
     {
       stop();
     }
+    return;
+  }
+  if(next.which == term::update_flag)
+  {
+    state_.update_flag_due = 0;
+    raise_flag(update_event);
     return;
   }
   if(next.which == term::counter_reset)
@@ -593,6 +765,10 @@ void lptim_v2::apply(due_term const& next)
     {
       state_.repetition = state_.repetition_reload;
     }
+    return;
+  }
+  if(next.which == term::output)
+  {
     return;
   }
   if(next.which == term::mode_switch)
@@ -632,6 +808,11 @@ void lptim_v2::apply(due_term const& next)
     (compare ? state_.compare_due : state_.reload_due) = 0;
     return;
   }
+  auto const flag = compare ? compare_match : reload_match;
+  if((state_.isr & flag) == 0 and in_flight(compare ? state_.compare : state_.reload, next.due))
+  {
+    raise_flag(flag);
+  }
   static_cast<void>(settle_to(next.due));
   if(compare)
   {
@@ -643,6 +824,12 @@ void lptim_v2::apply(due_term const& next)
     state_.reload     = state_.reload_pending;
     state_.reload_due = 0;
   }
+}
+
+auto lptim_v2::in_flight(std::uint32_t value, std::uint64_t ps) const -> bool
+{
+  auto const due = match_due(value);
+  return due and *due > ps and wide{*due} * state_.hz - tick_unit() <= wide{ps} * state_.hz;
 }
 
 auto lptim_v2::settle_to(std::uint64_t ps) -> bool
@@ -669,6 +856,8 @@ void lptim_v2::reanchor(std::uint64_t ps, std::uint64_t ticks)
 
 void lptim_v2::catch_up(std::uint64_t ps)
 {
+  auto const wanted = out_.wanted();
+  listened_         = listened_.value_or(wanted) and wanted;
   while(auto const next = next_term())
   {
     if(next->due > ps)
@@ -676,8 +865,11 @@ void lptim_v2::catch_up(std::uint64_t ps)
       break;
     }
     apply(*next);
+    sync_out(next->due);
   }
   state_.settled_ps = std::max(state_.settled_ps, ps);
+  sync_out(ps);
+  listened_ = wanted;
 }
 
 void lptim_v2::start(std::uint64_t ps, bool single)
@@ -776,9 +968,7 @@ void lptim_v2::refuse_channels()
   auto const as_input = [&](std::size_t channel) {
     return variant_.capture and get(regs_, channel_select_[channel]) != 0;
   };
-  if(std::ranges::any_of(std::array{0uz, 1uz}, [&](std::size_t channel) {
-       return not as_input(channel) and get(regs_, channel_enable_[channel]) != 0;
-     }))
+  if(not as_input(1) and get(regs_, channel_enable_[1]) != 0)
   {
     unmodelled(use::channel_output, "CCMR1");
   }
@@ -790,10 +980,6 @@ void lptim_v2::refuse_channels()
 
 void lptim_v2::refuse_at_start()
 {
-  if(get(regs_, wave_) != 0)
-  {
-    unmodelled(use::wave, "CFGR");
-  }
   if(get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0)
   {
     unmodelled(use::external_clock, "CFGR");
@@ -807,6 +993,7 @@ void lptim_v2::refuse_at_start()
 
 void lptim_v2::refresh()
 {
+  sync_out(now_ps());
   regs_.poke(isr_.offset, state_.isr);
   regs_.poke(cnt_.offset, count_at(now_ps()));
   if(state_.armed != 0)
@@ -845,6 +1032,10 @@ void lptim_v2::on_bus_reset()
   {
     ctx_.events.cancel(seq - 1);
   }
+  if(state_.out != 0 and out_.wanted())
+  {
+    out_.edge(trigger_edge::falling, now_ps());
+  }
   restore_reset_values();
 }
 
@@ -866,7 +1057,8 @@ void lptim_v2::restore_reset_values()
 void lptim_v2::rebase(std::uint64_t ps, std::uint64_t hz)
 {
   auto       dues = std::array{&state_.compare_due,    &state_.reload_due, &state_.interrupts_due,
-                               &state_.repetition_due, &state_.reset_due,  &state_.switch_due};
+                               &state_.repetition_due, &state_.reset_due,  &state_.switch_due,
+                               &state_.update_flag_due};
   auto const old  = state_.hz;
   if(old != 0)
   {
@@ -979,7 +1171,16 @@ void lptim_v2::interrupts_written(std::uint32_t old, std::uint32_t now)
 
 void lptim_v2::configuration_written(std::uint32_t old, std::uint32_t now)
 {
-  if(not enabled() or old == now)
+  if(not enabled())
+  {
+    if(old != now)
+    {
+      refresh();
+      reschedule();
+    }
+    return;
+  }
+  if(old == now)
   {
     return;
   }
@@ -1006,8 +1207,10 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   }
   else if(was_on and not is_on)
   {
-    state_.switch_due = 0;
-    state_.reset_due  = 0;
+    state_.switch_due   = 0;
+    state_.reset_due    = 0;
+    state_.latched      = 0;
+    state_.started_once = 0;
     stop();
   }
   regs_.poke(
@@ -1027,10 +1230,11 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
     {
       armed = true;
     }
-    else
+    else if(not(wave() and state_.started_once != 0))
     {
       start(t, single);
-      started = true;
+      state_.started_once = 1;
+      started             = true;
     }
   }
   refresh();
@@ -1045,8 +1249,14 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void lptim_v2::channels_written(std::uint32_t, std::uint32_t)
+void lptim_v2::channels_written(std::uint32_t old, std::uint32_t now)
 {
+  auto const at = reg("CCMR1").offset;
+  regs_.poke(at, old);
+  catch_up(now_ps());
+  regs_.poke(at, now);
+  refresh();
+  reschedule();
   if(state_.running != 0)
   {
     refuse_channels();

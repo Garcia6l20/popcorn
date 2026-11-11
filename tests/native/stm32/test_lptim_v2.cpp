@@ -1,4 +1,5 @@
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
@@ -34,6 +35,7 @@ using popcorn::testing::no_reset_t;
 using popcorn::testing::rcc_reset_pulse;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
+using popcorn::testing::trigger_probe;
 using popcorn::testing::u575;
 
 constexpr std::string_view firmware = "rcc_ll";
@@ -70,6 +72,9 @@ constexpr std::uint32_t    enc      = 1u << 24;
 constexpr std::uint32_t    cksel    = 1u << 0;
 constexpr std::uint32_t    cc1e     = 1u << 1;
 constexpr std::uint32_t    cc1sel   = 1u << 0;
+constexpr std::uint32_t    cc1p     = 1u << 2;
+constexpr std::uint32_t    cc2e     = 1u << 17;
+constexpr std::uint32_t    wavpol   = 1u << 21;
 constexpr std::uint64_t    cycle    = 250'000;
 constexpr std::uint64_t    hsi      = 62'500;
 
@@ -117,6 +122,8 @@ struct rig
   address                        base{};
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
+  trigger_probe*                 probe{};
+  mutable std::uint64_t          enabled_at{};
 
   rig(rig const&)                    = delete;
   auto operator=(rig const&) -> rig& = delete;
@@ -124,13 +131,28 @@ struct rig
   explicit rig(
       unit                             which  = units[0],
       bool                             strict = false,
-      popcorn::part_description const& desc   = u575())
+      popcorn::part_description const& desc   = u575(),
+      std::string_view                 watch  = {})
       : u{which}
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(stm32::board{}, desc);
     options.strict_peripherals = strict;
-    f    = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
+    if(not watch.empty())
+    {
+      options.models.insert_or_assign(
+          "DAC1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<trigger_probe>(ctx);
+          });
+    }
+    f = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
+    if(not watch.empty())
+    {
+      probe = f->model_of<trigger_probe>("DAC1");
+      REQUIRE(probe != nullptr);
+      probe->watched = watch;
+      probe->listen(true);
+    }
     base = f->target->peripheral(u.name).description().base;
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
@@ -221,9 +243,17 @@ struct rig
   {
     write(cfgr, config);
     write(cr, enable);
+    enabled_at = now_ps();
     write(dier, irqs);
     idle_to(now_ps() + 4 * cycle);
     write(icr, dierok);
+  }
+
+  [[nodiscard]] auto out_level(std::string_view signal) const -> std::optional<bool>
+  {
+    auto* const source = dynamic_cast<stm32::trigger_source*>(f->target->model(u.name));
+    REQUIRE(source != nullptr);
+    return source->level(signal);
   }
 
   void settle_values(std::uint32_t compare, std::uint32_t reload) const
@@ -278,7 +308,7 @@ struct rig
     settle_values(compare, reload);
     auto const at = now_ps();
     write(cr, enable | mode);
-    return at + 3 * cycle;
+    return std::max(at + 3 * cycle, enabled_at + (cycle << ((config >> 9) & 7)) * 2);
   }
 };
 
@@ -331,9 +361,9 @@ auto gaps(std::vector<std::uint64_t> const& at) -> std::vector<std::uint64_t>
 }
 
 TEST_CASE(
-    "RM0456 58.4.7 and 58.7.2: each U5 LPTIM starts 3 kernel clocks after CNTSTRT, sets "
-    "CC1IF at CCR1 and ARRM at ARR at that tick, the instant inferred, and raises its "
-    "IRQ through DIER")
+    "RM0456 58.4.7 and 58.4.19: each U5 LPTIM starts 3 kernel clocks after CNTSTRT, sets "
+    "CC1IF at CNT CCR1 + 1 and ARRM at CNT 0, one counter cycle after the match, and UE one "
+    "cycle after that, inferred, and raises its IRQ through DIER")
 {
   for(auto const& which : units)
   {
@@ -341,24 +371,28 @@ TEST_CASE(
     rig        r{which};
     auto const start = r.started(6, 10, cntstrt, cc1if | arrm);
     CHECK(r.read(cr) == enable);
-    CHECK(r.pending() == start + 6 * cycle);
-    r.idle_to(start + 5 * cycle);
-    CHECK(r.read(cnt) == 5);
+    CHECK(r.pending() == start + 7 * cycle);
+    r.idle_to(start + 6 * cycle);
+    CHECK(r.read(cnt) == 6);
     CHECK(r.read(isr) == 0);
     CHECK_FALSE(r.irq_pending());
-    r.idle_to(start + 6 * cycle);
+    r.idle_to(start + 7 * cycle);
+    CHECK(r.read(cnt) == 7);
     CHECK(r.read(isr) == cc1if);
     CHECK(r.irq_pending());
-    CHECK(r.pending() == start + 10 * cycle);
-    r.idle_to(start + 10 * cycle);
-    CHECK(r.read(isr) == (cc1if | arrm));
     CHECK(r.pending() == start + 11 * cycle);
+    r.idle_to(start + 10 * cycle);
+    CHECK(r.read(isr) == cc1if);
     r.idle_to(start + 11 * cycle);
     CHECK(r.read(cnt) == 0);
+    CHECK(r.read(isr) == (cc1if | arrm));
+    CHECK(r.pending() == start + 12 * cycle);
+    r.idle_to(start + 12 * cycle);
+    CHECK(r.read(cnt) == 1);
     CHECK(r.read(isr) == (cc1if | arrm | ue));
     r.write(icr, cc1if | arrm | ue);
     CHECK(r.read(isr) == 0);
-    CHECK(r.pending() == start + 17 * cycle);
+    CHECK(r.pending() == start + 18 * cycle);
   }
 }
 
@@ -366,10 +400,12 @@ TEST_CASE("RM0456 58.4.8: SNGSTRT stops the counter at 0 at the wrap after ARR")
 {
   rig        r;
   auto const start = r.started(6, 10, sngstrt);
-  r.idle_to(start + 10 * cycle);
-  r.write(icr, cc1if | arrm);
-  CHECK(r.pending() == start + 11 * cycle);
   r.idle_to(start + 11 * cycle);
+  CHECK(r.read(isr) == (cc1if | arrm));
+  r.write(icr, cc1if | arrm);
+  CHECK(r.read(cnt) == 0);
+  CHECK(r.pending() == start + 12 * cycle);
+  r.idle_to(start + 12 * cycle);
   CHECK(r.read(cnt) == 0);
   CHECK_FALSE(r.pending().has_value());
   r.idle_to(start + 40 * cycle);
@@ -391,7 +427,7 @@ TEST_CASE(
   CHECK(r.pending() == at + 3 * cycle);
   r.idle_to(at + 3 * cycle);
   CHECK(r.read(isr) == (cmp1ok | arrok));
-  CHECK(r.pending() == at + 8 * cycle + 12 * cycle);
+  CHECK(r.pending() == at + 8 * cycle + 16 * cycle);
 }
 
 TEST_CASE(
@@ -406,10 +442,10 @@ TEST_CASE(
     std::uint64_t next_reload;
   };
   for(auto const& [written, old_reload, first, next] : {
-          shot{2,  false, 20, 41},
-          shot{8,  true,  31, 52},
-          shot{24, false, 42, 63},
-          shot{30, true,  53, 74},
+          shot{2,  false, 21, 42},
+          shot{8,  true,  32, 53},
+          shot{24, false, 43, 64},
+          shot{30, true,  54, 75},
   })
   {
     CAPTURE(written);
@@ -419,7 +455,7 @@ TEST_CASE(
     r.write(icr, arrm);
     r.write(arr, 20);
     CHECK(r.read(arr) == 20);
-    CHECK(r.pending() == start + (old_reload ? written + 2 : written + 3) * cycle);
+    CHECK(r.pending() == start + (written + 3) * cycle);
     r.idle_to(start + (written + 2) * cycle);
     CHECK((r.read(isr) & arrok) == 0);
     r.idle_to(start + (written + 3) * cycle);
@@ -439,14 +475,15 @@ TEST_CASE(
 
 TEST_CASE(
     "RM0456 58.4.11, inferred: a CCR1 write sets CMP1OK 3 kernel clocks later, a value the "
-    "counter passed before then matches in the next period")
+    "counter passed matches in the next period, the value it holds then matches one cycle later")
 {
   for(auto const offset : {std::uint64_t{0}, std::uint64_t{22}})
   {
     for(auto const& [value, match] : {
-            std::pair{8u, std::uint64_t{8} },
-            std::pair{3u, std::uint64_t{14}},
-            std::pair{5u, std::uint64_t{16}}
+            std::pair{8u, std::uint64_t{9} },
+            std::pair{3u, std::uint64_t{15}},
+            std::pair{4u, std::uint64_t{16}},
+            std::pair{5u, std::uint64_t{6} }
     })
     {
       CAPTURE(offset);
@@ -474,19 +511,19 @@ TEST_CASE(
 {
   rig        r;
   auto const start = r.started(6, 10);
-  r.idle_to(start + 4 * cycle);
+  r.idle_to(start + 5 * cycle);
   r.write(dier, cc1if);
   CHECK(r.read(dier) == cc1if);
-  CHECK(r.pending() == start + 6 * cycle);
-  r.idle_to(start + 6 * cycle);
+  CHECK(r.pending() == start + 7 * cycle);
+  r.idle_to(start + 7 * cycle);
   CHECK(r.read(isr) == cc1if);
   CHECK_FALSE(r.irq_pending());
   r.write(icr, cc1if);
-  CHECK(r.pending() == start + 7 * cycle);
-  r.idle_to(start + 7 * cycle);
+  CHECK(r.pending() == start + 8 * cycle);
+  r.idle_to(start + 8 * cycle);
   CHECK(r.read(isr) == dierok);
   r.write(icr, dierok);
-  r.idle_to(start + 17 * cycle);
+  r.idle_to(start + 18 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm | ue));
   CHECK(r.irq_pending());
 }
@@ -497,24 +534,24 @@ TEST_CASE(
 {
   rig        r;
   auto const start = r.started(6, 10, cntstrt, cc1if | arrm);
-  r.idle_to(start + 10 * cycle);
+  r.idle_to(start + 11 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm));
   r.write(dier, arrm);
-  CHECK(r.pending() == start + 11 * cycle);
-  r.idle_to(start + 11 * cycle);
-  CHECK(r.pending() == start + 13 * cycle);
-  r.idle_to(start + 13 * cycle - cycle);
+  CHECK(r.pending() == start + 12 * cycle);
+  r.idle_to(start + 12 * cycle);
+  CHECK(r.pending() == start + 14 * cycle);
+  r.idle_to(start + 14 * cycle - cycle);
   CHECK(r.read(isr) == (cc1if | arrm | ue));
-  r.idle_to(start + 13 * cycle);
+  r.idle_to(start + 14 * cycle);
   CHECK(r.read(isr) == (arrm | ue | dierok));
   CHECK(r.irq_pending());
   r.write(icr, arrm | ue | dierok);
   r.write_at(0xE000'E280 + 4 * (r.u.irq / 32), 1u << (r.u.irq % 32));
   CHECK_FALSE(r.irq_pending());
-  r.idle_to(start + 17 * cycle);
+  r.idle_to(start + 18 * cycle);
   CHECK(r.read(isr) == cc1if);
   CHECK_FALSE(r.irq_pending());
-  r.idle_to(start + 21 * cycle);
+  r.idle_to(start + 22 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm));
   CHECK(r.irq_pending());
 }
@@ -591,7 +628,7 @@ TEST_CASE(
 {
   for(auto const& [written, next] : {
           std::pair{std::uint64_t{4},  std::uint64_t{7} },
-          std::pair{std::uint64_t{9},  std::uint64_t{10}},
+          std::pair{std::uint64_t{9},  std::uint64_t{11}},
           std::pair{std::uint64_t{26}, std::uint64_t{29}},
   })
   {
@@ -639,11 +676,12 @@ TEST_CASE(
     r.write(icr, cc1if | arrm);
     r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
     CHECK(r.read(cnt) == count);
-    auto const due = start + at + hsi + (match - count - 1) * 2 * hsi;
+    auto const due = start + at + hsi + (match - count) * 2 * hsi;
     if(count == 10)
     {
       CHECK(r.pending() == start + at + hsi);
-      r.idle_to(start + at + hsi);
+      r.idle_to(start + at + hsi + cycle);
+      CHECK((r.read(isr) & ue) == ue);
     }
     CHECK(r.pending() == due);
     r.idle_to(due);
@@ -675,7 +713,7 @@ TEST_CASE(
 {
   rig        r;
   auto const start = r.started(6, 10, cntstrt, cc1if);
-  CHECK(r.pending() == start + 6 * cycle);
+  CHECK(r.pending() == start + 7 * cycle);
   r.idle_to(start + 2 * cycle);
   rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
   CHECK(r.read(cr) == 0);
@@ -688,12 +726,12 @@ TEST_CASE(
   r.write(arr, 10);
   r.write(ccr1, 8);
   r.write(cr, enable | cntstrt);
-  REQUIRE(again < start + 6 * cycle);
+  REQUIRE(again < start + 7 * cycle);
   CHECK(r.pending() == again);
   r.idle_to(start + 6 * cycle);
   CHECK(r.read(isr) == (dierok | arrok | cmp1ok));
-  CHECK(r.pending() == again + 8 * cycle);
-  r.idle_to(again + 8 * cycle);
+  CHECK(r.pending() == again + 9 * cycle);
+  r.idle_to(again + 9 * cycle);
   CHECK(r.read(isr) == (dierok | arrok | cmp1ok | cc1if));
   CHECK(r.irq_pending());
 }
@@ -735,13 +773,12 @@ TEST_CASE(
     bool             logs;
   };
   for(auto const& [text, which, config, channels, logs] : {
-          one{"WAVE",         units[3], wave,  0,      true },
-          one{"CKSEL",        units[1], cksel, 0,      true },
-          one{"ENC 1",        units[0], enc,   0,      true },
-          one{"ENC 1",        units[2], enc,   0,      false},
-          one{"CC1E or CC2E", units[2], 0,     cc1e,   true },
-          one{"CC1SEL",       units[1], 0,     cc1sel, true },
-          one{"CC1SEL",       units[1], 0,     0,      false},
+          one{"CKSEL",  units[1], cksel, 0,      true },
+          one{"ENC 1",  units[0], enc,   0,      true },
+          one{"ENC 1",  units[2], enc,   0,      false},
+          one{"CC2E 1", units[2], 0,     cc2e,   true },
+          one{"CC1SEL", units[1], 0,     cc1sel, true },
+          one{"CC1SEL", units[1], 0,     0,      false},
   })
   {
     CAPTURE(text);
@@ -753,7 +790,7 @@ TEST_CASE(
     }
     auto const start = r.started(6, 10, cntstrt, 0, config);
     CHECK(r.warnings(text) == (logs ? 1 : 0));
-    r.idle_to(start + 6 * cycle);
+    r.idle_to(start + 7 * cycle);
     CHECK((r.read(isr) & cc1if) == cc1if);
     r.write(cr, 0);
     r.write(cr, enable);
@@ -799,6 +836,422 @@ TEST_CASE(
   r.idle_to(r.now_ps() + 20 * cycle);
   CHECK(r.read(cnt) == 0);
   CHECK(r.read(isr) == 0);
+}
+
+TEST_CASE(
+    "RM0456 58.4.19: the PWM output rises at CNT CCR1 + 1 and falls at CNT 0, one counter "
+    "cycle after the matches")
+{
+  struct shot
+  {
+    unit             which;
+    std::string_view signal;
+    std::uint32_t    config;
+    std::uint32_t    scale;
+  };
+  for(auto const& [which, signal, config, scale] : {
+          shot{units[0], "lptim1_ch1", 0,        1},
+          shot{units[0], "lptim1_ch1", presc(3), 8},
+          shot{units[1], "lptim2_ch1", 0,        1},
+          shot{units[2], "lptim3_ch1", 0,        1},
+  })
+  {
+    CAPTURE(which.name);
+    CAPTURE(config);
+    rig r{which, false, u575(), signal};
+    r.write(ccmr1, cc1e);
+    auto const a = r.started(2, 5, cntstrt, 0, config);
+    auto const k = std::uint64_t{scale} * cycle;
+    r.idle_to(a + 12 * k + cycle);
+    CHECK(r.probe->pulses == std::vector{a + 3 * k, a + 9 * k});
+    CHECK(r.probe->falls == std::vector{a + 6 * k, a + 12 * k});
+    CHECK(r.pending() == a + 15 * k);
+    CHECK(r.out_level(signal) == false);
+    r.idle_to(a + 15 * k);
+    CHECK(r.out_level(signal) == true);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.19 Figures 747 and 748: CC1IF and OC1REF come at CNT CCR1 + 1 and the fall at "
+    "CNT 0, CCR1 0 at CNT 1, UE one counter cycle after, counted in prescaled ticks")
+{
+  for(auto const config : {0u, presc(3)})
+  {
+    for(auto const compare : {3u, 6u, 0u})
+    {
+      CAPTURE(config);
+      CAPTURE(compare);
+      rig r{units[0], false, u575(), "lptim1_ch1"};
+      r.write(ccmr1, cc1e);
+      auto const a = r.started(compare, 8, cntstrt, 0, config);
+      auto const k = (config == 0 ? 1u : 8u) * cycle;
+      r.idle_to(a + compare * k);
+      CHECK(r.read(cnt) == compare);
+      CHECK((r.read(isr) & cc1if) == 0);
+      CHECK(r.out_level("lptim1_ch1") == false);
+      CHECK(r.probe->pulses.empty());
+      r.idle_to(a + (compare + 1) * k - cycle);
+      CHECK((r.read(isr) & cc1if) == 0);
+      r.idle_to(a + (compare + 1) * k);
+      CHECK(r.read(cnt) == compare + 1);
+      CHECK((r.read(isr) & cc1if) == cc1if);
+      CHECK(r.out_level("lptim1_ch1") == true);
+      CHECK(r.probe->pulses == std::vector{a + (compare + 1) * k});
+      r.idle_to(a + 8 * k);
+      CHECK(r.out_level("lptim1_ch1") == true);
+      CHECK((r.read(isr) & arrm) == 0);
+      r.idle_to(a + 9 * k);
+      CHECK(r.read(cnt) == 0);
+      CHECK((r.read(isr) & arrm) == arrm);
+      CHECK((r.read(isr) & ue) == 0);
+      CHECK(r.out_level("lptim1_ch1") == false);
+      CHECK(r.probe->falls == std::vector{a + 9 * k});
+      r.idle_to(a + 10 * k - cycle);
+      CHECK((r.read(isr) & ue) == 0);
+      r.idle_to(a + 10 * k);
+      CHECK((r.read(isr) & ue) == ue);
+    }
+  }
+}
+
+TEST_CASE(
+    "inferred: a CC1IF or ARRM in flight when CCR1 or ARR takes effect inside a prescaled tick "
+    "sets at that instant, the old value having matched")
+{
+  for(auto const reload : {false, true})
+  {
+    CAPTURE(reload);
+    rig        r;
+    auto const a = r.started(2, 6, cntstrt, 0, presc(3));
+    auto const k = 8 * cycle;
+    auto const w = a + (reload ? 6 : 2) * k - cycle;
+    auto const m = reload ? arrm : cc1if;
+    r.idle_to(w);
+    CHECK((r.read(isr) & m) == 0);
+    r.write(reload ? arr : ccr1, reload ? 9 : 4);
+    r.idle_to(w + 3 * cycle - cycle);
+    CHECK((r.read(isr) & m) == 0);
+    r.idle_to(w + 3 * cycle);
+    CHECK((r.read(isr) & m) == m);
+    CHECK((r.read(isr) & (reload ? arrok : cmp1ok)) != 0);
+  }
+}
+
+TEST_CASE(
+    "inferred: a CCR1 value that takes effect at the match instant, or after it, keeps the CC1IF "
+    "of the old value, one before the match it does not, at PRESC 0 and 3")
+{
+  for(auto const config : {0u, presc(3)})
+  {
+    for(auto const delta : {-1, 0, 1})
+    {
+      CAPTURE(config);
+      CAPTURE(delta);
+      rig        r;
+      auto const a  = r.started(2, 20, cntstrt, 0, config);
+      auto const k  = (config == 0 ? 1u : 8u) * cycle;
+      auto const ok = delta < 0 ? a + 2 * k - cycle : a + 2 * k + delta * cycle;
+      r.idle_to(ok - 3 * cycle);
+      r.write(ccr1, 10);
+      r.idle_to(ok);
+      CHECK((r.read(isr) & cmp1ok) == cmp1ok);
+      CHECK((r.read(isr) & cc1if) == (delta < 0 ? 0u : cc1if));
+      r.idle_to(a + 11 * k - cycle);
+      CHECK((r.read(isr) & cc1if) == (delta < 0 ? 0u : cc1if));
+      if(delta < 0)
+      {
+        r.idle_to(a + 11 * k);
+        CHECK((r.read(isr) & cc1if) == cc1if);
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "inferred: a CC1P write at the CMP1OK or ARROK instant that flips the level, and at the "
+    "update instant that applies a preloaded CCR1, applies after that term")
+{
+  struct shot
+  {
+    std::uint32_t config;
+    bool          reload;
+    bool          update;
+  };
+  for(auto const& [config, reload, update] : {
+          shot{0,       false, false},
+          shot{0,       true,  false},
+          shot{preload, false, true },
+  })
+  {
+    CAPTURE(config);
+    CAPTURE(reload);
+    rig r{units[0], false, u575(), "lptim1_ch1"};
+    r.write(ccmr1, cc1e);
+    auto const a = r.started(2, 10, cntstrt, 0, config);
+    r.idle_to(a + 4 * cycle);
+    CHECK(r.out_level("lptim1_ch1") == true);
+    auto const x = r.now_ps();
+    r.write(reload ? arr : ccr1, reload ? 4 : 8);
+    auto const at = update ? a + 11 * cycle : x + 3 * cycle;
+    r.idle_to(at);
+    r.write(ccmr1, cc1e | cc1p);
+    CHECK(r.probe->falls == std::vector{at});
+    CHECK(r.probe->pulses == std::vector{a + 3 * cycle, at});
+    CHECK(r.out_level("lptim1_ch1") == true);
+  }
+}
+
+TEST_CASE(
+    "RM0456 58.4.10: CC1P inverts the output at the CCMR1 write, also with ENABLE 0 and while "
+    "the counter runs, CC1E 0 or CC1SEL 1 leave it inactive")
+{
+  rig        r{units[0], false, u575(), "lptim1_ch1"};
+  auto const x = r.now_ps();
+  r.write(ccmr1, cc1e | cc1p);
+  CHECK(r.probe->pulses == std::vector{x});
+  CHECK(r.out_level("lptim1_ch1") == true);
+  r.idle_to(x + 2 * cycle);
+  r.write(ccmr1, cc1p);
+  CHECK(r.probe->falls == std::vector{x + 2 * cycle});
+  CHECK(r.out_level("lptim1_ch1") == false);
+  r.write(ccmr1, cc1e | cc1p | cc1sel);
+  CHECK(r.out_level("lptim1_ch1") == false);
+  r.write(ccmr1, cc1e | cc1p);
+  r.probe->pulses.clear();
+  r.probe->falls.clear();
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 7 * cycle);
+  CHECK(r.probe->falls == std::vector{a + 3 * cycle});
+  CHECK(r.probe->pulses == std::vector{a + 6 * cycle});
+  auto const y = r.now_ps();
+  r.write(ccmr1, cc1e);
+  CHECK(r.probe->falls == std::vector{a + 3 * cycle, y});
+  CHECK(r.out_level("lptim1_ch1") == false);
+}
+
+TEST_CASE(
+    "RM0456 58.4.10: a one-pulse run gives one pulse, set-once keeps the level and discards a "
+    "restart, ENABLE 0 drops it, the software restart inferred")
+{
+  for(auto const config : {0u, wave})
+  {
+    CAPTURE(config);
+    rig r{units[0], false, u575(), "lptim1_ch1"};
+    r.write(ccmr1, cc1e);
+    auto const a = r.started(2, 5, sngstrt, 0, config);
+    r.idle_to(a + 20 * cycle);
+    CHECK(r.probe->pulses == std::vector{a + 3 * cycle});
+    CHECK(r.probe->falls.size() == (config == wave ? 0u : 1u));
+    CHECK(r.out_level("lptim1_ch1") == (config == wave));
+    CHECK(r.read(cnt) == 0);
+    r.write(cr, enable | sngstrt);
+    r.idle_to(a + 25 * cycle);
+    CHECK(r.read(cnt) == (config == wave ? 0u : 2u));
+    r.idle_to(a + 30 * cycle);
+    CHECK(r.probe->pulses.size() == (config == wave ? 1u : 2u));
+    if(config == wave)
+    {
+      auto const x = r.now_ps();
+      r.write(cr, 0);
+      CHECK(r.probe->falls == std::vector{x});
+      CHECK(r.out_level("lptim1_ch1") == false);
+    }
+  }
+}
+
+TEST_CASE("inferred: set-once latches the output with no sink listening")
+{
+  rig r;
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5, cntstrt, 0, wave);
+  CHECK(r.pending() == a + 3 * cycle);
+  r.idle_to(a + 30 * cycle);
+  CHECK(r.out_level("lptim1_ch1") == true);
+  CHECK(r.read(cnt) == 0);
+  CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE("inferred: CCR1 equal to or above ARR keeps the output inactive")
+{
+  for(auto const compare : {5u, 9u})
+  {
+    CAPTURE(compare);
+    rig r{units[0], false, u575(), "lptim1_ch1"};
+    r.write(ccmr1, cc1e);
+    auto const a = r.started(compare, 5);
+    r.idle_to(a + 30 * cycle);
+    CHECK(r.probe->pulses.empty());
+    CHECK(r.out_level("lptim1_ch1") == false);
+  }
+}
+
+TEST_CASE("inferred: ENABLE 0 and an LPTIMxRST pulse drop the output at the write")
+{
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    rig r{units[0], false, u575(), "lptim1_ch1"};
+    r.write(ccmr1, cc1e);
+    auto const a = r.started(2, 5);
+    r.idle_to(a + 4 * cycle);
+    auto const x = r.now_ps();
+    if(reset)
+    {
+      rcc_reset_pulse(*r.f, r.u.reset_reg, r.u.reset_bit);
+    }
+    else
+    {
+      r.write(cr, 0);
+    }
+    CHECK(r.probe->falls == std::vector{x});
+    CHECK(r.out_level("lptim1_ch1") == false);
+    r.idle_to(x + 20 * cycle);
+    CHECK(r.probe->pulses.size() == 1);
+  }
+}
+
+TEST_CASE("inferred: COUNTRST drops a high output and the PWM restarts from the reset instant")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 20);
+  r.idle_to(a + 5 * cycle);
+  r.write(cr, enable | countrst);
+  auto const reset = a + 8 * cycle;
+  r.idle_to(reset);
+  CHECK(r.probe->falls == std::vector{reset});
+  CHECK(r.pending() == reset + 3 * cycle);
+  r.idle_to(reset + 3 * cycle);
+  CHECK(r.probe->pulses == std::vector{a + 3 * cycle, reset + 3 * cycle});
+}
+
+TEST_CASE("inferred: a CCR1 value applied at its CMP1OK moves the PWM level within the period")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 20);
+  r.idle_to(a + 4 * cycle);
+  CHECK(r.out_level("lptim1_ch1") == true);
+  auto const x = r.now_ps();
+  r.write(ccr1, 9);
+  r.idle_to(x + 3 * cycle);
+  CHECK(r.probe->falls == std::vector{x + 3 * cycle});
+  CHECK(r.out_level("lptim1_ch1") == false);
+  r.idle_to(a + 10 * cycle);
+  CHECK(r.probe->pulses == std::vector{a + 3 * cycle, a + 10 * cycle});
+}
+
+TEST_CASE("inferred: a kernel rate change keeps the PWM phase, the next edge follows the new rate")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.hsi_on();
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 3 * cycle);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 2);
+  auto const x = r.now_ps();
+  CHECK(r.pending() == x + 3 * hsi);
+  r.idle_to(x + 3 * hsi + 2 * hsi);
+  CHECK(r.probe->falls == std::vector{x + 3 * hsi});
+}
+
+TEST_CASE("inferred: a CC1P write at the instant of an output edge applies after the edge")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 3 * cycle);
+  r.write(ccmr1, cc1e | cc1p);
+  CHECK(r.probe->pulses == std::vector{a + 3 * cycle});
+  CHECK(r.probe->falls == std::vector{a + 3 * cycle});
+  CHECK(r.out_level("lptim1_ch1") == false);
+}
+
+TEST_CASE("inferred: a stopped kernel clock keeps the output level until it runs again")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 3 * cycle);
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 1);
+  r.idle_to(a + 40 * cycle);
+  CHECK(r.out_level("lptim1_ch1") == true);
+  CHECK(r.probe->falls.empty());
+  r.rcc("RCC_CCIPR3", "LPTIM1SEL", 0);
+  auto const resumed = r.now_ps();
+  r.idle_to(resumed + 4 * cycle);
+  CHECK(r.probe->falls == std::vector{resumed + 3 * cycle});
+}
+
+TEST_CASE("inferred: a PWM with no sink listening schedules no output event")
+{
+  rig r;
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 7 * cycle);
+  CHECK((r.read(isr) & (cc1if | arrm | ue)) == (cc1if | arrm | ue));
+  CHECK_FALSE(r.pending().has_value());
+}
+
+TEST_CASE("a snapshot restored under a listening sink gives it the next output edges and the level")
+{
+  rig r{units[0], false, u575(), "lptim1_ch1"};
+  r.write(ccmr1, cc1e);
+  auto const a = r.started(2, 5);
+  r.idle_to(a + 3 * cycle);
+  auto const saved = r.f->target->snapshot();
+  rig        other{units[0], false, u575(), "lptim1_ch1"};
+  other.probe->listen(false);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.probe->listening = true;
+  CHECK(other.out_level("lptim1_ch1") == true);
+  other.idle_to(a + 9 * cycle);
+  CHECK(other.probe->falls == std::vector{a + 6 * cycle});
+  CHECK(other.probe->pulses == std::vector{a + 9 * cycle});
+}
+
+TEST_CASE(
+    "RM0456 58.4.10: LPTIM4 drives lptim4_out from CCR1 and ARR, WAVPOL inverts it at the CFGR "
+    "write, also with ENABLE 0")
+{
+  rig        r{units[3], false, u575(), "lptim4_out"};
+  auto const x = r.now_ps();
+  r.write(cfgr, wavpol);
+  CHECK(r.probe->pulses == std::vector{x});
+  CHECK(r.out_level("lptim4_out") == true);
+  r.idle_to(x + 2 * cycle);
+  r.write(cfgr, 0);
+  CHECK(r.probe->falls == std::vector{x + 2 * cycle});
+  r.probe->pulses.clear();
+  r.probe->falls.clear();
+  auto const a = r.started(2, 5, cntstrt, 0, wavpol);
+  r.idle_to(a + 7 * cycle);
+  CHECK(r.probe->falls == std::vector{a + 3 * cycle});
+  REQUIRE(r.probe->pulses.size() == 2);
+  CHECK(r.probe->pulses.back() == a + 6 * cycle);
+  auto* const source = dynamic_cast<stm32::trigger_source*>(r.f->target->model("LPTIM4"));
+  REQUIRE(source != nullptr);
+  CHECK(source->produces("lptim4_out"));
+  CHECK_FALSE(source->produces("lptim4_ch1"));
+}
+
+TEST_CASE("each channel instance drives its own lptim<n>_ch1 signal")
+{
+  rig r;
+  for(auto const& [unit, own, other] : {
+          std::tuple{"LPTIM1", "lptim1_ch1", "lptim1_out"},
+          std::tuple{"LPTIM2", "lptim2_ch1", "lptim1_ch1"},
+          std::tuple{"LPTIM3", "lptim3_ch1", "lptim3_out"},
+  })
+  {
+    CAPTURE(unit);
+    auto* const source = dynamic_cast<stm32::trigger_source*>(r.f->target->model(unit));
+    REQUIRE(source != nullptr);
+    CHECK(source->produces(own));
+    CHECK_FALSE(source->produces(other));
+  }
 }
 
 TEST_CASE(
@@ -861,13 +1314,17 @@ TEST_CASE(
     rig        r;
     auto const start = r.started(30, 10, cntstrt, ue, 0, repetition);
     auto const span  = (repetition + 1) * 11 * cycle;
-    r.idle_to(start + 10 * cycle);
+    r.idle_to(start + 11 * cycle);
     CHECK(r.read(isr) == arrm);
-    CHECK(r.pending() == start + span);
-    r.idle_to(start + span - cycle);
-    CHECK(r.read(isr) == arrm);
-    CHECK_FALSE(r.irq_pending());
+    if(repetition != 0)
+    {
+      CHECK(r.pending() == start + span);
+    }
     r.idle_to(start + span);
+    CHECK(r.read(isr) == arrm);
+    CHECK(r.pending() == start + span + cycle);
+    CHECK_FALSE(r.irq_pending());
+    r.idle_to(start + span + cycle);
     CHECK(r.read(isr) == (arrm | ue));
     CHECK(r.irq_pending());
     r.idle_to(start + span + 3 * cycle);
@@ -885,12 +1342,15 @@ TEST_CASE("RM0456 58.4.8 and 58.4.16: SNGSTRT with REP 3 stops the counter at th
 {
   rig        r;
   auto const start = r.started(30, 10, sngstrt, 0, 0, 3);
-  r.idle_to(start + 10 * cycle);
+  r.idle_to(start + 11 * cycle);
   CHECK(r.pending() == start + 44 * cycle);
   r.idle_to(start + 43 * cycle);
   CHECK(r.read(cnt) == 10);
   r.idle_to(start + 44 * cycle);
   CHECK(r.read(cnt) == 0);
+  CHECK(r.read(isr) == arrm);
+  CHECK(r.pending() == start + 45 * cycle);
+  r.idle_to(start + 45 * cycle);
   CHECK(r.read(isr) == (arrm | ue));
   CHECK_FALSE(r.pending().has_value());
   r.idle_to(start + 60 * cycle);
@@ -956,11 +1416,11 @@ TEST_CASE(
       CHECK(r.pending() == std::min(ok, start + ((written + 10) / 11) * 11 * cycle));
       r.idle_to(ok);
       CHECK((r.read(isr) & repok) == repok);
-      r.idle_to(start + loaded * cycle);
+      r.idle_to(start + (loaded + 1) * cycle);
       CHECK((r.read(isr) & ue) == ue);
       r.write(icr, ue | repok);
       CHECK(r.pending() == start + (loaded + 33) * cycle);
-      r.idle_to(start + (loaded + 33) * cycle);
+      r.idle_to(start + (loaded + 34) * cycle);
       r.write(icr, ue);
       CHECK(r.pending() == start + (loaded + 66) * cycle);
     }
@@ -1004,13 +1464,16 @@ TEST_CASE(
     r.idle_to(start + applied * cycle);
     CHECK(r.read(cnt) == 0);
     r.write(icr, ue | cc1if | arrm);
-    CHECK(r.pending() == start + (applied + 3) * cycle);
-    r.idle_to(start + (applied + 3) * cycle);
+    CHECK(r.pending() == start + (applied + 1) * cycle);
+    r.idle_to(start + (applied + 1) * cycle);
+    r.write(icr, ue);
+    CHECK(r.pending() == start + (applied + 4) * cycle);
+    r.idle_to(start + (applied + 4) * cycle);
     CHECK(r.read(isr) == cc1if);
-    r.idle_to(start + (applied + 20) * cycle);
+    r.idle_to(start + (applied + 21) * cycle);
     CHECK(r.read(isr) == (cc1if | arrm));
     r.write(icr, cc1if | arrm);
-    CHECK(r.pending() == start + (applied + (repetition == 0 ? 21 : 24)) * cycle);
+    CHECK(r.pending() == start + (applied + (repetition == 0 ? 22 : 25)) * cycle);
   }
 }
 
@@ -1045,7 +1508,7 @@ TEST_CASE(
   for(auto const* one : {&r, &other})
   {
     CHECK(one->pending() == start + 44 * cycle);
-    one->idle_to(start + 44 * cycle);
+    one->idle_to(start + 45 * cycle);
     CHECK((one->read(isr) & ue) == ue);
     one->write(icr, ue);
     CHECK(one->pending() == start + (44 + 4 * 21) * cycle);
@@ -1085,7 +1548,7 @@ TEST_CASE(
   r.idle_to(r.now_ps() + 4 * cycle);
   auto const again = r.now_ps() + 3 * cycle;
   r.write(cr, enable | cntstrt);
-  CHECK(r.pending() == again + 20 * cycle);
+  CHECK(r.pending() == again + 21 * cycle);
 }
 
 TEST_CASE(
@@ -1107,9 +1570,9 @@ TEST_CASE(
   r.idle_to(r.now_ps() + 4 * cycle);
   auto const again = r.now_ps() + 3 * cycle;
   r.write(cr, enable | cntstrt);
-  r.idle_to(again + 32 * cycle);
-  CHECK((r.read(isr) & ue) == 0);
   r.idle_to(again + 33 * cycle);
+  CHECK((r.read(isr) & ue) == 0);
+  r.idle_to(again + 34 * cycle);
   CHECK((r.read(isr) & ue) == ue);
 }
 
@@ -1214,11 +1677,11 @@ TEST_CASE(
   r.idle_to(r.now_ps() + 4 * cycle);
   auto const again = r.now_ps() + 3 * cycle;
   r.write(cr, enable | cntstrt);
-  CHECK(r.pending() == again + 4 * cycle);
-  r.idle_to(again + 4 * cycle);
+  CHECK(r.pending() == again + 5 * cycle);
+  r.idle_to(again + 5 * cycle);
   CHECK(r.read(isr) == cc1if);
   CHECK(r.irq_pending());
-  r.idle_to(again + 20 * cycle);
+  r.idle_to(again + 21 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm));
 }
 
@@ -1228,8 +1691,8 @@ TEST_CASE(
 {
   rig        r;
   auto const start = r.started(10, 10);
-  CHECK(r.pending() == start + 10 * cycle);
-  r.idle_to(start + 10 * cycle);
+  CHECK(r.pending() == start + 11 * cycle);
+  r.idle_to(start + 11 * cycle);
   CHECK(r.read(isr) == (cc1if | arrm));
   rig        lowered;
   auto const from = lowered.started(30, 20);
@@ -1309,10 +1772,13 @@ TEST_CASE(
   auto const start = r.started(30, 10, sngstrt);
   r.idle_to(start + 8 * cycle);
   r.write(arr, 20);
-  CHECK(r.pending() == start + 10 * cycle);
+  CHECK(r.pending() == start + 11 * cycle);
   r.idle_to(start + 11 * cycle);
-  CHECK(r.read(isr) == (arrm | arrok | ue));
+  CHECK(r.read(isr) == (arrm | arrok));
   CHECK(r.read(cnt) == 0);
+  CHECK(r.pending() == start + 12 * cycle);
+  r.idle_to(start + 12 * cycle);
+  CHECK(r.read(isr) == (arrm | arrok | ue));
   CHECK_FALSE(r.pending().has_value());
 }
 
@@ -1321,9 +1787,9 @@ TEST_CASE(
     "the count restarting at that instant, inferred")
 {
   for(auto const& [written, first] : {
-          std::pair{std::uint64_t{4},  std::uint64_t{6} },
-          std::pair{std::uint64_t{26}, std::uint64_t{28}},
-          std::pair{std::uint64_t{8},  std::uint64_t{10}},
+          std::pair{std::uint64_t{4},  std::uint64_t{7} },
+          std::pair{std::uint64_t{26}, std::uint64_t{29}},
+          std::pair{std::uint64_t{8},  std::uint64_t{11}},
   })
   {
     CAPTURE(written);
@@ -1342,10 +1808,10 @@ TEST_CASE(
     CHECK(r.read(cnt) == 0);
     CHECK((r.read(isr) & ue) == 0);
     r.write(icr, cc1if | arrm | ue);
-    CHECK(r.pending() == reset + 6 * cycle);
-    r.idle_to(reset + 6 * cycle);
+    CHECK(r.pending() == reset + 7 * cycle);
+    r.idle_to(reset + 7 * cycle);
     CHECK(r.read(isr) == cc1if);
-    CHECK(r.read(cnt) == 6);
+    CHECK(r.read(cnt) == 7);
   }
   rig r;
   r.write(cr, countrst);
@@ -1365,6 +1831,9 @@ TEST_CASE(
   CHECK(r.read(isr) == arrm);
   CHECK(r.pending() == start + 22 * cycle);
   r.idle_to(start + 22 * cycle);
+  CHECK(r.read(isr) == arrm);
+  CHECK(r.pending() == start + 23 * cycle);
+  r.idle_to(start + 23 * cycle);
   CHECK(r.read(isr) == (arrm | ue));
   CHECK_FALSE(r.pending().has_value());
 }
@@ -1426,7 +1895,7 @@ TEST_CASE("inferred: a COUNTRST written with CNTSTRT clears its bit at the due, 
   r.idle_to(at + 3 * cycle);
   CHECK(r.read(cr) == enable);
   CHECK(r.read(cnt) == 0);
-  CHECK(r.pending() == at + 9 * cycle);
+  CHECK(r.pending() == at + 10 * cycle);
 }
 
 TEST_CASE(
@@ -1457,7 +1926,7 @@ TEST_CASE(
     r.idle_to(enabled + 12 * cycle);
     CHECK((r.read(cr) & countrst) == 0);
     CHECK(r.read(cnt) == 0);
-    CHECK(r.pending() == enabled + 16 * cycle + 6 * 8 * cycle);
+    CHECK(r.pending() == enabled + 16 * cycle + 7 * 8 * cycle);
   }
 }
 
