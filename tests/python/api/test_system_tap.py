@@ -12,7 +12,7 @@ from typing import cast, override
 
 import popcorn
 import pytest
-from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core, _system
+from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -292,9 +292,9 @@ def test_a_closed_system_s_tap_holds_every_frame_ended_by_its_last_pause(
 def test_the_tap_keeps_its_limit_and_counts_what_it_dropped(
     pair: Build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from popcorn import _system
+    from popcorn._system import taps
 
-    monkeypatch.setattr(_system, "_TAP_KEEP", 8)
+    monkeypatch.setattr(taps, "_TAP_KEEP", 8)
     system = pair()
     tap = system.tap("a.USART1")
     asyncio.run(to(system, at(3000)))
@@ -589,9 +589,11 @@ def test_a_merged_tap_buffer_keeps_the_newest_up_to_its_cap(
 ) -> None:
     from collections import deque
 
-    monkeypatch.setattr(_system, "_TAP_KEEP", 3)
+    from popcorn._system import taps
 
-    merged_of = vars(_system)["_merged"]
+    monkeypatch.setattr(taps, "_TAP_KEEP", 3)
+
+    merged_of = vars(taps)["_merged"]
 
     def order(item: int) -> tuple[int, int]:
         return item, 0

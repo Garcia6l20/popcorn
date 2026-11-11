@@ -1,23 +1,17 @@
-"""Several machines on one virtual clock, their UARTs, SPIs and I2Cs linked machine to machine."""
-
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
 import contextlib
-import heapq
 import logging
-import threading
 import weakref
-from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload, override
+from typing import TYPE_CHECKING, Any, Literal, cast, overload, override
 
 from popcorn import _core
-from popcorn._devices import chip_select
-from popcorn._enums import I2CPhase, ResetKind, StopReason
+from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import (
     ConfigError,
     EmulationError,
@@ -27,594 +21,42 @@ from popcorn._errors import (
     raise_first,
 )
 from popcorn._host import awaited, watch_awaits
-from popcorn._machine_description import (
-    MachineDescription,
-    _FrozenMap,  # pyright: ignore[reportPrivateUsage]
+from popcorn._stop import Stop
+from popcorn._system.checks import (
+    check_every,
+    check_member,
+    check_target,
+    end_error,
+    offsets_of,
+    on_loop,
+    unmark,
 )
-from popcorn._snapshot import Snapshot
-from popcorn._stop import Stop, stop_of
-from popcorn._tap import TapFrame
+from popcorn._system.description import SystemSnapshot, SystemStop
+from popcorn._system.goals import Goal, Pause, Wait, held_of, reached_of, reached_waits
+from popcorn._system.links import (
+    PARITY,
+    STOP_BITS,
+    I2CBus,
+    Medium,
+    SpiBus,
+    UartLink,
+    check_bus,
+    check_i2c,
+    check_line,
+    medium_of,
+    named_kind,
+)
+from popcorn._system.taps import I2CTap, SpiTap, UartTap
+from popcorn._system.wiring import I2CWired, LinkWires, SpiWired, Wired
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
     from popcorn._machine import Machine
     from popcorn._streams import UartPorts
 
-_STOP_BITS = {0.5: 1, 1.0: 2, 1.5: 3, 2.0: 4}
-_PARITY = {"none": 0, "even": 1, "odd": 2}
 _WATCHDOG = 5.0
-_TAP_KEEP = 1 << 20
 _LOG = logging.getLogger("popcorn")
 _UNDELIVERED = "a member stop the last run found is not delivered yet: run the system on first"
-_OPEN_END = (1 << 63) - 1
-
-type LineState = Literal["idle", "break"]
-"""The state a cut line is held in: `"idle"` keeps it high, `"break"` holds it low."""
-
-
-@dataclass(frozen=True)
-class UartLink:
-    """A UART link of a `System`, both directions, between two members or between two
-    UARTs of one member.
-
-    A frame whose stop bit ends at the sender's system time t ends at the receiver at exactly
-    t + `latency`, whatever the slicing, the thread timing or the system's quantum.
-
-    Attributes:
-        a: One end, `"<member>.<UART>"`, such as `"controller.UART4"`.
-        b: The other end.
-        latency: The line's latency L, above 0. No default: the system's quantum is the
-            smallest L, so L is part of every link's declaration.
-        baud: The line's declared baud: the shape of injected frames, and the baud a sender
-            whose frames differ by more than 3 percent is warned about.
-        data_bits: Declared data bits, 7, 8 or 9, at most 8 with a parity bit: a frame
-            carries data bits plus the parity bit in at most 9 bits.
-        stop_bits: Declared stop bits, 0.5, 1, 1.5 or 2.
-        parity: Declared parity, "none", "even" or "odd": the parity bit of injected frames.
-            A sender whose USART frames with another parity, CR1.PCE and PS, is warned about
-            as for another baud. Each USART computes the parity bit of the frames it sends and
-            checks the bit of the frames it receives, a mismatch setting ISR.PE, so a link
-            whose ends match its declared parity carries correct bits.
-    """
-
-    a: str
-    b: str
-    latency: VirtualDuration
-    baud: int
-    data_bits: int = 8
-    stop_bits: float = 1.0
-    parity: Literal["none", "even", "odd"] = "none"
-
-
-@dataclass(frozen=True)
-class SpiBus:
-    """An SPI bus of a `System`: one master SPI and one slave SPI per slave, on other members.
-
-    The master's SPI model runs as with a board device per slave, each selected by a chip
-    select pin of the master or by its SS output. A frame the master finishes at system time t
-    is clocked by the slave over [t + `latency`, t + `latency` + one frame time], and the slave's
-    reply completes the master's frame at t + 2 * `latency` + one frame time, whatever the
-    slicing, the thread timing or the system's quantum. SCK pauses for 2 * `latency` between
-    frames. A chip select edge reaches the slave `latency` after the master drove it. A frame
-    the slave never clocks, dropped by a reset of the slave or cut by a deselect, completes
-    with all ones. The master keeps its own board devices on the same SPI, the slaves' SPIs take
-    no board controller and no board device.
-
-        popcorn.SpiBus(
-            master="a.SPI1",
-            slaves={"a.PA4": "b.SPI2", "a.NSS": "c.SPI1"},
-            latency=us(5),
-        )
-
-    Attributes:
-        master: The master's SPI, `"<member>.<SPI>"`, such as `"a.SPI1"`.
-        slaves: Each slave's SPI by the master's chip select: `"<master member>.<pin>"`, a GPIO
-            pin of the master such as `"a.PA4"` selecting the slave while low, or
-            `"<master member>.NSS"` for the master's SS output. Slaves are on members other than
-            the master's. A master drives at most one slave through its SS output.
-        latency: The bus's latency L, above 0. No default: the system's quantum is the smallest
-            L, so L is part of every link's declaration.
-    """
-
-    master: str
-    slaves: Mapping[str, str]
-    latency: VirtualDuration
-
-    def __post_init__(self) -> None:
-        slaves = cast(object, self.slaves)
-        if not isinstance(slaves, Mapping):
-            raise ConfigError(
-                f"slaves: {slaves!r} is no mapping of a chip select to a slave",
-                key="slaves",
-                expected="a mapping of a chip select to a slave SPI",
-            )
-        object.__setattr__(self, "slaves", _FrozenMap(cast(Mapping[str, str], slaves)))
-
-
-@dataclass(frozen=True)
-class I2CBus:
-    """An I2C bus of a `System`: one controller I2C and one I2C per target, on other members.
-
-    The controller's I2C model runs as with a board target per remote target, which takes every
-    address: the address match is decided at the target. An address, write or read phase the
-    controller ends at system time t is replayed by each target's I2C over [t + `latency`,
-    t + `latency` + p], p the phase as the controller clocked it, ten SCL periods for an address
-    and nine for a byte. The target's answer is stamped t + `latency` + p + s, s its clock
-    stretch, and the controller's phase completes `latency` after the last answer, whatever the
-    slicing, the thread timing or the system's quantum. SCL stays low for 2 * `latency` + p + s
-    per phase. An address or a written byte is acknowledged when any target or board target
-    acknowledges it. The controller acknowledges a read byte. A write or read phase reaches only
-    the targets that acknowledged the transfer's last address. A STOP reaches the targets
-    `latency` after the controller drove it. A phase a target never answers, dropped by a reset
-    of the target or cut by a STOP, gets NACK for an address or a written byte and 0xFF for a
-    read byte. The controller keeps its own board targets on the same I2C, the targets' I2Cs take
-    no board controller and no board target.
-
-        popcorn.I2CBus(ports=["a.I2C1", "b.I2C1", "c.I2C2"], latency=us(5))
-
-    Attributes:
-        ports: The I2Cs, `"<member>.<I2C>"`, the controller's first, then each target's, on
-            members other than the controller's, at least one target.
-        latency: The bus's latency L, above 0. No default: the system's quantum is the smallest
-            L, so L is part of every link's declaration.
-    """
-
-    ports: Sequence[str]
-    latency: VirtualDuration
-
-    def __post_init__(self) -> None:
-        ports = cast(object, self.ports)
-        if isinstance(ports, str | bytes) or not isinstance(ports, Sequence):
-            raise ConfigError(
-                f"ports: {ports!r} is no sequence of I2Cs",
-                key="ports",
-                expected="a sequence of '<member>.<I2C>', the controller's first",
-            )
-        object.__setattr__(self, "ports", tuple(cast(Sequence[str], ports)))
-
-
-type _Medium = UartLink | SpiBus | I2CBus
-_MEDIA: tuple[type[_Medium], ...] = (UartLink, SpiBus, I2CBus)
-
-
-def _named(kind: type) -> str:
-    """`kind`'s name with its article, such as "a UartLink", "an SpiBus" or "an I2CBus"."""
-    return f"{'an' if kind.__name__.startswith(('Spi', 'I2C')) else 'a'} {kind.__name__}"
-
-
-def _joined(names: list[str]) -> str:
-    return ", ".join(names[:-1]) + " or " + names[-1]
-
-
-def _medium(index: int, link: object) -> _Medium:
-    """Return `links[index]` as a medium, or raise ConfigError at `links[index]`."""
-    if not isinstance(link, _MEDIA):
-        raise ConfigError(
-            f"links[{index}]: a {type(link).__qualname__}, not "
-            + _joined([_named(kind) for kind in _MEDIA]),
-            key=f"links[{index}]",
-            expected=_joined([f"a popcorn.{kind.__name__}" for kind in _MEDIA]),
-        )
-    return link
-
-
-def _check_medium(index: int, link: _Medium) -> list[tuple[str, object, str]]:
-    """Check the values of `links[index]`, return its ends as (key, value, unit kind)."""
-    match link:
-        case UartLink():
-            _check_line(index, link)
-            return [(f"links[{index}].{side}", getattr(link, side), "UART") for side in ("a", "b")]
-        case SpiBus():
-            return _check_bus(index, link).ends
-        case I2CBus():
-            return _check_i2c(index, link)
-
-
-@dataclass(frozen=True, slots=True)
-class SystemDescription:
-    """Members and links of a linked system, as data: what `System` runs.
-
-    A value, as `MachineDescription` is: frozen, hashable, equal by content, holding machine
-    descriptions and never a machine. Declaring one reads no file, so a conftest imports it
-    before the firmware exists. `machines`, `boot` and `link` build the runtime. The pytest
-    plugin's `@popcorn.pytest.system` fixtures boot each member from its own description's boot
-    cache.
-
-    Each member runs on its own host thread. The members meet at a barrier every `quantum` of
-    system time, and after it each receiver's thread drains the frames sent to it, senders in
-    member order, then links in `links` order. The Python callbacks of different members run
-    at once, each on its member's thread.
-
-        SYSTEM = popcorn.SystemDescription(
-            members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
-            links=[
-                popcorn.UartLink("ctl.UART4", "r1.USART3", latency=us(20), baud=460_800),
-                popcorn.UartLink("ctl.USART3", "r2.USART3", latency=us(20), baud=460_800),
-            ],
-        )
-
-    Attributes:
-        members: Each member's machine description, by member name, in member order. A name is a
-            `Machine` name: not empty, no whitespace, no dot. Members may share a machine
-            description: each is its own machine. A member's config and strictness are part of its
-            machine description, `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
-        links: The links, `UartLink`, `SpiBus` or `I2CBus`, at least one. Their order is part of the
-            system: it fixes the order of frames arriving at one receiver at the same instant on
-            several links.
-        offsets: System time of each member's local time at the start, 0 for an absent one.
-        goal_cap: Virtual time a member goal may run from its start, None for no cap, as
-            `System(goal_cap=)`.
-        on_member_reset: What a firmware or watchdog reset of a running member does, as
-            `System(on_member_reset=)`.
-
-    Raises:
-        ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
-            a bad name or no MachineDescription, `links` empty, `links[i]` neither `UartLink`,
-            `SpiBus` nor `I2CBus`, `links[i].a` or `.b` naming no member's peripheral as
-            `"<member>.<UART>"`, `links[i].master` or `links[i].slaves[<chip select>]` naming
-            none as `"<member>.<SPI>"`, a chip select that is not `"<master member>.<pin>"` or
-            `"<master member>.NSS"`, a slave on the master's member, `links[i].ports` with no
-            target, `links[i].ports[j]` naming none as `"<member>.<I2C>"` or a target on the
-            controller's member, or a UART, SPI or I2C in two links, `links[i].latency`,
-            `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of range, `offsets.<name>`
-            naming no member or below 0, `goal_cap` not above 0, or `on_member_reset` neither
-            "reset" nor "stop". Whether a link end is a UART, SPI or I2C of the member's part is
-            checked by `link`, which has the description.
-    """
-
-    members: Mapping[str, MachineDescription]
-    links: Sequence[UartLink | SpiBus | I2CBus]
-    offsets: Mapping[str, VirtualDuration] = field(default_factory=_FrozenMap[str, VirtualDuration])
-    goal_cap: VirtualDuration | None = None
-    on_member_reset: Literal["reset", "stop"] = "reset"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "members", _FrozenMap(self.members))
-        object.__setattr__(self, "links", tuple(self.links))
-        object.__setattr__(self, "offsets", _FrozenMap(self.offsets))
-        if not self.members:
-            raise ConfigError(
-                "members: a system needs a member", key="members", expected="a member"
-            )
-        for name, project in cast(Mapping[object, object], self.members).items():
-            key = f"members.{name}"
-            if not isinstance(name, str) or not _is_machine_name(name):
-                raise ConfigError(
-                    f"{key}: {name!r} is no machine name",
-                    key=key,
-                    expected="a name, not empty, without whitespace or a dot",
-                )
-            if not isinstance(project, MachineDescription):
-                raise ConfigError(
-                    f"{key}: a {type(project).__qualname__}, not a MachineDescription",
-                    key=key,
-                    expected="a popcorn.MachineDescription",
-                )
-        if not self.links:
-            raise ConfigError("a linked system needs a link", key="links", expected="a link")
-        used: set[str] = set()
-        for index, link in enumerate(cast(tuple[object, ...], self.links)):
-            for key, end, kind in _check_medium(index, _medium(index, link)):
-                self._check_end(key, end, kind, used)
-        _offsets(list(self.members), self.offsets)
-        cap = cast(object, self.goal_cap)
-        if cap is not None and (not isinstance(cap, VirtualDuration) or cap.ps <= 0):
-            raise ConfigError(
-                f"goal_cap: {cap!r} is no duration above 0",
-                key="goal_cap",
-                expected="None or a VirtualDuration above 0",
-            )
-        if self.on_member_reset not in ("reset", "stop"):
-            raise ConfigError(
-                f"on_member_reset: {self.on_member_reset!r} is neither 'reset' nor 'stop'",
-                key="on_member_reset",
-                expected="'reset' or 'stop'",
-            )
-
-    def _check_end(self, key: str, end: object, kind: str, used: set[str]) -> None:
-        """Check one end of a link, a `"<member>.<kind>"` string, and mark it used."""
-        if not isinstance(end, str):
-            raise ConfigError(
-                f"{key}: a {type(end).__qualname__}, not a str",
-                key=key,
-                expected=f"'<member>.<{kind}>'",
-            )
-        name, dot, unit = end.partition(".")
-        if not dot or not unit or name not in self.members:
-            raise ConfigError(
-                f"{key}: {end!r} names no member {kind}",
-                key=key,
-                expected=f"'<member>.<{kind}>'",
-            )
-        if end in used:
-            raise ConfigError(f"{key}: {end} is in two links", key=key, expected=f"a free {kind}")
-        used.add(end)
-
-    @property
-    def quantum(self) -> VirtualDuration:
-        """The quantum Q, the smallest link latency: members meet every Q of system time."""
-        return min(link.latency for link in self.links)
-
-    def replace(self, **changes: object) -> SystemDescription:
-        """A copy with `changes` applied, as `dataclasses.replace`, checked again."""
-        return replace(self, **changes)
-
-    def machines(self) -> dict[str, Machine]:
-        """A new machine per member, `MachineDescription.machine(name=<member>)`, not reset.
-
-        Raises:
-            Exception: As `MachineDescription.machine`.
-        """
-        return {name: project.machine(name=name) for name, project in self.members.items()}
-
-    async def boot(self) -> System:
-        """Build `machines`, boot each from reset as `MachineDescription.boot_machine` does, or only
-        reset it when its machine description has no `boot.until`, one after the other, then `link`
-        them. For scripts: the pytest plugin's `@popcorn.pytest.system` fixtures boot from the boot
-        cache instead.
-
-        Raises:
-            Exception: As `machines`, `MachineDescription.boot_machine` and `link`.
-        """
-        machines = self.machines()
-        for name, machine in machines.items():
-            project = self.members[name]
-            if project.boot.until is None:
-                machine.reset()
-            else:
-                await project.boot_machine(machine)
-        return self.link(machines)
-
-    def link(
-        self,
-        machines: Mapping[str, Machine],
-        *,
-        slice_instructions: int = 1_000_000,
-        slice_wall_budget: float = 1e-3,
-    ) -> System:
-        """The `System` of this system over `machines`, booted any way, each standing
-        where its system time starts: `offsets` gives that time.
-
-        Args:
-            machines: A parked machine per member, by member name, named as the member.
-            slice_instructions: As `System(slice_instructions=)`.
-            slice_wall_budget: As `System(slice_wall_budget=)`.
-
-        Raises:
-            ConfigError: `machines` misses a member or names another, at `members.<name>`, or
-                as `System`.
-            Exception: As `System`.
-        """
-        unmatched = sorted(set(self.members).symmetric_difference(machines))
-        if unmatched:
-            name = unmatched[0]
-            raise ConfigError(
-                f"members.{name}: a machine of no member, or a member with no machine",
-                key=f"members.{name}",
-                expected="one machine per member",
-            )
-        return System(
-            {name: machines[name] for name in self.members},
-            self.links,
-            offsets=self.offsets,
-            on_member_reset=self.on_member_reset,
-            goal_cap=self.goal_cap,
-            slice_instructions=slice_instructions,
-            slice_wall_budget=slice_wall_budget,
-        )
-
-
-@dataclass(frozen=True)
-class SystemStop:
-    """Why and where a `System.run` ended.
-
-    Attributes:
-        reason: TIME when every member reached the target, IDLE when every member slept with
-            nothing due and every link was empty, or the reason of the member stop that ended
-            the run.
-        member: The member whose stop ended the run, None for TIME and IDLE.
-        stop: That member's stop, None for TIME and IDLE.
-        time: System time of the stop: the target for TIME, the member's stop point for a
-            member stop, the point where every member was quiescent for IDLE.
-        stops: Each member's own stop at the end of the run, keyed by name. For TIME and IDLE
-            every member's, a TIME or IDLE stop at its position. For a member stop only that
-            member's: the others stand where the run left them, a position that depends on the
-            quantum.
-    """
-
-    reason: StopReason
-    member: str | None
-    stop: Stop | None
-    time: VirtualTime
-    stops: Mapping[str, Stop] = field(default_factory=dict[str, Stop])
-
-
-@dataclass(frozen=True)
-class SystemSnapshot:
-    """A `System`'s whole state at a stop, `System.snapshot`, restorable into it
-    any number of times with `System.restore`. In memory only.
-
-    Attributes:
-        members: Each member's own snapshot, keyed by name.
-        state: The system's own state: the window, the pending barrier, each member's base and
-            halt, and every link's frames in flight, armed edits and injections.
-        target: The last TIME target, the base `run(for_=)` and `wait_for` count from, None
-            before the first one.
-    """
-
-    members: Mapping[str, Snapshot]
-    state: bytes
-    target: VirtualTime | None
-
-
-@dataclass(frozen=True)
-class SpiTapFrame:
-    """One frame on an SPI bus, as `SpiTap` shows it. Times are system times.
-
-    Attributes:
-        slave: The slave's SPI, `"<member>.<SPI>"`.
-        cs: The chip select pin of the master that selected the slave, such as `"PA4"`, None for
-            the master's SS output.
-        unit: Number the master's side gave the frame on this slave's link, increasing per
-            slave: chip select edges of that slave take numbers from the same counter.
-        at: End of the master's frame at the master: the stamp the slave sees `latency` later.
-        reply: Stamp of the slave's reply, `at` + `latency` + one frame time, or the time the
-            frame was dropped. The master completes the frame `latency` after `reply`.
-        mosi: The frame the master sent, in wire order, first bit on the wire in bit `bits - 1`.
-        miso: The frame the slave returned, in wire order, all ones when `dropped`.
-        bits: Frame size, 4 to 32.
-        dropped: Whether the slave never clocked the frame, a reset of the slave dropped it or a
-            deselect cut it, and the master got all ones.
-    """
-
-    slave: str
-    cs: str | None
-    unit: int
-    at: VirtualTime
-    reply: VirtualTime
-    mosi: int
-    miso: int
-    bits: int
-    dropped: bool
-
-
-@dataclass(frozen=True)
-class I2CTapPhase:
-    """One phase on an I2C bus between the controller and one target, as `I2CTap` shows it.
-    Times are system times. An address phase gives one record per target. A write or read phase
-    gives one per target that acknowledged the transfer's last address.
-
-    Attributes:
-        target: The target's I2C, `"<member>.<I2C>"`.
-        unit: Number the controller's side gave the phase on this target's link, increasing per
-            target.
-        phase: `I2CPhase.ADDRESS`, `WRITE` or `READ`.
-        byte: For an address phase the address byte, the 7-bit address in bits 7 to 1 and the
-            read bit in bit 0. For a write phase the byte the controller wrote. For a read phase
-            the byte the target sent, 0xFF when `dropped`.
-        ack: The target's acknowledge of an address or a written byte, the controller's
-            acknowledge of a read byte.
-        at: End of the controller's phase at the controller: the stamp the target sees `latency`
-            later.
-        answer: Stamp of the target's answer, `at` + `latency` + the phase time + the target's
-            stretch, or the time the phase was dropped. The controller completes the phase
-            `latency` after the last target's answer.
-        dropped: Whether the target never answered the phase, a reset of the target dropped it
-            or a STOP cut it, and the controller got NACK or 0xFF.
-    """
-
-    target: str
-    unit: int
-    phase: I2CPhase
-    byte: int
-    ack: bool
-    at: VirtualTime
-    answer: VirtualTime
-    dropped: bool
-
-
-@dataclass(frozen=True)
-class _LinkWires:
-    ends: tuple[str, str]
-    wires: tuple[int, int]
-    link: int
-
-
-@dataclass(frozen=True)
-class _SpiWired:
-    ends: tuple[str, ...]
-    selects: tuple[str | None, ...]
-    bus: int
-
-
-@dataclass(frozen=True)
-class _I2CWired:
-    ends: tuple[str, ...]
-    bus: int
-
-
-type _Wired = _LinkWires | _SpiWired | _I2CWired
-
-
-@dataclass(frozen=True)
-class _Pause:
-    reason: _core.PauseReason
-    member: int | None
-    at: int
-    stop: Stop
-    error: BaseException | None
-    windows: int
-    slices: int
-
-    @staticmethod
-    def of(raw: object) -> _Pause:
-        reason, member, at, info, error, windows, slices = cast(
-            tuple[
-                _core.PauseReason,
-                int | None,
-                int,
-                _core.StopInfo,
-                BaseException | None,
-                int,
-                int,
-            ],
-            raw,
-        )
-        return _Pause(reason, member, at, stop_of(info), error, windows, slices)
-
-
-@dataclass(eq=False)
-class _Wait:
-    until: int | None
-    for_ps: int | None
-    deadline_ps: int | None
-    gate: _core.Predicate | None
-    stop_when: Callable[[], bool] | None
-    future: asyncio.Future[Stop]
-    until_ps: int | None = None
-    from_executed: int | None = None
-
-
-@dataclass(eq=False)
-class _Goal:
-    future: _core.HostFuture
-    task: asyncio.Task[object] | None
-    releases: bool = False
-    withdrawn: bool = False
-    waits: tuple[_Wait, ...] = ()
-
-    def done(self) -> bool:
-        return self.future.done()
-
-
-def _reached_waits(waits: Sequence[_Wait], stop: Stop, at: int, held: int) -> list[_Wait]:
-    """The waits a run goal serving `waits` reached with `stop` at system time `at`, `held`
-    the mask of waits whose predicate stopped it: none for a member stop."""
-    if stop.reason is StopReason.TIME and stop.detail == "goal cap":
-        return []
-    reached: list[_Wait] = []
-    for bit, wait in enumerate(waits):
-        if stop.reason is StopReason.USER:
-            own = bool(held >> bit & 1)
-        elif stop.reason is StopReason.TIME:
-            own = wait.until_ps is not None and wait.until_ps <= at
-        elif stop.reason is StopReason.ADDRESS:
-            own = wait.until == stop.pc
-        else:
-            own = False
-        if own:
-            reached.append(wait)
-    return reached
-
-
-def _held_of(raw: object) -> tuple[Stop, int, int]:
-    info, at, held = cast(tuple[_core.StopInfo, int, int], raw)
-    return stop_of(info), at, held
-
-
-def _reached_of(raw: object) -> tuple[Stop, int]:
-    info, at = cast(tuple[_core.StopInfo, int], raw)
-    return stop_of(info), at
 
 
 class System:
@@ -805,12 +247,12 @@ class System:
         self._machines = dict(members)
         self._index = {name: index for index, name in enumerate(self._names)}
         for name, machine in self._machines.items():
-            _check_member(name, machine)
+            check_member(name, machine)
         if not links:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
-        media = [_medium(index, link) for index, link in enumerate(cast(Sequence[object], links))]
-        offset_ps = _offsets(self._names, offsets or {})
-        self._media: list[_Wired] = []
+        media = [medium_of(index, link) for index, link in enumerate(cast(Sequence[object], links))]
+        offset_ps = offsets_of(self._names, offsets or {})
+        self._media: list[Wired] = []
         self._taps: dict[int, UartTap | SpiTap | I2CTap] = {}
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
@@ -822,11 +264,11 @@ class System:
         for index, link in enumerate(media):
             self._media.append(self._build(index, link, used))
         self._handle.start(offset_ps)
-        self._unlink = weakref.finalize(self, _unmark, self._mark_linked())
+        self._unlink = weakref.finalize(self, unmark, self._mark_linked())
         self._origin = max(offset_ps)
         self._closed = False
         self._failed: BaseException | None = None
-        self._flight: asyncio.Future[_Pause] | None = None
+        self._flight: asyncio.Future[Pause] | None = None
         self._native: _core.HostFuture | None = None
         self._free = False
         self._halting = False
@@ -837,9 +279,9 @@ class System:
         self._pausing = False
         self._target: int | None = None
         self._goal_cap = None if goal_cap is None else goal_cap.ps
-        self._goals: dict[int, _Goal] = {}
-        self._opens: dict[int, _Goal] = {}
-        self._waits: dict[int, list[_Wait]] = {}
+        self._goals: dict[int, Goal] = {}
+        self._opens: dict[int, Goal] = {}
+        self._waits: dict[int, list[Wait]] = {}
         self._rebuilds: set[int] = set()
         self._run_ends: dict[int, Stop] = {}
         self._undecided: dict[int, asyncio.Task[object] | None] = {}
@@ -857,7 +299,7 @@ class System:
             machine._system = cast(Any, weakref.ref(self))  # pyright: ignore[reportPrivateUsage]
         watch_awaits(self)
 
-    def _build(self, index: int, link: _Medium, used: set[tuple[str, str]]) -> _Wired:
+    def _build(self, index: int, link: Medium, used: set[tuple[str, str]]) -> Wired:
         match link:
             case UartLink():
                 return self._add_uart(index, link, used)
@@ -866,8 +308,8 @@ class System:
             case I2CBus():
                 return self._add_i2c(index, link, used)
 
-    def _add_spi(self, index: int, bus: SpiBus, used: set[tuple[str, str]]) -> _SpiWired:
-        lines = _check_bus(index, bus).lines
+    def _add_spi(self, index: int, bus: SpiBus, used: set[tuple[str, str]]) -> SpiWired:
+        lines = check_bus(index, bus).lines
         master, master_unit = self._bus_end(f"links[{index}].master", bus.master, used, "SPI")
         spec = _core.SpiBusSpec()
         spec.master = master
@@ -895,14 +337,14 @@ class System:
             number = self._handle.add_spi_bus(spec)
         except ConfigError as error:
             if error.key == "master":
-                raise _end_error(error, f"links[{index}].master") from error
+                raise end_error(error, f"links[{index}].master") from error
             if error.key.startswith("slaves["):
-                raise _end_error(error, keys[int(error.key[len("slaves[") : -1])]) from error
+                raise end_error(error, keys[int(error.key[len("slaves[") : -1])]) from error
             raise
-        return _SpiWired(tuple(ends), tuple(selects), number)
+        return SpiWired(tuple(ends), tuple(selects), number)
 
-    def _add_i2c(self, index: int, bus: I2CBus, used: set[tuple[str, str]]) -> _I2CWired:
-        keys = [key for key, _, _ in _check_i2c(index, bus)]
+    def _add_i2c(self, index: int, bus: I2CBus, used: set[tuple[str, str]]) -> I2CWired:
+        keys = [key for key, _, _ in check_i2c(index, bus)]
         ends = [
             self._bus_end(key, port, used, "I2C") for key, port in zip(keys, bus.ports, strict=True)
         ]
@@ -920,11 +362,11 @@ class System:
             number = self._handle.add_i2c_bus(spec)
         except ConfigError as error:
             if error.key == "controller":
-                raise _end_error(error, keys[0]) from error
+                raise end_error(error, keys[0]) from error
             if error.key.startswith("targets["):
-                raise _end_error(error, keys[1 + int(error.key[len("targets[") : -1])]) from error
+                raise end_error(error, keys[1 + int(error.key[len("targets[") : -1])]) from error
             raise
-        return _I2CWired(tuple(f"{self._names[member]}.{unit}" for member, unit in ends), number)
+        return I2CWired(tuple(f"{self._names[member]}.{unit}" for member, unit in ends), number)
 
     def _bus_end(
         self, key: str, end: str, used: set[tuple[str, str]], kind: str
@@ -944,8 +386,8 @@ class System:
         used.add((name, serving))
         return self._index[name], serving
 
-    def _add_uart(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> _LinkWires:
-        word_bits = _check_line(index, link)
+    def _add_uart(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> LinkWires:
+        word_bits = check_line(index, link)
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
         wires: list[int] = []
         for side, (sender, sender_link, _), (receiver, receiver_link, unit) in (
@@ -959,8 +401,8 @@ class System:
             spec.latency_ps = link.latency.ps
             spec.baud = link.baud
             spec.word_bits = word_bits
-            spec.half_stops = _STOP_BITS[link.stop_bits]
-            spec.parity = _PARITY[link.parity]
+            spec.half_stops = STOP_BITS[link.stop_bits]
+            spec.parity = PARITY[link.parity]
             spec.strict = self._machines[
                 self._names[receiver]
             ]._strict_peripherals  # pyright: ignore[reportPrivateUsage]
@@ -977,7 +419,7 @@ class System:
                     key=key,
                     expected=error.expected,
                 ) from error
-        return _LinkWires(
+        return LinkWires(
             (
                 f"{self._names[ends[0][0]]}.{ends[0][2]}",
                 f"{self._names[ends[1][0]]}.{ends[1][2]}",
@@ -988,17 +430,17 @@ class System:
 
     def _mark_linked(self) -> list[tuple[UartPorts, str]]:
         """Mark each linked UART on its member's ports, so its stream and pty refuse, and
-        return the marks for `_unmark`."""
+        return the marks for `unmark`."""
         marked: list[tuple[UartPorts, str]] = []
         for wired in self._media:
             match wired:
-                case _LinkWires():
+                case LinkWires():
                     for end in wired.ends:
                         name, _, unit = end.partition(".")
                         ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
                         ports.linked.add(unit)
                         marked.append((ports, unit))
-                case _SpiWired() | _I2CWired():
+                case SpiWired() | I2CWired():
                     pass
         return marked
 
@@ -1164,17 +606,17 @@ class System:
             tap = self._taps.get(index)
             if tap is None:
                 match wired:
-                    case _LinkWires():
+                    case LinkWires():
                         tap = UartTap(self, wired)
-                    case _SpiWired():
+                    case SpiWired():
                         tap = SpiTap(self, wired)
-                    case _I2CWired():
+                    case I2CWired():
                         tap = I2CTap(self, wired)
                 self._taps[index] = tap
             if kind is None and not isinstance(tap, UartTap):
-                raise TypeError(f"{end!r} has {_named(type(tap))}, pass {type(tap).__name__}")
+                raise TypeError(f"{end!r} has {named_kind(type(tap))}, pass {type(tap).__name__}")
             if kind is not None and not isinstance(tap, kind):
-                raise TypeError(f"{end!r} has {_named(type(tap))}, not {_named(kind)}")
+                raise TypeError(f"{end!r} has {named_kind(type(tap))}, not {named_kind(kind)}")
             return tap
         raise ValueError(f"{end!r} is no end of a link of {self!r}")
 
@@ -1227,7 +669,7 @@ class System:
                 handler error, of its own type. An error a member raised carries the note
                 "raised by member <name> at system time <t>".
         """
-        _check_target(for_, until)
+        check_target(for_, until)
         self._require_usable()
         await self._settled()
         self._refuse_run()
@@ -1286,7 +728,7 @@ class System:
             USER at the check point where `predicate` held, each member's stop a TIME stop
             there. TIME at `base + for_`. A member stop or IDLE as `run` returns them.
         """
-        _check_every(every, for_)
+        check_every(every, for_)
         self._require_usable()
         await self._settled()
         self._refuse_run()
@@ -1343,7 +785,7 @@ class System:
         self._release_undecided()
         try:
             for index in range(len(self._names)):
-                goal = _Goal(
+                goal = Goal(
                     self._handle.post_goal(
                         index, None, None, None, None, None, None, True, self._goal_cap, None
                     ),
@@ -1396,7 +838,7 @@ class System:
         if (
             self._free
             and loop is not None
-            and not _on_loop(loop)
+            and not on_loop(loop)
             and not loop.is_closed()
             and self._halt_from(loop)
         ):
@@ -1409,7 +851,7 @@ class System:
                 if native is not None:
                     self._pausing = True
                     self._handle.request_pause()
-                    pause = _Pause.of(native.result(None))
+                    pause = Pause.of(native.result(None))
                     if self._took(native):
                         self._paused(pause, None)
                 self._end_free()
@@ -1686,12 +1128,12 @@ class System:
                 tap._discard()  # pyright: ignore[reportPrivateUsage]
                 continue
             match wired:
-                case _LinkWires():
+                case LinkWires():
                     for wire in wired.wires:
                         self._handle.tap_take(wire)
-                case _SpiWired():
+                case SpiWired():
                     self._handle.spi_tap_take(wired.bus)
-                case _I2CWired():
+                case I2CWired():
                     self._handle.i2c_tap_take(wired.bus)
         for machine in self._machines.values():
             errors += machine._rebuilt()  # pyright: ignore[reportPrivateUsage]
@@ -1758,7 +1200,7 @@ class System:
         with contextlib.suppress(Exception):
             await asyncio.shield(flight)
 
-    def _launch(self, until_ps: int | None) -> asyncio.Future[_Pause]:
+    def _launch(self, until_ps: int | None) -> asyncio.Future[Pause]:
         future = self._handle.resume(until_ps)
         self._native = future
         flight = asyncio.ensure_future(self._flown(future, until_ps))
@@ -1766,7 +1208,7 @@ class System:
             self._flight = flight
         return flight
 
-    async def _resume(self, until_ps: int | None) -> _Pause:
+    async def _resume(self, until_ps: int | None) -> Pause:
         flight = self._launch(until_ps)
         try:
             return await asyncio.shield(flight)
@@ -1776,15 +1218,15 @@ class System:
                 self._handle.request_pause()
             raise
 
-    async def _flown(self, future: _core.HostFuture, until_ps: int | None) -> _Pause:
+    async def _flown(self, future: _core.HostFuture, until_ps: int | None) -> Pause:
         taken = False
         try:
             try:
-                pause = await awaited(future, _Pause.of, cancel=False)
+                pause = await awaited(future, Pause.of, cancel=False)
             except asyncio.CancelledError:
                 with contextlib.suppress(EmulationError):
                     self._handle.request_pause()
-                pause = _Pause.of(future.result(None))
+                pause = Pause.of(future.result(None))
         finally:
             taken = self._took(future)
         if taken:
@@ -1800,7 +1242,7 @@ class System:
         self._pausing = False
         return True
 
-    def _paused(self, pause: _Pause, until_ps: int | None) -> None:
+    def _paused(self, pause: Pause, until_ps: int | None) -> None:
         if pause.reason is _core.PauseReason.system_time and until_ps is not None:
             self._target = until_ps
         elif pause.reason is _core.PauseReason.delivered and pause.member is not None:
@@ -1841,14 +1283,14 @@ class System:
         self._halts.clear()
         self._schedule_kick()
 
-    def _run_stopped(self, index: int, goal: _Goal) -> None:
+    def _run_stopped(self, index: int, goal: Goal) -> None:
         """The goal of member `index`'s run stopped, at a delivery. Each wait whose own bounds
         or predicate it reached resolves with the stop, and the run goes on from there exactly
         for the others. Any other stop is a member stop: it ends the run, every wait resolves
         with it, and the member is released at it."""
         raw = goal.future.result(0.0)
-        stop, at, held = _held_of(raw) if goal.waits else (*_reached_of(raw), 0)
-        reached = _reached_waits(goal.waits, stop, at, held)
+        stop, at, held = held_of(raw) if goal.waits else (*reached_of(raw), 0)
+        reached = reached_waits(goal.waits, stop, at, held)
         waits = self._waits.get(index, [])
         if not reached:
             self._run_ends[index] = stop
@@ -1909,12 +1351,12 @@ class System:
                 [wait.stop_when for wait in waits],
                 self._goal_cap,
             )
-            goal = _Goal(future, None, waits=waits)
+            goal = Goal(future, None, waits=waits)
         else:
             future = self._handle.post_goal(
                 index, None, None, None, None, None, None, True, self._goal_cap, None
             )
-            goal = _Goal(future, None, releases=True)
+            goal = Goal(future, None, releases=True)
         self._undecided.pop(index, None)
         self._opens[index] = goal
         self._goals[index] = goal
@@ -2023,7 +1465,7 @@ class System:
         open_: bool,
         releases: bool = False,
         returning: Callable[[], tuple[int, int]] | None = None,
-    ) -> _Goal:
+    ) -> Goal:
         self._admitting += 1
         try:
             return await self._admit(
@@ -2059,7 +1501,7 @@ class System:
         open_: bool,
         releases: bool,
         returning: Callable[[], tuple[int, int]] | None,
-    ) -> _Goal:
+    ) -> Goal:
         self._require_usable()
         if index not in self._withdrawals:
             self._refuse_goal(index)
@@ -2091,7 +1533,7 @@ class System:
             until_return,
         )
         self._undecided.pop(index, None)
-        goal = _Goal(future, task, releases)
+        goal = Goal(future, task, releases)
         self._goals[index] = goal
         self._schedule_kick()
         return goal
@@ -2145,7 +1587,7 @@ class System:
         if exact is not None:
             raise MachineBusy(f"{machine.name} runs in its running(): no step inside it")
         waits = self._waits.setdefault(index, [])
-        wait = _Wait(
+        wait = Wait(
             until,
             None if for_ is None else for_.ps,
             None if deadline is None else deadline.ps,
@@ -2195,8 +1637,8 @@ class System:
             return None
         del future
         await self._landed()
-        stop, at, held = _held_of(raw) if waits else (*_reached_of(raw), 0)
-        return None if _reached_waits(waits, stop, at, held) else stop
+        stop, at, held = held_of(raw) if waits else (*reached_of(raw), 0)
+        return None if reached_waits(waits, stop, at, held) else stop
 
     def _refuse_goal(self, index: int) -> None:
         if self._system_run:
@@ -2206,10 +1648,10 @@ class System:
         if index in self._goals:
             raise MachineBusy(f"{self._names[index]} has a goal pending: one goal per member")
 
-    async def _reached(self, index: int, goal: _Goal) -> Stop:
+    async def _reached(self, index: int, goal: Goal) -> Stop:
         future, task = goal.future, goal.task
         try:
-            stop, _ = await awaited(future, _reached_of, cancel=False)
+            stop, _ = await awaited(future, reached_of, cancel=False)
             await self._landed()
         except asyncio.CancelledError:
             self._withdraw(index, goal)
@@ -2236,7 +1678,7 @@ class System:
             with contextlib.suppress(Exception):
                 await asyncio.shield(flight)
 
-    def _withdraw(self, index: int, goal: _Goal) -> None:
+    def _withdraw(self, index: int, goal: Goal) -> None:
         """Withdraw `goal` of member `index`, its task cancelled. A goal already delivered is
         released instead, at once while paused, else by the pause that delivers it."""
         goal.withdrawn = True
@@ -2317,7 +1759,7 @@ class System:
             self._names[index],
         )
 
-    def _system_stop(self, pause: _Pause, target: int) -> SystemStop:
+    def _system_stop(self, pause: Pause, target: int) -> SystemStop:
         reason = pause.reason
         if reason is _core.PauseReason.error:
             assert pause.error is not None
@@ -2412,996 +1854,3 @@ class System:
     @override
     def __repr__(self) -> str:
         return f"System({', '.join(self._names)})"
-
-
-class UartTap:
-    """Both directions of one link of a `System`, `system.tap("a.USART1")`: every frame
-    on the line with its system times, and frames injected, replaced or dropped by number.
-
-    The tap gets a frame once it ended. After a member stop, an IDLE pause or an error it holds
-    every frame whose stop-bit `end` is at or before the pause point and no later frame,
-    whatever the quantum, the slicing or the wall timing. After a TIME stop or a requested pause
-    it holds the frames ended by the earliest member's position, which can lie before the pause
-    point by an amount that depends on the quantum. After `close()` it holds every frame that
-    ended by the last pause. While the system runs it can lag the latest frames by up to two
-    windows of the quantum behind the receiving member's time, and a read at a pause is complete
-    as above.
-    It keeps up to 1 Mi frames per direction not read yet, about 380 bytes each, the oldest
-    dropped and counted in `dropped`: take them with `frames()`.
-    Reading never changes what the receiver gets.
-
-    `towards` names the receiving end of a direction, `"<member>.<UART>"`.
-
-    Line cuts, `cut`, `break_line` and `restore_line`, pull the cable over a window [start,
-    end) of system time at the senders, the base of `TapFrame.start`, both directions: each
-    receiver's line is cut over [start + L, end + L), L the link's latency. Per direction:
-
-    - A frame ending at or before `start`, or starting at or after `end`: delivered as sent.
-    - A frame starting before `start` and ending after it: delivered, cut at `start + L`,
-      tapped `cut` and `lost` with its stop-bit `end`. On an idle line the receiver gets it as
-      an aborted frame: nothing in RDR, IDLE one receiver frame after `start + L`. A frame
-      both aborted by its sender and cut keeps the abort's `end`, and the receiver sees the
-      earlier of the two.
-    - A frame starting inside the cut: never reaches the receiver, tapped `cut`, and also
-      `lost` when it ends after `end`.
-    - A frame an armed `drop` keeps off the line: `dropped` only.
-
-    An injected frame is classified the same way on its receiver times against [start + L,
-    end + L). Deviations: silicon samples a frame cut at `start + L`, which an idle line can
-    turn into a clean wrong byte, and can take the tail of a frame crossing `end + L` for a
-    start bit. The model delivers nothing for either.
-
-    `line="idle"`, the default, keeps the receiver's line high over the cut. `line="break"`
-    holds it low, RM0456 66.5.7: one break character, FE with data 0 and RXFNE, at the
-    receiver's stop-bit sample of a character starting at `start + L`, then nothing until the
-    line rises, and IDLE one receiver frame after `end + L` unless a frame starts before. A
-    frame whose stop bit is not sampled yet at `start + L` becomes that break character at its
-    own stop-bit sample, data 0, where silicon keeps the bits received before the cut. A cut
-    shorter than a frame gives the sampled byte, with FE only when the stop-bit sample falls
-    inside it, and nothing when it ends before the start bit's middle sample. LBDF is never set.
-
-    Errors ignore cuts: shape and overlap errors are found as without them. An injection over a
-    peer frame raises the overlap error, or is refused stopped, even when a cut keeps both off
-    the receiver's line, and a cut never turns a refused stopped injection into an accepted
-    one.
-
-    Who changes cuts, and the time "now" that `break_line` and `restore_line` take:
-
-    - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone
-      but a callback of another machine, see the last item. Now is the later of the two ends'
-      system times, `System.time_of`. After a run a member stop ended at P, a member that runs
-      a goal and sleeps below P stands at P. A member that ran past P stands where the run left
-      it, a position that depends on the quantum, and so does now. `cut` accepts a start from
-      now on.
-    - While the system runs, between two pauses of `running()` too, or with a member goal
-      pending: a callback of the link's cut owner, `owner`, such as an intercept or a model
-      method on that member. Now is the owner's system time at the callback, so the result is
-      the same in every run, at any quantum and slicing. `cut` there accepts a start from that
-      time on.
-    - From the `running()` body or another thread while the system runs, or a member goal is
-      pending: `break_line` and `restore_line` raise RuntimeError. `cut` accepts a start at or
-      after the reach of the link's deliveries so far, or from now when it finds the system
-      paused: its acceptance depends on wall timing, its effect only on `start` and `end`. A
-      body `cut` while the owner's callbacks also change cuts runs in wall order with them, so
-      which call a refusal hits depends on wall timing.
-    - A callback of any machine other than `owner`, a member or a machine outside this system:
-      `cut`, `break_line` and `restore_line` raise RuntimeError, stopped or running, before any
-      change.
-
-    Cuts never overlap, touching allowed, and at most 65536 wait per link, passed ones
-    included until they are erased, about one quantum after their end plus L and the end of
-    the last frame they touched. Snapshots keep the cuts. `owner` is harness configuration: not in
-    snapshots, kept across `System.restore`.
-    """
-
-    __slots__ = (
-        "__weakref__",
-        "_buffers",
-        "_dropped_base",
-        "_ends",
-        "_link",
-        "_lock",
-        "_overflow",
-        "_system",
-        "_wires",
-    )
-
-    def __init__(self, system: System, wired: _LinkWires) -> None:
-        """Wrap a link of `system`. Use `System.tap` instead."""
-        self._system = system
-        self._ends = wired.ends
-        self._wires = wired.wires
-        self._link = wired.link
-        self._buffers = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
-        self._overflow = 0
-        self._dropped_base = 0
-        self._lock = threading.Lock()
-
-    @property
-    def ends(self) -> tuple[str, str]:
-        """The link's two ends, `"<member>.<UART>"`, each named by the UART serving it."""
-        return self._ends
-
-    @property
-    def available(self) -> int:
-        """Frames the tap holds, both directions, not read yet."""
-        with self._lock:
-            self._pull()
-            return len(self._buffers[0]) + len(self._buffers[1])
-
-    @property
-    def dropped(self) -> int:
-        """Frames the tap dropped, both directions, because it held its limit, since system
-        start or the last `System.restore`."""
-        return self._dropped_total() - self._dropped_base
-
-    def _dropped_total(self) -> int:
-        handle = self._system._handle  # pyright: ignore[reportPrivateUsage]
-        return self._overflow + sum(handle.tap_dropped(wire) for wire in self._wires)
-
-    def frames(self, *, towards: str | None = None) -> list[TapFrame]:
-        """Take every frame the tap holds, towards `towards` only when given, oldest first.
-        Never runs the system, allowed stopped and running, from any thread.
-
-        After a member stop, an IDLE pause, an error or `close()`, it takes exactly the frames
-        ended by that point and not taken yet, whatever the quantum, the slicing or the wall
-        timing. After a TIME stop or a requested pause it takes those ended by the earliest
-        member's position, see the class. While the system runs, the tap fills at each
-        barrier and holds every frame ended two windows before the receiving member's time, so
-        how many frames a call takes depends on wall timing. Each frame's content never does.
-        Before a free run sleeps, it holds every frame ended by the earliest member's position.
-
-        Returns:
-            The frames, ordered by `end`, then direction: towards the link's second end first.
-
-        Raises:
-            TypeError: `towards` is no str.
-            ValueError: `towards` is no end of this link.
-        """
-        directions = (0, 1) if towards is None else (self._direction(towards),)
-        taken: list[TapFrame] = []
-        with self._lock:
-            self._pull()
-            for direction in directions:
-                buffer = self._buffers[direction]
-                taken.extend(buffer)
-                buffer.clear()
-        if towards is None:
-            taken.sort(key=lambda frame: (frame.end.ps, frame.towards != self._ends[1]))
-        return taken
-
-    def inject(self, data: bytes, *, at: VirtualTime, towards: str) -> None:
-        """Put frames on the line towards `towards`, back to back at the link's declared baud
-        and shape, as if a device on the line sent them. `at` is the start-bit edge of the first
-        frame at the receiver, system time. Delivered at exactly their times, whatever the
-        quantum, the slicing or the wall timing. With a declared parity, each frame carries
-        its parity bit in the MSB of its word, in place of that data bit.
-
-        Stopped or paused, they are checked at the call: `at` must be at or after the
-        receiver's system time, and no frame may overlap one already on the receiver's line.
-        While the system runs, from a `running()` body or another thread, `at` must be at or
-        after the reach of the deliveries done so far, which depends on wall timing, and an
-        overlap is found later: the system stops with an error at a time fixed by the frames,
-        the later frame's start for two injected frames, and the later of the injected frame's
-        start and the peer frame's sender start for an injected frame and a peer frame. The
-        error is the receiving member's.
-
-        Raises:
-            TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.
-            ValueError: `data` empty, `towards` no end of this link, `at` too early, or, stopped
-                or paused, an overlap. The message names the bound.
-            EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: Called from a callback of a machine.
-        """
-        frames = _data_frames(data)
-        if not isinstance(cast(object, at), VirtualTime):
-            raise TypeError(f"at must be a VirtualTime, not {type(at).__name__}")
-        direction = self._direction(towards)
-        system = self._system
-        system._require_usable()  # pyright: ignore[reportPrivateUsage]
-        wire = self._wires[direction]
-        paused = system._flight is None  # pyright: ignore[reportPrivateUsage]
-        try:
-            refused = self._native.inject(wire, frames, at.ps, paused)
-        except MachineRunning:
-            if not paused:
-                raise
-            refused = self._native.inject(wire, frames, at.ps, False)
-        if refused is None:
-            return
-        reason, bound_ps = refused
-        bound = VirtualTime(bound_ps)
-        receiver = self._ends[1 - direction]
-        if reason == "before_receiver":
-            raise ValueError(f"inject at {at}: before {receiver}'s system time {bound}")
-        if reason == "before_drained":
-            raise ValueError(
-                f"inject at {at}: before {bound}, the earliest time the running system can"
-                " still deliver"
-            )
-        raise ValueError(
-            f"inject at {at}: overlaps the frame starting at {bound} on {receiver}'s line"
-        )
-
-    def cut(self, start: VirtualTime, end: VirtualTime, *, line: LineState = "idle") -> None:
-        """Cut the link over [`start`, `end`) of system time, both directions, the line idle or
-        held low over the cut as `line` says: see the class doc for what each frame and the
-        receiver then get, and who may call it with which earliest `start`.
-
-        A `line="break"` cut keeps `System.run` without `until` from pausing IDLE, and a free
-        run from sleeping, until its release is handed and the receiver's IDLE one frame after
-        `end + L` has fired, since the break's events are due until then. An open break cut
-        whose line fell already does not.
-
-        Raises:
-            TypeError: `start` or `end` is no VirtualTime, a VirtualDuration included.
-            ValueError: `end` not after `start`, `line` neither "idle" nor "break", `start`
-                before the earliest start accepted now, the cut overlaps a cut registered
-                before, or 65536 cuts wait. The message names the bound or the cut overlapped.
-            EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: Called from a callback of a machine other than `owner`, stopped or
-                running.
-            MachineRunning: Called from inside a parked section.
-        """
-        _check_time("start", start)
-        _check_time("end", end)
-        if end.ps <= start.ps:
-            raise ValueError(f"cut [{start}, {end}): end must be after start")
-        low = _line_low(line)
-        system = self._system
-        system._require_usable()  # pyright: ignore[reportPrivateUsage]
-        stopped = system._flight is None  # pyright: ignore[reportPrivateUsage]
-        try:
-            outcome = self._native.cut(self._link, start.ps, end.ps, low, stopped)
-        except MachineRunning:
-            if not stopped:
-                raise
-            outcome = self._native.cut(self._link, start.ps, end.ps, low, False)
-        self._changed(outcome, f"cut [{start}, {end})")
-
-    def break_line(self, *, line: LineState = "idle") -> VirtualTime:
-        """Cut the link from now until `restore_line`, both directions, the line idle or held
-        low as `line` says. Now is the later end's system time when stopped, the owner's system
-        time from the owner's callback while the system runs, see the class doc.
-
-        Returns:
-            The cut's start, now.
-
-        Raises:
-            TypeError: `line` is no str.
-            ValueError: `line` neither "idle" nor "break", a cut is open already, a cut
-                registered before lies after now, or 65536 cuts wait.
-            EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: Called from a callback of a machine other than `owner`, stopped or
-                running. Called while the system runs, or a member goal is pending, from the
-                `running()` body or another thread. Use a callback of `owner`, or
-                `cut(start, end)`.
-            MachineRunning: Called from inside a parked section.
-        """
-        low = _line_low(line)
-        system = self._system
-        system._require_usable()  # pyright: ignore[reportPrivateUsage]
-        stopped = system._quiet()  # pyright: ignore[reportPrivateUsage]
-        return self._changed(self._native.break_line(self._link, low, stopped), "break_line")
-
-    def restore_line(self) -> VirtualTime:
-        """End the open cut now, both directions, now taken as `break_line` takes it. A cut
-        opened at or after now is withdrawn whole.
-
-        Returns:
-            The cut's end, now.
-
-        Raises:
-            ValueError: No cut is open.
-            EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: As `break_line`.
-            MachineRunning: Called from inside a parked section.
-        """
-        system = self._system
-        system._require_usable()  # pyright: ignore[reportPrivateUsage]
-        stopped = system._quiet()  # pyright: ignore[reportPrivateUsage]
-        return self._changed(self._native.restore(self._link, stopped), "restore_line")
-
-    @property
-    def owner(self) -> str:
-        """The member whose callbacks may change the link's cuts while the system runs, its
-        cut owner. Default the member of the link's first end, `UartLink.a`. Set it while the
-        system is stopped, to any member, an end of the link or not. It never depends on which
-        member calls first. Reading it works from any callback of a member and raises
-        `EmulationError` once the system is closed.
-
-        Raises, when set:
-            TypeError: The value is no str.
-            ValueError: No member of the system has that name.
-            EmulationError: The system was closed, or stopped on an error before.
-            MachineRunning: The system runs, or a member goal is pending.
-        """
-        system = self._system
-        return system._names[  # pyright: ignore[reportPrivateUsage]
-            self._native.link_owner(self._link)
-        ]
-
-    @owner.setter
-    def owner(self, member: str) -> None:
-        if not isinstance(cast(object, member), str):
-            raise TypeError(f"owner must be a str, not {type(member).__name__}")
-        system = self._system
-        index = system._index.get(member)  # pyright: ignore[reportPrivateUsage]
-        if index is None:
-            raise ValueError(f"owner {member!r} is no member of {system!r}")
-        system._require_quiet("owner change")  # pyright: ignore[reportPrivateUsage]
-        self._native.set_link_owner(self._link, index)
-
-    def _changed(
-        self, outcome: tuple[int | None, tuple[str, int, int] | None], what: str
-    ) -> VirtualTime:
-        at, refused = outcome
-        if at is not None:
-            return VirtualTime(at)
-        assert refused is not None
-        reason, bound_ps, end_ps = refused
-        bound = VirtualTime(bound_ps)
-        if reason == "before_bound":
-            raise ValueError(f"{what}: starts before {bound}, the earliest start accepted now")
-        if reason == "overlaps":
-            if end_ps == _OPEN_END:
-                raise ValueError(f"{what}: overlaps the cut open from {bound}")
-            raise ValueError(f"{what}: overlaps the cut [{bound}, {VirtualTime(end_ps)})")
-        if reason == "already_open":
-            raise ValueError(f"{what}: the cut from {bound} is open, restore_line() it first")
-        if reason == "none_open":
-            raise ValueError(f"{what}: no cut is open")
-        raise ValueError(f"{what}: {self._native.max_waiting_cuts()} cuts wait on the link already")
-
-    def replace(self, index: int, data: bytes, *, towards: str) -> None:
-        """Give the sender's frames numbered `index` on, one per byte, new data before they
-        start: the receiver and the tap see the new data at the frames' own times, with the
-        parity bit of the sender's own parity in the MSB of the word. Armed at any time, from
-        a `running()` body too: while the sender runs, whether the edit comes before the frame
-        starts depends on wall timing, its effect does not.
-
-        Raises:
-            TypeError: `index` is no int, `data` no bytes, or `towards` no str.
-            ValueError: `index` negative, `data` empty, `towards` no end of this link, a frame
-                it covers started already, `posted`, or it overlaps an edit armed before.
-            EmulationError: The system was closed, or stopped on an error before.
-        """
-        frames = _data_frames(data)
-        self._edit(
-            index, len(frames), towards, lambda wire: self._native.replace(wire, index, frames)
-        )
-
-    def drop(self, index: int, n: int = 1, *, towards: str) -> None:
-        """Keep the sender's `n` frames numbered `index` on off the line: the sender sends
-        them, the receiver sees an idle line, the tap shows them `dropped`. Armed as `replace`.
-
-        Raises:
-            TypeError: `index` or `n` is no int, or `towards` no str.
-            ValueError: `index` negative, `n` not above 0, `towards` no end of this link, or as
-                `replace`.
-            EmulationError: The system was closed, or stopped on an error before.
-        """
-        _check_count("n", n, 1)
-        self._edit(index, n, towards, lambda wire: self._native.drop(wire, index, n))
-
-    def posted(self, *, towards: str) -> int:
-        """Frames the sender started towards `towards` since system start: the lowest index
-        `replace` and `drop` still accept. While the sender runs it depends on wall timing.
-
-        Raises:
-            ValueError: `towards` is no end of this link.
-        """
-        return self._native.posted(self._wires[self._direction(towards)])
-
-    @property
-    def _native(self) -> _core.SystemHandle:
-        return self._system._handle  # pyright: ignore[reportPrivateUsage]
-
-    def _edit(self, index: int, n: int, towards: str, arm: Callable[[int], bool]) -> None:
-        _check_count("index", index, 0)
-        direction = self._direction(towards)
-        self._system._require_usable()  # pyright: ignore[reportPrivateUsage]
-        wire = self._wires[direction]
-        if arm(wire):
-            return
-        started = self._native.posted(wire)
-        if index < started:
-            raise ValueError(
-                f"frame {index} towards {towards} started already: {started} frames started"
-            )
-        raise ValueError(
-            f"frames {index} to {index + n - 1} towards {towards} overlap an edit armed before"
-        )
-
-    def _discard(self) -> None:
-        """Drop every frame held, native and buffered, for a restore."""
-        with self._lock:
-            for wire in self._wires:
-                self._native.tap_take(wire)
-            for buffer in self._buffers:
-                buffer.clear()
-            self._dropped_base = self._dropped_total()
-
-    def _direction(self, towards: str) -> int:
-        if not isinstance(cast(object, towards), str):
-            raise TypeError(f"towards must be a str, not {type(towards).__name__}")
-        named = self._system._end_name(towards)  # pyright: ignore[reportPrivateUsage]
-        if named == self._ends[1]:
-            return 0
-        if named == self._ends[0]:
-            return 1
-        raise ValueError(f"towards {towards!r} is neither {self._ends[0]} nor {self._ends[1]}")
-
-    def _pull(self) -> None:
-        """Move the native taps' frames into the buffers, with `_lock` held: two pulls at once
-        would append one direction's frames out of order."""
-        handle = self._native
-        for direction, wire in enumerate(self._wires):
-            towards = self._ends[1 - direction]
-            buffer = self._buffers[direction]
-            records = handle.tap_take(wire)
-            self._overflow += max(0, len(buffer) + len(records) - _TAP_KEEP)
-            buffer.extend(
-                TapFrame(
-                    data=record.data,
-                    index=record.index,
-                    start=VirtualTime(record.start_ps),
-                    end=VirtualTime(record.end_ps),
-                    arrival=VirtualTime(record.arrival_ps),
-                    towards=towards,
-                    injected=record.injected,
-                    brk=record.brk,
-                    lost=record.lost,
-                    dropped=record.dropped,
-                    cut=record.cut,
-                )
-                for record in records
-            )
-
-    @override
-    def __repr__(self) -> str:
-        return f"UartTap({self._ends[0]} <-> {self._ends[1]})"
-
-
-class SpiTap:
-    """Every frame on one `SpiBus` of a `System`, `system.tap("a.SPI1", SpiTap)`, with its system
-    times.
-
-    The tap gets a frame when the master's side takes the slave's reply, in the master's drain
-    that follows the reply's stamp. After a member stop, an IDLE pause, an error or a TIME stop
-    it holds the frames whose reply the master's drains reached, which depends on the quantum
-    for a frame whose reply lies near the pause point. After `close()` it holds every frame the
-    master took. A frame's content never depends on the quantum, the slicing or the wall
-    timing. It keeps up to 1 Mi frames not read yet, the oldest dropped and counted in
-    `dropped`: take them with `frames()`. The frames one call takes are in the order of `at`, by
-    slave index for frames of one `at`. Frames taken by separate calls can come out of order of
-    `at`, since the master takes a slow frame's reply after a later fast one's. Reading never
-    changes what the master or the slaves get.
-    """
-
-    __slots__ = (
-        "__weakref__",
-        "_buffer",
-        "_bus",
-        "_dropped_base",
-        "_ends",
-        "_lock",
-        "_overflow",
-        "_selects",
-        "_system",
-    )
-
-    def __init__(self, system: System, wired: _SpiWired) -> None:
-        """Wrap a bus of `system`. Use `System.tap` instead."""
-        self._system = system
-        self._ends = wired.ends
-        self._selects = wired.selects
-        self._bus = wired.bus
-        self._buffer = deque[SpiTapFrame](maxlen=_TAP_KEEP)
-        self._overflow = 0
-        self._dropped_base = 0
-        self._lock = threading.Lock()
-
-    @property
-    def ends(self) -> tuple[str, ...]:
-        """The bus's ends, `"<member>.<SPI>"`, each named by the SPI serving it: the master,
-        then the slaves in the order of `SpiBus.slaves`."""
-        return self._ends
-
-    @property
-    def available(self) -> int:
-        """Frames the tap holds, not read yet."""
-        with self._lock:
-            self._pull()
-            return len(self._buffer)
-
-    @property
-    def dropped(self) -> int:
-        """Frames the tap dropped because it held its limit, since system start or the last
-        `System.restore`."""
-        return self._dropped_total() - self._dropped_base
-
-    def _dropped_total(self) -> int:
-        return self._overflow + self._native.spi_tap_dropped(self._bus)
-
-    def frames(self, *, slave: str | None = None) -> list[SpiTapFrame]:
-        """Take every frame the tap holds, of slave `slave` only when given, oldest first.
-        Never runs the system, allowed stopped and running, from any thread.
-
-        Args:
-            slave: A slave's SPI, `"<member>.<SPI>"` or an alias of its SPI, None for all.
-
-        Returns:
-            The frames, in the order of `at`, by slave index for frames of one `at`.
-
-        Raises:
-            TypeError: `slave` is no str.
-            ValueError: `slave` is no slave of this bus.
-        """
-        index = None if slave is None else self._slave(slave)
-        with self._lock:
-            self._pull()
-            if index is None:
-                taken = list(self._buffer)
-                self._buffer.clear()
-            else:
-                named = self._ends[index + 1]
-                taken = [frame for frame in self._buffer if frame.slave == named]
-                kept = [frame for frame in self._buffer if frame.slave != named]
-                self._buffer.clear()
-                self._buffer.extend(kept)
-        return taken
-
-    @property
-    def _native(self) -> _core.SystemHandle:
-        return self._system._handle  # pyright: ignore[reportPrivateUsage]
-
-    def _slave(self, slave: str) -> int:
-        if not isinstance(cast(object, slave), str):
-            raise TypeError(f"slave must be a str, not {type(slave).__name__}")
-        named = self._system._end_name(slave)  # pyright: ignore[reportPrivateUsage]
-        if named in self._ends[1:]:
-            return self._ends.index(named) - 1
-        raise ValueError(f"slave {slave!r} is no slave of {', '.join(self._ends[1:])}")
-
-    def _discard(self) -> None:
-        """Drop every frame held, native and buffered, for a restore."""
-        with self._lock:
-            self._native.spi_tap_take(self._bus)
-            self._buffer.clear()
-            self._dropped_base = self._dropped_total()
-
-    def _pull(self) -> None:
-        """Move the native tap's frames into the buffer, with `_lock` held."""
-        records = sorted(
-            self._native.spi_tap_take(self._bus), key=lambda record: (record.at_ps, record.slave)
-        )
-        self._overflow += max(0, len(self._buffer) + len(records) - _TAP_KEEP)
-        pulled = [
-            SpiTapFrame(
-                slave=self._ends[record.slave + 1],
-                cs=self._selects[record.slave],
-                unit=record.unit,
-                at=VirtualTime(record.at_ps),
-                reply=VirtualTime(record.reply_ps),
-                mosi=record.mosi,
-                miso=record.miso,
-                bits=record.bits,
-                dropped=record.dropped,
-            )
-            for record in records
-        ]
-        self._buffer = _merged(self._buffer, pulled, self._order)
-
-    def _order(self, frame: SpiTapFrame) -> tuple[int, int]:
-        return frame.at.ps, self._ends.index(frame.slave)
-
-    @override
-    def __repr__(self) -> str:
-        return f"SpiTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
-
-
-class I2CTap:
-    """Every phase on one `I2CBus` of a `System`, `system.tap("a.I2C1", I2CTap)`, with its system
-    times.
-
-    The tap gets a phase when the controller's side takes the target's answer, in the
-    controller's drain that follows the answer's stamp. After a member stop, an IDLE pause, an
-    error or a TIME stop it holds the phases whose answer the controller's drains reached, which
-    depends on the quantum for a phase whose answer lies near the pause point. After `close()`
-    it holds every phase the controller took. A phase's content never depends on the quantum,
-    the slicing or the wall timing. It keeps up to 1 Mi phases not read yet, the oldest dropped
-    and counted in `dropped`: take them with `phases()`. The phases one call takes are in the
-    order of `at`, by target index for phases of one `at`. Phases taken by separate calls can
-    come out of the order of `at`: the controller can take the answer of a phase it gave up, by
-    a reset or a PE clear, after the answer of a later phase. Reading never changes what the
-    controller or the targets get.
-    """
-
-    __slots__ = (
-        "__weakref__",
-        "_buffer",
-        "_bus",
-        "_dropped_base",
-        "_ends",
-        "_lock",
-        "_overflow",
-        "_system",
-    )
-
-    def __init__(self, system: System, wired: _I2CWired) -> None:
-        """Wrap a bus of `system`. Use `System.tap` instead."""
-        self._system = system
-        self._ends = wired.ends
-        self._bus = wired.bus
-        self._buffer = deque[I2CTapPhase](maxlen=_TAP_KEEP)
-        self._overflow = 0
-        self._dropped_base = 0
-        self._lock = threading.Lock()
-
-    @property
-    def ends(self) -> tuple[str, ...]:
-        """The bus's ends, `"<member>.<I2C>"`, each named by the I2C serving it: the controller,
-        then the targets in the order of `I2CBus.ports`."""
-        return self._ends
-
-    @property
-    def available(self) -> int:
-        """Phases the tap holds, not read yet."""
-        with self._lock:
-            self._pull()
-            return len(self._buffer)
-
-    @property
-    def dropped(self) -> int:
-        """Phases the tap dropped because it held its limit, since system start or the last
-        `System.restore`."""
-        return self._dropped_total() - self._dropped_base
-
-    def _dropped_total(self) -> int:
-        return self._overflow + self._native.i2c_tap_dropped(self._bus)
-
-    def phases(self, *, target: str | None = None) -> list[I2CTapPhase]:
-        """Take every phase the tap holds, of target `target` only when given, oldest first.
-        Never runs the system, allowed stopped and running, from any thread.
-
-        Args:
-            target: A target's I2C, `"<member>.<I2C>"` or an alias of its I2C, None for all.
-
-        Returns:
-            The phases, in the order of `at`, by target index for phases of one `at`.
-
-        Raises:
-            TypeError: `target` is no str.
-            ValueError: `target` is no target of this bus.
-        """
-        index = None if target is None else self._target(target)
-        with self._lock:
-            self._pull()
-            if index is None:
-                taken = list(self._buffer)
-                self._buffer.clear()
-            else:
-                named = self._ends[index + 1]
-                taken = [phase for phase in self._buffer if phase.target == named]
-                kept = [phase for phase in self._buffer if phase.target != named]
-                self._buffer.clear()
-                self._buffer.extend(kept)
-        return taken
-
-    @property
-    def _native(self) -> _core.SystemHandle:
-        return self._system._handle  # pyright: ignore[reportPrivateUsage]
-
-    def _target(self, target: str) -> int:
-        if not isinstance(cast(object, target), str):
-            raise TypeError(f"target must be a str, not {type(target).__name__}")
-        named = self._system._end_name(target)  # pyright: ignore[reportPrivateUsage]
-        if named in self._ends[1:]:
-            return self._ends.index(named) - 1
-        raise ValueError(f"target {target!r} is no target of {', '.join(self._ends[1:])}")
-
-    def _discard(self) -> None:
-        """Drop every phase held, native and buffered, for a restore."""
-        with self._lock:
-            self._native.i2c_tap_take(self._bus)
-            self._buffer.clear()
-            self._dropped_base = self._dropped_total()
-
-    def _pull(self) -> None:
-        """Move the native tap's phases into the buffer, with `_lock` held."""
-        records = sorted(
-            self._native.i2c_tap_take(self._bus), key=lambda record: (record.at_ps, record.target)
-        )
-        self._overflow += max(0, len(self._buffer) + len(records) - _TAP_KEEP)
-        pulled = [
-            I2CTapPhase(
-                target=self._ends[record.target + 1],
-                unit=record.unit,
-                phase=I2CPhase(record.phase),
-                byte=record.byte,
-                ack=record.ack,
-                at=VirtualTime(record.at_ps),
-                answer=VirtualTime(record.answer_ps),
-                dropped=record.dropped,
-            )
-            for record in records
-        ]
-        self._buffer = _merged(self._buffer, pulled, self._order)
-
-    def _order(self, phase: I2CTapPhase) -> tuple[int, int]:
-        return phase.at.ps, self._ends.index(phase.target)
-
-    @override
-    def __repr__(self) -> str:
-        return f"I2CTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
-
-
-def _merged[T](
-    buffer: deque[T], pulled: list[T], order: Callable[[T], tuple[int, int]]
-) -> deque[T]:
-    if buffer and pulled and order(buffer[-1]) > order(pulled[0]):
-        return deque(heapq.merge(buffer, pulled, key=order), maxlen=_TAP_KEEP)
-    buffer.extend(pulled)
-    return buffer
-
-
-def _end_error(error: ConfigError, key: str) -> ConfigError:
-    """`error`, the native refusal of a bus end, keyed by the end's description key `key`."""
-    return ConfigError(
-        f"{key}: {error.file} is not {error.expected}",
-        file=error.file,
-        key=key,
-        expected=error.expected,
-    )
-
-
-def _check_time(name: str, value: VirtualTime) -> None:
-    if not isinstance(cast(object, value), VirtualTime):
-        raise TypeError(f"{name} must be a VirtualTime, not {type(value).__name__}")
-
-
-def _line_low(line: LineState) -> bool:
-    if not isinstance(cast(object, line), str):
-        raise TypeError(f"line must be a str, not {type(line).__name__}")
-    if line not in ("idle", "break"):
-        raise ValueError(f"line must be 'idle' or 'break', not {line!r}")
-    return line == "break"
-
-
-def _data_frames(data: bytes) -> list[int]:
-    if not isinstance(cast(object, data), bytes | bytearray | memoryview):
-        raise TypeError(f"data must be bytes, not {type(data).__name__}")
-    frames = list(bytes(data))
-    if not frames:
-        raise ValueError("data must hold at least one byte")
-    return frames
-
-
-def _check_count(name: str, value: int, least: int) -> None:
-    if isinstance(cast(object, value), bool) or not isinstance(cast(object, value), int):
-        raise TypeError(f"{name} must be an int, not {type(value).__name__}")
-    if value < least:
-        raise ValueError(f"{name} must be at least {least}, not {value}")
-
-
-def _unmark(marked: list[tuple[UartPorts, str]]) -> None:
-    """Give a closed or collected system's UARTs back to their streams and ptys."""
-    for ports, unit in marked:
-        ports.linked.discard(unit)
-
-
-def _on_loop(loop: asyncio.AbstractEventLoop) -> bool:
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
-
-
-def _check_member(name: str, machine: Machine) -> None:
-    if machine.name != name:
-        raise ConfigError(
-            f"members.{name}: the machine is named {machine.name!r}",
-            key=f"members.{name}",
-            expected=f"a Machine named {name!r}",
-        )
-    owner = machine._system  # pyright: ignore[reportPrivateUsage]
-    if owner is not None and owner() is not None:
-        raise ConfigError(
-            f"members.{name}: the machine is a member of another linked system",
-            key=f"members.{name}",
-            expected="a machine in no linked system",
-        )
-    if machine.busy:
-        raise MachineBusy(f"members.{name}: the machine is busy")
-
-
-def _check_target(for_: VirtualDuration | None, until: VirtualTime | None) -> None:
-    if (for_ is None) == (until is None):
-        raise TypeError("run takes for_ or until")
-    if for_ is not None:
-        if not isinstance(cast(object, for_), VirtualDuration):
-            raise TypeError(f"for_ must be a VirtualDuration, not {type(for_).__name__}")
-        if for_.ps < 0:
-            raise ValueError("for_ must not be negative")
-    elif not isinstance(cast(object, until), VirtualTime):
-        raise TypeError(f"until must be a VirtualTime, not {type(until).__name__}")
-
-
-def _check_every(every: VirtualDuration, for_: VirtualDuration | None) -> None:
-    for name, given in (("every", every), ("for_", for_)):
-        if given is not None and not isinstance(cast(object, given), VirtualDuration):
-            raise TypeError(f"{name} must be a VirtualDuration, not {type(given).__name__}")
-    if every.ps <= 0:
-        raise ValueError("every must be above 0")
-    if for_ is not None and for_.ps < 0:
-        raise ValueError("for_ must not be negative")
-
-
-def _offsets(names: Sequence[str], offsets: Mapping[str, VirtualDuration]) -> list[int]:
-    for name, given in offsets.items():
-        offset = cast(object, given)
-        if name not in names:
-            raise ConfigError(
-                f"offsets.{name}: no such member", key=f"offsets.{name}", expected="a member name"
-            )
-        if not isinstance(offset, VirtualDuration) or offset.ps < 0:
-            raise ConfigError(
-                f"offsets.{name}: {offset!r} is no duration of at least 0",
-                key=f"offsets.{name}",
-                expected="a VirtualDuration of at least 0",
-            )
-    return [offsets[name].ps if name in offsets else 0 for name in names]
-
-
-def _check_line(index: int, link: UartLink) -> int:
-    """Check the line values of `links[index]`, return its word bits, parity bit included."""
-    latency = cast(object, link.latency)
-    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
-        raise ConfigError(
-            f"links[{index}].latency: {link.latency!r} is no duration above 0",
-            key=f"links[{index}].latency",
-            expected="a VirtualDuration above 0",
-        )
-    baud, data_bits, parity, stop_bits = cast(
-        tuple[object, object, object, object],
-        (link.baud, link.data_bits, link.parity, link.stop_bits),
-    )
-    integral = isinstance(data_bits, int) and not isinstance(data_bits, bool)
-    word_bits = cast(int, data_bits) + (0 if parity == "none" else 1) if integral else 0
-    for name, refused, expected in (
-        (
-            "baud",
-            not isinstance(baud, int) or isinstance(baud, bool) or baud <= 0,
-            "a baud above 0",
-        ),
-        ("parity", not isinstance(parity, str) or parity not in _PARITY, "'none', 'even' or 'odd'"),
-        ("data_bits", word_bits not in (7, 8, 9), "7 to 9 data bits, the parity bit included"),
-        (
-            "stop_bits",
-            not isinstance(stop_bits, int | float)
-            or isinstance(stop_bits, bool)
-            or stop_bits not in _STOP_BITS,
-            "0.5, 1, 1.5 or 2 stop bits",
-        ),
-    ):
-        if refused:
-            key = f"links[{index}].{name}"
-            raise ConfigError(
-                f"{key}: {getattr(link, name)!r} is no UART line value", key=key, expected=expected
-            )
-    return word_bits
-
-
-class _CheckedBus(NamedTuple):
-    """What `_check_bus` found: the ends as (key, value, unit kind), the master, then each
-    slave, and the GPIO port and pin of each chip select."""
-
-    ends: list[tuple[str, object, str]]
-    lines: dict[object, tuple[str, int | None]]
-
-
-def _check_bus(index: int, bus: SpiBus) -> _CheckedBus:
-    """Check the values of `links[index]`, an `SpiBus`, return its ends and chip selects."""
-    latency = cast(object, bus.latency)
-    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
-        raise ConfigError(
-            f"links[{index}].latency: {bus.latency!r} is no duration above 0",
-            key=f"links[{index}].latency",
-            expected="a VirtualDuration above 0",
-        )
-    master = cast(object, bus.master)
-    ends: list[tuple[str, object, str]] = [(f"links[{index}].master", master, "SPI")]
-    lines: dict[object, tuple[str, int | None]] = {}
-    if not isinstance(master, str) or "." not in master:
-        return _CheckedBus(ends, lines)
-    owner = master.partition(".")[0]
-    slaves = cast(object, bus.slaves)
-    if not isinstance(slaves, Mapping) or not slaves:
-        raise ConfigError(
-            f"links[{index}].slaves: {slaves!r} is no mapping of a chip select to a slave",
-            key=f"links[{index}].slaves",
-            expected="a mapping of a chip select to a slave SPI, at least one",
-        )
-    for select, slave in cast(Mapping[object, object], slaves).items():
-        key = f"links[{index}].slaves[{select!r}]"
-        line = _chip_select(owner, select)
-        if line is None:
-            raise ConfigError(
-                f"{key}: {select!r} is no chip select of {owner or 'the master'}",
-                key=key,
-                expected="'<master member>.<pin>', such as 'a.PA4', or '<master member>.NSS'",
-            )
-        if line in lines.values():
-            raise ConfigError(
-                f"{key}: {select!r} names a chip select another slave of the bus uses",
-                key=key,
-                expected="a chip select no other slave of the bus uses",
-            )
-        lines[select] = line
-        if isinstance(slave, str) and slave.partition(".")[0] == owner:
-            raise ConfigError(
-                f"{key}: {slave} is on the master's member",
-                key=key,
-                expected="an SPI of another member",
-            )
-        ends.append((key, slave, "SPI"))
-    return _CheckedBus(ends, lines)
-
-
-def _check_i2c(index: int, bus: I2CBus) -> list[tuple[str, object, str]]:
-    """Check the values of `links[index]`, an `I2CBus`, return its ends as (key, value, unit
-    kind), the controller first."""
-    latency = cast(object, bus.latency)
-    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
-        raise ConfigError(
-            f"links[{index}].latency: {bus.latency!r} is no duration above 0",
-            key=f"links[{index}].latency",
-            expected="a VirtualDuration above 0",
-        )
-    ports = cast(Sequence[object], bus.ports)
-    if len(ports) < 2:
-        raise ConfigError(
-            f"links[{index}].ports: {ports!r} holds no target",
-            key=f"links[{index}].ports",
-            expected="the controller's I2C, then at least one target's",
-        )
-    ends = [(f"links[{index}].ports[{at}]", port, "I2C") for at, port in enumerate(ports)]
-    controller = ports[0]
-    if isinstance(controller, str) and "." in controller:
-        owner = controller.partition(".")[0]
-        for key, port, _ in ends[1:]:
-            if isinstance(port, str) and port.partition(".")[0] == owner:
-                raise ConfigError(
-                    f"{key}: {port} is on the controller's member",
-                    key=key,
-                    expected="an I2C of another member",
-                )
-    return ends
-
-
-def _chip_select(owner: str, select: object) -> tuple[str, int | None] | None:
-    """The GPIO port and pin of chip select `select`, `"<owner>.<pin>"` or `"<owner>.NSS"`
-    for the SS output, None when it is neither."""
-    if not isinstance(select, str):
-        return None
-    name, dot, pin = select.partition(".")
-    if not dot or name != owner:
-        return None
-    if pin == "NSS":
-        return "", None
-    try:
-        port, number = chip_select(pin)
-    except ValueError:
-        return None
-    return port, number
-
-
-def _is_machine_name(name: str) -> bool:
-    from popcorn._machine import check_machine_name
-
-    try:
-        check_machine_name(name)
-    except ValueError:
-        return False
-    return True

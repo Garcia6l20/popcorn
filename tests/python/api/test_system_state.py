@@ -537,9 +537,9 @@ def test_a_failed_restore_gives_every_member_its_state_back(
 def test_a_restore_restarts_what_each_tap_dropped(
     pair: Build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from popcorn import _system
+    from popcorn._system import taps
 
-    monkeypatch.setattr(_system, "_TAP_KEEP", 8)
+    monkeypatch.setattr(taps, "_TAP_KEEP", 8)
     system = pair(a_entry="link_tx_count", b_entry="link_rx")
     tap = system.tap("a.USART1")
     taken = system.snapshot()

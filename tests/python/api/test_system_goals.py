@@ -142,9 +142,9 @@ def test_a_member_halted_after_its_stop_lets_the_gather_go_on(ping: Build) -> No
 def test_the_watchdog_names_a_member_kept_parked_by_a_foreign_wait(
     ping: Build, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from popcorn import _system
+    from popcorn._system import system
 
-    monkeypatch.setattr(_system, "_WATCHDOG", 0.05)
+    monkeypatch.setattr(system, "_WATCHDOG", 0.05)
     system = ping()
     a, b = system.members["a"], system.members["b"]
 

@@ -637,9 +637,9 @@ def test_a_restore_drops_the_phases_of_a_tap_not_built_yet(pair: Build) -> None:
 def test_the_tap_keeps_its_limit_and_counts_what_it_dropped(
     pair: Build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from popcorn import _system
+    from popcorn._system import taps
 
-    monkeypatch.setattr(_system, "_TAP_KEEP", 2)
+    monkeypatch.setattr(taps, "_TAP_KEEP", 2)
     system = pair()
     tap = system.tap("a.I2C1", I2CTap)
     asyncio.run(to(system, END))
