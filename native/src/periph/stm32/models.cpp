@@ -14,7 +14,7 @@
 #include "i2c_rows.hpp"
 #include "iwdg_rows.hpp"
 #include "lpgpio_rows.hpp"
-#include "lptim_rows.hpp"
+#include "lptim_l4_rows.hpp"
 #include "lptim_v2_rows.hpp"
 #include "mdf_rows.hpp"
 #include "pwr_rows.hpp"

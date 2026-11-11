@@ -1,4 +1,4 @@
-#include "lptim_rows.hpp"
+#include "lptim_l4_rows.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
