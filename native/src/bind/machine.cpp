@@ -333,6 +333,14 @@ auto options_of(
           std::format("a USB device controller without a {} model", kind(name)));
     }
   };
+  auto const refuse_supply_taken = [&](std::string const& name) {
+    if(options.models.contains(name))
+    {
+      throw config_error(
+          "supply", 0, "supply.vdda_mv",
+          std::format("the built-in model of {}, not a {} model", name, kind(name)));
+    }
+  };
   detail::device_plan devices;
   if(not config.python_devices.empty() or rcc)
   {
@@ -351,6 +359,7 @@ auto options_of(
   if(config.vdda_mv)
   {
     supply = supply_names(description, inputs(), *config.vdda_mv, board);
+    std::ranges::for_each(supply, refuse_supply_taken);
   }
   auto all = periph::stm32::factories(board, description);
   for(auto& [name, factory] : detail::device_factories(devices, all))
@@ -367,7 +376,7 @@ auto options_of(
   }
   for(auto const& name : supply)
   {
-    options.models.try_emplace(name, std::move(all.at(name)));
+    options.models.emplace(name, std::move(all.at(name)));
   }
   if(config.arena_start)
   {

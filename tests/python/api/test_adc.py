@@ -11,6 +11,7 @@ import popcorn
 import pytest
 from popcorn import ConfigError, StopReason
 from popcorn.board import AnalogInput, SupplyOptions
+from popcorn.model import Model
 from popcorn.stm32 import mcu
 from popcorn.stm32.description import DescriptionError
 from popcorn.units import VirtualDuration, us
@@ -196,6 +197,37 @@ def test_a_drive_from_another_thread_during_a_run_raises(
 
     asyncio.run(body())
     assert len(errors) == 1 and isinstance(errors[0], popcorn.MachineRunning)
+
+
+@pytest.mark.parametrize(
+    ("part", "name"),
+    [
+        ("STM32U575QGIx", "ADC1"),
+        ("STM32U575QGIx", "DAC1"),
+        ("STM32L476RCTx", "ADC1"),
+        ("STM32L476RCTx", "DAC1"),
+        ("STM32L152RETx", "ADC"),
+        ("STM32L152RETx", "DAC"),
+        ("STM32H573AIIx", "ADC1"),
+        ("STM32H573AIIx", "DAC"),
+    ],
+)
+def test_a_python_model_on_a_supplied_peripheral_is_refused_next_to_the_supply(
+    part: str, name: str
+) -> None:
+    class Plain(Model):
+        pass
+
+    try:
+        description = mcu(part)
+    except DescriptionError as error:
+        pytest.skip(f"no {part} description: {error}")
+    with pytest.raises(ConfigError) as caught:
+        popcorn.Machine(description, models={name: Plain}, supply=SupplyOptions(vdda_mv=3300))
+    assert caught.value.key == "supply.vdda_mv"
+    assert caught.value.expected == f"the built-in model of {name}, not a Python model"
+    assert popcorn.Machine(description, models={name: Plain})
+    assert popcorn.Machine(description, supply=SupplyOptions(vdda_mv=3300))
 
 
 @pytest.fixture(scope="module")
