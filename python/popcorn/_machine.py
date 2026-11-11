@@ -21,7 +21,7 @@ from typing import (
     override,
 )
 
-from popcorn import _core, _machine_call, _machine_hooks
+from popcorn import _core, _machine_call, _machine_hooks, _machine_snapshot
 from popcorn._arena import Arena
 from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block, DeviceAudio
 from popcorn._call import (
@@ -45,7 +45,6 @@ from popcorn._errors import (
     MachineRunning,
     ModelError,
     SymbolError,
-    raise_first,
 )
 from popcorn._hooks import (
     CallbackTable,
@@ -1911,39 +1910,10 @@ class Machine:
         then runs in a new copy of the context current at `Machine()`, so a contextvar a hook set
         ends at the restore.
         """
-        self._restore_done = False
-        self._refuse_member("restore")
-        self._check_snapshot(snapshot)
-        raise_first(self._restore(snapshot))
+        return _machine_snapshot.restore(self, snapshot)
 
     def _check_snapshot(self, snapshot: Snapshot) -> None:
-        self._require_idle()
-        machine_id = snapshot.machine_id
-        if machine_id not in (0, self._handle.id()):
-            raise ConfigError(
-                "the snapshot was taken by another machine: restore into the machine that took"
-                " it, or load its saved form",
-                file="snapshot",
-                key="machine",
-                expected="restore into the machine that took it, or load its saved form",
-            )
-        self._handle.check_restore(snapshot.native)
-
-    def _restore(self, snapshot: Snapshot) -> list[ModelError]:
-        """Empty, restore and rebuild, the refusals already run.
-
-        Returns:
-            What raised on the way, for the caller to raise once its restore has finished.
-        """
-        self._require_idle()
-        error = self._emptied()
-        try:
-            self._restore_state(snapshot)
-        except BaseException as failed:
-            if error is not None:
-                failed.add_note(f"then {error}")
-            raise
-        return ([] if error is None else [error]) + self._rebuilt()
+        return _machine_snapshot.check_snapshot(self, snapshot)
 
     def _emptied(self) -> ModelError | None:
         """Empty the loop and restart the machine's context.
@@ -1951,10 +1921,7 @@ class Machine:
         Returns:
             What a `finally` raised as the loop was emptied.
         """
-        loop = self._loop
-        error = None if loop is None else loop._empty()  # pyright: ignore[reportPrivateUsage]
-        self._model_context.restart()
-        return error
+        return _machine_snapshot.emptied(self)
 
     def _pin_watch_keys(self) -> set[int]:
         """The keys of the pin watches standing, for `_end_pin_watches_but`."""
@@ -1972,36 +1939,10 @@ class Machine:
         Returns:
             What raised.
         """
-        if self._loop is None:
-            return []
-        self._loop._rewound()  # pyright: ignore[reportPrivateUsage]
-        errors: list[ModelError] = []
-        for device in self._uart_devices():
-            try:
-                self._model_context.run(device._rebuild)  # pyright: ignore[reportPrivateUsage]
-            except ModelError as error:
-                errors.append(error)
-        return errors
-
-    def _uart_devices(self) -> list[UartDevice]:
-        return [
-            device
-            for targets in self._devices.values()
-            for device in targets
-            if isinstance(device, UartDevice)
-        ]
+        return _machine_snapshot.rebuilt(self)
 
     def _restore_state(self, snapshot: Snapshot) -> None:
-        self._require_idle()
-        self._handle.restore(snapshot.native)
-        self._restore_done = True
-        self._last_stop = None
-        self._ports.discard()
-        self._audio.discard()
-        self._pdm.discard()
-        self._usb.discard()
-        if self._arena is not None:
-            self._arena.reset(snapshot.arena_offset)
+        return _machine_snapshot.restore_state(self, snapshot)
 
     def load_snapshot(self, path: str | os.PathLike[str]) -> Snapshot:
         """Read a saved snapshot and restore it.
