@@ -1263,6 +1263,7 @@ struct step06_adc_state
   std::uint8_t                   filter_count{};
   std::array<step06_adc_edge, 2> edges{};
   std::uint32_t                  edge_generation{};
+  std::uint64_t                  end_ps{};
 };
 
 auto live_state(adc_fixture const& f) -> step06_adc_state
@@ -2413,7 +2414,7 @@ TEST_CASE(
 TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the template")
 {
   constexpr auto expected_adc = std::to_array<unsigned char>(
-      {0xc4, 0x01, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+      {0xd4, 0x01, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
        0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x72, 0x65, 0x61, 0x64, 0x79,
        0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x73, 0x74, 0x61, 0x72, 0x74, 0x5f, 0x70, 0x73, 0x00,
@@ -2443,7 +2444,8 @@ TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the
        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x65, 0x64, 0x67, 0x65, 0x5f, 0x67, 0x65, 0x6e,
        0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00});
+       0x00, 0x12, 0x65, 0x6e, 0x64, 0x5f, 0x70, 0x73, 0x00, 0x20, 0x0e, 0x7b, 0x10, 0x00, 0x00,
+       0x00, 0x00, 0x00});
   constexpr auto    expected_common = std::to_array<unsigned char>({0x05, 0x00, 0x00, 0x00, 0x00});
   adc_fixture const f;
   downstream_scan(f, ovrmod);
@@ -2835,4 +2837,73 @@ TEST_CASE(
   bare.start(5);
   bare.settle();
   CHECK(bare.read("ADC_DR") == 0);
+}
+
+TEST_CASE(
+    "a TIM1 CC1 edge just under the conversion length after the last is ignored as busy, the "
+    "next one starts, rising or falling, U5")
+{
+  struct leg
+  {
+    std::uint32_t reload;
+    std::uint32_t conversions;
+  };
+  for(auto const& [reload, conversions] : std::array{
+          leg{5, 10},
+          leg{4, 12}
+  })
+  {
+    for(auto const edge : {exten_rising, exten_falling})
+    {
+      CAPTURE(reload);
+      CAPTURE(edge);
+      adc_fixture const f;
+      f.port().drive(5, 1'000'000);
+      f.enable();
+      f.write("ADC1", "ADC_CFGR1", ovrmod | edge | extsel(0));
+      f.write("ADC1", "ADC_SQR1", 5u << 6);
+      f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+      f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+      f.write("TIM1", "ARR", reload);
+      f.write("TIM1", "CCR1", 1);
+      f.write("TIM1", "EGR", 1);
+      f.write("TIM1", "SR", 0);
+      auto const from = f.now();
+      f.put("TIM1", "CR1", "CEN", 1);
+      constexpr std::uint64_t tick    = 250'000;
+      std::uint32_t           started = 0;
+      for(std::uint64_t k = 0; k < 120; ++k)
+      {
+        f.run_until(from + (k + 1) * tick);
+        if(f.isr("EOC") != 0)
+        {
+          ++started;
+          static_cast<void>(f.cpu_read("ADC_DR"));
+        }
+      }
+      CHECK(started == conversions);
+    }
+  }
+}
+
+TEST_CASE(
+    "a machine reset forgets the end of the last conversion, an early TIM15 trigger converts, U5")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  static_cast<void>(tim15_trgo(f, 0, 3'999));
+  static_cast<void>(start_scan(f));
+  f.run_until(f.now() + 6 * ms);
+  REQUIRE(f.isr("EOS") == 1);
+  f.target->reset();
+  f.set("pc", sym("rcc_ll", "idle"));
+  f.hsi16();
+  f.put("RCC", "RCC_AHB2ENR1", "ADC12EN", 1);
+  f.write("ADC1", "ADC_PCSEL", all_channels);
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  auto const start = tim15_trgo(f, 0, 3'999);
+  static_cast<void>(start_scan(f));
+  REQUIRE(start + ms + latency + scan_ps < 5 * ms);
+  f.run_until(start + ms + latency + scan_ps);
+  CHECK(f.isr("EOS") == 1);
 }

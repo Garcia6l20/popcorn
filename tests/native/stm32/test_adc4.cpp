@@ -4116,7 +4116,11 @@ void lptim_idle(adc4_fixture const& f, std::uint64_t cycles)
   f.run_until(f.now() + cycles * lptim_idle_unit);
 }
 
-[[nodiscard]] auto lptim_run(adc4_fixture const& f, lptim_pins const& pins) -> std::uint64_t
+[[nodiscard]] auto lptim_run(
+    adc4_fixture const& f,
+    lptim_pins const&   pins,
+    std::uint32_t       ccr = lptim_ccr,
+    std::uint32_t       arr = lptim_arr) -> std::uint64_t
 {
   f.put("RCC", "RCC_APB3ENR", pins.enable_bit, 1);
   f.write(pins.unit, "CCMR1", pins.channel2 ? lptim_cc2e : lptim_cc1e);
@@ -4126,13 +4130,13 @@ void lptim_idle(adc4_fixture const& f, std::uint64_t cycles)
   f.write(pins.unit, "DIER_output", 0);
   lptim_idle(f, 4);
   f.write(pins.unit, "ICR_output", lptim_dierok);
-  f.write(pins.unit, "ARR", lptim_arr);
+  f.write(pins.unit, "ARR", arr);
   lptim_idle(f, 4);
-  f.write(pins.unit, "CCR1", lptim_ccr);
+  f.write(pins.unit, "CCR1", ccr);
   if(pins.channel2)
   {
     lptim_idle(f, 4);
-    f.write(pins.unit, "CCR2", lptim_ccr + 3);
+    f.write(pins.unit, "CCR2", ccr + 3);
   }
   lptim_idle(f, 4);
   f.write(pins.unit, "ICR_output", lptim_cmp1ok | lptim_arrok | (pins.channel2 ? lptim_cmp2ok : 0));
@@ -4141,9 +4145,11 @@ void lptim_idle(adc4_fixture const& f, std::uint64_t cycles)
   return std::max(at + 3 * lptim_cycle, enabled_at + 2 * lptim_cycle);
 }
 
-[[nodiscard]] auto lptim_rise(lptim_pins const& pins, std::uint64_t a) -> std::uint64_t
+[[nodiscard]] auto
+    lptim_rise(lptim_pins const& pins, std::uint64_t a, std::uint32_t ccr = lptim_ccr)
+        -> std::uint64_t
 {
-  return a + (pins.channel2 ? lptim_ccr + 3 : lptim_ccr) * lptim_cycle + lptim_cycle;
+  return a + (pins.channel2 ? ccr + 3 : ccr) * lptim_cycle + lptim_cycle;
 }
 
 void lptim_scan_setup(
@@ -4259,4 +4265,76 @@ TEST_CASE("the ADC4 stops listening to the LPTIM output when ADSTP clears ADSTAR
   f.run_until(a + (lptim_arr + 4) * lptim_cycle + slow_latency + slow_halves(28));
   CHECK(f.dues().empty());
   CHECK(f.isr("EOC") == 0);
+}
+
+TEST_CASE(
+    "an LPTIM1 output edge on HSI16 one cycle before the end of the scan, posted after the end, is "
+    "ignored as busy, ADC4")
+{
+  constexpr std::uint32_t ccr        = 334;
+  constexpr std::uint32_t arr        = 574;
+  constexpr std::uint64_t core_cycle = 250'000;
+  constexpr std::uint64_t conversion = slow_latency + slow_halves(28);
+  adc4_fixture const      f;
+  lptim_scan_setup(f, lptim1_ch1, exten_both, true);
+  f.write("CR", advregen | aden | adstart);
+  auto const                                  a      = lptim_run(f, lptim1_ch1, ccr, arr);
+  auto const                                  rise   = lptim_rise(lptim1_ch1, a, ccr);
+  auto const                                  period = (arr + 1) * lptim_cycle;
+  auto const                                  fall   = rise + (arr - ccr) * lptim_cycle;
+  std::vector<std::pair<std::uint64_t, bool>> edges;
+  for(std::uint64_t m = 0; m < 12; ++m)
+  {
+    edges.emplace_back(rise + m * period, false);
+    edges.emplace_back(fall + m * period, true);
+  }
+  std::ranges::sort(edges);
+  auto          busy_until = std::uint64_t{0};
+  std::uint32_t ties       = 0;
+  for(auto const& [at, falling] : edges)
+  {
+    CAPTURE(at);
+    CAPTURE(falling);
+    auto const tie =
+        busy_until - at == lptim_cycle
+        and at < busy_until
+        and (at + core_cycle - 1) / core_cycle == (busy_until + core_cycle - 1) / core_cycle;
+    if(at >= busy_until)
+    {
+      busy_until = at + conversion;
+    }
+    f.run_until(at + us);
+    if(tie)
+    {
+      ++ties;
+      CHECK(f.dues().empty());
+    }
+    f.write("ISR", eoc | eos | eosmp);
+    static_cast<void>(f.cpu_read("DR"));
+  }
+  CHECK(ties >= 2);
+}
+
+TEST_CASE("a TIM15 trigger before the planned end of a stopped scan starts a new one, ADC4")
+{
+  adc4_fixture const f;
+  f.put("RCC", "RCC_APB2ENR", "TIM15EN", 1);
+  f.write("TIM15", "PSC", 0);
+  f.write("TIM15", "ARR", 79);
+  f.write("TIM15", "EGR", 1);
+  f.write("TIM15", "SR", 0);
+  f.put("TIM15", "CR2", "MMS", 2);
+  auto const origin = f.now();
+  f.put("TIM15", "CR1", "CEN", 1);
+  arm(f, exten_rising, 3, 0, false);
+  f.port().drive(pa4, 900'000);
+  f.write("CR", advregen | aden | adstart);
+  auto const first = origin + (f.now() - origin) / (20 * us) * (20 * us) + 20 * us;
+  f.run_until(first + 12 * us);
+  REQUIRE(f.cr("ADSTART") == 1);
+  f.write("CR", advregen | aden | adstp);
+  REQUIRE(f.cr("ADSTART") == 0);
+  f.write("CR", advregen | aden | adstart);
+  f.run_until(first + 20 * us + 2 * us);
+  CHECK(std::ranges::contains(f.dues(), first + 20 * us + slow_latency));
 }

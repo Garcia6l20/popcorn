@@ -577,6 +577,7 @@ private:
   void               retune();
   void               fire_edge(adc4_edge& slot);
   [[nodiscard]] auto busy() const -> bool;
+  [[nodiscard]] auto ended_early(std::uint64_t edge_ps) const -> bool;
   [[nodiscard]] auto trigger_blocked() const -> bool;
   void               release_wait();
   [[nodiscard]] auto startup_ps() const -> std::uint64_t;
@@ -1275,6 +1276,11 @@ auto adc4_model::busy() const -> bool
   return state_.start_pending or state_.converting or state_.waiting_clock;
 }
 
+auto adc4_model::ended_early(std::uint64_t edge_ps) const -> bool
+{
+  return not busy() and edge_ps < state_.end_ps;
+}
+
 auto adc4_model::trigger_blocked() const -> bool
 {
   return busy() or (get(regs_, wait_) != 0 and get(regs_, converted_) != 0);
@@ -1811,6 +1817,7 @@ void adc4_model::abort()
   ++state_.generation;
   state_.start_pending = false;
   state_.converting    = false;
+  state_.end_ps        = 0;
   state_.waiting_clock = false;
   state_.rank          = 0;
   state_.accumulated   = 0;
@@ -1874,7 +1881,7 @@ void adc4_model::triggered(std::string_view signal, trigger_edge edge, trigger_t
     ctx_.events.schedule_at(vtime{at.ps}, edge_due, free->generation, ctx_.clock);
     return;
   }
-  if(not trigger_blocked())
+  if(not trigger_blocked() and not ended_early(at.ps))
   {
     start_sequence(at.ps);
   }

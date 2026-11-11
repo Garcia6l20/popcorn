@@ -3471,3 +3471,67 @@ TEST_CASE(
   fresh.run_until(fresh.last_due("ADC2"));
   CHECK(fresh.cpu_read("ADC2", "ADC_DR") == 0x100);
 }
+
+TEST_CASE(
+    "an EXTI line 11 edge 1 ps before the end of the previous conversion, in the core cycle that "
+    "holds the end, is ignored as busy on the L4, 20 times")
+{
+  rig const r;
+  r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+  r.set("GPIOA", "MODER", "MODER11", 0);
+  r.enable();
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(6));
+  r.start(1);
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  for(std::uint32_t k = 0; k < 20; ++k)
+  {
+    CAPTURE(k);
+    auto const first = r.now() + 10 * us + 123 + k * 37;
+    pins->drive_at(11, true, vtime{first});
+    pins->drive_at(11, false, vtime{first + 100'000});
+    auto const end = first + edge_after(first, cycle_ps) + (12 + 8 * 15) * cycle_ps / 8;
+    r.run_until(first + 600'000);
+    REQUIRE(r.isr("EOC") == 0);
+    pins->drive_at(11, true, vtime{end - 1});
+    pins->drive_at(11, false, vtime{end - 1 + 100'000});
+    r.run_until(end + 1 * us);
+    CHECK(r.isr("EOC") == 1);
+    static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+    r.run_until(end + 6 * us);
+    CHECK(r.isr("EOC") == 0);
+  }
+}
+
+TEST_CASE(
+    "a machine reset forgets the end of the last conversion, an early EXTI line 11 edge converts, "
+    "L4")
+{
+  rig const r;
+  auto      arm = [&] {
+    r.set("RCC", "AHB2ENR", "ADCEN", 1);
+    r.set("RCC", "CCIPR", "ADCSEL", 3);
+    r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+    r.set("GPIOA", "MODER", "MODER11", 0);
+    r.enable();
+    r.write("ADC1", "ADC_CFGR", 0x8000'0000u | exten_up | extsel(6));
+    r.start(1);
+  };
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  arm();
+  r.run_until(r.now() + 1000 * us);
+  auto const late = r.now() + 10 * us;
+  pins->drive_at(11, true, vtime{late});
+  pins->drive_at(11, false, vtime{late + 1 * us});
+  r.run_until(late + 20 * us);
+  REQUIRE(r.isr("EOC") == 1);
+  r.f->target->reset();
+  r.f->set("pc", sym(firmware, "idle"));
+  arm();
+  REQUIRE(r.now() + 100 * us < late);
+  auto const early = r.now() + 10 * us + 123;
+  pins->drive_at(11, true, vtime{early});
+  r.run_until(early + 20 * us);
+  CHECK(r.isr("EOC") == 1);
+}

@@ -3340,3 +3340,109 @@ TEST_CASE(
   r.power();
   CHECK(r.convert(5) == 0);
 }
+
+TEST_CASE(
+    "a TIM2 CC2 trigger every 1.43 us, just under a 1.53 us conversion, is ignored as busy, the "
+    "next one starts")
+{
+  struct leg
+  {
+    std::uint32_t sample;
+    std::uint32_t conversions;
+  };
+  for(auto const& [sample, conversions] : std::array{
+          leg{1, 13},
+          leg{2, 13}
+  })
+  {
+    CAPTURE(sample);
+    adc_rig const r;
+    r.power();
+    r.write(smpr3, sample);
+    r.write(cr2, adon | (1u << 28) | (3u << 24));
+    r.write(sr, 0);
+    r.poke("RCC", 0x24, 1);
+    r.poke("TIM2", 0x2C, 2);
+    r.poke("TIM2", 0x38, 1);
+    auto const from = r.now();
+    r.poke("TIM2", 0x00, 1);
+    constexpr std::uint64_t tick    = 476'837;
+    std::uint32_t           started = 0;
+    for(std::uint64_t k = 0; k < 80; ++k)
+    {
+      r.run_until(from + (k + 1) * tick);
+      if((r.read(sr) & eoc) != 0)
+      {
+        ++started;
+        static_cast<void>(r.cpu_read(dr));
+      }
+    }
+    CHECK(started == conversions);
+  }
+}
+
+TEST_CASE(
+    "an EXTI line 11 edge 1 ps before the end of the previous conversion, in the core cycle that "
+    "holds the end, is ignored as busy, the edge after the end starts, 20 times")
+{
+  adc_rig const r;
+  r.power();
+  r.poke("SYSCFG", 0x10, 2u << 12);
+  r.write(cr2, adon | (1u << 28) | (15u << 24));
+  auto* const gpio = r.f.model_of<stm32::gpio_port>("GPIOC");
+  REQUIRE(gpio != nullptr);
+  constexpr std::uint64_t core_cycle = 476'837;
+  std::uint32_t           converted  = 0;
+  for(std::uint32_t k = 0; k < 20; ++k)
+  {
+    CAPTURE(k);
+    auto const first = r.now() + 10 * us + 123 + k * 37;
+    gpio->drive_at(11, true, vtime{first});
+    gpio->drive_at(11, false, vtime{first + 100 * ns});
+    r.run_until(first + 600 * ns);
+    REQUIRE((r.read(sr) & strt) != 0);
+    r.write(sr, 0);
+    auto const end = r.due();
+    REQUIRE(end > first + 100 * ns);
+    auto const inside = end - 1;
+    REQUIRE((inside + core_cycle - 1) / core_cycle == (end + core_cycle - 1) / core_cycle);
+    gpio->drive_at(11, true, vtime{inside});
+    gpio->drive_at(11, false, vtime{inside + 100 * ns});
+    r.run_until(end + 600 * ns);
+    CHECK((r.read(sr) & strt) == 0);
+    if((r.read(sr) & eoc) != 0)
+    {
+      ++converted;
+      static_cast<void>(r.cpu_read(dr));
+    }
+  }
+  CHECK(converted == 20);
+}
+
+TEST_CASE(
+    "an EXTI line 11 edge before the old end of a conversion aborted by a sequence write starts "
+    "a new one")
+{
+  adc_rig const r;
+  r.power();
+  r.poke("SYSCFG", 0x10, 2u << 12);
+  r.write(cr2, adon | (1u << 28) | (15u << 24));
+  auto* const gpio = r.f.model_of<stm32::gpio_port>("GPIOC");
+  REQUIRE(gpio != nullptr);
+  auto const first = r.now() + 10 * us + 123;
+  gpio->drive_at(11, true, vtime{first});
+  gpio->drive_at(11, false, vtime{first + 100 * ns});
+  r.run_until(first + 600 * ns);
+  REQUIRE((r.read(sr) & strt) != 0);
+  auto const old_end = r.due();
+  r.write(sqr1, 0);
+  r.write(sr, 0);
+  REQUIRE((r.read(sr) & strt) == 0);
+  auto const second = r.now() + 123;
+  REQUIRE(second + 100 * ns < old_end);
+  gpio->drive_at(11, true, vtime{second});
+  gpio->drive_at(11, false, vtime{second + 50 * ns});
+  r.run_until(second + 600 * ns);
+  CHECK((r.read(sr) & strt) != 0);
+  CHECK(r.due() == second + 218'750 + 16 * cycle);
+}

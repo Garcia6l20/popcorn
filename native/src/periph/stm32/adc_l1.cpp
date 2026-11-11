@@ -1322,7 +1322,8 @@ void adc_l1_model::injected_software_start()
 
 void adc_l1_model::regular_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software)
 {
-  if(regular_busy() or blocked(edge_ps))
+  auto const ended_early = not software and not state_.converting and edge_ps < state_.end_ps;
+  if(regular_busy() or ended_early or blocked(edge_ps))
   {
     if(software and not(state_.waiting_clock and not state_.injecting))
     {
@@ -1679,7 +1680,7 @@ void adc_l1_model::finish()
 
 void adc_l1_model::finish_injected()
 {
-  auto const end    = state_.end_ps;
+  auto const end    = std::exchange(state_.end_ps, 0);
   auto const result = state_.held ? state_.held_code : code(current_channel());
   state_.converting = false;
   auto const index  = std::size_t{state_.injected_rank};
@@ -1812,6 +1813,7 @@ void adc_l1_model::stop_engine()
   }
   ++state_.generation;
   state_.converting    = false;
+  state_.end_ps        = 0;
   state_.waiting_clock = false;
   state_.start_pending = false;
 }

@@ -732,6 +732,7 @@ struct adc_state
   std::uint8_t               filter_count{};
   std::array<adc_edge, 2>    edges{};
   std::uint32_t              edge_generation{};
+  std::uint64_t              end_ps{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
@@ -754,6 +755,7 @@ struct l4_adc_state
   std::uint8_t                 filter_count{};
   std::array<adc_edge, 2>      edges{};
   std::uint32_t                edge_generation{};
+  std::uint64_t                end_ps{};
   std::uint32_t                calibration_generation{};
   bool                         calibration_waiting{};
   std::uint64_t                enable_lock_ps{};
@@ -1676,6 +1678,7 @@ private:
   [[nodiscard]] auto channel_at(std::size_t rank) const -> std::uint32_t;
   [[nodiscard]] auto length() const -> std::size_t;
   [[nodiscard]] auto busy() const -> bool;
+  [[nodiscard]] auto ended_early(std::uint64_t edge_ps) const -> bool;
   [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
   [[nodiscard]] auto is_external(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
@@ -2236,6 +2239,11 @@ template <typename Traits> auto adc_model<Traits>::busy() const -> bool
   return state_.converting or state_.waiting_clock;
 }
 
+template <typename Traits> auto adc_model<Traits>::ended_early(std::uint64_t edge_ps) const -> bool
+{
+  return not busy() and edge_ps < state_.end_ps;
+}
+
 template <typename Traits>
 auto adc_model<Traits>::external(analog_channel channel) const -> std::size_t
 {
@@ -2454,6 +2462,7 @@ template <typename Traits> void adc_model<Traits>::restore_reset_values()
     regs_.poke(reg(name).offset, describe(name).reset);
   }
   abort();
+  state_.end_ps = 0;
   state_.data.clear();
   state_.dma_stopped  = false;
   state_.filter_count = 0;
@@ -3116,6 +3125,7 @@ template <typename Traits> void adc_model<Traits>::finish()
   auto const due    = due_samples();
   auto const end    = after(std::uint64_t{due} * conversion());
   state_.converting = false;
+  state_.end_ps     = end;
   for(; state_.held < due; ++state_.held)
   {
     state_.sum += code();
@@ -3421,7 +3431,7 @@ void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, tr
     ctx_.events.schedule_at(vtime{at.ps}, edge_due, free->generation, ctx_.clock);
     return;
   }
-  if(busy())
+  if(busy() or ended_early(at.ps))
   {
     latch_regular();
     return;
