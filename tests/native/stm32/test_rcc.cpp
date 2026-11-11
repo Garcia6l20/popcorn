@@ -1690,24 +1690,24 @@ TEST_CASE("the missing reset bit message names every reset bit name an instance 
   CHECK(stm32::reset_bit_choices("ADC12") == "ADC12RST");
 }
 
-TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its writes")
+TEST_CASE("TSCRST resets an unmodelled peripheral's storage and holds its writes")
 {
   auto const  f    = idle_fixture();
-  auto const& desc = f.target->peripheral("LPTIM1").description();
+  auto const& desc = f.target->peripheral("TSC").description();
   popcorn::testing::enable_clocks(
       *f.target, {
-                     {"APB3ENR", "LPTIM1EN"}
+                     {"AHB1ENR", "TSCEN"}
   });
-  auto const* cfgr     = popcorn::find_register(desc, "CFGR");
+  auto const* control  = popcorn::find_register(desc, "CR");
   auto&       services = probe(f).context.services;
-  REQUIRE(cfgr != nullptr);
+  REQUIRE(control != nullptr);
   auto const store = [&](std::uint32_t value, popcorn::initiator by = popcorn::initiator::cpu) {
-    REQUIRE(services.write(desc.base + cfgr->offset, 4, value, by).has_value());
+    REQUIRE(services.write(desc.base + control->offset, 4, value, by).has_value());
   };
-  auto const load = [&] { return f.target->peripheral("LPTIM1").peek(cfgr->offset); };
+  auto const load = [&] { return f.target->peripheral("TSC").peek(control->offset); };
   store(0x10);
   REQUIRE(load() == 0x10);
-  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "TSCRST", 1);
   CHECK(load() == 0);
   for(auto const by :
       {popcorn::initiator::cpu, popcorn::initiator::debugger, popcorn::initiator::dma})
@@ -1716,24 +1716,24 @@ TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its wri
     store(0x10, by);
     CHECK(load() == 0);
   }
-  auto const read = services.read(desc.base + cfgr->offset, 4, popcorn::initiator::cpu);
+  auto const read = services.read(desc.base + control->offset, 4, popcorn::initiator::cpu);
   REQUIRE(read.has_value());
   CHECK(*read == 0);
-  f.target->peripheral("LPTIM1").poke(cfgr->offset, 0x5);
-  services.hold_in_reset("LPTIM1", true);
+  f.target->peripheral("TSC").poke(control->offset, 0x5);
+  services.hold_in_reset("TSC", true);
   CHECK(load() == 0x5);
-  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 0);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "TSCRST", 0);
   store(0x10);
   CHECK(load() == 0x10);
 
-  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
-  f.target->peripheral("LPTIM1").poke(cfgr->offset, 0x5);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "TSCRST", 1);
+  f.target->peripheral("TSC").poke(control->offset, 0x5);
   auto const saved = f.target->snapshot();
   f.target->reset(reset_kind::software);
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   popcorn::testing::enable_clocks(
       *f.target, {
-                     {"APB3ENR", "LPTIM1EN"}
+                     {"AHB1ENR", "TSCEN"}
   });
   store(0x20);
   CHECK(load() == 0x20);

@@ -1332,7 +1332,7 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 ## LPTIM
 
-Source: [lptim.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/lptim.cpp)
+Source: [lptim.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/lptim.cpp), [lptim_v2.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/lptim_v2.cpp)
 
 STM32L4 LPTIM1 and LPTIM2, RM0351 section 34, count the kernel clock of RCC_CCIPR LPTIM1SEL or
 LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
@@ -1436,6 +1436,76 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
 - EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and
   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
   stuck at Stop entry or at a flag clear racing a new event, are outside the model.
+
+### STM32U5 LPTIM1 to LPTIM4
+
+STM32U5 LPTIM1 to LPTIM4, RM0456 section 58, count the kernel clock of RCC_CCIPR1 LPTIM2SEL or
+RCC_CCIPR3 LPTIM1SEL and LPTIM34SEL through the prescaler, started by CNTSTRT or SNGSTRT. LPTIM1
+to LPTIM3 have the ISR, ICR and DIER of RM0456 58.7.2, 58.7.5 and 58.7.8, LPTIM4 those of 58.7.1,
+58.7.4 and 58.7.7. The model leaves the CCMR1 and CCR2 of the STM32U5 LPTIM4 description
+unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
+
+- The counter starts at the later of the CNTSTRT or SNGSTRT write plus 3 kernel clocks, RM0456
+  58.4.7, and the ENABLE write plus two prescaled clocks, RM0456 58.4.13, the prescaled reading
+  inferred. A start write made with ENABLE 0 is discarded, also when the same write sets ENABLE,
+  inferred. CNTSTRT and SNGSTRT read 0 at once, inferred.
+- Continuous mode counts 0 to ARR and wraps. One-shot mode stops at 0 at the wrap after ARR, the
+  update event of RM0456 58.4.8 with RCR 0.
+- CC1IF and ARRM set at the kernel clock edge where the counter reaches CCR1 and ARR, RM0456
+  58.7.2, the instant inferred. CCR1 above ARR never matches, CCR1 equal to ARR sets CC1IF with
+  ARRM, and a counter above a lowered ARR counts to 0xFFFF before it wraps, inferred.
+- CMP1OK and ARROK set 3 kernel clocks after the CCR1 or ARR write, and the value applies then,
+  inferred: RM0456 58.4.11 states a latency with no number. Counter ticks up to the OK compare
+  with the old values, inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred.
+- DIEROK sets 3 kernel clocks after a DIER write, and the enables take effect then, inferred:
+  RM0456 58.7.8 states the flag with no latency. Each DIER bit the write changes clears its ISR
+  flag at that instant, ES0499 2.17.3, the instant inferred. A flag that sets while its DIER bit
+  is in effect raises the LPTIM IRQ until ICR clears it, so a DIER bit set after its flag raises
+  nothing, RM0456 58.6.
+- Terms due at the same time apply in the order CMP1OK, ARROK, DIEROK, CC1IF, ARRM, wrap, mode
+  switch, inferred.
+- SNGSTRT written while the counter runs in continuous mode makes it stop at a later wrap, and
+  CNTSTRT written in one-shot mode makes it go on counting, RM0456 58.4.8. The new mode reaches
+  the counter 3 kernel clocks after the write, inferred. The same mode written again while the
+  counter runs is discarded, inferred. A second CNTSTRT or SNGSTRT before the first reaches the
+  counter replaces it, logs one `model_warning` and raises `ModelError` under `strict`, inferred.
+- ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CCR1, ARR or DIER
+  write, inferred.
+- A CFGR write with ENABLE 1, a DIER, CCR1 or ARR write with ENABLE 0, RM0456 58.7.8, 58.7.10,
+  58.7.12 and 58.7.13, and a second DIER, CCR1 or ARR write before its OK flag, RM0456 58.4.11
+  and 58.7.8, log one `model_warning` each and raise `ModelError` under `strict`. The register
+  keeps its value, inferred, except the second write outside `strict`, whose value replaces the
+  pending one, inferred.
+- CFGR2 is storage: a firmware write that sets a bit logs one `model_warning` and raises
+  `ModelError` under `strict` before it is stored, and the coverage report lists it as
+  `storage_only`. A write of the reset value 0, as `HAL_LPTIM_Init` and `HAL_LPTIM_DeInit` make,
+  passes.
+- No LPTIM output drives a pin or a trigger signal.
+- A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
+  start latency, and the kernel clocks left before each pending OK flag, mode switch and one-shot
+  stop, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
+  them until it runs again, inferred.
+- LPTIM1RST to LPTIM4RST reset the registers and the state of their LPTIM.
+- CNT reads the exact count, so the double read of RM0456 58.7.14 always agrees.
+- These functions are not modelled. Each logs one `model_warning` at its first use and raises
+  `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
+  counter start PRELOAD, WAVE, CKSEL or COUNTMODE, ENC on LPTIM1 and LPTIM2, CC1E or CC2E with
+  the channel as output and CC1SEL or CC2SEL on LPTIM1 to LPTIM3, the CCMR1 ones also at a CCMR1
+  write while the counter runs. At the write: CNTSTRT or SNGSTRT with TRIGEN not 00, which leaves
+  the counter stopped, any RCR or CCR2 write, so REPOK, UE, CMP2OK and CC2IF never set, a DIER
+  bit other than CC1IE, ARRMIE, CMP1OKIE and ARROKIE, COUNTRST, which reads 0 at once, and
+  RSTARE. A function the model lacks otherwise counts the kernel clock with channel 1 comparing
+  CCR1.
+- The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
+  stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
+- ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, and
+  2.17.2, ARRM and CMPM missed in one-shot mode with an odd REP under an APB clock slower than the
+  kernel clock, are probabilistic and outside the model. ES0499 2.17.4, the over-capture lost
+  when CCxOF clears with a capture pulse active, concerns the input capture mode, not modelled.
+- ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, concerns the LPTIM inputs, not
+  modelled. ES0499 2.3.2, TIMICSEL not protected by LPTIM2SEC: the RCC model secures TIMICSEL
+  while LPTIM2, TIM16 or TIM17 is Secure, as RM0456 11.5.1 reads, so a Non-secure TIMICSEL write
+  with only LPTIM2 Secure is lost where the silicon takes it.
 
 ## MDF and ADF
 

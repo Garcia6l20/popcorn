@@ -218,6 +218,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
     "stm32u575/iwdg_ewi": ExampleParts(
         "STM32U575QGIx", ("STM32U575RITxQ",), pins=(), adc_channels=(), flash_kib=None
     ),
+    "stm32u575/lptim": ExampleParts(
+        "STM32U575QGIx", (), pins=("PA5",), adc_channels=(), flash_kib=None
+    ),
     "stm32u575/linked_uart": ExampleParts(
         "STM32U575QGIx",
         ("STM32U575VITxQ",),

@@ -26,6 +26,7 @@ stm32 = [
         "wwdg.cpp",
         "lpgpio.cpp",
         "lptim.cpp",
+        "lptim_v2.cpp",
         "rtc.cpp",
         "rtc_classic.cpp",
         "spi.cpp",

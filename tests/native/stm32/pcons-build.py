@@ -59,6 +59,7 @@ firmwares = {
         "irq_ll",
         "hash_ll",
         "rng_ll",
+        "lptim_ll",
     )
 }
 h573_firmwares = {
@@ -199,6 +200,7 @@ u575_programs = [
         ("stm32-iwdg", "test_iwdg.cpp"),
         ("stm32-wwdg-u5", "test_wwdg_u5.cpp"),
         ("stm32-dac-u5", "test_dac_u5.cpp"),
+        ("stm32-lptim-v2", "test_lptim_v2.cpp"),
         ("stm32-rtc", "test_rtc.cpp"),
         ("stm32-spi", "test_spi.cpp"),
         ("stm32-i2c", "test_i2c.cpp"),
