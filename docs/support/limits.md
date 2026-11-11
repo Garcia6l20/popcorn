@@ -1524,29 +1524,38 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
   CC2SEL 0 as the only condition, so the reset CCR2 0 sets it at CNT 1 of every run. WAVE 1 latches
   each channel on its own, also with its CCxE 0, inferred.
 - With CCxSEL 1 channel x of LPTIM1 to LPTIM3 captures, RM0456 58.3 Table 599 and 58.4.18. Its input
-  is the pin signal `lptim<n>_chx` with CFGR2 ICxSEL 00, RM0456 58.4.3 Tables 607 to 610. With ICxF
-  not 00 a level change counts once it has held for 2, 4 or 8 clocks of the RCC kernel clock, a
-  shorter pulse rejected, RM0456 58.7.17, the sampling phase taken as the change, inferred. ICxF
-  applies per channel as CCMR1 holds it, inferred, where RM0456 58.4.5 sets the capture filters as
-  one group. CCxP selects the rising, the falling or both edges and ICxPSC captures every 1, 2, 4 or
-  8 edges, RM0456 58.7.17, the prescaler counting only with CCxE 1 and reset by CCxE written to 0,
-  inferred. With CCxE 1 a capture latches CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613
-  latency in counter steps after the counter clock of the edge, so CCRx minus the offset is the
-  count at the edge, and CCxIF sets at the latch, inferred. With the counter stopped the capture
-  comes the same latency on the prescaled kernel clock counted from ENABLE and latches the stopped
-  CNT, inferred. Captures in flight apply in the order of their instants, and edges whose captures
-  fall on the same counter clock give one capture, inferred. A capture in flight is dropped by CCxE
-  or CCxSEL written to 0 and by ENABLE written to 0, and keeps its instant across a kernel rate
-  change, inferred. A CPU or DMA read of CCRx clears CCxIF, RM0456 58.7.3, a debugger read leaves
-  it, inferred. CCRx is read-only, RM0456 58.7.12 and 58.7.18: a write is discarded and sets no
-  CMPxOK, inferred. A capture channel compares nothing and drives its signal low. A CFGR2 write that
-  changes ICxSEL counts the level change it makes as an edge, inferred. With the kernel clock
-  stopped and CKSEL 0 an edge captures nothing, inferred. LPTIMxRST takes the capture input levels,
-  inferred. CCxP 10 on a capture channel logs one `model_warning` at a start and at a CCMR1 write
-  while the counter runs and raises `ModelError` under `strict`, RM0456 58.7.17 reserving it: both
-  edges then capture. A CCMR1 write that changes CCxSEL, ICxF, CCxP or ICxPSC of a capture channel
-  with CCxE 1 logs one `model_warning` and raises `ModelError` under `strict`, RM0456 58.7.17, the
-  new setting taking effect at the write.
+  is the pin signal `lptim<n>_chx` with CFGR2 ICxSEL 00, RM0456 58.4.3 Tables 607 to 610. IC2SEL 01
+  to 11 select the internal clocks of RM0456 Tables 608 to 610, LSI and LSE on LPTIM1, HSI16/256,
+  MSIS/1024 and MSIS/4 on LPTIM2: the input toggles every half period of the divided rate, rounded
+  up to a whole ps, from its level when the channel starts to capture, the phase inferred, and a
+  rate change takes effect from the last toggle, inferred. With ICxF not 00 a level change counts
+  once it has held for 2, 4 or 8 clocks of the RCC kernel clock, a shorter pulse rejected, RM0456
+  58.7.17, the sampling phase taken as the change, inferred. ICxF applies per channel as CCMR1 holds
+  it, inferred, where RM0456 58.4.5 sets the capture filters as one group. CCxP selects the rising,
+  the falling or both edges and ICxPSC captures every 1, 2, 4 or 8 edges, RM0456 58.7.17, the
+  prescaler counting only with CCxE 1 and reset by CCxE written to 0, inferred. With CCxE 1 a
+  capture latches CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613 latency in counter steps after
+  the counter clock of the edge, so CCRx minus the offset is the count at the edge, and CCxIF sets
+  at the latch, inferred. A capture while CCxIF is set also sets CCxOF, RM0456 58.4.18, and CCxOIE
+  arms the IRQ. ES0499 2.17.4: a CCxOCF write from one counter clock before a capture up to the
+  capture leaves CCxOF unset at every later over-capture, the window inferred, until CCxE is written
+  to 0 and back to 1 at least PRESC x 3 kernel clocks later, the erratum's workaround, or ENABLE is
+  written to 0, inferred. With the counter stopped the capture comes the same latency on the
+  prescaled kernel clock counted from ENABLE and latches the stopped CNT, inferred. Captures in
+  flight apply in the order of their instants, and edges whose captures fall on the same counter
+  clock give one capture, inferred. A capture in flight is dropped by CCxE or CCxSEL written to 0
+  and by ENABLE written to 0, and keeps its instant across a kernel rate change, inferred. A CPU or
+  DMA read of CCRx clears CCxIF, RM0456 58.7.3, a debugger read leaves it, inferred. CCRx is read-
+  only, RM0456 58.7.12 and 58.7.18: a write is discarded and sets no CMPxOK, inferred. A capture
+  channel compares nothing and drives its signal low. A CFGR2 write that changes ICxSEL counts the
+  level change it makes as an edge, inferred. With the kernel clock stopped and CKSEL 0 an edge
+  captures nothing, inferred. LPTIMxRST takes the capture input levels, inferred. CCxP 10 on a
+  capture channel logs one `model_warning` at a start and at a CCMR1 write while the counter runs
+  and raises `ModelError` under `strict`, RM0456 58.7.17 reserving it: both edges then capture. A
+  CCMR1 write that changes CCxSEL, ICxF, CCxP or ICxPSC of a capture channel with CCxE 1 logs one
+  `model_warning` and raises `ModelError` under `strict`, RM0456 58.7.17, the new setting taking
+  effect at the write. Two CCMR1 writes closer than PRESC x 3 kernel clocks both apply at once,
+  where RM0456 58.7.17 calls the result unpredictable.
 - A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or the
   start latency, and the kernel clocks left before each pending OK flag, COUNTRST and mode
   switch, inferred. A stopped kernel clock, MSIKON 0 under LPTIM1SEL 00 included, freezes all of
@@ -1623,22 +1632,22 @@ unclaimed, as RM0456 58.3 Table 599 gives LPTIM4 no channel.
 - These functions are not modelled. Each logs one `model_warning` at its first use and raises
   `ModelError` under `strict` at every use, after the write has taken the effect stated: at a
   counter start and at a CFGR2 write while it runs IN1SEL not 00 with CKSEL 1 or COUNTMODE 1, IN2SEL
-  not 00 with ENC 1, and IC1SEL or IC2SEL not 00 on a capture channel, the input then reading 0. At
-  a counter start and at a CCMR1 write while it runs CC1SEL or CC2SEL 1 with CKSEL 1, COUNTMODE 1 or
-  ENC 1, a capture then latching CNT at the filtered edge. At a CNTSTRT or SNGSTRT
+  not 00 with ENC 1, IC1SEL not 00 and a reserved IC2SEL input on a capture channel, the input then
+  reading 0. At a counter start and at a CCMR1 write while it runs CC1SEL or CC2SEL 1 with CKSEL 1,
+  COUNTMODE 1 or ENC 1, a capture then latching CNT at the filtered edge. At a CNTSTRT or SNGSTRT
   write with TRIGEN not 00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, named in
-  the warning, which leaves the counter stopped. At the write: a DIER bit other than CC1IE,
-  ARRMIE, EXTTRIGIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, on LPTIM1 and LPTIM2 UPIE and DOWNIE,
-  and on LPTIM1 to LPTIM3 CC2IE and CMP2OKIE. A function the model lacks otherwise counts the
-  kernel clock with channel 1 comparing CCR1.
+  the warning, which leaves the counter stopped. At the write: a DIER bit other than CC1IE, ARRMIE,
+  EXTTRIGIE, CMP1OKIE, ARROKIE, UEIE and REPOKIE, on LPTIM1 and LPTIM2 UPIE and DOWNIE, and on
+  LPTIM1 to LPTIM3 CC2IE, CMP2OKIE, CC1OIE and CC2OIE. A function the model lacks otherwise counts
+  the kernel clock with channel 1 comparing CCR1.
 - The autonomous mode of LPTIM1 to LPTIM3, RM0456 58.4.20, has no LPTIM register bit. RCC_SRDAMR
   stores LPTIM1AMEN, LPTIM3AMEN and LPTIM4AMEN, and Stop is not modelled.
 - ES0499 2.17.1, the LPTIM interrupt stuck at Stop entry when ENABLE clears near an interrupt, is
   probabilistic and outside the model. ES0499 2.17.2, ARRM and CMPM that "there is a chance" are
   not set at the end of a one-shot REP cycle with an odd REP and an APB clock slower than the
   kernel clock, unless {ARR, CMP} >= KER_CLK / (2 * APB_CLK), is probabilistic: the model always
-  sets them and logs nothing. ES0499 2.17.4, the over-capture lost
-  when CCxOF clears with a capture pulse active, concerns the input capture mode, not modelled.
+  sets them and logs nothing. ES0499 2.17.4, the over-capture lost when CCxOF clears with a capture
+  pulse active, is reproduced in the capture bullet above.
 - ES0499 2.3.1, LPTIM3_IN1 and LPTIM3_IN2 protected by LPTIM1SEC, is outside the model: the GPIO
   model passes an alternate function input to its peripheral whatever the security of the pin and of
   the peripheral, so neither the GTZC rule of RM0456 nor the erratum applies. ES0499 2.3.2, TIMICSEL

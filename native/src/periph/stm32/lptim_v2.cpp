@@ -36,6 +36,9 @@ constexpr std::uint32_t update_event             = 1u << 7;
 constexpr std::uint32_t repetition_ok            = 1u << 8;
 constexpr std::uint32_t compare2_match           = 1u << 9;
 constexpr std::uint32_t compare2_ok              = 1u << 19;
+constexpr std::uint32_t overcapture1             = 1u << 12;
+constexpr std::uint32_t overcapture2             = 1u << 13;
+constexpr std::uint32_t modelled_capture_enables = overcapture1 | overcapture2;
 constexpr std::uint32_t interrupts_ok            = 1u << 24;
 constexpr std::uint32_t modelled_enables         = compare_match
                                                  | reload_match
@@ -97,6 +100,7 @@ enum class term : std::uint8_t
   capture2_input,
   capture1,
   capture2,
+  capture2_clock,
 };
 
 enum class use : std::uint8_t
@@ -109,12 +113,11 @@ enum class use : std::uint8_t
 
 constexpr auto unmodelled_table = std::to_array<std::string_view>({
     "IN1SEL not 00, comp1_out or a reserved input 1, with CKSEL 1 or COUNTMODE 1, IN2SEL not 00, "
-    "comp2_out or a reserved input 2, with ENC 1, or IC1SEL or IC2SEL not 00 on a capture channel, "
-    "a comparator, an internal clock or a reserved input: not modelled, the input reads 0",
+    "comp2_out or a reserved input 2, with ENC 1, or IC1SEL or IC2SEL not 00 on a capture channel "
+    "with a comparator or a reserved input: not modelled, the input reads 0",
     "CC1SEL or CC2SEL 1 with CKSEL 1, COUNTMODE 1 or ENC 1, the input capture with the counter "
     "clocked by an input: not modelled, a capture takes CNT at the filtered edge",
-    "a DIER enable of an over-capture flag or a DMA request: not "
-    "modelled, the model never sets these flags or requests",
+    "a DIER enable of a DMA request: not modelled, the model never raises these requests",
 });
 static_assert(unmodelled_table.size() == static_cast<std::size_t>(use::count));
 
@@ -188,6 +191,12 @@ struct lptim_v2_state
   std::array<std::uint64_t, 2>              capture_filter_due{};
   std::array<std::uint64_t, 2>              capture_edge_ps{};
   std::array<std::vector<std::uint64_t>, 2> captures{};
+  std::array<std::uint64_t, 2>              capture_last_ps{};
+  std::array<std::uint64_t, 2>              capture_off_ps{};
+  std::array<std::uint8_t, 2>               overcapture_lost{};
+  std::uint64_t                             source_ps{};
+  std::uint8_t                              source_level{};
+  std::uint8_t                              source_live{};
 
   friend auto operator==(lptim_v2_state const&, lptim_v2_state const&) -> bool = default;
 };
@@ -282,30 +291,40 @@ struct lptim_v2_state
  *        latches each channel on its own, also with its CCxE 0, inferred.
  *        With CCxSEL 1 on LPTIM1 to LPTIM3 channel x captures, RM0456 58.3 Table 599 and 58.4.18.
  *        Its input is the pin signal `lptim<n>_chx` with CFGR2 ICxSEL 00, RM0456 58.4.3 Tables 607
- *        to 610. With ICxF not 00 a level change counts once it has held for 2, 4 or 8 clocks of
- *        the RCC kernel clock, a shorter pulse rejected, RM0456 58.7.17, the sampling phase taken
- *        as the change, inferred. ICxF applies per channel as CCMR1 holds it, inferred, where
- *        RM0456 58.4.5 sets the capture filters as one group. CCxP selects the rising, the falling
- *        or both edges and ICxPSC captures every 1, 2, 4 or 8 edges, RM0456 58.7.17, the prescaler
- *        counting only with CCxE 1 and reset by CCxE written to 0, inferred. With CCxE 1 a capture
- *        latches CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613 latency in counter steps after
- *        the counter clock of the edge, so CCRx minus the offset is the count at the edge, and
- *        CCxIF sets at the latch, inferred. With the counter stopped the capture comes the same
- *        latency on the prescaled kernel clock counted from ENABLE and latches the stopped CNT,
- *        inferred. Captures in flight apply in the order of their instants, and edges whose
- *        captures fall on the same counter clock give one capture, inferred. A capture in flight is
- *        dropped by CCxE or CCxSEL written to 0 and by ENABLE written to 0, and keeps its instant
- *        across a kernel rate change, inferred. A CPU or DMA read of CCRx clears CCxIF, RM0456
- *        58.7.3, a debugger read leaves it, inferred. CCRx is read-only, RM0456 58.7.12 and
- *        58.7.18: a write is discarded and sets no CMPxOK, inferred. A capture channel compares
- *        nothing and drives its signal low. A CFGR2 write that changes ICxSEL counts the level
- *        change it makes as an edge, inferred. With the kernel clock stopped and CKSEL 0 an edge
- *        captures nothing, inferred. LPTIMxRST takes the capture input levels, inferred. CCxP 10 on
- *        a capture channel logs one model_warning at a start and at a CCMR1 write while the counter
- *        runs and raises model_error under strict_peripherals, RM0456 58.7.17 reserving it: both
- *        edges then capture. A CCMR1 write that changes CCxSEL, ICxF, CCxP or ICxPSC of a capture
- *        channel with CCxE 1 logs one model_warning and raises model_error under
- *        strict_peripherals, RM0456 58.7.17, the new setting taking effect at the write.
+ *        to 610. IC2SEL 01 to 11 select the internal clocks of RM0456 Tables 608 to 610, LSI and
+ *        LSE on LPTIM1, HSI16/256, MSIS/1024 and MSIS/4 on LPTIM2: the input toggles every half
+ *        period of the divided rate, rounded up to a whole ps, from its level when the channel
+ *        starts to capture, the phase inferred, and a rate change takes effect from the last
+ *        toggle, inferred. With ICxF not 00 a level change counts once it has held for 2, 4 or 8
+ *        clocks of the RCC kernel clock, a shorter pulse rejected, RM0456 58.7.17, the sampling
+ *        phase taken as the change, inferred. ICxF applies per channel as CCMR1 holds it, inferred,
+ *        where RM0456 58.4.5 sets the capture filters as one group. CCxP selects the rising, the
+ *        falling or both edges and ICxPSC captures every 1, 2, 4 or 8 edges, RM0456 58.7.17, the
+ *        prescaler counting only with CCxE 1 and reset by CCxE written to 0, inferred. With CCxE 1
+ *        a capture latches CNT into CCRx, RM0456 58.4.18, the RM0456 Table 613 latency in counter
+ *        steps after the counter clock of the edge, so CCRx minus the offset is the count at the
+ *        edge, and CCxIF sets at the latch, inferred. A capture while CCxIF is set also sets CCxOF,
+ *        RM0456 58.4.18, and CCxOIE arms the IRQ. ES0499 2.17.4: a CCxOCF write from one counter
+ *        clock before a capture up to the capture leaves CCxOF unset at every later over-capture,
+ *        the window inferred, until CCxE is written to 0 and back to 1 at least PRESC x 3 kernel
+ *        clocks later, the erratum's workaround, or ENABLE is written to 0, inferred. With the
+ *        counter stopped the capture comes the same latency on the prescaled kernel clock counted
+ *        from ENABLE and latches the stopped CNT, inferred. Captures in flight apply in the order
+ *        of their instants, and edges whose captures fall on the same counter clock give one
+ *        capture, inferred. A capture in flight is dropped by CCxE or CCxSEL written to 0 and by
+ *        ENABLE written to 0, and keeps its instant across a kernel rate change, inferred. A CPU or
+ *        DMA read of CCRx clears CCxIF, RM0456 58.7.3, a debugger read leaves it, inferred. CCRx is
+ *        read-only, RM0456 58.7.12 and 58.7.18: a write is discarded and sets no CMPxOK, inferred.
+ *        A capture channel compares nothing and drives its signal low. A CFGR2 write that changes
+ *        ICxSEL counts the level change it makes as an edge, inferred. With the kernel clock
+ *        stopped and CKSEL 0 an edge captures nothing, inferred. LPTIMxRST takes the capture input
+ *        levels, inferred. CCxP 10 on a capture channel logs one model_warning at a start and at a
+ *        CCMR1 write while the counter runs and raises model_error under strict_peripherals, RM0456
+ *        58.7.17 reserving it: both edges then capture. A CCMR1 write that changes CCxSEL, ICxF,
+ *        CCxP or ICxPSC of a capture channel with CCxE 1 logs one model_warning and raises
+ *        model_error under strict_peripherals, RM0456 58.7.17, the new setting taking effect at the
+ *        write. Two CCMR1 writes closer than PRESC x 3 kernel clocks both apply at once, where
+ *        RM0456 58.7.17 calls the result unpredictable.
  *        With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on input 1,
  *        rising, falling or both, instead of the kernel clock, RM0456 58.4.12 and 58.7.10. Input 1
  *        is the pin signal `lptim<n>_in1` with CFGR2 IN1SEL 00, RM0456 58.4.3 Table 605, and a
@@ -374,14 +393,15 @@ struct lptim_v2_state
  *        counter.
  *        The functions below are logged as not modelled: each logs one model_warning at its first
  *        use and raises model_error under strict_peripherals at every use, after the write has
- *        taken the effect stated. At a counter start and at a CFGR2 write while it runs: IN1SEL
- *        not 00 with CKSEL 1 or COUNTMODE 1, IN2SEL not 00 with ENC 1, and IC1SEL or IC2SEL not
- *        00 on a capture channel, the input then reading 0. At a counter start and at a CCMR1
- *        write while it runs: CC1SEL or CC2SEL 1 with CKSEL 1, COUNTMODE 1 or ENC 1, a capture
- *        then latching CNT at the filtered edge. At a CNTSTRT or SNGSTRT write with TRIGEN not
- *        00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, which leaves the
+ *        taken the effect stated. At a counter start and at a CFGR2 write while it runs: IN1SEL not
+ *        00 with CKSEL 1 or COUNTMODE 1, IN2SEL not 00 with ENC 1, IC1SEL not 00 and a reserved
+ *        IC2SEL input on a capture channel, the input then reading 0. At a counter start and at a
+ *        CCMR1 write while it runs: CC1SEL or CC2SEL 1 with CKSEL 1, COUNTMODE 1 or ENC 1, a
+ *        capture then latching CNT at the filtered edge. At a CNTSTRT or SNGSTRT write with TRIGEN
+ *        not 00: TRIGSEL not 0, an input of RM0456 Table 604 no model produces, which leaves the
  *        counter stopped. At the write: a DIER bit other than CC1IE, ARRMIE, EXTTRIGIE, CMP1OKIE,
- *        ARROKIE, UPIE, DOWNIE, UEIE and REPOKIE, and on a channel instance CC2IE and CMP2OKIE.
+ *        ARROKIE, UPIE, DOWNIE, UEIE and REPOKIE, on a channel instance CC2IE and CMP2OKIE, and on
+ *        a capture instance CC1OIE and CC2OIE.
  *        Deviation: CNT reads exact, without the double-read rule of RM0456 58.7.14.
  */
 class lptim_v2 final : public dispatch_model<lptim_v2, lptim_v2_state>,
@@ -518,14 +538,21 @@ private:
   [[nodiscard]] auto
       filtered_change(filter_line line, std::uint64_t ps, bool level, std::uint32_t code, bool live)
           -> bool;
-  void trigger_changed(std::uint64_t ps, bool level);
-  void trigger_fired(std::uint64_t ps, bool rising);
-  void restart_on_trigger(std::uint64_t ps, bool single);
-  void arm(bool single);
-  void capture_changed(std::size_t channel, std::uint64_t ps, bool level);
-  void capture_edge(std::size_t channel, std::uint64_t ps, bool rising);
-  void apply_capture(std::size_t channel, std::uint64_t due);
-  void drop_captures(std::size_t channel);
+  void               trigger_changed(std::uint64_t ps, bool level);
+  void               trigger_fired(std::uint64_t ps, bool rising);
+  void               restart_on_trigger(std::uint64_t ps, bool single);
+  void               arm(bool single);
+  void               capture_changed(std::size_t channel, std::uint64_t ps, bool level);
+  void               capture_edge(std::size_t channel, std::uint64_t ps, bool rising);
+  void               apply_capture(std::size_t channel, std::uint64_t due);
+  void               drop_captures(std::size_t channel);
+  void               sync_source(std::uint64_t ps);
+  [[nodiscard]] auto source_due() const -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto source_hz() const -> std::uint64_t;
+  [[nodiscard]] auto source_wanted() const -> bool;
+  [[nodiscard]] auto in_capture_pulse(std::size_t channel, std::uint64_t ps) const -> bool;
+  void               overcapture_cleared(std::size_t channel, std::uint64_t ps);
+  void               capture_enable_changed(std::size_t channel, bool on, std::uint64_t ps);
 
   lptim_v2_variant                          variant_;
   register_file&                            regs_;
@@ -559,6 +586,7 @@ private:
   std::array<field_ref, 2>                  capture_filter_{};
   std::array<field_ref, 2>                  capture_prescaler_{};
   std::array<std::string, 2>                capture_inputs_{};
+  std::array<core::clock_domain, 3>         source_domains_{};
   std::array<bool, 2>                       capture_polarity_logged_{};
   std::array<bool, 2>                       capture_setup_logged_{};
   core::clock_domain                        kernel_;
@@ -642,6 +670,13 @@ lptim_v2::lptim_v2(model_context& ctx, peripheral_desc const& desc, lptim_v2_var
     capture_filter_    = {field("CCMR1", "IC1F"), field("CCMR1", "IC2F")};
     capture_prescaler_ = {field("CCMR1", "IC1PSC"), field("CCMR1", "IC2PSC")};
     capture_inputs_    = {lower(desc.name) + "_ch1", lower(desc.name) + "_ch2"};
+    for(std::size_t select = 1; select <= 3; ++select)
+    {
+      if(auto const input = variant.capture2_inputs[select]; not input.domain.empty())
+      {
+        source_domains_[select - 1] = ctx.clock.domain(input.domain);
+      }
+    }
   }
   state_.reload = describe("ARR").reset;
   state_.hz     = ctx.clock.hz(kernel_);
@@ -694,7 +729,9 @@ auto lptim_v2::selects_unmodelled_input() const -> bool
   return (external() and (select & input1_select) != 0)
       or (encoder() and (select & input2_select) != 0)
       or (capturing(0) and (select & capture1_select) != 0)
-      or (capturing(1) and (select & capture2_select) != 0);
+      or (capturing(1)
+          and (select & capture2_select) != 0
+          and variant_.capture2_inputs[(select & capture2_select) >> 20].domain.empty());
 }
 
 auto lptim_v2::line_of(bool second) -> filter_line
@@ -920,7 +957,8 @@ auto lptim_v2::modelled_interrupts() const -> std::uint32_t
 {
   return modelled_enables
        | (variant_.channels != 0 ? modelled_channel_enables : 0u)
-       | (variant_.encoder ? modelled_encoder_enables : 0u);
+       | (variant_.encoder ? modelled_encoder_enables : 0u)
+       | (variant_.capture and variant_.channels != 0 ? modelled_capture_enables : 0u);
 }
 
 auto lptim_v2::drive(bool raw, std::size_t channel) const -> bool
@@ -1134,6 +1172,10 @@ void lptim_v2::offer_captures(std::optional<due_term>& best) const
   {
     offer(state_.captures[1].front(), term::capture2);
   }
+  if(auto const due = source_due())
+  {
+    offer(*due, term::capture2_clock);
+  }
 }
 
 void lptim_v2::raise_flag(std::uint32_t flag)
@@ -1221,6 +1263,13 @@ void lptim_v2::apply(due_term const& next)
     state_.capture_filter_due[channel] = 0;
     state_.capture_filtered[channel]   = state_.capture_pending[channel];
     capture_edge(channel, next.due, state_.capture_pending[channel] != 0);
+    return;
+  }
+  if(next.which == term::capture2_clock)
+  {
+    state_.source_ps    = next.due;
+    state_.source_level = state_.source_level != 0 ? 0 : 1;
+    capture_changed(1, next.due, state_.source_level != 0);
     return;
   }
   if(next.which == term::capture1 or next.which == term::capture2)
@@ -1570,6 +1619,7 @@ void lptim_v2::refresh()
 
 void lptim_v2::reschedule()
 {
+  sync_source(now_ps());
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
   {
     ctx_.events.cancel(seq - 1);
@@ -1816,6 +1866,12 @@ void lptim_v2::on_clock_change()
   auto const hz = kernel_hz();
   if(hz == state_.hz)
   {
+    if(state_.source_live != 0)
+    {
+      catch_up(now_ps());
+      refresh();
+      reschedule();
+    }
     return;
   }
   auto const t = now_ps();
@@ -1831,6 +1887,14 @@ void lptim_v2::plain_written(std::uint32_t, std::uint32_t)
 void lptim_v2::clear_written(std::uint32_t, std::uint32_t now)
 {
   catch_up(now_ps());
+  for(std::size_t channel = 0; channel < 2 and variant_.capture and variant_.channels != 0;
+      ++channel)
+  {
+    if((now & (channel == 0 ? overcapture1 : overcapture2)) != 0)
+    {
+      overcapture_cleared(channel, now_ps());
+    }
+  }
   state_.isr &= ~now;
   state_.armed &= ~now;
   regs_.poke(icr_.offset, 0);
@@ -1922,6 +1986,8 @@ void lptim_v2::control_written(std::uint32_t old, std::uint32_t now)
     state_.armed_mode   = 0;
     drop_captures(0);
     drop_captures(1);
+    state_.overcapture_lost = {};
+    state_.capture_off_ps   = {};
     stop();
   }
   regs_.poke(
@@ -1988,6 +2054,10 @@ void lptim_v2::channels_written(std::uint32_t old, std::uint32_t now)
     if(before[channel] and not taking(channel))
     {
       drop_captures(channel);
+    }
+    if(before[channel] != taking(channel))
+    {
+      capture_enable_changed(channel, taking(channel), now_ps());
     }
   }
   refresh();
@@ -2271,15 +2341,102 @@ void lptim_v2::apply_capture(std::size_t channel, std::uint64_t due)
   auto& queue = state_.captures[channel];
   queue.erase(queue.begin());
   auto const value                                  = count_at(due);
+  auto const flag                                   = channel == 0 ? compare_match : compare2_match;
   (channel == 0 ? state_.compare : state_.compare2) = value;
   regs_.poke((channel == 0 ? ccr1_ : ccr2_).offset, value);
-  raise_flag(channel == 0 ? compare_match : compare2_match);
+  if((state_.isr & flag) != 0 and state_.overcapture_lost[channel] == 0)
+  {
+    raise_flag(channel == 0 ? overcapture1 : overcapture2);
+  }
+  raise_flag(flag);
+  state_.capture_last_ps[channel] = due;
 }
 
 void lptim_v2::drop_captures(std::size_t channel)
 {
   state_.captures[channel].clear();
   state_.capture_divided[channel] = 0;
+}
+
+auto lptim_v2::source_hz() const -> std::uint64_t
+{
+  auto const select = (regs_.peek(inputs_.offset) & capture2_select) >> 20;
+  if(select == 0 or variant_.capture2_inputs[select].domain.empty())
+  {
+    return 0;
+  }
+  return ctx_.clock.hz(source_domains_[select - 1]);
+}
+
+auto lptim_v2::source_wanted() const -> bool
+{
+  return enabled() and capturing(1) and get(regs_, channel_enable_[1]) != 0 and source_hz() != 0;
+}
+
+auto lptim_v2::source_due() const -> std::optional<std::uint64_t>
+{
+  if(state_.source_live == 0)
+  {
+    return std::nullopt;
+  }
+  auto const select = (regs_.peek(inputs_.offset) & capture2_select) >> 20;
+  auto const hz     = source_hz();
+  if(hz == 0)
+  {
+    return std::nullopt;
+  }
+  auto const half = (wide{ps_per_second} * variant_.capture2_inputs[select].divider + 2 * hz - 1)
+                  / (2 * wide{hz});
+  return state_.source_ps + static_cast<std::uint64_t>(half);
+}
+
+void lptim_v2::sync_source(std::uint64_t ps)
+{
+  auto const wanted = variant_.capture and variant_.channels != 0 and source_wanted();
+  if(wanted and state_.source_live == 0)
+  {
+    state_.source_ps    = ps;
+    state_.source_level = state_.capture_level[1];
+  }
+  state_.source_live = wanted ? 1 : 0;
+}
+
+auto lptim_v2::in_capture_pulse(std::size_t channel, std::uint64_t ps) const -> bool
+{
+  auto const near = [&](std::uint64_t due) {
+    return state_.hz != 0 and wide{due} * state_.hz <= wide{ps} * state_.hz + tick_unit();
+  };
+  auto const& queue = state_.captures[channel];
+  return (state_.capture_last_ps[channel] == ps and ps != 0)
+      or (not queue.empty() and near(queue.front()));
+}
+
+void lptim_v2::overcapture_cleared(std::size_t channel, std::uint64_t ps)
+{
+  if(in_capture_pulse(channel, ps))
+  {
+    state_.overcapture_lost[channel] = 1;
+  }
+}
+
+void lptim_v2::capture_enable_changed(std::size_t channel, bool on, std::uint64_t ps)
+{
+  if(not on)
+  {
+    state_.capture_off_ps[channel] = ps + 1;
+    return;
+  }
+  auto const off = std::exchange(state_.capture_off_ps[channel], 0);
+  auto const hz  = ctx_.clock.hz(kernel_);
+  if(off == 0 or hz == 0)
+  {
+    return;
+  }
+  auto const needed = wide{3u << get(regs_, prescaler_)} * ps_per_second;
+  if(wide{ps - (off - 1)} * hz >= needed)
+  {
+    state_.overcapture_lost[channel] = 0;
+  }
 }
 
 void lptim_v2::input_changed(std::uint64_t ps, bool level, bool second)

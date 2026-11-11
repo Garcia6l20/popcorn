@@ -39,6 +39,40 @@ private:
   std::array<std::string_view, 8> names_;
 };
 
+/** @brief One internal input of input capture 2, the RCC clock domain it divides. */
+struct lptim_v2_clock_input
+{
+  /** @brief RCC clock domain, empty for a reserved input. */
+  std::string_view domain;
+  /** @brief Division of the domain's rate. */
+  std::uint32_t divider = 1;
+};
+
+/** @brief Input capture 2 inputs of CFGR2 IC2SEL 01, 10 and 11, RM0456 Tables 608 to 610. IC2SEL
+ *         00 is the instance's `<instance>_ch2` pin. It has no default constructor, so a variant
+ *         that omits its `capture2_inputs` field does not build. */
+class lptim_v2_capture2_inputs
+{
+public:
+  lptim_v2_capture2_inputs() = delete;
+
+  constexpr lptim_v2_capture2_inputs(
+      lptim_v2_clock_input mux1,
+      lptim_v2_clock_input mux2,
+      lptim_v2_clock_input mux3)
+      : inputs_{mux1, mux2, mux3}
+  {}
+
+  /** @brief The input of IC2SEL @p select, 1 to 3. */
+  [[nodiscard]] constexpr auto operator[](std::size_t select) const -> lptim_v2_clock_input
+  {
+    return inputs_[select - 1];
+  }
+
+private:
+  std::array<lptim_v2_clock_input, 3> inputs_;
+};
+
 /** @brief Differences between the LPTIM peripherals of the STM32U5 and STM32H5 IP the model rows
  *         serve, RM0456 58.3 Table 599. */
 struct lptim_v2_variant
@@ -61,30 +95,35 @@ struct lptim_v2_variant
   std::string_view bus_clock = "pclk3";
   /** @brief Trigger inputs of TRIGSEL 0 to 7, RM0456 58.4.3 Table 604. */
   lptim_v2_triggers triggers;
+  /** @brief Input capture 2 inputs of IC2SEL 01 to 11, RM0456 58.4.3 Tables 608 to 610. */
+  lptim_v2_capture2_inputs capture2_inputs;
 };
 
 /** @brief STM32U5 LPTIM1 on APB3, RM0456 58.3 Table 599: encoder, input capture, two
- *         channels. */
+ *         channels, LSI and LSE on input capture 2, Table 608. */
 inline constexpr lptim_v2_variant u5_lptim1{
-    .triggers = {
-                 "etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "tamp_trg2", "lpdma_ch2_tc",
-                 "comp1_out", "comp2_out"}
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "tamp_trg2", "lpdma_ch2_tc",
+                   "comp1_out", "comp2_out"},
+    .capture2_inputs = {{"lsi"}, {"lse"}, {}}
 };
 /** @brief STM32U5 LPTIM2: LPTIM1 on APB1, its clock enable in RCC_APB1ENR2, the GPDMA triggers of
- *         RM0456 Table 604. */
+ *         RM0456 Table 604, HSI16/256, MSIS/1024 and MSIS/4 on input capture 2, Table 609. */
 inline constexpr lptim_v2_variant u5_lptim2{
     .bus_clock = "pclk1",
-    .triggers  = {
-                  "etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "gpdma_ch0_tc", "gpdma_ch4_tc",
-                  "comp1_out", "comp2_out"}
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "gpdma_ch0_tc", "gpdma_ch4_tc",
+                   "comp1_out", "comp2_out"},
+    .capture2_inputs = {{"hsi16", 256}, {"msis", 1024}, {"msis", 4}}
 };
 /** @brief STM32U5 LPTIM3: LPTIM1 without the encoder mode, RM0456 58.3 Table 599, and its own
  *         triggers of Table 604. */
 inline constexpr lptim_v2_variant u5_lptim3{
-    .encoder  = false,
-    .triggers = {
-                 "etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "lpdma_ch1_tc", "tamp_trg3",
-                 "comp1_out", "comp2_out"}
+    .encoder = false,
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "tamp_trg1", "lpdma_ch1_tc", "tamp_trg3",
+                   "comp1_out", "comp2_out"},
+    .capture2_inputs = {{}, {}, {}}
 };
 /** @brief STM32U5 LPTIM4, RM0456 58.3 Table 599 and 58.7.1: no channel, no encoder, no input
  *         capture, the `ISR`, `ICR` and `DIER` layout of 58.7.1, 58.7.4 and 58.7.7. */
@@ -95,9 +134,10 @@ inline constexpr lptim_v2_variant u5_lptim4{
     .channels   = 0,
     .encoder    = false,
     .capture    = false,
-    .triggers   = {
-                   "etr", "rtc_alra_trg", "rtc_alrb_trg", "lpdma_ch0_tc", "tamp_trg2", "tamp_trg3",
-                   "comp1_out", "comp2_out"}
+    .triggers =
+        {"etr", "rtc_alra_trg", "rtc_alrb_trg", "lpdma_ch0_tc", "tamp_trg2", "tamp_trg3",
+                   "comp1_out", "comp2_out"},
+    .capture2_inputs = {{}, {}, {}}
 };
 
 /**
