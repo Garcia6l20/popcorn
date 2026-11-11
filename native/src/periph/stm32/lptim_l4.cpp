@@ -337,15 +337,15 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
  *   stuck at Stop entry or at a flag clear racing a new event, are outside the model.
  */
-class lptim final : public dispatch_model<lptim, lptim_l4_state>,
-                    public clock_listener,
-                    public bus_reset_listener,
-                    public core_hold_listener,
-                    public trigger_source,
-                    public trigger_sink
+class lptim_l4 final : public dispatch_model<lptim_l4, lptim_l4_state>,
+                       public clock_listener,
+                       public bus_reset_listener,
+                       public core_hold_listener,
+                       public trigger_source,
+                       public trigger_sink
 {
 public:
-  lptim(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant);
+  lptim_l4(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               load(std::span<std::byte const> in) override;
@@ -465,23 +465,23 @@ private:
   std::optional<bool>               listened_;
 };
 
-constexpr std::array<write_entry<lptim>, 8> lptim_l4_writes{
+constexpr std::array<write_entry<lptim_l4>, 8> lptim_l4_writes{
     {
-     {"ISR", &lptim::plain_written},
-     {"ICR", &lptim::clear_written},
-     {"IER", &lptim::locked_written<locked::interrupts>},
-     {"CFGR", &lptim::locked_written<locked::configuration>},
-     {"CR", &lptim::control_written},
-     {"CMP", &lptim::value_written<term::compare_written>},
-     {"ARR", &lptim::value_written<term::reload_written>},
-     {"CNT", &lptim::plain_written},
+     {"ISR", &lptim_l4::plain_written},
+     {"ICR", &lptim_l4::clear_written},
+     {"IER", &lptim_l4::locked_written<locked::interrupts>},
+     {"CFGR", &lptim_l4::locked_written<locked::configuration>},
+     {"CR", &lptim_l4::control_written},
+     {"CMP", &lptim_l4::value_written<term::compare_written>},
+     {"ARR", &lptim_l4::value_written<term::reload_written>},
+     {"CNT", &lptim_l4::plain_written},
      }
 };
 
-constexpr std::array<write_entry<lptim>, 1> lptim_l4_option_writes{
-    {{"OR", &lptim::locked_written<locked::option>}}};
+constexpr std::array<write_entry<lptim_l4>, 1> lptim_l4_option_writes{
+    {{"OR", &lptim_l4::locked_written<locked::option>}}};
 
-lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant)
+lptim_l4::lptim_l4(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant const& variant)
     : dispatch_model{ctx, desc, "LPTIM", lptim_l4_writes}, variant_{variant}, regs_{ctx.regs},
       isr_{reg("ISR")}, ier_{reg("IER")}, cfgr_{reg("CFGR")}, cr_{reg("CR")}, cmp_{reg("CMP")},
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
@@ -512,44 +512,44 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_l4_variant c
   state_.hz     = ctx.clock.hz(kernel_);
 }
 
-auto lptim::now_ps() const -> std::uint64_t
+auto lptim_l4::now_ps() const -> std::uint64_t
 {
   return ctx_.clock.time().ps;
 }
 
-auto lptim::kernel_hz() const -> std::uint64_t
+auto lptim_l4::kernel_hz() const -> std::uint64_t
 {
   return state_.held != 0 or get(regs_, clock_select_) != 0 ? 0 : ctx_.clock.hz(kernel_);
 }
 
-auto lptim::enabled() const -> bool
+auto lptim_l4::enabled() const -> bool
 {
   return (regs_.peek(cr_.offset) & enable_bit) != 0;
 }
 
-auto lptim::anchor() const -> wide
+auto lptim_l4::anchor() const -> wide
 {
   return wide{state_.anchor_ps} * state_.hz + state_.anchor_frac;
 }
 
-auto lptim::tick_unit() const -> wide
+auto lptim_l4::tick_unit() const -> wide
 {
   return (wide{1} << get(regs_, prescaler_)) * ps_per_second;
 }
 
-void lptim::set_anchor(wide at)
+void lptim_l4::set_anchor(wide at)
 {
   state_.anchor_ps   = static_cast<std::uint64_t>(at / state_.hz);
   state_.anchor_frac = static_cast<std::uint64_t>(at % state_.hz);
 }
 
-auto lptim::first_wrap() const -> std::uint64_t
+auto lptim_l4::first_wrap() const -> std::uint64_t
 {
   auto const from = state_.anchor_count;
   return from <= state_.reload ? state_.reload + 1u - from : counter_top + 1u - from;
 }
 
-auto lptim::position(std::uint64_t ticks) const -> std::uint32_t
+auto lptim_l4::position(std::uint64_t ticks) const -> std::uint32_t
 {
   auto const wrap = first_wrap();
   if(ticks < wrap)
@@ -559,7 +559,7 @@ auto lptim::position(std::uint64_t ticks) const -> std::uint32_t
   return static_cast<std::uint32_t>((ticks - wrap) % (std::uint64_t{state_.reload} + 1u));
 }
 
-auto lptim::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
+auto lptim_l4::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
 {
   auto const at = wide{ps} * state_.hz;
   if(state_.running == 0 or state_.hz == 0 or external() or at < anchor())
@@ -569,18 +569,18 @@ auto lptim::ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>
   return static_cast<std::uint64_t>((at - anchor()) / tick_unit());
 }
 
-auto lptim::count_at(std::uint64_t ps) const -> std::uint32_t
+auto lptim_l4::count_at(std::uint64_t ps) const -> std::uint32_t
 {
   auto const ticks = ticks_at(ps);
   return ticks ? position(*ticks) : state_.anchor_count;
 }
 
-auto lptim::ceil_ps(wide at) const -> std::uint64_t
+auto lptim_l4::ceil_ps(wide at) const -> std::uint64_t
 {
   return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
 }
 
-auto lptim::ticks_to(std::uint32_t value) const -> std::uint64_t
+auto lptim_l4::ticks_to(std::uint32_t value) const -> std::uint64_t
 {
   auto const from   = state_.anchor_count;
   auto const period = std::uint64_t{state_.reload} + 1u;
@@ -588,7 +588,7 @@ auto lptim::ticks_to(std::uint32_t value) const -> std::uint64_t
                                : first_wrap() + value;
 }
 
-auto lptim::match_at(std::uint32_t value) const -> std::optional<wide>
+auto lptim_l4::match_at(std::uint32_t value) const -> std::optional<wide>
 {
   if(state_.running == 0 or state_.hz == 0 or external() or value > state_.reload)
   {
@@ -611,7 +611,8 @@ auto lptim::match_at(std::uint32_t value) const -> std::optional<wide>
   return at;
 }
 
-auto lptim::match_due(std::uint32_t value, std::uint64_t held) const -> std::optional<std::uint64_t>
+auto lptim_l4::match_due(std::uint32_t value, std::uint64_t held) const
+    -> std::optional<std::uint64_t>
 {
   auto const at  = match_at(value);
   auto const due = at ? std::optional{ceil_ps(*at)} : std::nullopt;
@@ -622,12 +623,12 @@ auto lptim::match_due(std::uint32_t value, std::uint64_t held) const -> std::opt
   return due;
 }
 
-auto lptim::wave() const -> bool
+auto lptim_l4::wave() const -> bool
 {
   return get(regs_, wave_) != 0;
 }
 
-auto lptim::raw_at(std::uint64_t ps) const -> bool
+auto lptim_l4::raw_at(std::uint64_t ps) const -> bool
 {
   if(state_.latched != 0)
   {
@@ -658,7 +659,7 @@ auto lptim::raw_at(std::uint64_t ps) const -> bool
   return state_.compare <= count and count < state_.reload;
 }
 
-auto lptim::out_due() const -> std::optional<std::uint64_t>
+auto lptim_l4::out_due() const -> std::optional<std::uint64_t>
 {
   if(state_.running == 0
      or state_.latched != 0
@@ -688,7 +689,7 @@ auto lptim::out_due() const -> std::optional<std::uint64_t>
   return best;
 }
 
-void lptim::sync_out(std::uint64_t ps)
+void lptim_l4::sync_out(std::uint64_t ps)
 {
   auto const raw = raw_at(ps);
   if(raw and wave() and state_.running != 0)
@@ -707,7 +708,7 @@ void lptim::sync_out(std::uint64_t ps)
   state_.out_ps = std::max(state_.out_ps, ps);
 }
 
-auto lptim::next_term() const -> std::optional<due_term>
+auto lptim_l4::next_term() const -> std::optional<due_term>
 {
   auto best = std::optional<due_term>{};
   if(state_.hz == 0)
@@ -743,7 +744,7 @@ auto lptim::next_term() const -> std::optional<due_term>
   return best;
 }
 
-void lptim::raise_flag(std::uint32_t flag)
+void lptim_l4::raise_flag(std::uint32_t flag)
 {
   state_.isr |= flag;
   if(flag == compare_match)
@@ -760,7 +761,7 @@ void lptim::raise_flag(std::uint32_t flag)
   }
 }
 
-void lptim::hold_in_flight(std::uint64_t ps)
+void lptim_l4::hold_in_flight(std::uint64_t ps)
 {
   auto const now   = wide{ps} * state_.hz;
   auto const delay = wide{variant_.event_delay_cycles} * ps_per_second;
@@ -778,7 +779,7 @@ void lptim::hold_in_flight(std::uint64_t ps)
   held(reload_match, state_.reload, state_.reload_held);
 }
 
-void lptim::apply(due_term const& next)
+void lptim_l4::apply(due_term const& next)
 {
   if(next.which == term::output)
   {
@@ -909,7 +910,7 @@ void lptim::apply(due_term const& next)
   }
 }
 
-void lptim::align_wrap(std::uint64_t ps)
+void lptim_l4::align_wrap(std::uint64_t ps)
 {
   auto const ticks = ticks_at(ps);
   auto const wrap  = first_wrap();
@@ -931,7 +932,7 @@ void lptim::align_wrap(std::uint64_t ps)
   state_.anchor_count = 0;
 }
 
-void lptim::reanchor(std::uint64_t ps, std::uint64_t ticks)
+void lptim_l4::reanchor(std::uint64_t ps, std::uint64_t ticks)
 {
   hold_in_flight(ps);
   state_.anchor_count = position(ticks);
@@ -939,7 +940,7 @@ void lptim::reanchor(std::uint64_t ps, std::uint64_t ticks)
   set_anchor(anchor() + wide{ticks} * tick_unit());
 }
 
-void lptim::catch_up(std::uint64_t ps)
+void lptim_l4::catch_up(std::uint64_t ps)
 {
   auto const wanted = out_.wanted();
   listened_         = listened_.value_or(wanted) and wanted;
@@ -957,12 +958,12 @@ void lptim::catch_up(std::uint64_t ps)
   listened_ = wanted;
 }
 
-auto lptim::preload() const -> bool
+auto lptim_l4::preload() const -> bool
 {
   return get(regs_, preload_) != 0;
 }
 
-void lptim::start(std::uint64_t ps, bool single)
+void lptim_l4::start(std::uint64_t ps, bool single)
 {
   if(state_.hz == 0)
   {
@@ -977,7 +978,7 @@ void lptim::start(std::uint64_t ps, bool single)
   begin(wide{ps} * state_.hz + wide{variant_.start_cycles} * ps_per_second, ps, single);
 }
 
-void lptim::begin(wide at, std::uint64_t ps, bool single)
+void lptim_l4::begin(wide at, std::uint64_t ps, bool single)
 {
   auto const ready = wide{state_.enable_ps} * state_.hz + 2 * tick_unit();
   set_anchor(std::max(at, ready));
@@ -987,7 +988,7 @@ void lptim::begin(wide at, std::uint64_t ps, bool single)
   state_.single       = single ? 1 : 0;
 }
 
-void lptim::switch_mode(std::uint64_t ps, bool single)
+void lptim_l4::switch_mode(std::uint64_t ps, bool single)
 {
   if(state_.switch_due != 0)
   {
@@ -1006,7 +1007,7 @@ void lptim::switch_mode(std::uint64_t ps, bool single)
   state_.switch_single = single ? 1 : 0;
 }
 
-void lptim::transfer_preloaded()
+void lptim_l4::transfer_preloaded()
 {
   if((state_.preloaded & compare_loaded) != 0)
   {
@@ -1019,7 +1020,7 @@ void lptim::transfer_preloaded()
   state_.preloaded = 0;
 }
 
-void lptim::stop()
+void lptim_l4::stop()
 {
   transfer_preloaded();
   state_.running      = 0;
@@ -1030,7 +1031,7 @@ void lptim::stop()
   state_.wrap_held    = 0;
 }
 
-void lptim::refuse_unmodelled()
+void lptim_l4::refuse_unmodelled()
 {
   refuse_clock();
   if(trigger_mode() and get(regs_, trigger_select_) != 0)
@@ -1061,7 +1062,7 @@ void lptim::refuse_unmodelled()
   }
 }
 
-void lptim::refresh()
+void lptim_l4::refresh()
 {
   sync_out(now_ps());
   regs_.poke(isr_.offset, state_.isr);
@@ -1076,7 +1077,7 @@ void lptim::refresh()
   }
 }
 
-void lptim::reschedule()
+void lptim_l4::reschedule()
 {
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
   {
@@ -1091,18 +1092,18 @@ void lptim::reschedule()
       ctx_.events.schedule_at(vtime{next->due}, tick_event, ++state_.generation, ctx_.clock) + 1;
 }
 
-void lptim::reset(register_file&, reset_kind)
+void lptim_l4::reset(register_file&, reset_kind)
 {
   restore_reset_values();
 }
 
-void lptim::load(std::span<std::byte const> in)
+void lptim_l4::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
   listened_.reset();
 }
 
-void lptim::on_bus_reset()
+void lptim_l4::on_bus_reset()
 {
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
   {
@@ -1121,7 +1122,7 @@ void lptim::on_bus_reset()
   state_.in2_level     = pin_level(in2_) ? 1 : 0;
 }
 
-void lptim::restore_reset_values()
+void lptim_l4::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -1136,7 +1137,7 @@ void lptim::restore_reset_values()
   line_->lower();
 }
 
-void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
+void lptim_l4::rebase(std::uint64_t ps, std::uint64_t hz)
 {
   auto dues =
       std::array{&state_.compare_due, &state_.reload_due, &state_.compare_held, &state_.reload_held,
@@ -1194,7 +1195,7 @@ void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
   state_.paused_units    = 0;
 }
 
-void lptim::on_clock_change()
+void lptim_l4::on_clock_change()
 {
   auto const hz = kernel_hz();
   if(hz == state_.hz)
@@ -1208,7 +1209,7 @@ void lptim::on_clock_change()
   reschedule();
 }
 
-void lptim::on_core_hold(bool held)
+void lptim_l4::on_core_hold(bool held)
 {
   if(held)
   {
@@ -1229,7 +1230,7 @@ void lptim::on_core_hold(bool held)
   reschedule();
 }
 
-void lptim::interest_changed()
+void lptim_l4::interest_changed()
 {
   catch_up(now_ps());
   refresh();
@@ -1237,37 +1238,37 @@ void lptim::interest_changed()
   reschedule();
 }
 
-auto lptim::produces(std::string_view signal) const -> bool
+auto lptim_l4::produces(std::string_view signal) const -> bool
 {
   return signal == out_.signal();
 }
 
-auto lptim::listens(std::string_view) const -> bool
+auto lptim_l4::listens(std::string_view) const -> bool
 {
   return false;
 }
 
-auto lptim::can_listen(std::string_view) const -> bool
+auto lptim_l4::can_listen(std::string_view) const -> bool
 {
   return false;
 }
 
-auto lptim::takes_pin(std::string_view signal) const -> bool
+auto lptim_l4::takes_pin(std::string_view signal) const -> bool
 {
   return signal == etr_ or signal == in1_ or (not in2_.empty() and signal == in2_);
 }
 
-auto lptim::external() const -> bool
+auto lptim_l4::external() const -> bool
 {
   return get(regs_, clock_select_) != 0 or get(regs_, count_mode_) != 0 or encoder();
 }
 
-auto lptim::encoder() const -> bool
+auto lptim_l4::encoder() const -> bool
 {
   return variant_.encoder and get(regs_, encoder_) != 0;
 }
 
-void lptim::refuse_clock()
+void lptim_l4::refuse_clock()
 {
   if(not external())
   {
@@ -1298,7 +1299,7 @@ void lptim::refuse_clock()
   }
 }
 
-void lptim::encoder_edge(std::uint64_t ps, bool second, bool rising)
+void lptim_l4::encoder_edge(std::uint64_t ps, bool second, bool rising)
 {
   auto const polarity = get(regs_, clock_polarity_);
   if((polarity == 0 and not rising)
@@ -1323,7 +1324,7 @@ void lptim::encoder_edge(std::uint64_t ps, bool second, bool rising)
   count_edge(ps, true, up);
 }
 
-void lptim::count_edge(std::uint64_t ps, bool sampled, bool up)
+void lptim_l4::count_edge(std::uint64_t ps, bool sampled, bool up)
 {
   auto const count = state_.anchor_count;
   auto const wrap  = up ? count == state_.reload or count == counter_top : count == 0;
@@ -1360,7 +1361,7 @@ void lptim::count_edge(std::uint64_t ps, bool sampled, bool up)
   }
 }
 
-void lptim::edge_start(std::uint64_t units, bool single)
+void lptim_l4::edge_start(std::uint64_t units, bool single)
 {
   state_.running         = 1;
   state_.single          = single ? 1 : 0;
@@ -1370,7 +1371,7 @@ void lptim::edge_start(std::uint64_t units, bool single)
   state_.divided         = 0;
 }
 
-void lptim::clock_edge(std::uint64_t ps)
+void lptim_l4::clock_edge(std::uint64_t ps)
 {
   if(state_.enable_left != 0)
   {
@@ -1411,7 +1412,7 @@ void lptim::clock_edge(std::uint64_t ps)
   }
 }
 
-void lptim::input_edge(std::uint64_t ps, bool rising)
+void lptim_l4::input_edge(std::uint64_t ps, bool rising)
 {
   auto const polarity = get(regs_, clock_polarity_);
   if((polarity == 0 and not rising) or (polarity == 1 and rising) or state_.held != 0)
@@ -1436,12 +1437,12 @@ void lptim::input_edge(std::uint64_t ps, bool rising)
   count_edge(ps, true);
 }
 
-auto lptim::trigger_mode() const -> bool
+auto lptim_l4::trigger_mode() const -> bool
 {
   return get(regs_, trigger_enable_) != 0;
 }
 
-auto lptim::pin_level(std::string_view signal) const -> bool
+auto lptim_l4::pin_level(std::string_view signal) const -> bool
 {
   return not signal.empty() and std::ranges::any_of(ctx_.peers.all(), [&](model const* peer) {
     auto const* const port = dynamic_cast<gpio_port const*>(peer);
@@ -1449,7 +1450,7 @@ auto lptim::pin_level(std::string_view signal) const -> bool
   });
 }
 
-void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
+void lptim_l4::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
   if(signal == in1_ or (not in2_.empty() and signal == in2_))
   {
@@ -1513,7 +1514,7 @@ void lptim::triggered(std::string_view signal, trigger_edge edge, trigger_time a
   reschedule();
 }
 
-auto lptim::level(std::string_view signal) const -> std::optional<bool>
+auto lptim_l4::level(std::string_view signal) const -> std::optional<bool>
 {
   if(signal != out_.signal())
   {
@@ -1522,10 +1523,10 @@ auto lptim::level(std::string_view signal) const -> std::optional<bool>
   return (static_cast<std::uint8_t>(raw_at(now_ps()) ? 1u : 0u) ^ state_.polarity) != 0;
 }
 
-void lptim::plain_written(std::uint32_t, std::uint32_t)
+void lptim_l4::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-void lptim::clear_written(std::uint32_t, std::uint32_t now)
+void lptim_l4::clear_written(std::uint32_t, std::uint32_t now)
 {
   catch_up(now_ps());
   state_.isr &= ~now;
@@ -1535,7 +1536,7 @@ void lptim::clear_written(std::uint32_t, std::uint32_t now)
   reschedule();
 }
 
-template <locked Which> void lptim::locked_written(std::uint32_t old, std::uint32_t now)
+template <locked Which> void lptim_l4::locked_written(std::uint32_t old, std::uint32_t now)
 {
   if(Which == locked::configuration and not enabled())
   {
@@ -1564,7 +1565,7 @@ template <locked Which> void lptim::locked_written(std::uint32_t old, std::uint3
       std::format("a {} write with CR.ENABLE 1: the register keeps its value", name));
 }
 
-void lptim::control_written(std::uint32_t old, std::uint32_t now)
+void lptim_l4::control_written(std::uint32_t old, std::uint32_t now)
 {
   if((old & now & enable_bit) != 0
      and (now & single_start) != 0
@@ -1621,7 +1622,7 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
   reschedule();
 }
 
-template <term Which> void lptim::value_written(std::uint32_t old, std::uint32_t now)
+template <term Which> void lptim_l4::value_written(std::uint32_t old, std::uint32_t now)
 {
   constexpr auto compare = Which == term::compare_written;
   auto const     at      = compare ? cmp_ : arr_;
@@ -1652,8 +1653,11 @@ template <term Which> void lptim::value_written(std::uint32_t old, std::uint32_t
   reschedule();
 }
 
-auto lptim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
-    -> std::expected<std::uint32_t, bus_error>
+auto lptim_l4::on_read(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    access_ctx     access) -> std::expected<std::uint32_t, bus_error>
 {
   auto const listened = listened_;
   catch_up(now_ps());
@@ -1665,7 +1669,7 @@ auto lptim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   return dispatch_model::on_read(regs, offset, size, access);
 }
 
-void lptim::on_event(std::uint32_t kind, std::uint64_t payload)
+void lptim_l4::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind != tick_event or payload != state_.generation)
   {
@@ -1681,7 +1685,7 @@ void lptim::on_event(std::uint32_t kind, std::uint64_t payload)
 auto lptim_l4_factory(lptim_l4_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<lptim>(ctx, desc, variant);
+    return std::make_shared<lptim_l4>(ctx, desc, variant);
   };
 }
 

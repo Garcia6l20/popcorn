@@ -41,7 +41,7 @@ constexpr std::uint64_t sync_cycles        = 2;
 constexpr std::uint64_t stamp_apre_cycles  = 2;
 constexpr std::uint64_t tamper_apre_cycles = 3;
 
-enum classic_event : std::uint8_t
+enum l1l4_event : std::uint8_t
 {
   init_ready,
   shadow_ready,
@@ -56,40 +56,40 @@ enum classic_event : std::uint8_t
   tamper2_ready,
   tamper3_ready,
   tamper_sample,
-  classic_events,
+  l1l4_events,
 };
 
 struct rtc_l1l4_state
 {
-  std::uint64_t                             anchor_ps{};
-  std::uint64_t                             anchor_frac{};
-  std::uint64_t                             hz{};
-  std::uint64_t                             cycle0{};
-  std::uint64_t                             seconds{};
-  std::uint64_t                             phase{};
-  std::uint64_t                             start{};
-  std::uint32_t                             prediv_a{127};
-  std::uint32_t                             prediv_s{255};
-  std::uint8_t                              counting{};
-  std::uint8_t                              weekday_base{};
-  std::uint8_t                              unlock{};
-  std::uint8_t                              latched_valid{};
-  std::uint64_t                             latched{};
-  std::uint8_t                              shadow_reset{};
-  std::uint64_t                             wakeup_base{};
-  std::uint64_t                             wakeup_fired{};
-  std::uint8_t                              lines{};
-  std::array<std::uint64_t, classic_events> due{};
-  std::array<std::uint8_t, classic_events>  armed{};
-  std::array<std::uint32_t, classic_events> generation{};
-  std::uint8_t                              held{};
-  std::uint64_t                             held_ps{};
-  std::uint8_t                              stamp_pending{};
-  std::uint32_t                             stamp_time{};
-  std::uint32_t                             stamp_date{};
-  std::uint32_t                             stamp_subsecond{};
-  std::uint8_t                              tamper_pending{};
-  std::array<std::uint8_t, 3>               tamper_samples{};
+  std::uint64_t                          anchor_ps{};
+  std::uint64_t                          anchor_frac{};
+  std::uint64_t                          hz{};
+  std::uint64_t                          cycle0{};
+  std::uint64_t                          seconds{};
+  std::uint64_t                          phase{};
+  std::uint64_t                          start{};
+  std::uint32_t                          prediv_a{127};
+  std::uint32_t                          prediv_s{255};
+  std::uint8_t                           counting{};
+  std::uint8_t                           weekday_base{};
+  std::uint8_t                           unlock{};
+  std::uint8_t                           latched_valid{};
+  std::uint64_t                          latched{};
+  std::uint8_t                           shadow_reset{};
+  std::uint64_t                          wakeup_base{};
+  std::uint64_t                          wakeup_fired{};
+  std::uint8_t                           lines{};
+  std::array<std::uint64_t, l1l4_events> due{};
+  std::array<std::uint8_t, l1l4_events>  armed{};
+  std::array<std::uint32_t, l1l4_events> generation{};
+  std::uint8_t                           held{};
+  std::uint64_t                          held_ps{};
+  std::uint8_t                           stamp_pending{};
+  std::uint32_t                          stamp_time{};
+  std::uint32_t                          stamp_date{};
+  std::uint32_t                          stamp_subsecond{};
+  std::uint8_t                           tamper_pending{};
+  std::array<std::uint8_t, 3>            tamper_samples{};
 
   friend auto operator==(rtc_l1l4_state const&, rtc_l1l4_state const&) -> bool = default;
 };
@@ -120,14 +120,14 @@ struct alarm_names
   std::string_view write;
 };
 
-constexpr std::array<alarm_names, 2> classic_alarms{
+constexpr std::array<alarm_names, 2> l1l4_alarms{
     {
      {"ALRMAR", "ALRMASSR", "ALRAE", "ALRAIE", "ALRAF", "ALRAWF"},
      {"ALRMBR", "ALRMBSSR", "ALRBE", "ALRBIE", "ALRBF", "ALRBWF"},
      }
 };
 
-struct classic_alarm
+struct l1l4_alarm
 {
   reg_ref                   reg;
   std::optional<reg_ref>    subseconds;
@@ -458,7 +458,7 @@ private:
   std::uint32_t                           keyed_flags_{};
   std::vector<std::uint32_t>              storage_;
   std::vector<std::uint32_t>              backups_;
-  std::array<classic_alarm, 2>            alarms_{};
+  std::array<l1l4_alarm, 2>               alarms_{};
   field_ref                               wakeup_reload_;
   field_ref                               wakeup_clock_;
   field_ref                               wakeup_enable_;
@@ -493,7 +493,7 @@ private:
   bool                                               debugger_write_ = false;
 };
 
-constexpr std::array<write_entry<rtc_l1l4>, 11> classic_writes{
+constexpr std::array<write_entry<rtc_l1l4>, 11> l1l4_writes{
     {
      {"TR", &rtc_l1l4::time_written},
      {"DR", &rtc_l1l4::date_written},
@@ -531,7 +531,7 @@ rtc_l1l4::rtc_l1l4(
     peripheral_desc const&                  desc,
     std::optional<std::chrono::sys_seconds> initial,
     rtc_l1l4_variant const&                 variant)
-    : dispatch_model{ctx, desc, "RTC", classic_writes}, initial_{initial}, variant_{variant},
+    : dispatch_model{ctx, desc, "RTC", l1l4_writes}, initial_{initial}, variant_{variant},
       regs_{ctx.regs}, time_{reg("TR")}, date_{reg("DR")}, status_{reg("ISR")}, control_{reg("CR")},
       key_{reg("WPR")}, init_{field("ISR", "INIT")}, init_flag_{field("ISR", "INITF")},
       init_status_{field("ISR", "INITS")}, shadow_flag_{field("ISR", "RSF")},
@@ -549,7 +549,7 @@ rtc_l1l4::rtc_l1l4(
 {
   for(std::size_t which = 0; which < alarms_.size(); ++which)
   {
-    auto const& names = classic_alarms[which];
+    auto const& names = l1l4_alarms[which];
     auto&       a     = alarms_[which];
     a.reg             = reg(names.reg);
     a.enable          = field("CR", names.enable);
@@ -831,7 +831,7 @@ auto rtc_l1l4::next_alarm(std::size_t which, std::uint64_t after) const
 
 void rtc_l1l4::plan_alarm(std::size_t which)
 {
-  auto const kind    = static_cast<classic_event>(alarm_a + which);
+  auto const kind    = static_cast<l1l4_event>(alarm_a + which);
   state_.armed[kind] = 0;
   ++state_.generation[kind];
   if(get(regs_, alarms_[which].enable) == 0 or state_.counting == 0)
@@ -904,7 +904,7 @@ void rtc_l1l4::alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::
   for(std::size_t which = 0; which < alarms_.size(); ++which)
   {
     auto const& a    = alarms_[which];
-    auto const  kind = static_cast<classic_event>(alarm_a_write + which);
+    auto const  kind = static_cast<l1l4_event>(alarm_a_write + which);
     if(a.enable.of(old) == 0 and a.enable.of(now) != 0)
     {
       update(regs_, a.write, 0);
@@ -1054,13 +1054,13 @@ auto rtc_l1l4::on_write(
 
 void rtc_l1l4::on_event(std::uint32_t kind, std::uint64_t payload)
 {
-  if(kind >= classic_events or payload != state_.generation[kind] or state_.armed[kind] == 0)
+  if(kind >= l1l4_events or payload != state_.generation[kind] or state_.armed[kind] == 0)
   {
     return;
   }
   auto const cycle   = count_.cycle_at(now_ps());
   state_.armed[kind] = 0;
-  switch(static_cast<classic_event>(kind))
+  switch(static_cast<l1l4_event>(kind))
   {
     case init_ready:
       if(get(regs_, init_) != 0)
@@ -1122,7 +1122,7 @@ void rtc_l1l4::on_event(std::uint32_t kind, std::uint64_t payload)
       }
       break;
     }
-    case classic_events:
+    case l1l4_events:
       break;
   }
   settle(cycle);
@@ -1235,7 +1235,7 @@ void rtc_l1l4::detect(std::size_t which, std::uint64_t at_ps)
     return;
   }
   state_.tamper_pending |= bit;
-  arm(static_cast<classic_event>(tamper1_ready + which),
+  arm(static_cast<l1l4_event>(tamper1_ready + which),
       count_.cycle_at(at_ps) + tamper_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
 }
 
