@@ -42,7 +42,7 @@ inline constexpr spi_variant h5_spi{
     .dma_enables_writable = false};
 
 /** @brief Differences between the classic SPI peripherals the model rows serve. */
-struct spi_classic_variant
+struct spi_l1l4_variant
 {
   /** @brief The peripheral has the TI frame format, `CR2.FRF`. Without it the bit is storage. */
   bool ti_mode;
@@ -56,11 +56,11 @@ struct spi_classic_variant
 };
 
 /** @brief STM32L1 SPI of Cat.3 to Cat.6, RM0038 28.2.1: the TI mode. */
-inline constexpr spi_classic_variant l1_spi_ti{.ti_mode = true, .kernel_buses = l1_apb_windows};
+inline constexpr spi_l1l4_variant l1_spi_ti{.ti_mode = true, .kernel_buses = l1_apb_windows};
 /** @brief STM32L1 SPI of Cat.1 and Cat.2, RM0038 28.2.1 and 28.5.2 FRF: no TI mode. */
-inline constexpr spi_classic_variant l1_spi{.ti_mode = false, .kernel_buses = l1_apb_windows};
+inline constexpr spi_l1l4_variant l1_spi{.ti_mode = false, .kernel_buses = l1_apb_windows};
 /** @brief STM32L4 SPI1 to SPI3, RM0351 42.3 Table 268: the TI mode and the FIFOs. */
-inline constexpr spi_classic_variant l4_spi{
+inline constexpr spi_l1l4_variant l4_spi{
     .ti_mode      = true,
     .fifo         = true,
     .kernel_buses = l4_apb_windows};
@@ -82,10 +82,10 @@ inline constexpr spi_classic_variant l4_spi{
  * @param controllers Board `spi_controllers`, each instance's controller, shared.
  * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto spi_classic_factory(
+[[nodiscard]] auto spi_l1l4_factory(
     decltype(board::spi) const&             devices,
     decltype(board::spi_controllers) const& controllers,
-    spi_classic_variant                     variant) -> model_factory;
+    spi_l1l4_variant                        variant) -> model_factory;
 
 /** @brief The SPI model rows. */
 [[nodiscard]] auto spi_rows() -> std::span<builtin const>;

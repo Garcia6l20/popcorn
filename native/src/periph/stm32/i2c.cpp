@@ -3182,7 +3182,7 @@ constexpr auto i2c_row_table = std::to_array<builtin>({
         {.ip = "I2C", .ip_version_glob = "i2c2_v1_1U5*", .families = family::h5}),
     row_of<^^i2c_factory, ^^l4_i2c, ^^board::i2c, ^^board::i2c_controllers>(
         {.ip = "I2C", .ip_version_glob = "i2c2_v1_1_Cube", .families = family::l4}),
-    row_of<^^i2c_v1_factory, ^^l1_i2c, ^^board::i2c, ^^board::i2c_controllers>(
+    row_of<^^i2c_l1_factory, ^^l1_i2c, ^^board::i2c, ^^board::i2c_controllers>(
         {.ip = "I2C", .ip_version_glob = "i2c1_v1_*", .families = family::l1}),
 });
 }

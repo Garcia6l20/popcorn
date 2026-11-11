@@ -2072,13 +2072,13 @@ constexpr auto spi_row_table = std::to_array<builtin>({
         {.ip = "SPI", .ip_version_glob = "spi2s3_v1*", .families = family::u5}),
     row_of<^^spi_factory, ^^h5_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s3_v2*", .families = family::h5}),
-    row_of<^^spi_classic_factory, ^^l1_spi_ti, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_l1l4_factory, ^^l1_spi_ti, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s1_v2_*", .families = family::l1}),
-    row_of<^^spi_classic_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_l1l4_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s1_v1_*", .families = family::l1}),
-    row_of<^^spi_classic_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_l1l4_factory, ^^l1_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "STM32L1_spi_cat2*", .families = family::l1}),
-    row_of<^^spi_classic_factory, ^^l4_spi, ^^board::spi, ^^board::spi_controllers>(
+    row_of<^^spi_l1l4_factory, ^^l4_spi, ^^board::spi, ^^board::spi_controllers>(
         {.ip = "SPI", .ip_version_glob = "spi2s1_v3_*", .families = family::l4}),
 });
 }

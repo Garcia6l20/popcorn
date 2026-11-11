@@ -38,14 +38,14 @@ inline constexpr i2c_variant l4_i2c{
     .start_cleared_by_address_clear = true};
 
 /** @brief Differences between the I2C peripherals of RM0038 section 26 the model rows serve. */
-struct i2c_v1_variant
+struct i2c_l1_variant
 {
   /** @brief Buses whose clock is the clock of an instance in their window. */
   std::span<bus_window const> kernel_buses;
 };
 
 /** @brief STM32L1 I2C1 and I2C2 on APB1, RM0038 Table 5. */
-inline constexpr i2c_v1_variant l1_i2c{.kernel_buses = l1_apb_windows};
+inline constexpr i2c_l1_variant l1_i2c{.kernel_buses = l1_apb_windows};
 
 /**
  * @brief Factory of the I2C model, RM0456 section 65.
@@ -64,10 +64,10 @@ inline constexpr i2c_v1_variant l1_i2c{.kernel_buses = l1_apb_windows};
  * @param controllers Board `i2c_controllers`, each instance's controller, shared.
  * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto i2c_v1_factory(
+[[nodiscard]] auto i2c_l1_factory(
     decltype(board::i2c) const&             targets,
     decltype(board::i2c_controllers) const& controllers,
-    i2c_v1_variant                          variant) -> model_factory;
+    i2c_l1_variant                          variant) -> model_factory;
 
 /** @brief The I2C model rows. */
 [[nodiscard]] auto i2c_rows() -> std::span<builtin const>;

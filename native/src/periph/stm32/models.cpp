@@ -61,12 +61,12 @@ auto builtins() -> std::span<builtin const>
   static auto const table = [] {
     std::vector<builtin> all;
     for(auto const rows :
-        {rcc_rows(),      pwr_rows(),  flash_rows(),  caches_rows(),      crs_rows(),
-         gpio_rows(),     exti_rows(), syscfg_rows(), dma_classic_rows(), gpdma_rows(),
-         lptim_rows(),    tim_rows(),  usart_rows(),  i2c_rows(),         spi_rows(),
-         usb_rows(),      adc_rows(),  dac_rows(),    iwdg_rows(),        rtc_rows(),
-         sai_rows(),      mdf_rows(),  dbgmcu_rows(), crc_rows(),         hash_rows(),
-         rng_rows(),      gtzc_rows(), sbs_rows(),    wwdg_rows(),        lpgpio_rows(),
+        {rcc_rows(),      pwr_rows(),  flash_rows(),  caches_rows(),   crs_rows(),
+         gpio_rows(),     exti_rows(), syscfg_rows(), dma_l1l4_rows(), gpdma_rows(),
+         lptim_rows(),    tim_rows(),  usart_rows(),  i2c_rows(),      spi_rows(),
+         usb_rows(),      adc_rows(),  dac_rows(),    iwdg_rows(),     rtc_rows(),
+         sai_rows(),      mdf_rows(),  dbgmcu_rows(), crc_rows(),      hash_rows(),
+         rng_rows(),      gtzc_rows(), sbs_rows(),    wwdg_rows(),     lpgpio_rows(),
          lptim_v2_rows(), adc4_rows()})
     {
       all.insert(all.end(), rows.begin(), rows.end());

@@ -26,12 +26,12 @@ namespace
 {
 constexpr std::uint8_t gpio_lines = 16;
 
-struct exti_classic_state
+struct exti_l1l4_state
 {
-  friend auto operator==(exti_classic_state const&, exti_classic_state const&) -> bool = default;
+  friend auto operator==(exti_l1l4_state const&, exti_l1l4_state const&) -> bool = default;
 };
 
-static_assert(std::is_empty_v<exti_classic_state>);
+static_assert(std::is_empty_v<exti_l1l4_state>);
 
 /**
  * @brief Classic EXTI of the STM32L1, RM0038 section 10.2, and of the STM32L47x/L48x, RM0351
@@ -93,16 +93,13 @@ static_assert(std::is_empty_v<exti_classic_state>);
  *   edges from `EXTI_SWIERx` only.
  * - STM32L4: `EXTI_EMR1` and `EXTI_EMR2` are storage, and an EXTI event wakes no WFE.
  */
-class exti_classic final : public dispatch_model<exti_classic, exti_classic_state>,
-                           public exti_input,
-                           public exti_line_input,
-                           public trigger_source
+class exti_l1l4 final : public dispatch_model<exti_l1l4, exti_l1l4_state>,
+                        public exti_input,
+                        public exti_line_input,
+                        public trigger_source
 {
 public:
-  exti_classic(
-      model_context&              ctx,
-      peripheral_desc const&      desc,
-      exti_classic_variant const& variant);
+  exti_l1l4(model_context& ctx, peripheral_desc const& desc, exti_l1l4_variant const& variant);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -145,22 +142,20 @@ private:
 
 constexpr std::size_t max_banks = 2;
 
-auto exti_classic_writes(
-    model_context&              ctx,
-    peripheral_desc const&      desc,
-    exti_classic_variant const& variant) -> std::vector<write_entry<exti_classic>>
+auto exti_l1l4_writes(
+    model_context&           ctx,
+    peripheral_desc const&   desc,
+    exti_l1l4_variant const& variant) -> std::vector<write_entry<exti_l1l4>>
 {
-  constexpr std::array software{
-      &exti_classic::software_written<0>, &exti_classic::software_written<1>};
-  constexpr std::array pending{
-      &exti_classic::pending_written<0>, &exti_classic::pending_written<1>};
+  constexpr std::array software{&exti_l1l4::software_written<0>, &exti_l1l4::software_written<1>};
+  constexpr std::array pending{&exti_l1l4::pending_written<0>, &exti_l1l4::pending_written<1>};
   if(variant.banks.empty() or variant.banks.size() > max_banks)
   {
     throw config_error(
         ctx.part.part, 0, std::format("peripherals.{}", desc.name),
         std::format("one or two EXTI banks, the variant gives {}", variant.banks.size()));
   }
-  std::vector<write_entry<exti_classic>> out;
+  std::vector<write_entry<exti_l1l4>> out;
   for(std::size_t at = 0; at < variant.banks.size(); ++at)
   {
     auto const& bank = variant.banks[at];
@@ -186,11 +181,11 @@ auto exti_classic_writes(
   return out;
 }
 
-exti_classic::exti_classic(
-    model_context&              ctx,
-    peripheral_desc const&      desc,
-    exti_classic_variant const& variant)
-    : dispatch_model{ctx, desc, "EXTI", exti_classic_writes(ctx, desc, variant)}, regs_{ctx.regs}
+exti_l1l4::exti_l1l4(
+    model_context&           ctx,
+    peripheral_desc const&   desc,
+    exti_l1l4_variant const& variant)
+    : dispatch_model{ctx, desc, "EXTI", exti_l1l4_writes(ctx, desc, variant)}, regs_{ctx.regs}
 {
   for(auto const& bank : variant.banks)
   {
@@ -224,7 +219,7 @@ exti_classic::exti_classic(
   }
 }
 
-auto exti_classic::line_register(std::string_view name, std::uint32_t lines) const -> std::uint32_t
+auto exti_l1l4::line_register(std::string_view name, std::uint32_t lines) const -> std::uint32_t
 {
   auto const&   described = describe(name);
   std::uint32_t mask      = 0;
@@ -242,7 +237,7 @@ auto exti_classic::line_register(std::string_view name, std::uint32_t lines) con
   return reg(name).offset;
 }
 
-auto exti_classic::bank_of(exti_bank const& bank) const -> bank_regs
+auto exti_l1l4::bank_of(exti_bank const& bank) const -> bank_regs
 {
   auto const lines = static_cast<std::uint32_t>((std::uint64_t{1} << bank.lines) - 1u);
   auto const edges = lines & ~bank.direct;
@@ -258,7 +253,7 @@ auto exti_classic::bank_of(exti_bank const& bank) const -> bank_regs
       .pr    = line_register(named("PR"), edges)};
 }
 
-void exti_classic::reset(register_file& regs, reset_kind)
+void exti_l1l4::reset(register_file& regs, reset_kind)
 {
   for(auto const& name : claims())
   {
@@ -267,10 +262,10 @@ void exti_classic::reset(register_file& regs, reset_kind)
   interrupts();
 }
 
-void exti_classic::on_event(std::uint32_t, std::uint64_t)
+void exti_l1l4::on_event(std::uint32_t, std::uint64_t)
 {}
 
-auto exti_classic::pending() const -> std::uint64_t
+auto exti_l1l4::pending() const -> std::uint64_t
 {
   std::uint64_t out = 0;
   for(auto const& bank : banks_)
@@ -280,7 +275,7 @@ auto exti_classic::pending() const -> std::uint64_t
   return out;
 }
 
-void exti_classic::interrupts()
+void exti_l1l4::interrupts()
 {
   auto const lines_pending = pending();
   for(auto const& [lines, line] : irqs_)
@@ -296,7 +291,7 @@ void exti_classic::interrupts()
   }
 }
 
-void exti_classic::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
+void exti_l1l4::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
 {
   if(pin >= gpio_lines)
   {
@@ -321,7 +316,7 @@ void exti_classic::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
   }
 }
 
-void exti_classic::line_changed(std::uint8_t line, bool level)
+void exti_l1l4::line_changed(std::uint8_t line, bool level)
 {
   auto const bank = std::ranges::find_if(banks_, [&](bank_regs const& b) {
     return line >= b.first and line - b.first < std::popcount(b.lines);
@@ -350,8 +345,7 @@ void exti_classic::line_changed(std::uint8_t line, bool level)
   interrupts();
 }
 
-template <std::size_t Bank>
-void exti_classic::software_written(std::uint32_t old, std::uint32_t now)
+template <std::size_t Bank> void exti_l1l4::software_written(std::uint32_t old, std::uint32_t now)
 {
   auto const& bank   = banks_[Bank];
   auto const  raised = now & ~old & bank.edges & regs_.peek(bank.imr);
@@ -359,7 +353,7 @@ void exti_classic::software_written(std::uint32_t old, std::uint32_t now)
   interrupts();
 }
 
-template <std::size_t Bank> void exti_classic::pending_written(std::uint32_t old, std::uint32_t now)
+template <std::size_t Bank> void exti_l1l4::pending_written(std::uint32_t old, std::uint32_t now)
 {
   auto const& bank    = banks_[Bank];
   auto const  written = now & bank.edges;
@@ -368,15 +362,15 @@ template <std::size_t Bank> void exti_classic::pending_written(std::uint32_t old
   interrupts();
 }
 
-auto exti_classic::stateless() const -> bool
+auto exti_l1l4::stateless() const -> bool
 {
   return true;
 }
 
-void exti_classic::interest_changed()
+void exti_l1l4::interest_changed()
 {}
 
-auto exti_classic::output_of(std::string_view signal) const -> std::optional<std::uint8_t>
+auto exti_l1l4::output_of(std::string_view signal) const -> std::optional<std::uint8_t>
 {
   auto const found = std::ranges::find(outputs_, signal, &trigger_output::signal);
   if(found == outputs_.end())
@@ -386,12 +380,12 @@ auto exti_classic::output_of(std::string_view signal) const -> std::optional<std
   return static_cast<std::uint8_t>(found - outputs_.begin());
 }
 
-auto exti_classic::produces(std::string_view signal) const -> bool
+auto exti_l1l4::produces(std::string_view signal) const -> bool
 {
   return output_of(signal).has_value();
 }
 
-auto exti_classic::level(std::string_view signal) const -> std::optional<bool>
+auto exti_l1l4::level(std::string_view signal) const -> std::optional<bool>
 {
   auto const line = output_of(signal);
   if(not line)
@@ -410,10 +404,10 @@ auto exti_classic::level(std::string_view signal) const -> std::optional<bool>
 }
 }
 
-auto exti_classic_factory(exti_classic_variant variant) -> model_factory
+auto exti_l1l4_factory(exti_l1l4_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<exti_classic>(ctx, desc, variant);
+    return std::make_shared<exti_l1l4>(ctx, desc, variant);
   };
 }
 
@@ -422,11 +416,11 @@ namespace
 constexpr auto exti_table = std::to_array<builtin>({
     row_of<^^exti_factory>(
         {.ip = "EXTI", .ip_version_glob = "", .families = family::u5 | family::h5}),
-    row_of<^^exti_classic_factory, ^^l1_exti_24>(
+    row_of<^^exti_l1l4_factory, ^^l1_exti_24>(
         {.ip = "EXTI", .ip_version_glob = "", .families = family::l1}),
-    row_of<^^exti_classic_factory, ^^l1_exti_23>(
+    row_of<^^exti_l1l4_factory, ^^l1_exti_23>(
         {.ip = "EXTI", .ip_version_glob = "STM32L1_exti_23", .families = family::l1}),
-    row_of<^^exti_classic_factory, ^^l4_exti>(
+    row_of<^^exti_l1l4_factory, ^^l4_exti>(
         {.ip = "EXTI", .ip_version_glob = "", .families = family::l4}),
 });
 }

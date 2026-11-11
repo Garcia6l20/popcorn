@@ -241,7 +241,7 @@ auto without_field(part_description desc, std::string_view reg, std::string_view
   return desc;
 }
 
-auto make_machine(part_description desc, std::optional<stm32::rtc_classic_variant> variant = {})
+auto make_machine(part_description desc, std::optional<stm32::rtc_l1l4_variant> variant = {})
     -> std::unique_ptr<core::machine>
 {
   stm32::register_builtin_models();
@@ -249,7 +249,7 @@ auto make_machine(part_description desc, std::optional<stm32::rtc_classic_varian
   if(variant)
   {
     options.models = stm32::factories({}, desc);
-    options.models.insert_or_assign("RTC", stm32::rtc_classic_factory(std::nullopt, *variant));
+    options.models.insert_or_assign("RTC", stm32::rtc_l1l4_factory(std::nullopt, *variant));
   }
   return std::make_unique<core::machine>(
       std::move(desc), popcorn::arch::armv8m::factory(), std::move(options));

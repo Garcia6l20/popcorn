@@ -35,7 +35,7 @@ struct exti_bank
 };
 
 /** @brief Differences between the classic EXTI controllers the model rows serve. */
-struct exti_classic_variant
+struct exti_l1l4_variant
 {
   /** @brief Register banks, one or two. */
   std::span<exti_bank const> banks;
@@ -72,9 +72,9 @@ inline constexpr auto l1_exti_banks_24 = std::to_array<exti_bank>({
     {"", 0, 24, 0},
 });
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
-inline constexpr exti_classic_variant l1_exti_23{.banks = l1_exti_banks_23, .irqs = l1_exti_irqs};
+inline constexpr exti_l1l4_variant l1_exti_23{.banks = l1_exti_banks_23, .irqs = l1_exti_irqs};
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 10.2: 24 lines. */
-inline constexpr exti_classic_variant l1_exti_24{.banks = l1_exti_banks_24, .irqs = l1_exti_irqs};
+inline constexpr exti_l1l4_variant l1_exti_24{.banks = l1_exti_banks_24, .irqs = l1_exti_irqs};
 
 /** @brief STM32L47x/L48x, RM0351 14.5 and Table 62: lines 0 to 31 in bank 1, 32 to 39 in bank 2,
  *         direct lines 17, 23 to 34 and 39, IMR1 reset 0xFF820000 and IMR2 0x00000087. */
@@ -102,7 +102,7 @@ inline constexpr auto l4_exti_irqs = std::to_array<exti_line_group>({
     {21, 22, 64},
 });
 /** @brief STM32L47x/L48x, RM0351 section 14. */
-inline constexpr exti_classic_variant l4_exti{.banks = l4_exti_banks, .irqs = l4_exti_irqs};
+inline constexpr exti_l1l4_variant l4_exti{.banks = l4_exti_banks, .irqs = l4_exti_irqs};
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
 [[nodiscard]] auto exti_factory() -> model_factory;
@@ -111,7 +111,7 @@ inline constexpr exti_classic_variant l4_exti{.banks = l4_exti_banks, .irqs = l4
  * @brief Factory of the classic EXTI model, RM0038 section 10.2.
  * @param variant Lines and NVIC lines of the family the row serves.
  */
-[[nodiscard]] auto exti_classic_factory(exti_classic_variant variant) -> model_factory;
+[[nodiscard]] auto exti_l1l4_factory(exti_l1l4_variant variant) -> model_factory;
 
 /** @brief The EXTI model rows. */
 [[nodiscard]] auto exti_rows() -> std::span<builtin const>;

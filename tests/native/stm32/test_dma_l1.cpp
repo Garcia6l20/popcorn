@@ -577,21 +577,21 @@ TEST_CASE("the DMA2 model refuses a description with channel 6 registers or chan
 
 TEST_CASE("the DMA model refuses a variant past its request slots or naming a channel it lacks")
 {
-  auto const refused = [](stm32::dma_classic_variant const& variant) {
+  auto const refused = [](stm32::dma_l1l4_variant const& variant) {
     auto options = popcorn::testing::stm32_options();
-    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(variant));
+    options.models.insert_or_assign("DMA1", stm32::dma_l1l4_factory(variant));
     CHECK_THROWS_AS(parked(l152re(), firmware, std::move(options)), popcorn::config_error);
   };
-  std::array<stm32::dma_classic_request, 65> many{};
-  std::ranges::fill(many, stm32::dma_classic_request{.signal = "usart1_tx_dma", .channel = 4});
+  std::array<stm32::dma_l1l4_request, 65> many{};
+  std::ranges::fill(many, stm32::dma_l1l4_request{.signal = "usart1_tx_dma", .channel = 4});
   refused({.channels = 7, .requests = many});
   refused({.channels = 3, .requests = std::span{many}.first(64)});
-  constexpr std::array<stm32::dma_classic_request, 1> zero{
+  constexpr std::array<stm32::dma_l1l4_request, 1> zero{
       {{.signal = "usart1_tx_dma", .channel = 0}}};
   refused({.channels = 7, .requests = zero});
   auto options = popcorn::testing::stm32_options();
   options.models.insert_or_assign(
-      "DMA1", stm32::dma_classic_factory({.channels = 7, .requests = std::span{many}.first(64)}));
+      "DMA1", stm32::dma_l1l4_factory({.channels = 7, .requests = std::span{many}.first(64)}));
   CHECK_NOTHROW(parked(l152re(), firmware, std::move(options)));
 }
 
@@ -804,7 +804,7 @@ constexpr std::uint32_t word_sizes = psize_word | msize_word;
 
 TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 variants hold every request on its channel")
 {
-  auto const listed = [](stm32::dma_classic_variant const& variant, std::string_view instance) {
+  auto const listed = [](stm32::dma_l1l4_variant const& variant, std::string_view instance) {
     std::vector<std::pair<std::string_view, std::uint32_t>> out;
     for(auto const& request : variant.requests)
     {

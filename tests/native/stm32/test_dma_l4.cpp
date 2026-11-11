@@ -359,7 +359,7 @@ constexpr std::uint16_t strh = 0x8001;
 TEST_CASE(
     "RM0351 Tables 46 and 47: the DMA1 and DMA2 variants hold every request, channel and code")
 {
-  auto const listed = [](stm32::dma_classic_variant const& variant, std::string_view instance) {
+  auto const listed = [](stm32::dma_l1l4_variant const& variant, std::string_view instance) {
     std::vector<std::tuple<std::string_view, std::uint32_t, std::uint32_t>> out;
     for(auto const& request : variant.requests)
     {
@@ -543,6 +543,6 @@ TEST_CASE("the L4 DMA rows serve DMA1 and DMA2, an L1 variant does not attach to
   CHECK(f.model_of<stm32::dma_controller>("DMA1") != nullptr);
   CHECK(f.model_of<stm32::dma_controller>("DMA2") != nullptr);
   auto options = popcorn::testing::stm32_options();
-  options.models.insert_or_assign("DMA2", stm32::dma_classic_factory(stm32::l1_dma2));
+  options.models.insert_or_assign("DMA2", stm32::dma_l1l4_factory(stm32::l1_dma2));
   CHECK_THROWS_AS((stm32_fixture{l476rc(), firmware, std::move(options)}), popcorn::config_error);
 }

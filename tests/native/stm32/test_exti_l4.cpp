@@ -656,7 +656,7 @@ TEST_CASE("the L4 EXTI row serves the L476, the L1 variant does not attach to it
   stm32::register_builtin_models();
   auto options   = popcorn::testing::stm32_options();
   options.models = stm32::factories(stm32::board{}, l476rc());
-  options.models.insert_or_assign("EXTI", stm32::exti_classic_factory(stm32::l1_exti_24));
+  options.models.insert_or_assign("EXTI", stm32::exti_l1l4_factory(stm32::l1_exti_24));
   CHECK_THROWS_AS(
       (core::machine{l476rc(), popcorn::arch::armv8m::factory(), std::move(options)}),
       popcorn::config_error);

@@ -59,7 +59,7 @@ enum classic_event : std::uint8_t
   classic_events,
 };
 
-struct rtc_classic_state
+struct rtc_l1l4_state
 {
   std::uint64_t                             anchor_ps{};
   std::uint64_t                             anchor_frac{};
@@ -91,7 +91,7 @@ struct rtc_classic_state
   std::uint8_t                              tamper_pending{};
   std::array<std::uint8_t, 3>               tamper_samples{};
 
-  friend auto operator==(rtc_classic_state const&, rtc_classic_state const&) -> bool = default;
+  friend auto operator==(rtc_l1l4_state const&, rtc_l1l4_state const&) -> bool = default;
 };
 
 constexpr std::array<std::string_view, 5> locked_names{
@@ -209,7 +209,7 @@ struct unmodelled_entry
  *        RM0351 38.3.7 programs the alarm with no ALRxWF poll. RTC_TAMPCR and RTC_OR are storage.
  *        A read protection regression from level 1 to level 0, which the STM32L4 FLASH reports,
  *        writes 0 to every backup register, RM0351 3.5.1.
- *        Timestamps, RM0351 38.3.13, with `rtc_classic_variant::timestamps`: with CR.TSE set, an
+ *        Timestamps, RM0351 38.3.13, with `rtc_l1l4_variant::timestamps`: with CR.TSE set, an
  *        edge of the RTC_TS input, rising with CR.TSEDGE 0 and falling with 1, captures TR, DR
  *        bits 15:0 without the year and SSR into RTC_TSTR, RTC_TSDR and RTC_TSSSR at the board
  *        time of the edge, `pin_edge_clock::edge_ps`, also when the GPIO applies it later,
@@ -220,7 +220,7 @@ struct unmodelled_entry
  *        line 19, RM0351 Table 62. RTC_TS reads the variant's pin, PC13, whatever its GPIO mode,
  *        RM0351 38.3.2: the board drive, else the PUPDR pull-up, inferred. A PUPDR write and a
  *        TSEDGE write make no edge.
- *        Tampers, RM0351 38.3.14, with `rtc_classic_variant::tampers`: RTC_TAMP1 to RTC_TAMP3 on
+ *        Tampers, RM0351 38.3.14, with `rtc_l1l4_variant::tampers`: RTC_TAMP1 to RTC_TAMP3 on
  *        the variant's pins, PC13, PA0 and PE6, an unbonded pin never active. With TAMPFLT 0 an
  *        edge of the TAMPxTRG polarity with TAMPxE set is an event, with TAMPFLT 1 to 3 the
  *        input is sampled every 2^(15 - TAMPFREQ) RTCCLK cycles, on multiples of that period,
@@ -345,24 +345,24 @@ struct unmodelled_entry
  * - ES0250 2.19.4: INITF sets at the second RTCCLK edge after INIT for every INIT entry, a
  *   consecutive one included.
  */
-class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
-                          public clock_listener,
-                          public backup_domain,
-                          public core_hold_listener,
-                          public read_protection_listener,
-                          public board_input_listener,
-                          public rtc_core
+class rtc_l1l4 final : public dispatch_model<rtc_l1l4, rtc_l1l4_state>,
+                       public clock_listener,
+                       public backup_domain,
+                       public core_hold_listener,
+                       public read_protection_listener,
+                       public board_input_listener,
+                       public rtc_core
 {
   friend rtc_core;
 
   static constexpr std::uint32_t wakeup_event = wakeup;
 
 public:
-  rtc_classic(
+  rtc_l1l4(
       model_context&                          ctx,
       peripheral_desc const&                  desc,
       std::optional<std::chrono::sys_seconds> initial,
-      rtc_classic_variant const&              variant);
+      rtc_l1l4_variant const&                 variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -435,7 +435,7 @@ private:
   void               clear_stamp();
 
   std::optional<std::chrono::sys_seconds> initial_;
-  rtc_classic_variant                     variant_;
+  rtc_l1l4_variant                        variant_;
   register_file&                          regs_;
   reg_ref                                 time_;
   reg_ref                                 date_;
@@ -487,52 +487,50 @@ private:
   field_ref                                          tamper_pull_up_off_;
   std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
   std::array<bool, unmodelled_functions>             logged_{};
-  rtc_calendar::counter<rtc_classic_state>           count_;
+  rtc_calendar::counter<rtc_l1l4_state>              count_;
   core::clock_domain                                 domain_;
   bool                                               freeze_logged_  = false;
   bool                                               debugger_write_ = false;
 };
 
-constexpr std::array<write_entry<rtc_classic>, 11> classic_writes{
+constexpr std::array<write_entry<rtc_l1l4>, 11> classic_writes{
     {
-     {"TR", &rtc_classic::time_written},
-     {"DR", &rtc_classic::date_written},
-     {"CR", &rtc_classic::control_written},
-     {"ISR", &rtc_classic::status_written},
-     {"PRER", &rtc_classic::prescaler_written},
-     {"WUTR", &rtc_classic::locked_written<0>},
-     {"ALRMAR", &rtc_classic::locked_written<1>},
-     {"ALRMBR", &rtc_classic::locked_written<2>},
-     {"WPR", &rtc_classic::key_written},
-     {"TSTR", &rtc_classic::read_only_written<1>},
-     {"TSDR", &rtc_classic::read_only_written<2>},
+     {"TR", &rtc_l1l4::time_written},
+     {"DR", &rtc_l1l4::date_written},
+     {"CR", &rtc_l1l4::control_written},
+     {"ISR", &rtc_l1l4::status_written},
+     {"PRER", &rtc_l1l4::prescaler_written},
+     {"WUTR", &rtc_l1l4::locked_written<0>},
+     {"ALRMAR", &rtc_l1l4::locked_written<1>},
+     {"ALRMBR", &rtc_l1l4::locked_written<2>},
+     {"WPR", &rtc_l1l4::key_written},
+     {"TSTR", &rtc_l1l4::read_only_written<1>},
+     {"TSDR", &rtc_l1l4::read_only_written<2>},
      }
 };
 
-constexpr std::array<write_entry<rtc_classic>, 5> subsecond_writes{
+constexpr std::array<write_entry<rtc_l1l4>, 5> subsecond_writes{
     {
-     {"SSR", &rtc_classic::read_only_written<0>},
-     {"SHIFTR", &rtc_classic::shift_written},
-     {"TSSSR", &rtc_classic::read_only_written<3>},
-     {"ALRMASSR", &rtc_classic::locked_written<3>},
-     {"ALRMBSSR", &rtc_classic::locked_written<4>},
+     {"SSR", &rtc_l1l4::read_only_written<0>},
+     {"SHIFTR", &rtc_l1l4::shift_written},
+     {"TSSSR", &rtc_l1l4::read_only_written<3>},
+     {"ALRMASSR", &rtc_l1l4::locked_written<3>},
+     {"ALRMBSSR", &rtc_l1l4::locked_written<4>},
      }
 };
 
-constexpr std::array<write_entry<rtc_classic>, 1> smooth_writes{
-    {{"CALR", &rtc_classic::smooth_written}}};
+constexpr std::array<write_entry<rtc_l1l4>, 1> smooth_writes{{{"CALR", &rtc_l1l4::smooth_written}}};
 
-constexpr std::array<write_entry<rtc_classic>, 1> coarse_writes{
-    {{"CALIBR", &rtc_classic::coarse_written}}};
+constexpr std::array<write_entry<rtc_l1l4>, 1> coarse_writes{
+    {{"CALIBR", &rtc_l1l4::coarse_written}}};
 
-constexpr std::array<write_entry<rtc_classic>, 1> option_writes{
-    {{"OR", &rtc_classic::plain_written}}};
+constexpr std::array<write_entry<rtc_l1l4>, 1> option_writes{{{"OR", &rtc_l1l4::plain_written}}};
 
-rtc_classic::rtc_classic(
+rtc_l1l4::rtc_l1l4(
     model_context&                          ctx,
     peripheral_desc const&                  desc,
     std::optional<std::chrono::sys_seconds> initial,
-    rtc_classic_variant const&              variant)
+    rtc_l1l4_variant const&                 variant)
     : dispatch_model{ctx, desc, "RTC", classic_writes}, initial_{initial}, variant_{variant},
       regs_{ctx.regs}, time_{reg("TR")}, date_{reg("DR")}, status_{reg("ISR")}, control_{reg("CR")},
       key_{reg("WPR")}, init_{field("ISR", "INIT")}, init_flag_{field("ISR", "INITF")},
@@ -605,14 +603,14 @@ rtc_classic::rtc_classic(
   {
     bind(option_writes);
   }
-  std::vector<write_entry<rtc_classic>> named{
-      {variant.tamper_register, &rtc_classic::tamper_written}
+  std::vector<write_entry<rtc_l1l4>> named{
+      {variant.tamper_register, &rtc_l1l4::tamper_written}
   };
   for(auto const& described : desc.registers)
   {
     if(described.name.starts_with("BKP") and described.name.ends_with("R"))
     {
-      named.push_back({described.name, &rtc_classic::plain_written});
+      named.push_back({described.name, &rtc_l1l4::plain_written});
       backups_.push_back(described.offset);
     }
   }
@@ -701,12 +699,12 @@ rtc_classic::rtc_classic(
       "CR", "the reference clock detection", bits("CR", {"REFCKON"})};
 }
 
-auto rtc_classic::bypassed() const -> bool
+auto rtc_l1l4::bypassed() const -> bool
 {
   return bypass_ and get(regs_, *bypass_) != 0;
 }
 
-auto rtc_classic::keep_locked(reg_ref target, std::uint32_t old) -> bool
+auto rtc_l1l4::keep_locked(reg_ref target, std::uint32_t old) -> bool
 {
   if(unlocked())
   {
@@ -716,7 +714,7 @@ auto rtc_classic::keep_locked(reg_ref target, std::uint32_t old) -> bool
   return true;
 }
 
-void rtc_classic::settle(std::uint64_t cycle)
+void rtc_l1l4::settle(std::uint64_t cycle)
 {
   auto const position = count_.position_at(cycle);
   regs_.poke(time_.offset, count_.time_register(position));
@@ -728,7 +726,7 @@ void rtc_classic::settle(std::uint64_t cycle)
   update(regs_, init_status_, count_.calendar(position / count_.sync_ticks()).year != 0 ? 1 : 0);
 }
 
-void rtc_classic::refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now)
 {
   if(debugger_write_)
   {
@@ -754,7 +752,7 @@ void rtc_classic::refuse_unmodelled(std::string_view name, std::uint32_t old, st
   }
 }
 
-void rtc_classic::clear_backup(register_file& regs, bool board_calendar)
+void rtc_l1l4::clear_backup(register_file& regs, bool board_calendar)
 {
   for(auto const& name : claims())
   {
@@ -776,7 +774,7 @@ void rtc_classic::clear_backup(register_file& regs, bool board_calendar)
   state_.generation = generation;
 }
 
-auto rtc_classic::next_alarm(std::size_t which, std::uint64_t after) const
+auto rtc_l1l4::next_alarm(std::size_t which, std::uint64_t after) const
     -> std::optional<std::uint64_t>
 {
   auto const& a      = alarms_[which];
@@ -831,7 +829,7 @@ auto rtc_classic::next_alarm(std::size_t which, std::uint64_t after) const
   return *next * ticks + *first(0);
 }
 
-void rtc_classic::plan_alarm(std::size_t which)
+void rtc_l1l4::plan_alarm(std::size_t which)
 {
   auto const kind    = static_cast<classic_event>(alarm_a + which);
   state_.armed[kind] = 0;
@@ -847,14 +845,14 @@ void rtc_classic::plan_alarm(std::size_t which)
   }
 }
 
-void rtc_classic::plan_all()
+void rtc_l1l4::plan_all()
 {
   plan_wakeup();
   plan_alarm(0);
   plan_alarm(1);
 }
 
-void rtc_classic::update_lines()
+void rtc_l1l4::update_lines()
 {
   auto const raised = [&](field_ref flag, field_ref enable) {
     return get(regs_, flag) != 0 and get(regs_, enable) != 0;
@@ -897,7 +895,7 @@ void rtc_classic::update_lines()
   }
 }
 
-void rtc_classic::alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle)
+void rtc_l1l4::alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle)
 {
   if(not variant_.alarm_write_wait)
   {
@@ -919,7 +917,7 @@ void rtc_classic::alarm_enables_changed(std::uint32_t old, std::uint32_t now, st
   }
 }
 
-void rtc_classic::restart_timers(std::uint64_t cycle)
+void rtc_l1l4::restart_timers(std::uint64_t cycle)
 {
   if(not bypassed())
   {
@@ -931,7 +929,7 @@ void rtc_classic::restart_timers(std::uint64_t cycle)
   update_lines();
 }
 
-void rtc_classic::reset(register_file& regs, reset_kind kind)
+void rtc_l1l4::reset(register_file& regs, reset_kind kind)
 {
   if(kind == reset_kind::power_on or (variant_.brown_out_resets and kind == reset_kind::brown_out))
   {
@@ -980,7 +978,7 @@ void rtc_classic::reset(register_file& regs, reset_kind kind)
   restart_timers(cycle);
 }
 
-void rtc_classic::backup_reset()
+void rtc_l1l4::backup_reset()
 {
   auto const held_ps = state_.held_ps;
   auto const lines   = state_.lines;
@@ -997,7 +995,7 @@ void rtc_classic::backup_reset()
   restart_timers(state_.cycle0);
 }
 
-auto rtc_classic::on_read(
+auto rtc_l1l4::on_read(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1039,7 +1037,7 @@ auto rtc_classic::on_read(
   return read_lanes(value, offset, size);
 }
 
-auto rtc_classic::on_write(
+auto rtc_l1l4::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1054,7 +1052,7 @@ auto rtc_classic::on_write(
   return result;
 }
 
-void rtc_classic::on_event(std::uint32_t kind, std::uint64_t payload)
+void rtc_l1l4::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind >= classic_events or payload != state_.generation[kind] or state_.armed[kind] == 0)
   {
@@ -1131,7 +1129,7 @@ void rtc_classic::on_event(std::uint32_t kind, std::uint64_t payload)
   update_lines();
 }
 
-void rtc_classic::on_core_hold(bool held)
+void rtc_l1l4::on_core_hold(bool held)
 {
   if(not variant_.debug_freeze)
   {
@@ -1140,7 +1138,7 @@ void rtc_classic::on_core_hold(bool held)
   hold_core(held);
 }
 
-void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, bool level)
+void rtc_l1l4::board_input_changed(std::string_view port, std::uint8_t pin, bool level)
 {
   if(not variant_.timestamps and not variant_.tampers)
   {
@@ -1177,12 +1175,12 @@ void rtc_classic::board_input_changed(std::string_view port, std::uint8_t pin, b
   update_lines();
 }
 
-auto rtc_classic::tamper_count() const -> std::size_t
+auto rtc_l1l4::tamper_count() const -> std::size_t
 {
   return variant_.three_tampers ? 3 : 1;
 }
 
-auto rtc_classic::tamper_input(std::size_t which, bool precharged) const -> std::optional<bool>
+auto rtc_l1l4::tamper_input(std::size_t which, bool precharged) const -> std::optional<bool>
 {
   auto const* const peer   = ctx_.peers.find(variant_.tamper_ports[which]);
   auto const* const source = dynamic_cast<board_input_source const*>(peer);
@@ -1199,7 +1197,7 @@ auto rtc_classic::tamper_input(std::size_t which, bool precharged) const -> std:
   return (precharged and get(regs_, tamper_pull_up_off_) == 0) or source->board_level(pin);
 }
 
-auto rtc_classic::tamper_raised() const -> bool
+auto rtc_l1l4::tamper_raised() const -> bool
 {
   if(not variant_.tampers)
   {
@@ -1217,7 +1215,7 @@ auto rtc_classic::tamper_raised() const -> bool
   return false;
 }
 
-void rtc_classic::detect(std::size_t which, std::uint64_t at_ps)
+void rtc_l1l4::detect(std::size_t which, std::uint64_t at_ps)
 {
   auto const& t   = tamper_[which];
   auto const  bit = static_cast<std::uint8_t>(1u << which);
@@ -1241,7 +1239,7 @@ void rtc_classic::detect(std::size_t which, std::uint64_t at_ps)
       count_.cycle_at(at_ps) + tamper_apre_cycles * (std::uint64_t{state_.prediv_a} + 1));
 }
 
-void rtc_classic::tamper_fire(std::size_t which)
+void rtc_l1l4::tamper_fire(std::size_t which)
 {
   auto const& t = tamper_[which];
   state_.tamper_pending &= static_cast<std::uint8_t>(~(1u << which));
@@ -1252,7 +1250,7 @@ void rtc_classic::tamper_fire(std::size_t which)
   raise_tamper(which, get(regs_, t.no_erase) == 0);
 }
 
-void rtc_classic::raise_tamper(std::size_t which, bool erase)
+void rtc_l1l4::raise_tamper(std::size_t which, bool erase)
 {
   update(regs_, tamper_[which].flag, 1);
   if(erase)
@@ -1264,7 +1262,7 @@ void rtc_classic::raise_tamper(std::size_t which, bool erase)
   }
 }
 
-void rtc_classic::sample_tampers()
+void rtc_l1l4::sample_tampers()
 {
   auto const needed = std::uint8_t{1} << get(regs_, tamper_filter_);
   for(std::size_t which = 0; which < tamper_count(); ++which)
@@ -1286,7 +1284,7 @@ void rtc_classic::sample_tampers()
   }
 }
 
-void rtc_classic::plan_samples()
+void rtc_l1l4::plan_samples()
 {
   state_.armed[tamper_sample] = 0;
   ++state_.generation[tamper_sample];
@@ -1308,7 +1306,7 @@ void rtc_classic::plan_samples()
   arm(tamper_sample, (cycle / period + 1) * period);
 }
 
-void rtc_classic::stamp(std::uint64_t delay, std::uint64_t at_ps)
+void rtc_l1l4::stamp(std::uint64_t delay, std::uint64_t at_ps)
 {
   if(get(regs_, stamp_flag_) != 0 or state_.stamp_pending != 0)
   {
@@ -1324,7 +1322,7 @@ void rtc_classic::stamp(std::uint64_t delay, std::uint64_t at_ps)
   arm(timestamp_ready, cycle + delay * (std::uint64_t{state_.prediv_a} + 1));
 }
 
-void rtc_classic::clear_stamp()
+void rtc_l1l4::clear_stamp()
 {
   for(auto const name : {"TSTR", "TSDR", "TSSSR"})
   {
@@ -1335,7 +1333,7 @@ void rtc_classic::clear_stamp()
   }
 }
 
-void rtc_classic::on_read_protection_regression()
+void rtc_l1l4::on_read_protection_regression()
 {
   for(auto const offset : backups_)
   {
@@ -1343,17 +1341,17 @@ void rtc_classic::on_read_protection_regression()
   }
 }
 
-auto rtc_classic::storage_only(std::uint32_t offset) const -> bool
+auto rtc_l1l4::storage_only(std::uint32_t offset) const -> bool
 {
   return std::ranges::contains(storage_, offset);
 }
 
-void rtc_classic::on_clock_change()
+void rtc_l1l4::on_clock_change()
 {
   clock_changed();
 }
 
-void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::status_written(std::uint32_t old, std::uint32_t now)
 {
   auto clears = open_flags_;
   auto word   = old;
@@ -1424,7 +1422,7 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
   update_lines();
 }
 
-void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::control_written(std::uint32_t old, std::uint32_t now)
 {
   if(keep_locked(control_, old))
   {
@@ -1476,7 +1474,7 @@ void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void rtc_classic::coarse_written(std::uint32_t old, std::uint32_t)
+void rtc_l1l4::coarse_written(std::uint32_t old, std::uint32_t)
 {
   if(not unlocked() or not initializing())
   {
@@ -1484,7 +1482,7 @@ void rtc_classic::coarse_written(std::uint32_t old, std::uint32_t)
   }
 }
 
-void rtc_classic::smooth_written(std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::smooth_written(std::uint32_t old, std::uint32_t now)
 {
   auto const target = reg("CALR");
   if(keep_locked(target, old))
@@ -1494,7 +1492,7 @@ void rtc_classic::smooth_written(std::uint32_t old, std::uint32_t now)
   refuse_unmodelled("CALR", old, now);
 }
 
-void rtc_classic::shift_written(std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::shift_written(std::uint32_t old, std::uint32_t now)
 {
   auto const target = reg("SHIFTR");
   if(not keep_locked(target, old))
@@ -1504,7 +1502,7 @@ void rtc_classic::shift_written(std::uint32_t old, std::uint32_t now)
   regs_.poke(target.offset, 0);
 }
 
-void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
+void rtc_l1l4::tamper_written(std::uint32_t old, std::uint32_t now)
 {
   refuse_unmodelled(variant_.tamper_register, old, now);
   if(not variant_.tampers)
@@ -1530,7 +1528,7 @@ void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
   update_lines();
 }
 
-template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old, std::uint32_t)
+template <std::size_t Index> void rtc_l1l4::locked_written(std::uint32_t old, std::uint32_t)
 {
   auto const target = reg(locked_names[Index]);
   if(keep_locked(target, old))
@@ -1558,22 +1556,21 @@ template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old,
   plan_all();
 }
 
-template <std::size_t Index> void rtc_classic::read_only_written(std::uint32_t old, std::uint32_t)
+template <std::size_t Index> void rtc_l1l4::read_only_written(std::uint32_t old, std::uint32_t)
 {
   regs_.poke(reg(read_only_names[Index]).offset, old);
 }
 
-void rtc_classic::plain_written(std::uint32_t, std::uint32_t)
+void rtc_l1l4::plain_written(std::uint32_t, std::uint32_t)
 {}
 }
 
-auto rtc_classic_factory(
-    std::optional<std::chrono::sys_seconds> initial,
-    rtc_classic_variant                     variant) -> model_factory
+auto rtc_l1l4_factory(std::optional<std::chrono::sys_seconds> initial, rtc_l1l4_variant variant)
+    -> model_factory
 {
   return [initial,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<rtc_classic>(ctx, desc, initial, variant);
+    return std::make_shared<rtc_l1l4>(ctx, desc, initial, variant);
   };
 }
 }

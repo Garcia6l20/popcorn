@@ -22,7 +22,7 @@ struct exti_port_code
 
 /** @brief Differences between the classic SYSCFG controllers the model rows serve, by register
  *         role. A role the family lacks is empty. */
-struct syscfg_classic_variant
+struct syscfg_l1l4_variant
 {
   /** @brief Selector codes. A code with no entry, or an entry without the line, selects no
    *         port. */
@@ -67,7 +67,7 @@ inline constexpr auto l1_syscfg_storage = std::to_array<std::string_view>({"MEMR
 /** @brief STM32L1 SYSCFG registers a SYSCFGRST pulse keeps, RM0038 8.5.1: MEMRMP. */
 inline constexpr auto l1_syscfg_kept = std::to_array<std::string_view>({"MEMRMP"});
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 section 8.5. */
-inline constexpr syscfg_classic_variant l1_syscfg{
+inline constexpr syscfg_l1l4_variant l1_syscfg{
     .ports                = l1_exti_ports,
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
@@ -96,7 +96,7 @@ inline constexpr auto l4_syscfg_kept =
     std::to_array<std::string_view>({"MEMRMP", "SCSR", "CFGR2", "SWPR"});
 /** @brief STM32L47x/L48x, RM0351 section 9.2: EXTI selection, the SRAM2 erase through SCSR and
  *         SKR, no USB pull-up. */
-inline constexpr syscfg_classic_variant l4_syscfg{
+inline constexpr syscfg_l1l4_variant l4_syscfg{
     .ports                = l4_exti_ports,
     .usb_pull_up_register = "",
     .usb_pull_up_field    = "",
@@ -110,7 +110,7 @@ inline constexpr syscfg_classic_variant l4_syscfg{
     .erase_region         = "SRAM2"};
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 8.5.3: codes 0110 and 0111, PF and
  *         PG, exist on Cat.3 to Cat.6 only. */
-inline constexpr syscfg_classic_variant l1_syscfg_cat12{
+inline constexpr syscfg_l1l4_variant l1_syscfg_cat12{
     .ports                = std::span{l1_exti_ports}.first(6),
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
@@ -125,7 +125,7 @@ inline constexpr syscfg_classic_variant l1_syscfg_cat12{
  * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
  * @param variant Register roles and EXTI port codes of the family the row serves.
  */
-[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory;
+[[nodiscard]] auto syscfg_l1l4_factory(syscfg_l1l4_variant variant) -> model_factory;
 
 /** @brief The SYSCFG model rows. */
 [[nodiscard]] auto syscfg_rows() -> std::span<builtin const>;

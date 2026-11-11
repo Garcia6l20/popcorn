@@ -11,7 +11,7 @@
 namespace popcorn::periph::stm32
 {
 /** @brief One hardware request of a classic DMA controller: its signal and its channel. */
-struct dma_classic_request
+struct dma_l1l4_request
 {
   /** @brief Signal name, as dma_signal spells it, such as `usart1_tx_dma`. */
   std::string_view signal;
@@ -22,12 +22,12 @@ struct dma_classic_request
 };
 
 /** @brief Differences between the classic DMA controllers the model rows serve. */
-struct dma_classic_variant
+struct dma_l1l4_variant
 {
   /** @brief Channels, numbered from 1. */
   std::uint8_t channels;
   /** @brief Hardware requests, each ORed into its channel. */
-  std::span<dma_classic_request const> requests = {};
+  std::span<dma_l1l4_request const> requests = {};
   /**
    * @brief APB windows behind a 32-bit AHB/APB bridge that ignores HSIZE: a byte or halfword
    *        write there is a word write with the item on every lane, RM0038 11.3.4.
@@ -48,7 +48,7 @@ struct dma_classic_variant
  * @brief STM32L1 DMA1 requests, RM0038 11.3.7 Table 55. Signal names follow the requester models,
  *        `<instance>_<request>_dma` with the instance as the description names it.
  */
-inline constexpr std::array<dma_classic_request, 33> l1_dma1_requests{
+inline constexpr std::array<dma_l1l4_request, 33> l1_dma1_requests{
     {
      {"adc_dma", 1},       {"tim2_cc3_dma", 1}, {"tim4_cc1_dma", 1},  {"spi1_rx_dma", 2},
      {"usart3_tx_dma", 2}, {"tim2_upd_dma", 2}, {"tim3_cc3_dma", 2},  {"tim6_upd_dma", 2},
@@ -63,7 +63,7 @@ inline constexpr std::array<dma_classic_request, 33> l1_dma1_requests{
 };
 
 /** @brief STM32L1 DMA2 requests, RM0038 11.3.7 Table 56, named as for DMA1. */
-inline constexpr std::array<dma_classic_request, 15> l1_dma2_requests{
+inline constexpr std::array<dma_l1l4_request, 15> l1_dma2_requests{
     {
      {"spi3_rx_dma", 1},
      {"uart5_tx_dma", 1},
@@ -84,12 +84,12 @@ inline constexpr std::array<dma_classic_request, 15> l1_dma2_requests{
 };
 
 /** @brief STM32L1 DMA1, RM0038 11.1: 7 channels. */
-inline constexpr dma_classic_variant l1_dma1{
+inline constexpr dma_l1l4_variant l1_dma1{
     .channels    = 7,
     .requests    = l1_dma1_requests,
     .apb_windows = l1_apb_windows};
 /** @brief STM32L1 DMA2, RM0038 11.1 and the 11.4 note: 5 channels, on Cat.3 to Cat.6. */
-inline constexpr dma_classic_variant l1_dma2{
+inline constexpr dma_l1l4_variant l1_dma2{
     .channels    = 5,
     .requests    = l1_dma2_requests,
     .apb_windows = l1_apb_windows};
@@ -99,7 +99,7 @@ inline constexpr dma_classic_variant l1_dma2{
  *        names follow the requester models, as for the STM32L1. A signal the table lists on two
  *        channels, TIM16 and TIM17, has a row on each.
  */
-inline constexpr std::array<dma_classic_request, 63> l4_dma1_requests{
+inline constexpr std::array<dma_l1l4_request, 63> l4_dma1_requests{
     {
      {"adc1_dma", 1, 0},        {"tim2_cc3_dma", 1, 4},  {"tim17_cc1_dma", 1, 5},
      {"tim17_upd_dma", 1, 5},   {"tim4_cc1_dma", 1, 6},  {"adc2_dma", 2, 0},
@@ -130,7 +130,7 @@ inline constexpr std::array<dma_classic_request, 63> l4_dma1_requests{
  *        HASH rows of the STM32L49x/L4Ax are left out. SAI1, AES and SDMMC1 have a row on each of
  *        their two channels.
  */
-inline constexpr std::array<dma_classic_request, 49> l4_dma2_requests{
+inline constexpr std::array<dma_l1l4_request, 49> l4_dma2_requests{
     {
      {"sai1_a_dma", 1, 1},    {"uart5_tx_dma", 1, 2},   {"spi3_rx_dma", 1, 3},
      {"swpmi1_rx_dma", 1, 4}, {"tim5_cc4_dma", 1, 5},   {"tim5_trg_dma", 1, 5},
@@ -154,14 +154,14 @@ inline constexpr std::array<dma_classic_request, 49> l4_dma2_requests{
 
 /** @brief STM32L47x/L48x DMA1 and DMA2, RM0351 section 11: 7 channels each, `DMA_CSELR`, word
  *         access only to the registers. */
-inline constexpr dma_classic_variant l4_dma1{
+inline constexpr dma_l1l4_variant l4_dma1{
     .channels           = 7,
     .requests           = l4_dma1_requests,
     .apb_windows        = l4_apb_windows,
     .selection_register = "CSELR",
     .word_only          = true};
 /** @brief STM32L47x/L48x DMA2, as DMA1 with its own table. */
-inline constexpr dma_classic_variant l4_dma2{
+inline constexpr dma_l1l4_variant l4_dma2{
     .channels           = 7,
     .requests           = l4_dma2_requests,
     .apb_windows        = l4_apb_windows,
@@ -172,7 +172,7 @@ inline constexpr dma_classic_variant l4_dma2{
  * @brief Factory of the classic channel DMA model, RM0038 section 11.
  * @param variant Channels and requests of the controller the row serves.
  */
-[[nodiscard]] auto dma_classic_factory(dma_classic_variant variant) -> model_factory;
+[[nodiscard]] auto dma_l1l4_factory(dma_l1l4_variant variant) -> model_factory;
 
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
@@ -187,7 +187,7 @@ inline constexpr dma_classic_variant l4_dma2{
 [[nodiscard]] auto lpdma_factory() -> model_factory;
 
 /** @brief The classic DMA model rows. */
-[[nodiscard]] auto dma_classic_rows() -> std::span<builtin const>;
+[[nodiscard]] auto dma_l1l4_rows() -> std::span<builtin const>;
 
 /** @brief The GPDMA and LPDMA model rows. */
 [[nodiscard]] auto gpdma_rows() -> std::span<builtin const>;

@@ -92,7 +92,7 @@ auto fifo_push(
   return true;
 }
 
-struct spi_classic_state
+struct spi_l1l4_state
 {
   std::uint32_t                       generation{};
   std::uint32_t                       tx{};
@@ -122,10 +122,10 @@ struct spi_classic_state
   std::uint8_t                        host_mode_checked{};
   spi_fifo_state                      fifo{};
 
-  friend auto operator==(spi_classic_state const&, spi_classic_state const&) -> bool = default;
+  friend auto operator==(spi_l1l4_state const&, spi_l1l4_state const&) -> bool = default;
 };
 
-auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant) -> std::string
+auto kernel_name(peripheral_desc const& desc, spi_l1l4_variant const& variant) -> std::string
 {
   auto const* const bus = window_of(variant.kernel_buses, static_cast<std::uint32_t>(desc.base));
   if(bus == nullptr)
@@ -199,12 +199,12 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        clear, a debugger DR write sends nothing and a debugger SR write takes no part in the
  *        MODF clear. A write of 0 to CRCERR clears it from the CPU and the debugger alike.
  *        `SPI_I2SCFGR` and `SPI_I2SPR` are not claimed and stay storage. With the TI mode of the
- *        spi_classic_variant, FRF 1 with SPE 1 is logged once, raises model_error under
+ *        spi_l1l4_variant, FRF 1 with SPE 1 is logged once, raises model_error under
  *        strict_peripherals at each CR1 or CR2 write, and the SPI runs the Motorola format. The
  *        devices, the controller queue and both buffers are saved with the model, a reset drops
  *        the queue.
  *
- *        STM32L4 SPI1 to SPI3, RM0351 section 42, the fifo spi_classic_variant: the same rules
+ *        STM32L4 SPI1 to SPI3, RM0351 section 42, the fifo spi_l1l4_variant: the same rules
  *        with a 4-byte TXFIFO and RXFIFO in place of the buffers, RM0351 42.4.9. A frame has
  *        CR2.DS + 1 bits, one byte up to 8 bits, two bytes low byte first above, and a CR2
  *        write of DS 0000 to 0010 stores 0111, RM0351 42.6.2. A DR write pushes one byte at 8
@@ -339,18 +339,18 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *   the end of a target transfer, and ES0250 2.23.3, CRC corruption when another peripheral's DMA
  *   transfer completes, are not modelled: BSY follows RM0351 42.4.10 and the CRC RM0351 42.4.14.
  */
-class spi_classic final : public dispatch_model<spi_classic, spi_classic_state>,
-                          public spi_controller_port,
-                          public bus_reset_listener,
-                          public dma_requester
+class spi_l1l4 final : public dispatch_model<spi_l1l4, spi_l1l4_state>,
+                       public spi_controller_port,
+                       public bus_reset_listener,
+                       public dma_requester
 {
 public:
-  spi_classic(
+  spi_l1l4(
       model_context&                       ctx,
       peripheral_desc const&               desc,
       std::vector<spi_attachment>          attachments,
       std::shared_ptr<spi_controller_sink> controller,
-      spi_classic_variant const&           variant);
+      spi_l1l4_variant const&              variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -436,7 +436,7 @@ private:
 
   register_file&                       regs_;
   std::shared_ptr<spi_controller_sink> controller_;
-  spi_attachments<spi_classic_state>   attachments_;
+  spi_attachments<spi_l1l4_state>      attachments_;
   reg_ref                              control_;
   reg_ref                              status_;
   reg_ref                              data_;
@@ -485,25 +485,25 @@ private:
   bool                                 crc_size_logged_{};
 };
 
-constexpr std::array<write_entry<spi_classic>, 7> spi_classic_writes{
+constexpr std::array<write_entry<spi_l1l4>, 7> spi_l1l4_writes{
     {
-     {"CR1", &spi_classic::control_written},
-     {"CR2", &spi_classic::control2_written},
-     {"SR", &spi_classic::status_written},
-     {"DR", &spi_classic::plain_written},
+     {"CR1", &spi_l1l4::control_written},
+     {"CR2", &spi_l1l4::control2_written},
+     {"SR", &spi_l1l4::status_written},
+     {"DR", &spi_l1l4::plain_written},
      {"CRCPR", nullptr},
      {"RXCRCR", nullptr},
      {"TXCRCR", nullptr},
      }
 };
 
-spi_classic::spi_classic(
+spi_l1l4::spi_l1l4(
     model_context&                       ctx,
     peripheral_desc const&               desc,
     std::vector<spi_attachment>          attachments,
     std::shared_ptr<spi_controller_sink> controller,
-    spi_classic_variant const&           variant)
-    : dispatch_model{ctx, desc, "SPI", spi_classic_writes}, regs_{ctx.regs},
+    spi_l1l4_variant const&              variant)
+    : dispatch_model{ctx, desc, "SPI", spi_l1l4_writes}, regs_{ctx.regs},
       controller_{std::move(controller)}, attachments_{state_, std::move(attachments)},
       control_{reg("CR1")}, status_{reg("SR")}, data_{reg("DR")}, tx_crc_{reg("TXCRCR")},
       rx_crc_{reg("RXCRCR")}, phase_{field("CR1", "CPHA")}, polarity_{field("CR1", "CPOL")},
@@ -546,7 +546,7 @@ spi_classic::spi_classic(
   }
 }
 
-auto spi_classic::frame_bits() const -> std::uint32_t
+auto spi_l1l4::frame_bits() const -> std::uint32_t
 {
   if(fifo_)
   {
@@ -555,12 +555,12 @@ auto spi_classic::frame_bits() const -> std::uint32_t
   return get(regs_, size_) != 0 ? 16 : 8;
 }
 
-auto spi_classic::frame_bytes() const -> std::uint8_t
+auto spi_l1l4::frame_bytes() const -> std::uint8_t
 {
   return frame_bits() > 8 ? 2 : 1;
 }
 
-auto spi_classic::crc_bits() const -> std::uint32_t
+auto spi_l1l4::crc_bits() const -> std::uint32_t
 {
   if(fifo_)
   {
@@ -569,17 +569,17 @@ auto spi_classic::crc_bits() const -> std::uint32_t
   return frame_bits();
 }
 
-auto spi_classic::crc_frames() const -> std::uint8_t
+auto spi_l1l4::crc_frames() const -> std::uint8_t
 {
   return crc_bits() > frame_bits() ? 2 : 1;
 }
 
-auto spi_classic::crc_bypass() const -> bool
+auto spi_l1l4::crc_bypass() const -> bool
 {
   return fifo_ and receive_only() and get(regs_, crc_enable_) != 0;
 }
 
-auto spi_classic::pulsing() const -> bool
+auto spi_l1l4::pulsing() const -> bool
 {
   return fifo_
      and get(regs_, fifo_->pulse) != 0
@@ -587,7 +587,7 @@ auto spi_classic::pulsing() const -> bool
      and (not ti_format_ or get(regs_, *ti_format_) == 0);
 }
 
-void spi_classic::begin_crc_frame()
+void spi_l1l4::begin_crc_frame()
 {
   auto& fifo         = state_.fifo;
   state_.crc_pending = 0;
@@ -603,7 +603,7 @@ void spi_classic::begin_crc_frame()
   state_.shift     = regs_.peek(tx_crc_.offset) >> (8u * lane) & spi_mask(width);
 }
 
-void spi_classic::check_crc_size()
+void spi_l1l4::check_crc_size()
 {
   if(not fifo_ or get(regs_, crc_enable_) == 0 or frame_bits() == 8 or frame_bits() == 16)
   {
@@ -621,38 +621,38 @@ void spi_classic::check_crc_size()
   }
 }
 
-auto spi_classic::wire_frame(std::uint32_t value) const -> std::uint32_t
+auto spi_l1l4::wire_frame(std::uint32_t value) const -> std::uint32_t
 {
   auto const frame = value & spi_mask(frame_bits());
   return get(regs_, lsb_first_) != 0 ? spi_reversed(frame, frame_bits()) : frame;
 }
 
-auto spi_classic::receive_only() const -> bool
+auto spi_l1l4::receive_only() const -> bool
 {
   return get(regs_, bidi_) != 0 ? get(regs_, bidi_output_) == 0 : get(regs_, rx_only_) != 0;
 }
 
-auto spi_classic::receiving() const -> bool
+auto spi_l1l4::receiving() const -> bool
 {
   return get(regs_, bidi_) == 0 or get(regs_, bidi_output_) == 0;
 }
 
-auto spi_classic::controlling() const -> bool
+auto spi_l1l4::controlling() const -> bool
 {
   return get(regs_, enable_) != 0 and get(regs_, master_) != 0;
 }
 
-auto spi_classic::power_on_offset() const -> std::uint64_t
+auto spi_l1l4::power_on_offset() const -> std::uint64_t
 {
   return ctx_.clock.since_power_on().ps - ctx_.clock.time().ps;
 }
 
-auto spi_classic::bus_mode() const -> std::uint8_t
+auto spi_l1l4::bus_mode() const -> std::uint8_t
 {
   return static_cast<std::uint8_t>(get(regs_, polarity_) << 1 | get(regs_, phase_));
 }
 
-auto spi_classic::crc_step(
+auto spi_l1l4::crc_step(
     std::uint32_t crc,
     std::uint32_t frame,
     std::uint32_t frame_bits,
@@ -672,7 +672,7 @@ auto spi_classic::crc_step(
   return crc;
 }
 
-auto spi_classic::tx_ready() const -> bool
+auto spi_l1l4::tx_ready() const -> bool
 {
   if(fifo_)
   {
@@ -681,7 +681,7 @@ auto spi_classic::tx_ready() const -> bool
   return state_.tx_full != 0;
 }
 
-auto spi_classic::tx_empty() const -> bool
+auto spi_l1l4::tx_empty() const -> bool
 {
   if(fifo_)
   {
@@ -690,7 +690,7 @@ auto spi_classic::tx_empty() const -> bool
   return state_.tx_full == 0;
 }
 
-auto spi_classic::tx_holding() const -> bool
+auto spi_l1l4::tx_holding() const -> bool
 {
   if(fifo_)
   {
@@ -699,7 +699,7 @@ auto spi_classic::tx_holding() const -> bool
   return state_.tx_full != 0;
 }
 
-auto spi_classic::rx_ready() const -> bool
+auto spi_l1l4::rx_ready() const -> bool
 {
   if(fifo_)
   {
@@ -715,7 +715,7 @@ auto spi_classic::rx_ready() const -> bool
   return state_.rx_full != 0;
 }
 
-auto spi_classic::take_tx() -> std::uint32_t
+auto spi_l1l4::take_tx() -> std::uint32_t
 {
   if(fifo_)
   {
@@ -725,7 +725,7 @@ auto spi_classic::take_tx() -> std::uint32_t
   return state_.tx;
 }
 
-void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
+void spi_l1l4::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
 {
   if(fifo_)
   {
@@ -758,7 +758,7 @@ void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_
   state_.tx_full    = 1;
 }
 
-void spi_classic::store_rx(std::uint32_t received)
+void spi_l1l4::store_rx(std::uint32_t received)
 {
   if(fifo_)
   {
@@ -781,7 +781,7 @@ void spi_classic::store_rx(std::uint32_t received)
   state_.rx_full = 1;
 }
 
-auto spi_classic::read_rx(std::uint32_t offset, std::uint8_t size) -> std::uint32_t
+auto spi_l1l4::read_rx(std::uint32_t offset, std::uint8_t size) -> std::uint32_t
 {
   if(not fifo_)
   {
@@ -802,7 +802,7 @@ auto spi_classic::read_rx(std::uint32_t offset, std::uint8_t size) -> std::uint3
   return spi_mask(8u * count);
 }
 
-void spi_classic::rethrow_refused()
+void spi_l1l4::rethrow_refused()
 {
   hooks_.rethrow();
   auto const joined = [](std::vector<std::string> const& names) {
@@ -834,14 +834,14 @@ void spi_classic::rethrow_refused()
   }
 }
 
-void spi_classic::refuse_unit(std::string_view primitive) const
+void spi_l1l4::refuse_unit(std::string_view primitive) const
 {
   throw config_error(
       ctx_.part.part, 0, std::format("devices.{}", desc_.name),
       std::format("transfer() only, the STM32L1 SPI takes no {}()", primitive));
 }
 
-auto spi_classic::frame_ps() -> std::uint64_t
+auto spi_l1l4::frame_ps() -> std::uint64_t
 {
   auto const hz = ctx_.clock.hz(kernel_);
   if(hz == 0)
@@ -855,7 +855,7 @@ auto spi_classic::frame_ps() -> std::uint64_t
   return std::uint64_t{frame_bits()} * (2u << get(regs_, baud_)) * ps_per_second / hz;
 }
 
-void spi_classic::hardware_select(bool selected, std::optional<std::uint64_t> at_ps)
+void spi_l1l4::hardware_select(bool selected, std::optional<std::uint64_t> at_ps)
 {
   if(selected and get(regs_, ss_output_) == 0)
   {
@@ -875,17 +875,17 @@ void spi_classic::hardware_select(bool selected, std::optional<std::uint64_t> at
   }
 }
 
-void spi_classic::reset(register_file&, reset_kind kind)
+void spi_l1l4::reset(register_file&, reset_kind kind)
 {
   restore_reset_values(kind);
 }
 
-void spi_classic::on_bus_reset()
+void spi_l1l4::on_bus_reset()
 {
   restore_reset_values(std::nullopt);
 }
 
-void spi_classic::restore_reset_values(std::optional<reset_kind> kind)
+void spi_l1l4::restore_reset_values(std::optional<reset_kind> kind)
 {
   for(auto const& name : claims())
   {
@@ -915,7 +915,7 @@ void spi_classic::restore_reset_values(std::optional<reset_kind> kind)
   hooks_.rethrow();
 }
 
-void spi_classic::power_cut()
+void spi_l1l4::power_cut()
 {
   auto const         at = ctx_.clock.since_power_on();
   std::exception_ptr first;
@@ -939,7 +939,7 @@ void spi_classic::power_cut()
   }
 }
 
-void spi_classic::start_frame(std::uint64_t from_ps)
+void spi_l1l4::start_frame(std::uint64_t from_ps)
 {
   if(state_.busy != 0 or not controlling())
   {
@@ -983,7 +983,7 @@ void spi_classic::start_frame(std::uint64_t from_ps)
   ctx_.events.schedule_at(vtime{state_.frame_end_ps}, frame_done, ++state_.generation, ctx_.clock);
 }
 
-void spi_classic::finish_frame()
+void spi_l1l4::finish_frame()
 {
   state_.busy    = 0;
   auto const at  = vtime{state_.frame_end_ps + power_on_offset()};
@@ -1021,7 +1021,7 @@ void spi_classic::finish_frame()
   }
 }
 
-void spi_classic::land(std::uint32_t received)
+void spi_l1l4::land(std::uint32_t received)
 {
   auto const bits  = frame_bits();
   auto const width = crc_bits();
@@ -1081,7 +1081,7 @@ void spi_classic::land(std::uint32_t received)
   store_rx(received);
 }
 
-void spi_classic::mode_fault()
+void spi_l1l4::mode_fault()
 {
   update(regs_, fault_, 1);
   update(regs_, enable_, 0);
@@ -1097,7 +1097,7 @@ void spi_classic::mode_fault()
   hardware_select(false);
 }
 
-void spi_classic::flags()
+void spi_l1l4::flags()
 {
   auto const up         = get(regs_, enable_) != 0;
   auto const controller = up and get(regs_, master_) != 0;
@@ -1138,7 +1138,7 @@ void spi_classic::flags()
   rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and rx_ready());
 }
 
-void spi_classic::control_written(std::uint32_t old, std::uint32_t now)
+void spi_l1l4::control_written(std::uint32_t old, std::uint32_t now)
 {
   auto const locked = get(regs_, fault_) != 0;
   if(locked and state_.fault_seen != 0)
@@ -1189,16 +1189,16 @@ void spi_classic::control_written(std::uint32_t old, std::uint32_t now)
   start_frame(ctx_.clock.time().ps);
 }
 
-void spi_classic::status_written(std::uint32_t old, std::uint32_t now)
+void spi_l1l4::status_written(std::uint32_t old, std::uint32_t now)
 {
   auto const kept = crc_error_.of(old) & crc_error_.of(now);
   regs_.poke(status_.offset, crc_error_.with(old, kept));
 }
 
-void spi_classic::plain_written(std::uint32_t, std::uint32_t)
+void spi_l1l4::plain_written(std::uint32_t, std::uint32_t)
 {}
 
-void spi_classic::control2_written(std::uint32_t, std::uint32_t)
+void spi_l1l4::control2_written(std::uint32_t, std::uint32_t)
 {
   if(fifo_ and get(regs_, size_) < 3)
   {
@@ -1207,7 +1207,7 @@ void spi_classic::control2_written(std::uint32_t, std::uint32_t)
   warn_ti();
 }
 
-void spi_classic::warn_ti()
+void spi_l1l4::warn_ti()
 {
   if(not ti_format_ or get(regs_, enable_) == 0 or get(regs_, *ti_format_) == 0)
   {
@@ -1223,7 +1223,7 @@ void spi_classic::warn_ti()
   }
 }
 
-auto spi_classic::on_read(
+auto spi_l1l4::on_read(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1257,7 +1257,7 @@ auto spi_classic::on_read(
   return value.transform([lanes](std::uint32_t word_read) { return word_read & lanes; });
 }
 
-auto spi_classic::on_write(
+auto spi_l1l4::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1289,7 +1289,7 @@ auto spi_classic::on_write(
   return result;
 }
 
-void spi_classic::on_event(std::uint32_t kind, std::uint64_t payload)
+void spi_l1l4::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind == host_edge)
   {
@@ -1317,7 +1317,7 @@ void spi_classic::on_event(std::uint32_t kind, std::uint64_t payload)
   rethrow_refused();
 }
 
-void spi_classic::transfer_completed(dma_controller const& by, std::uint32_t request)
+void spi_l1l4::transfer_completed(dma_controller const& by, std::uint32_t request)
 {
   if(get(regs_, crc_enable_) == 0)
   {
@@ -1343,7 +1343,7 @@ void spi_classic::transfer_completed(dma_controller const& by, std::uint32_t req
   }
 }
 
-void spi_classic::last_but_one(dma_controller const& by, std::uint32_t request)
+void spi_l1l4::last_but_one(dma_controller const& by, std::uint32_t request)
 {
   if(not fifo_)
   {
@@ -1364,7 +1364,7 @@ void spi_classic::last_but_one(dma_controller const& by, std::uint32_t request)
   flags();
 }
 
-auto spi_classic::transfer(
+auto spi_l1l4::transfer(
     vtime                          start,
     std::uint64_t                  frame_ps,
     std::uint8_t                   bits,
@@ -1386,12 +1386,12 @@ auto spi_classic::transfer(
   return from;
 }
 
-void spi_classic::select(vtime, std::uint32_t, std::uint64_t)
+void spi_l1l4::select(vtime, std::uint32_t, std::uint64_t)
 {
   refuse_unit("select");
 }
 
-void spi_classic::frame(
+void spi_l1l4::frame(
     std::uint32_t,
     std::uint8_t,
     std::uint64_t,
@@ -1402,17 +1402,17 @@ void spi_classic::frame(
   refuse_unit("frame");
 }
 
-void spi_classic::deselect(vtime, std::uint32_t, std::uint64_t)
+void spi_l1l4::deselect(vtime, std::uint32_t, std::uint64_t)
 {
   refuse_unit("deselect");
 }
 
-void spi_classic::drop(vtime, std::uint32_t, std::uint64_t)
+void spi_l1l4::drop(vtime, std::uint32_t, std::uint64_t)
 {
   refuse_unit("drop");
 }
 
-auto spi_classic::host_selects() const -> bool
+auto spi_l1l4::host_selects() const -> bool
 {
   if(get(regs_, enable_) == 0 or get(regs_, master_) != 0)
   {
@@ -1425,7 +1425,7 @@ auto spi_classic::host_selects() const -> bool
   return state_.host_selected != 0;
 }
 
-void spi_classic::begin_host_frame()
+void spi_l1l4::begin_host_frame()
 {
   if(host_selects())
   {
@@ -1462,7 +1462,7 @@ void spi_classic::begin_host_frame()
   state_.host_shift = wire_frame(state_.shift);
 }
 
-void spi_classic::end_host_frame()
+void spi_l1l4::end_host_frame()
 {
   auto const& now  = state_.host.front();
   state_.host_busy = 0;
@@ -1489,7 +1489,7 @@ void spi_classic::end_host_frame()
   land(wire_frame(now.frames[state_.host_next]));
 }
 
-void spi_classic::host_edge_reached()
+void spi_l1l4::host_edge_reached()
 {
   if(state_.host.empty())
   {
@@ -1558,16 +1558,16 @@ void spi_classic::host_edge_reached()
   }
 }
 
-void spi_classic::save(std::vector<std::byte>& out) const
+void spi_l1l4::save(std::vector<std::byte>& out) const
 {
   auto copy = state_;
   attachments_.save_devices(copy.devices);
   reflex::serde::bson::serializer{out}.dump(copy);
 }
 
-void spi_classic::load(std::span<std::byte const> in)
+void spi_l1l4::load(std::span<std::byte const> in)
 {
-  auto        loaded = reflex::serde::bson::deserializer{in}.template load<spi_classic_state>();
+  auto        loaded = reflex::serde::bson::deserializer{in}.template load<spi_l1l4_state>();
   auto const& fifo   = loaded.fifo;
   if(fifo.rx_level > fifo.rx.size() or fifo.tx_level > fifo.tx.size())
   {
@@ -1580,16 +1580,16 @@ void spi_classic::load(std::span<std::byte const> in)
 }
 }
 
-auto spi_classic_factory(
+auto spi_l1l4_factory(
     decltype(board::spi) const&             devices_,
     decltype(board::spi_controllers) const& controllers_,
-    spi_classic_variant                     variant) -> model_factory
+    spi_l1l4_variant                        variant) -> model_factory
 {
   return [devices = devices_, controllers = controllers_,
           variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = devices.find(desc.name);
     auto const controller = controllers.find(desc.name);
-    return std::make_shared<spi_classic>(
+    return std::make_shared<spi_l1l4>(
         ctx, desc, found != devices.end() ? found->second : std::vector<spi_attachment>{},
         controller != controllers.end() ? controller->second : nullptr, variant);
   };

@@ -593,7 +593,7 @@ TEST_CASE("checklist 39: the STM32L4 RTC variant refuses the L152RE RTC, its TAF
   stm32::register_builtin_models();
   auto options   = popcorn::testing::stm32_options();
   options.models = stm32::factories({}, l152re());
-  options.models.insert_or_assign("RTC", stm32::rtc_classic_factory(std::nullopt, stm32::l4_rtc));
+  options.models.insert_or_assign("RTC", stm32::rtc_l1l4_factory(std::nullopt, stm32::l4_rtc));
   CHECK_THROWS_AS(
       static_cast<void>(std::make_unique<core::machine>(
           l152re(), popcorn::arch::armv8m::factory(), std::move(options))),

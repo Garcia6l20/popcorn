@@ -26,12 +26,11 @@ constexpr std::uint32_t erase_done     = 0;
 constexpr std::uint32_t first_key      = 0xCA;
 constexpr std::uint32_t second_key     = 0x53;
 
-struct syscfg_classic_state
+struct syscfg_l1l4_state
 {
   std::uint8_t key_stage{};
 
-  friend auto operator==(syscfg_classic_state const&, syscfg_classic_state const&)
-      -> bool = default;
+  friend auto operator==(syscfg_l1l4_state const&, syscfg_l1l4_state const&) -> bool = default;
 };
 
 /**
@@ -97,17 +96,14 @@ struct syscfg_classic_state
  *   that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError` before
  *   the store.
  */
-class syscfg_classic final : public dispatch_model<syscfg_classic, syscfg_classic_state>,
-                             public exti_selector,
-                             public usb_pull_up_source,
-                             public bus_reset_listener,
-                             public read_protection_listener
+class syscfg_l1l4 final : public dispatch_model<syscfg_l1l4, syscfg_l1l4_state>,
+                          public exti_selector,
+                          public usb_pull_up_source,
+                          public bus_reset_listener,
+                          public read_protection_listener
 {
 public:
-  syscfg_classic(
-      model_context&                ctx,
-      peripheral_desc const&        desc,
-      syscfg_classic_variant const& variant);
+  syscfg_l1l4(model_context& ctx, peripheral_desc const& desc, syscfg_l1l4_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -143,7 +139,7 @@ private:
   void               zero_erase_region();
 
   register_file&                        regs_;
-  syscfg_classic_variant                variant_;
+  syscfg_l1l4_variant                   variant_;
   std::array<field_ref, selected_lines> selectors_{};
   std::optional<field_ref>              pull_up_;
   std::uint32_t                         pull_up_storage_{};
@@ -157,27 +153,27 @@ private:
   storage_notes                         notes_;
 };
 
-auto syscfg_classic_writes(peripheral_desc const& desc, syscfg_classic_variant const& variant)
-    -> std::vector<write_entry<syscfg_classic>>
+auto syscfg_l1l4_writes(peripheral_desc const& desc, syscfg_l1l4_variant const& variant)
+    -> std::vector<write_entry<syscfg_l1l4>>
 {
   constexpr std::array handlers{
-      &syscfg_classic::selector_written<0>, &syscfg_classic::selector_written<1>,
-      &syscfg_classic::selector_written<2>, &syscfg_classic::selector_written<3>};
-  std::vector<write_entry<syscfg_classic>> out;
+      &syscfg_l1l4::selector_written<0>, &syscfg_l1l4::selector_written<1>,
+      &syscfg_l1l4::selector_written<2>, &syscfg_l1l4::selector_written<3>};
+  std::vector<write_entry<syscfg_l1l4>> out;
   for(auto const& described : desc.registers)
   {
     if(described.alternate_of)
     {
       continue;
     }
-    write_entry<syscfg_classic> entry{described.name, nullptr};
+    write_entry<syscfg_l1l4> entry{described.name, nullptr};
     if(not variant.erase_register.empty() and described.name == variant.erase_register)
     {
-      entry.on_write = &syscfg_classic::erase_written;
+      entry.on_write = &syscfg_l1l4::erase_written;
     }
     if(not variant.key_register.empty() and described.name == variant.key_register)
     {
-      entry.on_write = &syscfg_classic::key_written;
+      entry.on_write = &syscfg_l1l4::key_written;
     }
     for(std::size_t at = 0; at < handlers.size(); ++at)
     {
@@ -191,11 +187,11 @@ auto syscfg_classic_writes(peripheral_desc const& desc, syscfg_classic_variant c
   return out;
 }
 
-syscfg_classic::syscfg_classic(
-    model_context&                ctx,
-    peripheral_desc const&        desc,
-    syscfg_classic_variant const& variant)
-    : dispatch_model{ctx, desc, "SYSCFG", syscfg_classic_writes(desc, variant)}, regs_{ctx.regs},
+syscfg_l1l4::syscfg_l1l4(
+    model_context&             ctx,
+    peripheral_desc const&     desc,
+    syscfg_l1l4_variant const& variant)
+    : dispatch_model{ctx, desc, "SYSCFG", syscfg_l1l4_writes(desc, variant)}, regs_{ctx.regs},
       variant_{variant}, hclk_{ctx.clock.domain("hclk")}
 {
   for(std::size_t line = 0; line < selected_lines; ++line)
@@ -239,7 +235,7 @@ syscfg_classic::syscfg_classic(
   }
 }
 
-void syscfg_classic::restore_reset_values()
+void syscfg_l1l4::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -247,7 +243,7 @@ void syscfg_classic::restore_reset_values()
   }
 }
 
-void syscfg_classic::reset(register_file&, reset_kind)
+void syscfg_l1l4::reset(register_file&, reset_kind)
 {
   auto const before = usb_pull_up();
   restore_reset_values();
@@ -255,7 +251,7 @@ void syscfg_classic::reset(register_file&, reset_kind)
   tell_pull_up(before);
 }
 
-void syscfg_classic::tell_pull_up(bool before)
+void syscfg_l1l4::tell_pull_up(bool before)
 {
   if(usb_pull_up() == before)
   {
@@ -267,7 +263,7 @@ void syscfg_classic::tell_pull_up(bool before)
   }
 }
 
-void syscfg_classic::on_bus_reset()
+void syscfg_l1l4::on_bus_reset()
 {
   std::vector<std::pair<std::uint32_t, std::uint32_t>> selectors;
   for(auto const& bits : selectors_)
@@ -296,7 +292,7 @@ void syscfg_classic::on_bus_reset()
   tell_pull_up(before);
 }
 
-void syscfg_classic::on_event(std::uint32_t kind, std::uint64_t)
+void syscfg_l1l4::on_event(std::uint32_t kind, std::uint64_t)
 {
   if(kind != erase_done)
   {
@@ -306,12 +302,12 @@ void syscfg_classic::on_event(std::uint32_t kind, std::uint64_t)
   regs_.poke(erase_->offset, 0);
 }
 
-auto syscfg_classic::erasing() const -> bool
+auto syscfg_l1l4::erasing() const -> bool
 {
   return busy_ and get(regs_, *busy_) != 0;
 }
 
-void syscfg_classic::zero_erase_region()
+void syscfg_l1l4::zero_erase_region()
 {
   std::vector<std::byte> const zeros(region_->size);
   if(not ctx_.services.write_block(region_->start, zeros, initiator::dma))
@@ -320,7 +316,7 @@ void syscfg_classic::zero_erase_region()
   }
 }
 
-void syscfg_classic::on_read_protection_regression()
+void syscfg_l1l4::on_read_protection_regression()
 {
   if(region_ != nullptr)
   {
@@ -328,14 +324,14 @@ void syscfg_classic::on_read_protection_regression()
   }
 }
 
-void syscfg_classic::key_written(std::uint32_t, std::uint32_t now)
+void syscfg_l1l4::key_written(std::uint32_t, std::uint32_t now)
 {
   auto const key   = now & 0xFFu;
   state_.key_stage = key == first_key ? 1 : key == second_key and state_.key_stage == 1 ? 2 : 0;
   regs_.poke(key_->offset, 0);
 }
 
-void syscfg_classic::erase_written(std::uint32_t old, std::uint32_t now)
+void syscfg_l1l4::erase_written(std::uint32_t old, std::uint32_t now)
 {
   if(erasing())
   {
@@ -354,7 +350,7 @@ void syscfg_classic::erase_written(std::uint32_t old, std::uint32_t now)
   ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + ps}, erase_done, 0, ctx_.clock);
 }
 
-auto syscfg_classic::port_of(std::uint8_t line, std::uint32_t code) const
+auto syscfg_l1l4::port_of(std::uint8_t line, std::uint32_t code) const
     -> std::optional<std::uint8_t>
 {
   auto const found = std::ranges::find(variant_.ports, code, &exti_port_code::code);
@@ -365,7 +361,7 @@ auto syscfg_classic::port_of(std::uint8_t line, std::uint32_t code) const
   return static_cast<std::uint8_t>(found->port - 'A');
 }
 
-auto syscfg_classic::selected_port(std::uint8_t line) const -> std::optional<std::uint8_t>
+auto syscfg_l1l4::selected_port(std::uint8_t line) const -> std::optional<std::uint8_t>
 {
   if(line >= selected_lines)
   {
@@ -374,7 +370,7 @@ auto syscfg_classic::selected_port(std::uint8_t line) const -> std::optional<std
   return port_of(line, get(regs_, selectors_[line]));
 }
 
-auto syscfg_classic::level_of(std::optional<std::uint8_t> port, std::uint8_t line) const -> bool
+auto syscfg_l1l4::level_of(std::optional<std::uint8_t> port, std::uint8_t line) const -> bool
 {
   if(not port)
   {
@@ -385,7 +381,7 @@ auto syscfg_classic::level_of(std::optional<std::uint8_t> port, std::uint8_t lin
   return gpio != nullptr and line < gpio->pin_count() and gpio->level(line);
 }
 
-void syscfg_classic::reselect(std::uint32_t offset, std::uint32_t old, std::uint32_t now)
+void syscfg_l1l4::reselect(std::uint32_t offset, std::uint32_t old, std::uint32_t now)
 {
   auto* const exti = dynamic_cast<exti_line_input*>(ctx_.peers.find("EXTI"));
   if(exti == nullptr)
@@ -414,27 +410,27 @@ void syscfg_classic::reselect(std::uint32_t offset, std::uint32_t old, std::uint
 }
 
 template <std::size_t Register>
-void syscfg_classic::selector_written(std::uint32_t old, std::uint32_t now)
+void syscfg_l1l4::selector_written(std::uint32_t old, std::uint32_t now)
 {
   reselect(selectors_[Register * 4].offset, old, now);
 }
 
-auto syscfg_classic::usb_pull_up() const -> bool
+auto syscfg_l1l4::usb_pull_up() const -> bool
 {
   return pull_up_ and get(regs_, *pull_up_) != 0;
 }
 
-auto syscfg_classic::stateless() const -> bool
+auto syscfg_l1l4::stateless() const -> bool
 {
   return variant_.erase_register.empty();
 }
 
-auto syscfg_classic::storage_only(std::uint32_t offset) const -> bool
+auto syscfg_l1l4::storage_only(std::uint32_t offset) const -> bool
 {
   return std::ranges::contains(storage_, offset);
 }
 
-auto syscfg_classic::on_write(
+auto syscfg_l1l4::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -455,7 +451,7 @@ auto syscfg_classic::on_write(
   return result;
 }
 
-auto syscfg_classic::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+auto syscfg_l1l4::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   if(write and storage_only(word))
   {
@@ -465,21 +461,21 @@ auto syscfg_classic::guard(std::uint32_t word, access_ctx const& ctx, bool write
 }
 }
 
-auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory
+auto syscfg_l1l4_factory(syscfg_l1l4_variant variant) -> model_factory
 {
   return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<syscfg_classic>(ctx, desc, variant);
+    return std::make_shared<syscfg_l1l4>(ctx, desc, variant);
   };
 }
 
 namespace
 {
 constexpr auto syscfg_table = std::to_array<builtin>({
-    row_of<^^syscfg_classic_factory, ^^l1_syscfg>(
+    row_of<^^syscfg_l1l4_factory, ^^l1_syscfg>(
         {.ip = "SYSCFG", .ip_version_glob = "", .families = family::l1}),
-    row_of<^^syscfg_classic_factory, ^^l1_syscfg_cat12>(
+    row_of<^^syscfg_l1l4_factory, ^^l1_syscfg_cat12>(
         {.ip = "SYSCFG", .ip_version_glob = "STM32L1_exti_23", .families = family::l1}),
-    row_of<^^syscfg_classic_factory, ^^l4_syscfg>(
+    row_of<^^syscfg_l1l4_factory, ^^l4_syscfg>(
         {.ip = "SYS", .ip_version_glob = "STM32L47x_sys_*", .families = family::l4}),
     row_of<^^syscfg_factory>(
         {.ip = "SYS", .ip_version_glob = "STM32U5x_sys_*", .families = family::u5}),

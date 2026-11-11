@@ -24,7 +24,7 @@ inline constexpr rtc_variant u5_rtc{};
 inline constexpr rtc_variant h5_rtc{.privilege_register = "PRIVCFGR"};
 
 /** @brief Differences between the classic RTC peripherals the model rows serve, RM0038 20. */
-struct rtc_classic_variant
+struct rtc_l1l4_variant
 {
   /** @brief Whether the RTC has subseconds and the shadow bypass: RTC_SSR, RTC_SHIFTR,
    *         RTC_TSSSR, RTC_ALRMASSR, RTC_ALRMBSSR, RTC_CR.BYPSHAD and RTC_ISR.SHPF. */
@@ -84,11 +84,11 @@ struct rtc_classic_variant
 };
 
 /** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
-inline constexpr rtc_classic_variant l1_rtc{};
+inline constexpr rtc_l1l4_variant l1_rtc{};
 /** @brief STM32L1 Cat.1 RTC, RM0038 20.2, 20.3.1, 20.3.5 and 30.16.4: no subseconds, no smooth
  *         calibration, one tamper input, no DBG_RTC_STOP and alarm write flags that follow the
  *         alarm enables. */
-inline constexpr rtc_classic_variant l1_cat1_rtc{
+inline constexpr rtc_l1l4_variant l1_cat1_rtc{
     .subseconds         = false,
     .smooth_calibration = false,
     .three_tampers      = false,
@@ -99,7 +99,7 @@ inline constexpr rtc_classic_variant l1_cat1_rtc{
  *         RTCCLK period, a backup domain a brown-out keeps, RM0351 6.1.3, the alarm interrupt
  *         on EXTI line 18, RM0351 Table 62, the timestamp on PC13, RM0351 38.3.13, and the
  *         tampers on PC13, PA0 and PE6, RM0351 38.3.14. */
-inline constexpr rtc_classic_variant l4_rtc{
+inline constexpr rtc_l1l4_variant l4_rtc{
     .brown_out_resets   = false,
     .tamper_register    = "TAMPCR",
     .coarse_calibration = false,
@@ -124,9 +124,9 @@ inline constexpr rtc_classic_variant l4_rtc{
  * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
  * @param variant What differs between the RTC of the category the row serves.
  */
-[[nodiscard]] auto rtc_classic_factory(
-    std::optional<std::chrono::sys_seconds> initial,
-    rtc_classic_variant                     variant) -> model_factory;
+[[nodiscard]] auto
+    rtc_l1l4_factory(std::optional<std::chrono::sys_seconds> initial, rtc_l1l4_variant variant)
+        -> model_factory;
 
 /**
  * @brief Factory of the TAMP backup register model, RM0456 section 64.
