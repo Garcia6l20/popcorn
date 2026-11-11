@@ -2,6 +2,8 @@
 
 #include <doctest/doctest.h>
 
+#include <reflex/enum.hpp>
+
 #include <cstdint>
 #include <format>
 #include <optional>

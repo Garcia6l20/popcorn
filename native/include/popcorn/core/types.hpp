@@ -6,7 +6,7 @@
  * fault records, and the enums that describe them.
  */
 
-#include <reflex/enum.hpp>
+#include <reflex/format.hpp>
 
 #include <compare>
 #include <cstdint>

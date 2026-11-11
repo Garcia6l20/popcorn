@@ -5,7 +5,7 @@
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 
-#include <reflex/enum.hpp>
+#include <reflex/format.hpp>
 
 #include <cstddef>
 #include <cstdint>

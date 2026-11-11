@@ -25,7 +25,7 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
-#include <reflex/enum.hpp>
+#include <reflex/format.hpp>
 
 #include <atomic>
 #include <chrono>
