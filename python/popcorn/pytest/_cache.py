@@ -38,7 +38,7 @@ from popcorn import (
 )
 from popcorn._machine import AttachedDevice
 from popcorn._machine_description import check_inputs
-from popcorn._model_build import registered_classes
+from popcorn._model_build import registered_classes, registry_generation, unregistered
 from popcorn._native_digest import native_digest
 from popcorn.board import I2CController, I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
@@ -252,6 +252,31 @@ def _registration_lines(project: MachineDescription, description: PartDescriptio
         lines.append(f"{head} {_class_source(cls)}")
         lines.extend(f"{p.name} registered {line}" for line in imported_sources(cls))
     return lines
+
+
+_registry_memo: tuple[int, str] | None = None
+
+
+def registry_digest() -> str:
+    """The digest of the user registrations in force, empty with none.
+
+    Recomputed only after a `register()` or `unregister()`.
+    """
+    global _registry_memo
+    generation = registry_generation()
+    if _registry_memo is not None and _registry_memo[0] == generation:
+        return _registry_memo[1]
+    if not registered_classes and not unregistered:
+        digest = ""
+    else:
+        lines: list[str] = []
+        for (ip, glob), cls in sorted(registered_classes.items()):
+            lines.append(f"{ip} {glob} {cls.__module__}:{cls.__qualname__} {_class_source(cls)}")
+            lines.extend(imported_sources(cls))
+        lines.extend(f"removed {ip} {glob}" for ip, glob in sorted(unregistered))
+        digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+    _registry_memo = (generation, digest)
+    return digest
 
 
 def cache_key(

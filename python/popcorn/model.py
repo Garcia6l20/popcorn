@@ -38,7 +38,13 @@ from typing import ClassVar, override
 from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, ModelError
-from popcorn._model_build import build_model, building, registered_classes
+from popcorn._model_build import (
+    build_model,
+    building,
+    registered_classes,
+    registry_changed,
+    unregistered,
+)
 from popcorn._part_description import PartDescription
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualDuration, VirtualTime
@@ -588,7 +594,8 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
 
     For vendor packages: `@register("tim", "v2.*")`. The class takes no constructor
     parameters. A later registration of the same IP and glob replaces it, a model wired
-    explicitly to a peripheral takes precedence.
+    explicitly to a peripheral takes precedence. A machine fixture takes the registrations in
+    force when its test starts.
     """
 
     def install(cls: M) -> M:
@@ -597,6 +604,8 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
         _core.register_python_model(ip, version_glob)
         _REGISTERED[(ip, version_glob)] = functools.partial(build_model, cls)
         registered_classes[(ip, version_glob)] = cls
+        unregistered.discard((ip, version_glob))
+        registry_changed()
         return cls
 
     return install
@@ -607,6 +616,8 @@ def unregister(ip: str, version_glob: str = "*") -> None:
     _core.unregister_python_model(ip, version_glob)
     _REGISTERED.pop((ip, version_glob), None)
     registered_classes.pop((ip, version_glob), None)
+    unregistered.add((ip, version_glob))
+    registry_changed()
 
 
 __all__ = [

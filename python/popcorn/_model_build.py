@@ -20,6 +20,23 @@ building: contextvars.ContextVar[_core.ModelContext | None] = contextvars.Contex
 registered_classes: dict[tuple[str, str], type[object]] = {}
 """Class of each `popcorn.model.register()` registration, by IP and glob."""
 
+unregistered: set[tuple[str, str]] = set()
+"""IP and glob of each registration `popcorn.model.unregister()` removed, built-in ones included,
+until `register()` sets them again."""
+
+_generation = 0
+
+
+def registry_changed() -> None:
+    """Count one `register()` or `unregister()`."""
+    global _generation
+    _generation += 1
+
+
+def registry_generation() -> int:
+    """The number of registry changes so far in this process."""
+    return _generation
+
 
 def build_model(maker: Callable[[], Model], context: _core.ModelContext) -> Model:
     """Build a model for `context`'s peripheral, what the native factories call.

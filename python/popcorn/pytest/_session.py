@@ -26,6 +26,7 @@ from popcorn.pytest._cache import (
     devices_digest,
     locked,
     recorded_inputs,
+    registry_digest,
     sweep_directory,
 )
 from popcorn.pytest._loop import OwnedLoop, owned_loop
@@ -49,6 +50,8 @@ class Key:
         strict: Whether unmodelled peripheral accesses raise.
         devices: The digest of the bus devices given instead of the machine description's, UNCACHED
             when they cannot be keyed, None for the machine description's.
+        registry: The digest of the `popcorn.model.register()` registrations in force, empty with
+            none.
         name: The machine description's `name`, for reports only, not compared.
         config: The config name selected, None for the base machine description, for reports only,
             not compared.
@@ -57,6 +60,7 @@ class Key:
     digest: str
     strict: bool
     devices: str | None = None
+    registry: str = ""
     name: str = field(default="", compare=False)
     config: str | None = field(default=None, compare=False)
 
@@ -64,6 +68,8 @@ class Key:
     def identity(self) -> str:
         """The compared fields as text, equal in every process for equal keys."""
         base = f"digest={self.digest} strict={self.strict}"
+        if self.registry:
+            base = f"{base} registry={self.registry}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
     @override
@@ -71,6 +77,8 @@ class Key:
         base = f"config={self.config or '-'} digest={self.digest[:12]} strict={self.strict}"
         if self.name:
             base = f"description={self.name} {base}"
+        if self.registry:
+            base = f"{base} registry={self.registry}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
 
@@ -217,7 +225,7 @@ class PopcornSession:
         self._projects.setdefault(digest, selected)
         if strict is None:
             strict = selected.strict
-        return Key(digest, strict, name=selected.name, config=config)
+        return Key(digest, strict, registry=registry_digest(), name=selected.name, config=config)
 
     def project(self, key: Key) -> MachineDescription:
         """The machine description `key` was made from by `key()`."""

@@ -502,3 +502,185 @@ def test_a_removed_built_in_registration_is_keyed(tmp_path: Path) -> None:
         [sys.executable, str(script)], cwd=ROOT, capture_output=True, text=True, check=True
     )
     assert result.stdout.splitlines()[-1] == "keys 0 1 2 1"
+
+
+ANSWER = """
+from popcorn.model import Model, on_read
+
+
+class Answer(Model):
+    @on_read("RO")
+    def ro(self):
+        return 0xCAFE
+"""
+
+TESTDEV_RO = 0x4001_0000
+
+TEST_HEADER = f"""
+import popcorn
+from popcorn.model import register, unregister
+from answer import Answer
+
+RO = {TESTDEV_RO:#x}
+
+
+def served(machine):
+    try:
+        return machine.mem.u32[RO]
+    except popcorn.ModelError:
+        return None
+
+"""
+
+
+def registry_session(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, conftest: str, tests: str
+) -> pytest.RunResult:
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("POPCORN_CACHE_DIR", str(pytester.path / "cache"))
+    models = pytester.mkdir("models")
+    (models / "answer.py").write_text(ANSWER)
+    write_conftest(
+        pytester,
+        f"import sys\nsys.path.insert(0, {str(models)!r})\n"
+        f"from popcorn.model import register, unregister\nfrom answer import Answer\n{conftest}",
+    )
+    write_project(pytester, imports="from answer import Answer")
+    pytester.makepyfile(f"{TEST_HEADER}{tests}")
+    return pytester.runpytest_subprocess(*BASE, "-p", "no:cacheprovider")
+
+
+@pytest.mark.timeout(60)
+def test_a_registration_made_between_tests_applies_to_the_next_machine(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = registry_session(
+        pytester,
+        monkeypatch,
+        "",
+        """
+def test_a_before(machine):
+    assert served(machine) is None
+    register("testdev")(Answer)
+
+
+def test_b_registered(machine):
+    assert served(machine) == 0xCAFE
+    unregister("testdev")
+
+
+def test_c_unregistered(machine):
+    assert served(machine) is None
+""",
+    )
+    result.assert_outcomes(passed=3)
+    assert summary(result).startswith("popcorn: 3 key(s)")
+
+
+@pytest.mark.timeout(60)
+def test_an_unregistration_of_a_registration_made_before_the_first_boot_applies(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = registry_session(
+        pytester,
+        monkeypatch,
+        'register("testdev")(Answer)\n',
+        """
+def test_a_registered(machine):
+    assert served(machine) == 0xCAFE
+    unregister("testdev")
+
+
+def test_b_unregistered(machine):
+    assert served(machine) is None
+""",
+    )
+    result.assert_outcomes(passed=2)
+    assert summary(result).startswith("popcorn: 2 key(s)")
+
+
+@pytest.mark.timeout(60)
+def test_a_session_without_a_registration_boots_once_and_keeps_its_key_text(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = registry_session(
+        pytester,
+        monkeypatch,
+        "",
+        """
+def test_a(machine):
+    assert served(machine) is None
+
+
+def test_b(machine):
+    assert served(machine) is None
+""",
+    )
+    result.assert_outcomes(passed=2)
+    assert summary(result).startswith("popcorn: 1 key(s)")
+    assert "registry=" not in "\n".join(result.outlines)
+
+
+@pytest.mark.timeout(60)
+def test_registry_cycles_keep_one_boot_per_registry_state(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = registry_session(
+        pytester,
+        monkeypatch,
+        'register("testdev")(Answer)\nunregister("testdev")\n',
+        """
+import pytest
+
+def test_cycles(machine):
+    for _ in range(1000):
+        register("testdev")(Answer)
+        unregister("testdev")
+
+
+@pytest.mark.parametrize("answered", [False, True] * 20)
+def test_alternating(machine, answered):
+    if answered:
+        assert served(machine) == 0xCAFE
+        unregister("testdev")
+    else:
+        assert served(machine) is None
+        register("testdev")(Answer)
+""",
+    )
+    result.assert_outcomes(passed=41)
+    assert int(summary(result).split()[1]) == 2
+
+
+REGISTRY_DIGEST = """
+from popcorn.model import Model, register, unregister
+from popcorn.pytest._cache import registry_digest
+from popcorn.pytest._session import Key
+
+
+class Dma(Model):
+    pass
+
+
+digests = [registry_digest()]
+unregister("GPDMA", "STM32U5_dma3_*")
+digests.append(registry_digest())
+register("GPDMA", "STM32U5_dma3_*")(Dma)
+digests.append(registry_digest())
+assert registry_digest() is not None and registry_digest() == digests[2]
+print("digests", *(digests.index(digest) for digest in digests))
+print("empty", digests[0] == "")
+print("identity", Key("d", False).identity, "|", Key("d", False, registry="r").identity)
+"""
+
+
+def test_the_registry_digest_covers_removed_and_replaced_registrations(tmp_path: Path) -> None:
+    script = tmp_path / "registry_digest.py"
+    script.write_text(REGISTRY_DIGEST)
+    result = subprocess.run(
+        [sys.executable, str(script)], cwd=ROOT, capture_output=True, text=True, check=True
+    )
+    lines = result.stdout.splitlines()
+    assert lines[-3] == "digests 0 1 2"
+    assert lines[-2] == "empty True"
+    assert lines[-1] == "identity digest=d strict=False | digest=d strict=False registry=r"
