@@ -228,6 +228,114 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        LPTIM reads DBG_LPTIMx_STOP again, which a system reset keeps and a power-on reset
  *        clears, RM0351 48.16.4 and 48.16.5.
  *        Deviation: CNT reads exact, without the double-read rule of RM0351 34.7.8.
+ *
+ * @limits lptim LPTIM
+ *
+ * @group l4 rule "STM32L4 LPTIM1 and LPTIM2, RM0351 section 34"
+ * STM32L4 LPTIM1 and LPTIM2, RM0351 section 34, count the kernel clock of RCC_CCIPR LPTIM1SEL or
+ * LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
+ *
+ * - The counter starts at the later of the CNTSTRT or SNGSTRT write plus 3 kernel clocks, RM0351
+ *   34.4.6, and the ENABLE write plus two prescaled clocks, inferred from RM0351 34.4.12. A start
+ *   write made with ENABLE 0 is discarded, also when the same write sets ENABLE, inferred. CNTSTRT
+ *   and SNGSTRT read 0 at once, inferred.
+ * - CMPM and ARRM set one kernel clock after the counter reaches CMP or ARR, ES0250 2.18.3, also
+ *   with PRESC above 0, inferred. CMP above ARR never matches, and a counter above a lowered ARR
+ *   counts to 0xFFFF before it wraps, inferred.
+ * - CMPOK and ARROK set 3 kernel clocks after the CMP or ARR write, and the value applies then,
+ *   inferred: RM0351 34.4.10 states a latency with no number. Counter ticks up to the OK compare
+ *   with the old values, and a match of such a tick still sets its flag at its due after the OK,
+ *   inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred. Terms due at the
+ *   same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, mode switch, inferred.
+ * - With PRELOAD 1 and the counter started, a CMP or ARR value takes effect at the first wrap at or
+ *   after its OK flag, RM0351 34.4.10, the wrap being the tick after ARR, inferred. The counter
+ *   counts as started from the CNTSTRT or SNGSTRT write, its start latency included, inferred. A
+ *   later write waits for its own OK and wrap. ENABLE written to 0 and the one-shot stop apply such
+ *   a value at once, inferred.
+ * - SNGSTRT written while the counter runs in continuous mode makes it stop at a later wrap, and
+ *   CNTSTRT written in one-shot mode makes it go on counting, RM0351 34.4.7. The new mode reaches
+ *   the counter 3 kernel clocks after the write, inferred, so a wrap before then keeps the old
+ *   mode, and a CNTSTRT reaching a counter that the one-shot wrap stopped starts it. The same mode
+ *   written again while the counter runs is discarded, inferred. A second CNTSTRT or SNGSTRT before
+ *   the first reaches the counter replaces it, logs one `model_warning` and raises `ModelError`
+ *   under `strict`, inferred.
+ * - ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CMP or ARR write,
+ *   inferred.
+ * - A flag that sets while its IER bit is 1 arms the LPTIM IRQ until ICR clears it, so an IER bit
+ *   set after its flag raises nothing, RM0351 34.6.
+ * - An IER, CFGR or OR write with ENABLE 1, a CMP or ARR write with ENABLE 0, and a second CMP or
+ *   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
+ *   `strict`. The register keeps its value, except the second write, whose value replaces the
+ *   pending one, inferred.
+ * - A start with OR_0 or OR_1 set, TRIGSEL not 0 with TRIGEN not 00, PRESC above 0 with COUNTMODE 1
+ *   or ENC 1, which RM0351 34.4.11 and 34.4.13 forbid, ENC 1 with CKSEL 1, or with CKSEL 1,
+ *   COUNTMODE 1 or ENC 1 CKPOL 11, CKPOL 10 with CKSEL 1 or a CKFLT above 0, logs one
+ *   `model_warning` each and raises `ModelError` under `strict`. The counter then counts the kernel
+ *   clock, or input 1 edges as configured, and with TRIGSEL not 0 no trigger starts it.
+ * - The COMP inputs of OR_0 and OR_1 and the RTC and COMP trigger inputs of TRIGSEL above 0 are
+ *   not modelled, each logged once and raised under `strict` at the use.
+ * - With CKSEL 1 or COUNTMODE 1 the counter counts the active edges CKPOL selects on the
+ *   `lptim1_in1` and `lptim2_in1` pin signals, PB5 or PC0 AF1 and PB1 or PC0 AF14 on the L476,
+ *   RM0351 34.4.11 and 34.7.4. With CKSEL 1 the input 1 edges clock the kernel logic, RM0351 34.4.3
+ *   and 34.4.11, so CMPOK, ARROK, the start, a mode switch and a trigger count edges and no
+ *   internal clock: the ENABLE latency 2 edges, the OK and start latencies 3 edges and a trigger
+ *   start 2 counter clocks, inferred counts that give the five lost edges of RM0351 34.4.11 after
+ *   an ENABLE and a CNTSTRT for every PRESC. PRESC divides the edges before the counter, RM0351
+ *   34.4.5, and CMPM and ARRM set at the edge, inferred. With COUNTMODE 1 every active edge counts
+ *   and the flags set one kernel clock after it, the kernel clock sampling taken as the edge
+ *   itself, inferred, and an edge with the kernel clock stopped is dropped, inferred. An edge
+ *   during a debug hold is dropped, and `lptim1_out` follows CNT at each edge, inferred.
+ * - With ENC 1, LPTIM1 only, RM0351 34.3 Table 216, the counter counts the `lptim1_in1` and
+ *   `lptim1_in2` edges CKPOL selects, PB5 or PC0 and PB7 or PC2 AF1 on the L476, up or down by the
+ *   level of the other input, RM0351 34.4.13 Table 220, between 0 and ARR: counting down from 0
+ *   gives ARR. A change of direction sets DOWN or UP, RM0351 34.7.1, at the edge, and the count
+ *   starts upwards, inferred. CMPM and ARRM set one kernel clock after the edge that reaches CMP or
+ *   ARR in either direction, inferred. An edge during a debug hold or with the kernel clock stopped
+ *   is dropped, inferred. LPTIMxRST takes the input pins' levels. With PRELOAD 1 a pending CMP or
+ *   ARR applies at a down wrap from 0 as at an up wrap, and that wrap loads the new ARR, inferred:
+ *   RM0351 34.4.10 names only the end of the period. SNGSTRT with ENC 1 logs one `model_warning`
+ *   and raises `ModelError` under `strict`, RM0351 34.4.13 asking for continuous mode, and the
+ *   one-shot stop then applies at an up wrap.
+ * - With TRIGEN not 00 and TRIGSEL 0, the `lptim1_etr` and `lptim2_etr` pin signals, PB6 or PC3 AF1
+ *   and PA5 or PC3 AF14 on the L476, start the counter on the edge TRIGEN selects, RM0351 34.4.6
+ *   and 34.7.4. CNTSTRT or SNGSTRT arm the start and choose the mode. EXTTRIG sets at the edge, and
+ *   the counter starts two prescaled clocks after it, RM0351 34.4.6. With TRGFLT 01, 10 or 11 a
+ *   level change counts once the pin has held it for 2, 4 or 8 kernel clocks, and a shorter pulse
+ *   is rejected, RM0351 34.4.4 and 34.7.4: EXTTRIG and the start move by that many clocks, the
+ *   sampling phase taken as the edge itself, inferred. An edge during a debug hold or with the
+ *   kernel clock stopped starts nothing, and the level it leaves becomes the filtered level, since
+ *   the filter samples on the kernel clock, inferred. LPTIMxRST takes the pin's level as the
+ *   filtered level, inferred. A trigger while the counter runs is ignored and sets no EXTTRIG,
+ *   RM0351 34.4.6 and 34.7.1, unless TIMOUT is 1: it then sets EXTTRIG and restarts the count from
+ *   0 two prescaled clocks later, RM0351 34.4.8, the latency inferred. In one-shot mode each
+ *   trigger after the stop starts a new run, RM0351 34.4.7, and with WAVE 1 only the first trigger
+ *   starts one. A trigger before CNTSTRT or SNGSTRT starts nothing and sets no EXTTRIG, inferred. A
+ *   trigger at the time of another term applies after it, inferred.
+ * - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
+ * - A kernel rate change, such as an LPTIM1SEL write or a PPRE1 change under PCLK1, keeps CNT, the
+ *   kernel clocks already spent in the current tick or the start latency, and the kernel clocks
+ *   left before each pending CMPOK, ARROK, CMPM, ARRM, mode switch and one-shot stop, inferred. A
+ *   stopped kernel clock, LPTIMxEN 0 included, freezes all of them until it runs again, inferred.
+ * - LPTIM1RST and LPTIM2RST reset the registers and the state of their LPTIM.
+ * - The output drives the `lptim1_out` and `lptim2_out` trigger signals and no pin, so ES0250
+ *   2.18.4, LPTIM1 outputs not open-drain, is outside the model. With WAVE 0 it rises one kernel
+ *   clock after CNT reaches CMP and falls one kernel clock after CNT reaches ARR, as ES0250 2.18.3
+ *   Figure 3 draws it, with PRESC above 0 inferred, RM0351 34.4.9 reads "exceeds". A one-shot run
+ *   gives one such pulse, RM0351 34.4.9. With WAVE 1 it rises once and keeps its level until ENABLE
+ *   is written to 0, and a start after the first one is discarded until then, RM0351 34.4.7, the
+ *   software start reading inferred. CMP at or above ARR keeps it inactive, inferred. WAVPOL
+ *   inverts it at the CFGR write, also with ENABLE 0, RM0351 34.4.9. ENABLE written to 0 and
+ *   LPTIMxRST drop it to the inactive level at the write, inferred.
+ * - While the core is halted with DBG_LPTIM1_STOP or DBG_LPTIM2_STOP set, that LPTIM's counter
+ *   clock stops, RM0351 34.4.14, 48.16.4 and 48.16.5. The model freezes it as a stopped kernel
+ *   clock: CNT, the kernel clocks spent in the current tick and those left before each pending
+ *   CMPOK, ARROK, match delay, mode switch and stop resume at the release, the latencies inferred.
+ *   A kernel rate change during the hold applies from the release, inferred. The hold is kept
+ *   across LPTIMxRST, RM0351 34.4.14. At a machine reset the LPTIM reads DBG_LPTIMx_STOP again,
+ *   which a system reset keeps and a power-on reset clears, RM0351 48.16.4 and 48.16.5.
+ * - EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and
+ *   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
+ *   stuck at Stop entry or at a flag clear racing a new event, are outside the model.
  */
 class lptim final : public dispatch_model<lptim, lptim_state>,
                     public clock_listener,
