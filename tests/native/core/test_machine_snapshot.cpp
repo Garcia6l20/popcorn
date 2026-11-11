@@ -461,7 +461,8 @@ TEST_CASE("write-once locks restore whether or not either machine was ever reset
   }
 }
 
-TEST_CASE("a serialized snapshot with a foreign event owner or clock domain is refused up front")
+TEST_CASE(
+    "a serialized snapshot with a foreign event owner, clock domain or epoch is refused up front")
 {
   auto f      = booted();
   std::ignore = model(f).context().clock.domain("apb");
@@ -475,6 +476,10 @@ TEST_CASE("a serialized snapshot with a foreign event owner or clock domain is r
   {
     REQUIRE_FALSE(data.clock.domain_names.empty());
     data.clock.domain_names.front() = "ahb";
+  }
+  SUBCASE("epoch start past the instruction count")
+  {
+    data.clock.epoch_icount = popcorn::icount{data.clock.now.value + 1};
   }
   auto other  = fixture{m33(), "snapshot", with_model()};
   std::ignore = model(other).context().clock.domain("apb");

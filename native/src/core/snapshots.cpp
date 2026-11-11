@@ -244,6 +244,12 @@ void machine::restore_checked(core::snapshot const& saved, bool apply)
   {
     refuse("clock.domain_names", std::format("the clock domains of this machine, {}", domains));
   }
+  if(data.clock.epoch_icount > data.clock.now)
+  {
+    refuse(
+        "clock.epoch_icount",
+        std::format("an epoch start at or before the instruction count {}", data.clock.now.value));
+  }
   for(auto const& pending : data.events.pending)
   {
     auto const owner = pending.id.owner;

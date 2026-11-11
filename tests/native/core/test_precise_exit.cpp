@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <ranges>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -333,6 +334,47 @@ TEST_CASE("a rate change in the raising store's block keeps model time monotonic
   REQUIRE(f.model().go_time.has_value());
   CHECK(f.target->virtual_clock().time() >= *f.model().go_time);
   CHECK(f.target->virtual_clock().time().ps < 1'000'000'000'000ull);
+}
+
+TEST_CASE("an exact clock write and a precise exit in one block run the same at every slicing")
+{
+  auto const run_with = [](std::uint64_t slice) {
+    auto f                     = raising();
+    f.model().halve_rate_on_go = true;
+    f.model().drives_clock     = true;
+    f.model().accesses.clear();
+    f.enter("store_raise");
+    std::uint64_t ran = 0;
+    for(;;)
+    {
+      auto const result =
+          f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{slice}});
+      ran += result.executed.value;
+      if(result.stopped and result.stopped->reason == stop_reason::user)
+      {
+        break;
+      }
+      REQUIRE((not result.stopped or result.stopped->reason == stop_reason::budget));
+    }
+    auto const clock = f.target->snapshot().data().clock;
+    CHECK(clock.epoch_icount <= clock.now);
+    CHECK(clock.epoch_icount.value != 0);
+    REQUIRE(f.model().go_time.has_value());
+    CHECK(f.target->virtual_clock().time() >= *f.model().go_time);
+    CHECK(f.target->virtual_clock().time().ps < 1'000'000'000'000ull);
+    auto const& accesses = f.model().accesses;
+    REQUIRE(accesses.size() == 3);
+    CHECK(accesses[1].ctx.now >= accesses[0].ctx.now);
+    CHECK(accesses[2].ctx.now >= accesses[1].ctx.now);
+    return std::tuple{ran, f.now(), f.target->virtual_clock().time().ps, accesses[2].ctx.now};
+  };
+  auto const whole = run_with(1'000'000);
+  CHECK(std::get<0>(whole) == executed_from(quiet(), "store_raise") + handler_length);
+  for(auto const slice : {1ull, 2ull, 3ull, 5ull, 7ull})
+  {
+    CAPTURE(slice);
+    CHECK(run_with(slice) == whole);
+  }
 }
 
 TEST_CASE("a fault in the raising instruction keeps the coverage cut of the fault")

@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -179,6 +180,254 @@ TEST_CASE("time holds through a rate change made inside the hold")
   CHECK(clock.time() == popcorn::vtime{100'000'000});
   driver.advance({4});
   CHECK(clock.time() == popcorn::vtime{101'000'000});
+}
+
+TEST_CASE("a second rate change inside the hold keeps the epoch at or below the exact count")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  clock.set_core_hz(2'000'000);
+  auto const state = driver.state();
+  CHECK(state.epoch_icount == popcorn::icount{50});
+  CHECK(state.epoch_icount <= state.now);
+  CHECK(driver.exact_time() == popcorn::vtime{50'000'000});
+  CHECK(clock.now() == popcorn::icount{100});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.retract({40});
+  CHECK(driver.exact_now().value == 50);
+  CHECK(driver.exact_time() == popcorn::vtime{50'000'000});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("a retract after a charged-ahead epoch start ends at the epoch start")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.on_charged_ahead([] { return 1000; });
+  driver.advance({100});
+  clock.set_core_hz(2'000'000);
+  auto const started = driver.state();
+  CHECK(started.epoch_icount == popcorn::icount{0});
+  CHECK(started.epoch_time == popcorn::vtime{0});
+  driver.retract({500});
+  CHECK(driver.exact_now().value == 0);
+  CHECK(driver.exact_time() == popcorn::vtime{0});
+  CHECK(driver.state().epoch_icount == driver.state().now);
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{50'000'000});
+  driver.advance({100});
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{50'000'000});
+  driver.advance({1});
+  CHECK(driver.state().held == popcorn::icount{0});
+  CHECK(clock.time() == popcorn::vtime{50'500'000});
+}
+
+TEST_CASE("a charged-ahead epoch start charges the instructions after the write at the new rate")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.on_charged_ahead([] { return 30; });
+  driver.advance({100});
+  clock.set_core_hz(2'000'000);
+  auto const state = driver.state();
+  CHECK(state.epoch_icount == popcorn::icount{70});
+  CHECK(state.epoch_time == popcorn::vtime{70'000'000});
+  CHECK(clock.time() == popcorn::vtime{85'000'000});
+  driver.retract({30});
+  CHECK(driver.exact_now().value == 70);
+  CHECK(driver.exact_time() == popcorn::vtime{70'000'000});
+  CHECK(clock.time() == popcorn::vtime{85'000'000});
+}
+
+TEST_CASE("time held across an epoch start stays at the held value, then resumes at the new rate")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  for(std::uint64_t executed = 0; executed <= 220; ++executed)
+  {
+    CAPTURE(executed);
+    CHECK(clock.time().ps == std::max<std::uint64_t>(100'000'000, 50'000'000 + executed * 250'000));
+    CHECK(clock.now().value == std::max<std::uint64_t>(100, 50 + executed));
+    driver.advance({1});
+  }
+  CHECK(driver.state().held == popcorn::icount{0});
+}
+
+TEST_CASE("time never leaves the held value through rate changes in a hold, slower then faster")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  clock.set_core_hz(500'000);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(driver.exact_time() == popcorn::vtime{50'000'000});
+  CHECK(clock.now().value == 100);
+  clock.set_core_hz(2'000'000);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(clock.now().value == 100);
+  driver.advance({99});
+  CHECK(driver.exact_time() == popcorn::vtime{99'500'000});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(driver.state().held == popcorn::icount{100});
+  driver.advance({1});
+  CHECK(driver.exact_time() == popcorn::vtime{100'000'000});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(driver.state().held == popcorn::icount{0});
+  driver.advance({1});
+  CHECK(clock.time() == popcorn::vtime{100'500'000});
+}
+
+TEST_CASE("time never leaves the held value through rate changes in a hold, faster then slower")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  clock.set_core_hz(250'000);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({10});
+  CHECK(driver.exact_time() == popcorn::vtime{90'000'000});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({3});
+  CHECK(driver.exact_time() == popcorn::vtime{102'000'000});
+  CHECK(clock.time() == popcorn::vtime{102'000'000});
+  CHECK(driver.state().held == popcorn::icount{100});
+  CHECK(clock.now().value == 100);
+  driver.advance({37});
+  CHECK(driver.state().held == popcorn::icount{0});
+  CHECK(clock.time() == popcorn::vtime{250'000'000});
+}
+
+TEST_CASE("a charged-ahead rate change inside a hold keeps time at or above the held time")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.on_charged_ahead([] { return 30; });
+  driver.advance({100});
+  driver.retract({50});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  clock.set_core_hz(4'000'000);
+  CHECK(driver.state().epoch_icount == popcorn::icount{20});
+  CHECK(driver.exact_time() == popcorn::vtime{27'500'000});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(clock.now().value == 100);
+  driver.advance({50});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({239});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(driver.state().held == popcorn::icount{100});
+  driver.advance({1});
+  CHECK(driver.state().held == popcorn::icount{0});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("a snapshot taken in a hold after a rate change restores the same now and time")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  auto const saved = driver.state();
+  auto const now   = clock.now();
+  auto const time  = clock.time();
+  auto const exact = driver.exact_time();
+  driver.advance({7});
+  driver.restore(saved);
+  CHECK(clock.now() == now);
+  CHECK(clock.time() == time);
+  CHECK(driver.exact_time() == exact);
+  CHECK(driver.state() == saved);
+}
+
+TEST_CASE("random public calls never put the epoch past the count or wrap the time")
+{
+  std::uint64_t seed = 12345;
+  auto const    next = [&seed](std::uint64_t bound) {
+    seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+    return (seed >> 33) % bound;
+  };
+  std::uint64_t held_calls = 0;
+  for(int run = 0; run < 300; ++run)
+  {
+    popcorn::core::clock        clock{1'000'000 + next(200'000'000)};
+    popcorn::core::clock_driver driver{clock};
+    std::uint64_t               ahead = 0;
+    driver.on_charged_ahead([&ahead] { return ahead; });
+    std::vector<popcorn::core::clock_state> saves;
+    for(int call = 0; call < 60; ++call)
+    {
+      CAPTURE(run);
+      CAPTURE(call);
+      auto const before       = clock.now();
+      auto const time_before  = clock.time();
+      auto const state_before = driver.state();
+      auto const exact_before = driver.exact_time();
+      auto const period_ps    = 1'000'000'000'000ull / clock.instruction_hz() + 1;
+      bool       restored     = false;
+      ahead                   = next(3) == 0 ? next(200) : 0;
+      auto const kind         = next(8);
+      switch(kind)
+      {
+        case 0:
+        case 1:
+          driver.advance({next(50)});
+          break;
+        case 2:
+          driver.retract({next(60)});
+          break;
+        case 3:
+          clock.set_core_hz(1'000'000 + next(300'000'000));
+          break;
+        case 4:
+          clock.set_cpi(1.0 + static_cast<double>(next(4)));
+          break;
+        case 5:
+          driver.jump_to({driver.exact_now().value + next(100)});
+          break;
+        case 6:
+          saves.push_back(driver.state());
+          break;
+        default:
+          if(not saves.empty())
+          {
+            driver.restore(saves[next(saves.size())]);
+            restored = true;
+          }
+          break;
+      }
+      auto const state = driver.state();
+      held_calls += state.held.value != 0;
+      REQUIRE(state.epoch_icount <= state.now);
+      REQUIRE(driver.exact_time().ps < (1ull << 60));
+      REQUIRE(clock.time().ps < (1ull << 60));
+      if(not restored)
+      {
+        REQUIRE(clock.now() >= before);
+        auto const repriced = (kind == 3 or kind == 4) ? ahead * period_ps : 0;
+        if(state_before.held.value != 0 and exact_before.ps <= state_before.held_time.ps)
+        {
+          REQUIRE(clock.time() >= time_before);
+        }
+        else
+        {
+          REQUIRE(clock.time().ps + repriced >= time_before.ps);
+        }
+      }
+    }
+  }
+  CHECK(held_calls > 3'000);
 }
 
 TEST_CASE("a restore drops the held values")

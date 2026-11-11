@@ -135,10 +135,12 @@ public:
   /**
    * @brief Virtual time since reset: the time of the current epoch's start plus
    *        vtime_from_instructions() of the instructions executed since, at instruction_hz().
+   *        After a clock_driver::retract() it stays at the value it had until the exact time
+   *        passes it, through any rate change in between.
    */
   [[nodiscard]] auto time() const -> vtime
   {
-    return std::max(time_at(now()), state_.held_time);
+    return std::max(time_at(state_.now), state_.held_time);
   }
 
   /** @brief Virtual time of the current epoch's start, the last rate change. */
@@ -236,6 +238,7 @@ private:
   void refresh_rate();
 
   [[nodiscard]] auto time_at(icount count) const -> vtime
+      pre(count.value >= state_.epoch_icount.value)
   {
     return vtime{
         state_.epoch_time.ps
@@ -290,14 +293,14 @@ public:
   /**
    * @brief Takes back instructions advance() charged for a block the engine left early, never
    *        past the start of the current epoch. clock::now() and clock::time() keep returning
-   *        the values they reached before until execution passes them: models never read time
-   *        going back. The held values are part of clock_state, so a snapshot keeps them.
+   *        the values they reached before until execution passes them. The held values are part
+   *        of clock_state, so a snapshot keeps them.
    *
-   * While held, the two can disagree: a rate change inside the hold starts its epoch at the
-   * exact count, so time() stays held at the old rate's value while now() is held at the old
-   * count, and time() later resumes from the new epoch. A time-keyed event already overdue at
-   * scheduling, and an event a model schedules at now(), key to the held now(): they fire once
-   * execution reaches it, not at the exact count.
+   * A rate change inside the hold starts its epoch at the exact count. time() stays at the
+   * held time until the exact time reaches it and then follows the new epoch, and now() stays at
+   * the held count. A time-keyed event already overdue at scheduling, and an event a model
+   * schedules at now(), key to the held now(): they fire once execution reaches it, not at the
+   * exact count.
    * @param unrun Instructions charged but not run.
    */
   void retract(icount unrun)
@@ -370,7 +373,10 @@ public:
   /**
    * @brief Installs the function a rate change asks for the instructions already charged to the
    *        clock but not retired yet, those after the current one in a translated block charged
-   *        whole. The new epoch starts before them, so they run at the new rate.
+   *        whole. The new epoch starts before them, so they run at the new rate: after a change
+   *        to a faster rate, clock::time() reads up to the count times the difference of the old
+   *        and the new period lower than before it, except while a clock_driver::retract() holds
+   *        it and the exact time has not passed the held time.
    * @param ahead Returns the count, 0 when none or unknown, empty to remove.
    */
   void on_charged_ahead(std::move_only_function<std::uint64_t()> ahead);
