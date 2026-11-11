@@ -18,9 +18,9 @@ namespace
 {
 constexpr std::size_t gpio_lines = 16;
 
-struct exti_state
+struct exti_u5h5_state
 {
-  friend auto operator==(exti_state const&, exti_state const&) -> bool = default;
+  friend auto operator==(exti_u5h5_state const&, exti_u5h5_state const&) -> bool = default;
 };
 
 /**
@@ -43,10 +43,10 @@ struct exti_state
  *
  * @limits exti
  */
-class exti final : public dispatch_model<exti, exti_state>, public exti_input
+class exti_u5h5 final : public dispatch_model<exti_u5h5, exti_u5h5_state>, public exti_input
 {
 public:
-  exti(model_context& ctx, peripheral_desc const& desc);
+  exti_u5h5(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -81,32 +81,32 @@ private:
   illegal_event                     illegal_;
 };
 
-constexpr std::array<write_entry<exti>, 8> exti_writes{
+constexpr std::array<write_entry<exti_u5h5>, 8> exti_u5h5_writes{
     {
-     {"EXTI_SWIER1", &exti::software_written},
-     {"EXTI_RPR1", &exti::pending_written<false>},
-     {"EXTI_FPR1", &exti::pending_written<true>},
-     {"EXTI_EXTICR1", &exti::mask_written},
-     {"EXTI_EXTICR2", &exti::mask_written},
-     {"EXTI_EXTICR3", &exti::mask_written},
-     {"EXTI_EXTICR4", &exti::mask_written},
-     {"EXTI_IMR1", &exti::mask_written},
+     {"EXTI_SWIER1", &exti_u5h5::software_written},
+     {"EXTI_RPR1", &exti_u5h5::pending_written<false>},
+     {"EXTI_FPR1", &exti_u5h5::pending_written<true>},
+     {"EXTI_EXTICR1", &exti_u5h5::mask_written},
+     {"EXTI_EXTICR2", &exti_u5h5::mask_written},
+     {"EXTI_EXTICR3", &exti_u5h5::mask_written},
+     {"EXTI_EXTICR4", &exti_u5h5::mask_written},
+     {"EXTI_IMR1", &exti_u5h5::mask_written},
      }
 };
 
-constexpr std::array<write_entry<exti>, 6> exti_trustzone_writes{
+constexpr std::array<write_entry<exti_u5h5>, 6> exti_trustzone_writes{
     {
      {"EXTI_RTSR1", nullptr},
      {"EXTI_FTSR1", nullptr},
      {"EXTI_EMR1", nullptr},
      {"EXTI_SECCFGR1", nullptr},
      {"EXTI_PRIVCFGR1", nullptr},
-     {"EXTI_LOCKR", &exti::lock_written},
+     {"EXTI_LOCKR", &exti_u5h5::lock_written},
      }
 };
 
-exti::exti(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "EXTI", exti_writes, exti_trustzone_writes}, regs_{ctx.regs},
+exti_u5h5::exti_u5h5(model_context& ctx, peripheral_desc const& desc)
+    : dispatch_model{ctx, desc, "EXTI", exti_u5h5_writes, exti_trustzone_writes}, regs_{ctx.regs},
       unit_{unit_named(ctx.part, desc.name)}
 {
   if(ctx.trustzone)
@@ -141,7 +141,7 @@ exti::exti(model_context& ctx, peripheral_desc const& desc)
   }
 }
 
-void exti::reset(register_file& regs, reset_kind)
+void exti_u5h5::reset(register_file& regs, reset_kind)
 {
   for(auto const& name : claims())
   {
@@ -150,10 +150,10 @@ void exti::reset(register_file& regs, reset_kind)
   interrupts();
 }
 
-void exti::on_event(std::uint32_t, std::uint64_t)
+void exti_u5h5::on_event(std::uint32_t, std::uint64_t)
 {}
 
-void exti::interrupts()
+void exti_u5h5::interrupts()
 {
   for(std::size_t line = 0; line < gpio_lines; ++line)
   {
@@ -170,7 +170,7 @@ void exti::interrupts()
   }
 }
 
-void exti::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
+void exti_u5h5::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
 {
   if(pin >= gpio_lines or get(regs_, source_[pin]) != port)
   {
@@ -187,14 +187,14 @@ void exti::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
   interrupts();
 }
 
-template <bool Falling> void exti::pending_written(std::uint32_t old, std::uint32_t now)
+template <bool Falling> void exti_u5h5::pending_written(std::uint32_t old, std::uint32_t now)
 {
   auto const& pending = Falling ? falling_pending_ : rising_pending_;
   regs_.poke(pending[0].offset, old & ~now);
   interrupts();
 }
 
-void exti::software_written(std::uint32_t, std::uint32_t now)
+void exti_u5h5::software_written(std::uint32_t, std::uint32_t now)
 {
   for(std::size_t line = 0; line < gpio_lines; ++line)
   {
@@ -207,17 +207,17 @@ void exti::software_written(std::uint32_t, std::uint32_t now)
   interrupts();
 }
 
-void exti::mask_written(std::uint32_t, std::uint32_t)
+void exti_u5h5::mask_written(std::uint32_t, std::uint32_t)
 {
   interrupts();
 }
 
-void exti::lock_written(std::uint32_t old, std::uint32_t now)
+void exti_u5h5::lock_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(lock_, old | now);
 }
 
-auto exti::line_bits(std::uint32_t word, std::uint32_t lines) const -> std::uint32_t
+auto exti_u5h5::line_bits(std::uint32_t word, std::uint32_t lines) const -> std::uint32_t
 {
   if(std::ranges::contains(per_line_, word))
   {
@@ -240,7 +240,7 @@ auto exti::line_bits(std::uint32_t word, std::uint32_t lines) const -> std::uint
   return bits;
 }
 
-auto exti::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+auto exti_u5h5::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   if(not ctx_.trustzone)
   {
@@ -275,17 +275,17 @@ auto exti::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_g
 }
 }
 
-auto exti_factory() -> model_factory
+auto exti_u5h5_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<exti>(ctx, desc);
+    return std::make_shared<exti_u5h5>(ctx, desc);
   };
 }
 
 namespace
 {
 constexpr auto exti_u5h5_row_table = std::to_array<builtin>({
-    row_of<^^exti_factory>(
+    row_of<^^exti_u5h5_factory>(
         {.ip = "EXTI", .ip_version_glob = "", .families = family::u5 | family::h5}),
 });
 }

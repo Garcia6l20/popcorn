@@ -105,7 +105,7 @@ inline constexpr auto l4_exti_irqs = std::to_array<exti_line_group>({
 inline constexpr exti_l1l4_variant l4_exti{.banks = l4_exti_banks, .irqs = l4_exti_irqs};
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
-[[nodiscard]] auto exti_factory() -> model_factory;
+[[nodiscard]] auto exti_u5h5_factory() -> model_factory;
 
 /**
  * @brief Factory of the classic EXTI model, RM0038 section 10.2.

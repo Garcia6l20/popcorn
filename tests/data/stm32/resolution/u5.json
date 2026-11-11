@@ -47,7 +47,7 @@
   },
   "groups": [
     {"parts": ["STM32U575AGIx", "STM32U575AIIx", "STM32U575CGTx", "STM32U575CGUx", "STM32U575CITx", "STM32U575CIUx", "STM32U575QGIx", "STM32U575QIIx", "STM32U575RGTx", "STM32U575RITx", "STM32U575VGTx", "STM32U575VITx", "STM32U575ZGTx", "STM32U575ZITx"], "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5/*", "row", "flash_factory", "flash_u5", "flash"],
       "GPIOA": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
       "GPIOB": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
@@ -148,7 +148,7 @@
       "DCMI": ["", "none_no_row", "", "", ""]
     }},
     {"parts": ["STM32U575AGIxQ", "STM32U575AIIxQ", "STM32U575CGTxQ", "STM32U575CGUxQ", "STM32U575CITxQ", "STM32U575CIUxQ", "STM32U575OGYxQ", "STM32U575OIYxQ", "STM32U575QGIxQ", "STM32U575QIIxQ", "STM32U575RGTxQ", "STM32U575RITxQ", "STM32U575VGTxQ", "STM32U575VITxQ", "STM32U575ZGTxQ", "STM32U575ZITxQ"], "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5/*", "row", "flash_factory", "flash_u5", "flash"],
       "GPIOA": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
       "GPIOB": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
@@ -249,7 +249,7 @@
       "DCMI": ["", "none_no_row", "", "", ""]
     }},
     {"parts": ["STM32U585AIIx", "STM32U585CITx", "STM32U585CIUx", "STM32U585QIIx", "STM32U585RITx", "STM32U585VITx", "STM32U585ZITx"], "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5/*", "row", "flash_factory", "flash_u5", "flash"],
       "GPIOA": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
       "GPIOB": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
@@ -352,7 +352,7 @@
       "DCMI": ["", "none_no_row", "", "", ""]
     }},
     {"parts": ["STM32U585AIIxQ", "STM32U585CITxQ", "STM32U585CIUxQ", "STM32U585OIYxQ", "STM32U585QIIxQ", "STM32U585RITxQ", "STM32U585VITxQ", "STM32U585ZITxQ"], "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5/*", "row", "flash_factory", "flash_u5", "flash"],
       "GPIOA": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
       "GPIOB": ["GPIO/STM32U57x_gpio/u5/GPIO?", "row", "gpio_factory", "u575_gpio", ""],
@@ -457,7 +457,7 @@
   ],
   "probes": {
     "u535-flash-5bit-generic-gpio": {"part": "STM32U535CBTx", "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5:STM32U535*,STM32U545*/*", "row", "flash_factory", "flash_5bit", "flash"],
       "GPIOA": ["GPIO/STM32U5x_gpio_*/u5/GPIO?", "row", "gpio_factory", "u5_gpio", ""],
       "GPIOB": ["GPIO/STM32U5x_gpio_*/u5/GPIO?", "row", "gpio_factory", "u5_gpio", ""],
@@ -558,7 +558,7 @@
       "DCMI": ["", "none_no_row", "", "", ""]
     }},
     "u599-flash-8bit": {"part": "STM32U599NJHxQ", "instances": {
-      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_factory", "", ""],
+      "EXTI": ["EXTI/-/u5,h5/*", "row", "exti_u5h5_factory", "", ""],
       "FLASH": ["flash/v1.0.0_U5_Cube/u5:STM32U59*,STM32U5A*,STM32U5F*,STM32U5G*/*", "row", "flash_factory", "flash_8bit", "flash"],
       "GPIOA": ["GPIO/STM32U5x_gpio_*/u5/GPIO?", "row", "gpio_factory", "u5_gpio", ""],
       "GPIOB": ["GPIO/STM32U5x_gpio_*/u5/GPIO?", "row", "gpio_factory", "u5_gpio", ""],
