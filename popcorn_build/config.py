@@ -6,7 +6,6 @@ from pathlib import Path
 
 from pcons import find_c_toolchain, get_variant
 
-from popcorn_build.gcc_tools import gcc_ar_for
 from popcorn_build.version import popcorn_version
 
 VARIANTS = ("debug", "release", "asan", "tsan")
@@ -49,7 +48,7 @@ def _check_gcc() -> str:
     return gxx
 
 
-gcc_ar = str(gcc_ar_for(Path(_check_gcc())))
+_check_gcc()
 _require_tool("cmake", "building Unicorn")
 _require_tool("ninja", "running the build")
 

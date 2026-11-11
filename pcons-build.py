@@ -7,7 +7,7 @@ from pathlib import Path
 from pcons import Project, Target, add_subdirectory, get_var
 
 from popcorn_build import check, schema
-from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
+from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
 from popcorn_build.layering import misplaced_sources
 from popcorn_build.options import build_examples, build_tests
 from popcorn_build.plugin_sdk import SDK, sdk_headers
@@ -73,7 +73,6 @@ elif VARIANT == "tsan":
     env.link.flags.append("-fsanitize=thread")
 else:
     env.set_variant(VARIANT)
-    env.ar.cmd = gcc_ar
 
 building_wheel = get_var("PCONS_BUILD_WHEEL", False)
 lto = get_var("POPCORN_ENABLE_LTO", building_wheel) and VARIANT not in ("asan", "tsan")
