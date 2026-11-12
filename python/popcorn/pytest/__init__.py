@@ -256,7 +256,8 @@ line, else the description:
   `--popcorn-strict` turns strictness on, else `MachineDescription.strict` of the config
   applies. A `strict=` given to `machine_factory` overrides all three.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
-  `wait_for` and `call`, never a wall-clock timeout. `budget=None` in a marker is unbounded.
+  `wait_for` and `call`, never a wall-clock timeout. It counts instructions the core executes,
+  not the time it sleeps in WFI or WFE. `budget=None` in a marker is unbounded.
   `system.run` is bounded by its `for_` or `until` only.
 
 The marker takes no `config`: a marker naming one fails the test, the config is set on

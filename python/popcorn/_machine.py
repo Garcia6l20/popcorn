@@ -1191,9 +1191,10 @@ class Machine:
     def default_budget(self) -> int | None:
         """The instruction budget of `run`, `wait_for` and `call` when they are given none.
 
-        None, the default, leaves them unbounded. `step` counts its own instructions, and the
-        background run of `running()` stays unbounded whatever this is. A host setting, not part
-        of snapshots.
+        It counts instructions the core executes, not the time it sleeps in WFI or WFE: bound a
+        run that may sleep with `for_`. None, the default, leaves them unbounded. `step` counts
+        its own instructions, and the background run of `running()` stays unbounded whatever
+        this is. A host setting, not part of snapshots.
         """
         return self._default_budget
 
@@ -1536,7 +1537,8 @@ class Machine:
             args: Arguments in declaration order.
             returns: Result kind of a function without DWARF.
             budget: Stop the call with BUDGET past this many instructions, `default_budget`
-                when None.
+                when None. It counts instructions the core executes, not the time it sleeps in
+                WFI or WFE: bound a call that may sleep with `for_`.
             privileged: Run in privileged thread mode.
             stack: The stack pointer the call runs on.
             stack_top: Initial value of that stack pointer, the current one when None.
@@ -2052,7 +2054,8 @@ class Machine:
                 `FrameReturn()` stops with RETURNED when the function running now returns,
                 detail `<function> returned`, see `FrameReturn`.
             budget: Stop with BUDGET at the first block boundary past this many instructions,
-                `default_budget` when None.
+                `default_budget` when None. It counts instructions the core executes, not the
+                time it sleeps in WFI or WFE: bound a run that may sleep with `for_`.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
                 due, sleeps to the deadline and stops with TIME, not IDLE. The stop lands on the
                 first boundary at or after the deadline, so `time` can pass it: by less than one
@@ -2100,7 +2103,8 @@ class Machine:
         function the reset core runs.
 
         Args:
-            budget: Instructions the whole step out may take, `default_budget` when None.
+            budget: Instructions the whole step out may take, `default_budget` when None. It
+                counts instructions the core executes, not the time it sleeps in WFI or WFE.
 
         Raises:
             MachineBusy: A run, step, call, wait or free run is active.

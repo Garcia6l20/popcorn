@@ -161,8 +161,8 @@ struct slice_request
    * leave_until is set: the run arrives there, it does not leave. */
   std::vector<address> arrive_at{};
   /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
-   * block boundary at or past them. The caller subtracts `slice_result::executed` between
-   * slices. */
+   * block boundary at or past them. Counts executed instructions only, not the cycles slept
+   * in WFI or WFE. The caller subtracts `slice_result::executed` between slices. */
   std::optional<icount> budget_left{};
   /** @brief Stop with stop_reason::budget after exactly this many instructions, for stepping.
    * Whole blocks run up to the last block boundary before the count, then the remaining

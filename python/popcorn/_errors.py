@@ -177,7 +177,8 @@ class BudgetExceeded(EmulationError):
     """An instruction budget ran out.
 
     Attributes:
-        budget: The budget, in instructions.
+        budget: From a run, the `Stop.instructions` it reached when its budget ran out,
+            instructions since reset, sleep included. From a boot, the `Boot.budget` given.
     """
 
     def __init__(

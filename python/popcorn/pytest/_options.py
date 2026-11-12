@@ -46,7 +46,8 @@ class Settings:
         trace_dir: Where kept traces go, None for the default location under the pytest cache.
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
         budget: The default instruction budget of `run`, `wait_for` and `call`,
-            `--popcorn-budget`.
+            `--popcorn-budget`. It counts instructions the core executes, not the time it
+            sleeps in WFI or WFE.
         part: The part every machine of the session is built on instead of its description's,
             `--popcorn-part`, None for each description's own. It replaces the part of the
             selected config of every machine fixture, system member and `machine_factory` call,

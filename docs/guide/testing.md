@@ -52,7 +52,8 @@ trace ring.
 `@pytest.mark.popcorn` sets the settings of every popcorn machine a test uses:
 
 - `budget`, the default instruction budget of each `run`, `call` and wait. `budget=None` means
-  no limit. It never acts as a wall-clock timeout.
+  no limit. It counts instructions the core executes, not the time it sleeps in WFI or WFE, so a
+  firmware that may sleep also needs `for_`. It never acts as a wall-clock timeout.
 - `strict`, whether a firmware access to an unmodelled peripheral raises `ModelError`.
 
 Put it on a module as `pytestmark = pytest.mark.popcorn(budget=...)`. The closest marker wins

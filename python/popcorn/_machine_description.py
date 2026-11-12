@@ -343,7 +343,9 @@ class Boot:
         until: Symbol boot runs to, None to only reset.
         image: Name of the image `until` is looked up in, as `Machine.sym(image=)`, None for
             the last image defining it.
-        budget: Instructions boot may take, None for no limit.
+        budget: Instructions boot may take, None for no limit. It counts instructions the core
+            executes, not the time it sleeps in WFI or WFE: a boot that may sleep needs a bound
+            of its own.
         memory_init: Memory written after the images load.
         arena_base: First address of the call arena, None for the default, False for none.
         arena_size: Size of the call arena in bytes, None for the default.
