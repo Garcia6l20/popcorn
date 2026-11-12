@@ -655,7 +655,8 @@ private:
   [[nodiscard]] auto master_mode() const -> std::uint32_t;
   [[nodiscard]] auto master_mode_of(std::uint32_t cr2) const -> std::uint32_t;
   [[nodiscard]] auto trgo_wanted(std::uint32_t mode) -> bool;
-  [[nodiscard]] auto at_ps(wide at) const -> std::uint64_t;
+  /** @brief Picoseconds of the tick at @p at, rounded up. Callers run under counting(). */
+  [[nodiscard]] auto at_ps(wide at) const -> std::uint64_t pre(state_.hz != 0);
   [[nodiscard]] auto ticks_in(wide span) const -> std::uint64_t;
 
   void start_at(std::uint64_t ps);
@@ -1881,10 +1882,6 @@ void tim::oc1_moved(bool before, trigger_time at)
 
 [[gnu::hot]] auto tim::at_ps(wide at) const -> std::uint64_t
 {
-  if(state_.hz == 0) [[unlikely]]
-  {
-    return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
-  }
   if(hz_divisor_.value() != state_.hz)
   {
     hz_divisor_ = core::divisor{state_.hz};

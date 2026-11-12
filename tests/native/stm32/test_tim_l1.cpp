@@ -399,6 +399,32 @@ TEST_CASE("TIM2 PWM mode 1 on CH1 flags CC1 250 us into each 1 ms period, firmwa
   CHECK(run.compares[1] - run.updates[0] < 251 * us);
 }
 
+TEST_CASE(
+    "a TIM3 whose clock is gated mid-count holds its count and resumes when the clock returns")
+{
+  rig r;
+  r.base("TIM3", 29);
+  r.write("TIM3", "DIER", 1u);
+  r.write("TIM3", "CR1", 1u);
+  r.at_tick(10);
+  CHECK(r.read("TIM3", "CNT") == 10);
+  r.set("RCC", "APB1ENR", "TIM3EN", 0);
+  r.at_tick(40);
+  auto const& units = r.f->target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"TIM3"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  auto const pending = r.f->target->snapshot().data().events.pending;
+  CHECK(std::ranges::none_of(pending, [&](auto const& event) { return event.id.owner == owner; }));
+  CHECK(r.read("TIM3", "CNT") == 10);
+  CHECK(r.get("TIM3", "SR", "UIF") == 0);
+  r.set("RCC", "APB1ENR", "TIM3EN", 1);
+  CHECK(r.read("TIM3", "CNT") == 10);
+  r.at_tick(50);
+  CHECK(r.read("TIM3", "CNT") == 20);
+  CHECK(r.get("TIM3", "SR", "UIF") == 0);
+}
+
 TEST_CASE("RM0038 17.4.7: TIM3 captures PA6 edges into CCR1, IC1PSC 01 every second edge, firmware")
 {
   constexpr std::array<std::uint64_t, 8> rising{100, 300, 700, 1500, 3100, 6300, 12700, 25500};

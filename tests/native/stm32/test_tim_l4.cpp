@@ -554,6 +554,32 @@ TEST_CASE("RM0351 31.3.2: TIM2 to TIM5 count down with DIR 1, the update at the 
   }
 }
 
+TEST_CASE(
+    "a TIM3 whose clock is gated mid-count holds its count and resumes when the clock returns")
+{
+  rig r;
+  r.base("TIM3", 29);
+  r.write("TIM3", "DIER", 1u);
+  r.write("TIM3", "CR1", 1u);
+  r.at_tick(10);
+  CHECK(r.read("TIM3", "CNT") == 10);
+  r.set("RCC", "APB1ENR1", "TIM3EN", 0);
+  r.at_tick(40);
+  auto const& units = r.f->target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"TIM3"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  auto const pending = r.f->target->snapshot().data().events.pending;
+  CHECK(std::ranges::none_of(pending, [&](auto const& event) { return event.id.owner == owner; }));
+  CHECK(r.read("TIM3", "CNT") == 10);
+  CHECK(r.get("TIM3", "SR", "UIF") == 0);
+  r.set("RCC", "APB1ENR1", "TIM3EN", 1);
+  CHECK(r.read("TIM3", "CNT") == 10);
+  r.at_tick(50);
+  CHECK(r.read("TIM3", "CNT") == 20);
+  CHECK(r.get("TIM3", "SR", "UIF") == 0);
+}
+
 TEST_CASE("RM0351 31.4.22: TIM2 TI4_RMP 00 captures PA3 edges on CH4, 01 to 11 read low and log")
 {
   for(std::uint32_t const remap : {0u, 1u, 2u, 3u})
