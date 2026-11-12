@@ -869,3 +869,66 @@ TEST_CASE("the H5 lock warning names RM0481")
     CHECK(found->message.find("RM0456") == std::string::npos);
   }
 }
+
+TEST_CASE("RM0481 56.8.4 and 57.7.4: setting WUS0 or WUS1 logs once and raises under strict")
+{
+  auto const stop_records = [](lock_scene const& t) {
+    return std::ranges::count_if(t.logged, [](core::log_record const& record) {
+      return record.message.find("Stop mode") != std::string::npos;
+    });
+  };
+  for(auto const& which : {usart2, lpuart})
+  {
+    for(auto const* bit : {"WUS0", "WUS1"})
+    {
+      CAPTURE(which.name);
+      CAPTURE(bit);
+      lock_scene t{which};
+      auto const wus = t.mask("CR3", bit);
+      t.cpu("CR3", wus);
+      CHECK(t.get("CR3") == wus);
+      CHECK(stop_records(t) == 1);
+      t.cpu("CR3", 0);
+      t.cpu("CR3", wus);
+      CHECK(stop_records(t) == 1);
+      lock_scene c{which};
+      c.debugger("CR3", wus);
+      c.cpu("CR3", 0);
+      CHECK(c.get("CR3") == 0);
+      CHECK(stop_records(c) == 0);
+      lock_scene s{which, true};
+      CHECK(s.refuses("CR3", wus));
+      CHECK(s.get("CR3") == 0);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 56.8.4 and 57.7.4: setting WUS0 with UE 1 logs a stop-mode record and a lock record")
+{
+  auto const count = [](lock_scene const& t, std::string_view text) {
+    return std::ranges::count_if(t.logged, [&](core::log_record const& record) {
+      return record.message.find(text) != std::string::npos;
+    });
+  };
+  for(auto const& which : {usart2, lpuart})
+  {
+    CAPTURE(which.name);
+    lock_scene t{which};
+    auto const wus0 = t.mask("CR3", "WUS0");
+    auto const wus1 = t.mask("CR3", "WUS1");
+    t.debugger("CR3", wus1);
+    t.debugger("CR1_enabled", t.mask("CR1_enabled", "UE"));
+    t.cpu("CR3", wus0 | wus1);
+    CHECK(t.get("CR3") == wus1);
+    CHECK(count(t, "Stop mode") == 1);
+    CHECK(count(t, "written with UE 1") == 1);
+    lock_scene s{which, true};
+    s.debugger("CR3", wus1);
+    s.debugger("CR1_enabled", s.mask("CR1_enabled", "UE"));
+    CHECK(s.refuses("CR3", wus0 | wus1));
+    CHECK(s.get("CR3") == wus1);
+    CHECK(count(s, "Stop mode") == 1);
+    CHECK(count(s, "written with UE 1") == 0);
+  }
+}

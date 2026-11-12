@@ -455,8 +455,9 @@ struct lock
  *        instance's CCIPR selection, and the part has no PRESC, so the kernel clock divided by BRR
  *        gives the baud, 256 times it on LPUART1. `usart_variant::names` maps the field names of
  *        each family. On every family, a CPU or DMA write that sets a bit of CR1.UESM, CR3.UCESM,
- *        WUFIE or WUS logs one warning and raises model_error under strict peripherals before the
- *        store: the model runs in Run mode only and WUF stays 0.
+ *        WUFIE or WUS, or its bits WUS0 and WUS1 where the description splits it, logs one
+ *        warning and raises model_error under strict peripherals before the store: the model
+ *        runs in Run mode only and WUF stays 0.
  *
  *        The `sci2` register set of the STM32L1 USART and UART, RM0038 27.6, drives the same
  *        frame engine with one data word each way: SR holds TXE for an empty TDR, TC, RXNE, IDLE,
@@ -484,8 +485,8 @@ struct lock
  * - Only plain asynchronous mode is modelled. Synchronous, smartcard, IrDA, LIN, half-duplex,
  *   driver enable, auto baud and receiver timeout are logged as not modelled.
  * - The model runs in Run mode only. A CPU or DMA write that sets CR1.UESM, CR3.UCESM, CR3.WUFIE or
- *   CR3.WUS, where the description has them, logs one `model_warning` and raises `ModelError` under
- *   `strict_peripherals` before the store, on every family. WUF stays 0.
+ *   CR3.WUS, or on the STM32H5 its bits WUS0 and WUS1, logs one `model_warning` and raises
+ *   `ModelError` under `strict_peripherals` before the store, on every family. WUF stays 0.
  * - GTPR and AUTOCR are not served, so the locks on their fields are not enforced.
  *
  * @group all rule
@@ -1013,8 +1014,13 @@ usart::usart(
              ? std::optional{field(reg_name, bits)}
              : std::nullopt;
   };
-  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 4>{
-          {{cr1_, "UESM"}, {"CR3", "UCESM"}, {"CR3", "WUFIE"}, {"CR3", "WUS"}}
+  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 6>{
+          {{cr1_, "UESM"},
+           {"CR3", "UCESM"},
+           {"CR3", "WUFIE"},
+           {"CR3", "WUS"},
+           {"CR3", "WUS0"},
+           {"CR3", "WUS1"}}
   })
   {
     if(auto const found = optional(reg_name, bits))

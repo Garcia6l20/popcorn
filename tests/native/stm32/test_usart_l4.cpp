@@ -926,3 +926,28 @@ TEST_CASE(
   t.r.write(usart2 + cr3, three);
   CHECK(t.read(cr3) == three);
 }
+
+TEST_CASE(
+    "RM0351 40.8.3 and 41.7.3: setting WUS logs once and raises under strict, clearing it passes")
+{
+  for(auto const& one : {units[0], units[2]})
+  {
+    CAPTURE(one.name);
+    auto const wus = field_mask(one, "CR3", "WUS");
+    lock_scene t{one};
+    t.cpu(cr3, wus);
+    CHECK(t.read(cr3) == wus);
+    CHECK(t.r.stop_mode_warnings() == 1);
+    t.cpu(cr3, 0);
+    t.cpu(cr3, wus);
+    CHECK(t.r.stop_mode_warnings() == 1);
+    lock_scene c{one};
+    c.r.write(one.base + cr3, wus);
+    c.cpu(cr3, 0);
+    CHECK(c.read(cr3) == 0);
+    CHECK(c.r.stop_mode_warnings() == 0);
+    lock_scene s{one, true};
+    CHECK(s.refuses(cr3, wus));
+    CHECK(s.read(cr3) == 0);
+  }
+}
