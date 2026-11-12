@@ -49,6 +49,7 @@ struct waiter
   std::uint64_t            members_fired{};
   std::atomic<bool>        ended{false};
   std::optional<vtime>     since{};
+  std::atomic<bool>        registered{false};
   std::uint64_t            since_slice{};
   std::exception_ptr       error{};
   std::weak_ptr<host_core> owner{};
@@ -68,6 +69,7 @@ struct waiter
           spec.after->ps > room ? std::numeric_limits<std::uint64_t>::max()
                                 : now.ps + spec.after->ps};
     }
+    registered.store(true, std::memory_order_release);
   }
 
   [[nodiscard]] auto live() const noexcept -> bool
@@ -1577,7 +1579,7 @@ auto waiter_handle::ended() const noexcept -> bool
 
 auto waiter_handle::deadline() const noexcept -> std::optional<vtime>
 {
-  if(waiter_->spec.after and not waiter_->since)
+  if(waiter_->spec.after and not waiter_->registered.load(std::memory_order_acquire))
   {
     return std::nullopt;
   }
