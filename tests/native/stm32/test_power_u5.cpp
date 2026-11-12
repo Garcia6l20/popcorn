@@ -762,3 +762,34 @@ TEST_CASE("a U5 description without PWR_CR3.REGSEL or PWR_SVMSR.REGS throws conf
     }
   }
 }
+
+TEST_CASE("a U5 VOS change posts one event at the write time plus the board's ready delay")
+{
+  stm32::board board{};
+  board.pwr.ready_delay = std::chrono::nanoseconds{12'347};
+  auto options          = popcorn::testing::stm32_options();
+  options.models        = stm32::factories(board, u575());
+  stm32_fixture           f{u575(), "pwr_ll", std::move(options)};
+  constexpr std::uint32_t loop_at = 0x2000'0100;
+  REQUIRE(f.target->mem().write(loop_at, 4, 0xE7FD'BF30).has_value());
+  f.set("pc", loop_at | 1u);
+  auto const& units = f.target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, std::string_view{"PWR"}, &popcorn::peripheral_desc::name)
+      - units.begin());
+  auto const& pwr     = f.target->peripheral("PWR").description();
+  auto const  vosr    = pwr.base + popcorn::find_register(pwr, "PWR_VOSR")->offset;
+  auto const  written = f.target->virtual_clock().time().ps;
+  REQUIRE(f.target->mem().write(vosr, 4, 3u << 16).has_value());
+  std::vector<std::uint64_t> dues;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner)
+    {
+      dues.push_back(event.due_ps);
+    }
+  }
+  REQUIRE(dues.size() == 1);
+  auto const delay_ps = static_cast<std::uint64_t>(board.pwr.ready_delay.count()) * 1000;
+  CHECK(dues[0] == written + delay_ps);
+}
