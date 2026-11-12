@@ -513,3 +513,416 @@ TEST_CASE("ES0250 2.21.3: with RTSE the receiver reads ready while RE or UE is 0
   r.write(usart2 + cr1, ue);
   CHECK(r.port("USART2").ready_to_receive());
 }
+
+namespace
+{
+constexpr address cr2 = 0x04;
+
+struct unit
+{
+  std::string_view name;
+  address          base;
+  address          clock_register;
+  std::uint32_t    clock_bit;
+  bool             low_power;
+};
+
+constexpr std::array<unit, 3> units{
+    {{"USART2", usart2, apb1enr1, 17, false},
+     {"UART4", uart4, apb1enr1, 19, false},
+     {"LPUART1", lpuart1, apb1enr2, 0, true}}
+};
+
+auto field_mask(unit const& one, std::string_view reg_name, std::string_view field_name)
+    -> std::uint32_t
+{
+  static auto const desc = l476rc();
+  auto const        peripheral =
+      std::ranges::find(desc.peripherals, one.name, &popcorn::peripheral_desc::name);
+  REQUIRE(peripheral != desc.peripherals.end());
+  auto const reg_found =
+      std::ranges::find(peripheral->registers, reg_name, &popcorn::register_desc::name);
+  REQUIRE(reg_found != peripheral->registers.end());
+  auto const field_found =
+      std::ranges::find(reg_found->fields, field_name, &popcorn::field_desc::name);
+  REQUIRE(field_found != reg_found->fields.end());
+  return (field_found->width >= 32 ? 0xFFFF'FFFFu : ((1u << field_found->width) - 1))
+      << field_found->lsb;
+}
+
+auto has_field(unit const& one, std::string_view reg_name, std::string_view field_name) -> bool
+{
+  static auto const desc = l476rc();
+  auto const        peripheral =
+      std::ranges::find(desc.peripherals, one.name, &popcorn::peripheral_desc::name);
+  REQUIRE(peripheral != desc.peripherals.end());
+  auto const reg_found =
+      std::ranges::find(peripheral->registers, reg_name, &popcorn::register_desc::name);
+  REQUIRE(reg_found != peripheral->registers.end());
+  return std::ranges::contains(reg_found->fields, field_name, &popcorn::field_desc::name);
+}
+
+struct lock_scene
+{
+  rig  r;
+  unit u;
+
+  lock_scene(unit const& one, bool strict = false) : r{"idle", strict}, u{one}
+  {
+    r.write(u.clock_register, r.read(u.clock_register) | (1u << u.clock_bit));
+  }
+
+  void cpu(address offset, std::uint32_t value) const
+  {
+    r.cpu_write(u.base + offset, value);
+  }
+
+  [[nodiscard]] auto read(address offset) const -> std::uint32_t
+  {
+    return r.read(u.base + offset);
+  }
+
+  [[nodiscard]] auto refuses(address offset, std::uint32_t value) const -> bool
+  {
+    try
+    {
+      static_cast<void>(r.services().write(u.base + offset, 4, value, popcorn::initiator::cpu));
+    }
+    catch(popcorn::model_error const&)
+    {
+      return true;
+    }
+    return false;
+  }
+
+  [[nodiscard]] auto lock_records(std::string_view reg_name) const -> std::ptrdiff_t
+  {
+    return std::ranges::count_if(r.logged, [&](core::log_record const& record) {
+      return record.reg == reg_name
+         and record.message.find("written with UE 1") != std::string::npos;
+    });
+  }
+};
+
+struct locked_field
+{
+  std::string_view reg_name;
+  address          offset;
+  std::string_view field_name;
+  std::string_view section;
+};
+
+constexpr std::array<locked_field, 8> l4_cr1{
+    {{"CR1", cr1, "M0", "40.8.1"},
+     {"CR1", cr1, "M1", "40.8.1"},
+     {"CR1", cr1, "OVER8", "40.8.1"},
+     {"CR1", cr1, "PCE", "40.8.1"},
+     {"CR1", cr1, "PS", "40.8.1"},
+     {"CR1", cr1, "WAKE", "40.8.1"},
+     {"CR1", cr1, "DEAT", "40.8.1"},
+     {"CR1", cr1, "DEDT", "40.8.1"}}
+};
+constexpr std::array<locked_field, 13> l4_cr2{
+    {{"CR2", cr2, "CLKEN", "40.8.2"},
+     {"CR2", cr2, "CPHA", "40.8.2"},
+     {"CR2", cr2, "CPOL", "40.8.2"},
+     {"CR2", cr2, "DATAINV", "40.8.2"},
+     {"CR2", cr2, "LBCL", "40.8.2"},
+     {"CR2", cr2, "LBDL", "40.8.2"},
+     {"CR2", cr2, "LINEN", "40.8.2"},
+     {"CR2", cr2, "MSBFIRST", "40.8.2"},
+     {"CR2", cr2, "RXINV", "40.8.2"},
+     {"CR2", cr2, "STOP", "40.8.2"},
+     {"CR2", cr2, "SWAP", "40.8.2"},
+     {"CR2", cr2, "TXINV", "40.8.2"},
+     {"CR2", cr2, "ADDM7", "40.8.2"}}
+};
+constexpr std::array<locked_field, 13> l4_cr3{
+    {{"CR3", cr3, "DDRE", "40.8.3"},
+     {"CR3", cr3, "DEM", "40.8.3"},
+     {"CR3", cr3, "DEP", "40.8.3"},
+     {"CR3", cr3, "HDSEL", "40.8.3"},
+     {"CR3", cr3, "IREN", "40.8.3"},
+     {"CR3", cr3, "IRLP", "40.8.3"},
+     {"CR3", cr3, "NACK", "40.8.3"},
+     {"CR3", cr3, "ONEBIT", "40.8.3"},
+     {"CR3", cr3, "OVRDIS", "40.8.3"},
+     {"CR3", cr3, "RTSE", "40.8.3"},
+     {"CR3", cr3, "SCEN", "40.8.3"},
+     {"CR3", cr3, "CTSE", "40.8.3"},
+     {"CR3", cr3, "WUS", "40.8.3"}}
+};
+constexpr std::array<locked_field, 14> l4_lpuart_cr1_2{
+    {{"CR1", cr1, "M0", "41.7.1"},
+     {"CR1", cr1, "M1", "41.7.1"},
+     {"CR1", cr1, "PCE", "41.7.1"},
+     {"CR1", cr1, "PS", "41.7.1"},
+     {"CR1", cr1, "WAKE", "41.7.1"},
+     {"CR1", cr1, "DEAT", "41.7.1"},
+     {"CR1", cr1, "DEDT", "41.7.1"},
+     {"CR2", cr2, "DATAINV", "41.7.2"},
+     {"CR2", cr2, "MSBFIRST", "41.7.2"},
+     {"CR2", cr2, "RXINV", "41.7.2"},
+     {"CR2", cr2, "SWAP", "41.7.2"},
+     {"CR2", cr2, "TXINV", "41.7.2"},
+     {"CR2", cr2, "STOP", "41.7.2"},
+     {"CR2", cr2, "ADDM7", "41.7.2"}}
+};
+constexpr std::array<locked_field, 8> l4_lpuart_cr3{
+    {{"CR3", cr3, "DDRE", "41.7.3"},
+     {"CR3", cr3, "DEM", "41.7.3"},
+     {"CR3", cr3, "DEP", "41.7.3"},
+     {"CR3", cr3, "HDSEL", "41.7.3"},
+     {"CR3", cr3, "OVRDIS", "41.7.3"},
+     {"CR3", cr3, "RTSE", "41.7.3"},
+     {"CR3", cr3, "CTSE", "41.7.3"},
+     {"CR3", cr3, "WUS", "41.7.3"}}
+};
+
+void pin_locked(unit const& one, locked_field const& entry)
+{
+  CAPTURE(one.name);
+  CAPTURE(entry.field_name);
+  lock_scene t{one};
+  auto const mask = field_mask(one, entry.reg_name, entry.field_name);
+  if(entry.offset == cr1)
+  {
+    t.cpu(cr1, mask | ue);
+    REQUIRE(t.read(cr1) == (mask | ue));
+    t.cpu(cr1, ue);
+    CHECK(t.read(cr1) == (mask | ue));
+    t.cpu(cr1, 0);
+    CHECK(t.read(cr1) == 0);
+    return;
+  }
+  t.cpu(entry.offset, mask);
+  REQUIRE(t.read(entry.offset) == mask);
+  t.cpu(cr1, ue);
+  t.cpu(entry.offset, 0);
+  CHECK(t.read(entry.offset) == mask);
+  t.cpu(cr1, 0);
+  t.cpu(entry.offset, 0);
+  CHECK(t.read(entry.offset) == 0);
+}
+}
+
+TEST_CASE("RM0351 40.8.1 to 40.8.3 and 41.7.1 to 41.7.3: every UE-locked L4 field holds with UE 1")
+{
+  auto const pin_each = [](unit const& one, auto const& table) {
+    for(auto const& entry : table)
+    {
+      SUBCASE(
+          std::string{one.name}
+              .append(" ")
+              .append(entry.section)
+              .append(" ")
+              .append(entry.field_name)
+              .c_str())
+      {
+        pin_locked(one, entry);
+      }
+    }
+  };
+  pin_each(units[0], l4_cr1);
+  pin_each(units[0], l4_cr2);
+  pin_each(units[0], l4_cr3);
+  pin_each(units[2], l4_lpuart_cr1_2);
+  pin_each(units[2], l4_lpuart_cr3);
+}
+
+TEST_CASE("RM0351 40.8.1 to 40.8.4: UART4 holds its UE-locked fields with UE 1")
+{
+  for(auto const& entry : {l4_cr1[0], l4_cr2[1], l4_cr2[9], l4_cr3[0], l4_cr3[12]})
+  {
+    pin_locked(units[1], entry);
+  }
+  lock_scene t{units[1]};
+  t.cpu(brr, 0x45);
+  t.cpu(cr1, ue);
+  t.cpu(brr, 0x90);
+  CHECK(t.read(brr) == 0x45);
+}
+
+TEST_CASE("RM0351 40.8.4 and 41.7.4: BRR holds with UE 1 on USART2 and LPUART1")
+{
+  for(auto const& one : {units[0], units[2]})
+  {
+    CAPTURE(one.name);
+    lock_scene t{one};
+    t.cpu(brr, 0x345);
+    t.cpu(cr1, ue);
+    t.cpu(brr, 0x400);
+    CHECK(t.read(brr) == 0x345);
+    t.cpu(cr1, 0);
+    t.cpu(brr, 0x400);
+    CHECK(t.read(brr) == 0x400);
+  }
+}
+
+TEST_CASE("RM0351 40.8.2: CLKEN written with UE 1 keeps its value on an L4 USART and logs once")
+{
+  lock_scene t{units[0]};
+  auto const clken = field_mask(units[0], "CR2", "CLKEN");
+  t.cpu(cr1, ue);
+  t.cpu(cr2, clken);
+  t.cpu(cr2, clken);
+  CHECK(t.read(cr2) == 0);
+  CHECK(t.lock_records("CR2") == 1);
+}
+
+TEST_CASE("RM0351 41.7.2: LPUART1 CR2 has no CLKEN field, the L4 USART CR2 has it")
+{
+  CHECK_FALSE(has_field(units[2], "CR2", "CLKEN"));
+  CHECK(has_field(units[0], "CR2", "CLKEN"));
+}
+
+TEST_CASE("RM0351 40.8.3 and 41.7.3: WUS written with UE 1 keeps its value on USART2 and LPUART1")
+{
+  for(auto const& one : {units[0], units[2]})
+  {
+    CAPTURE(one.name);
+    lock_scene t{one};
+    auto const wus = field_mask(one, "CR3", "WUS");
+    t.cpu(cr3, wus & (2u << 20));
+    t.cpu(cr1, ue);
+    CHECK(t.read(cr3) == (wus & (2u << 20)));
+    t.cpu(cr3, wus & (1u << 20));
+    CHECK(t.read(cr3) == (wus & (2u << 20)));
+    CHECK(t.lock_records("CR3") == 1);
+    t.cpu(cr3, 0);
+    CHECK(t.read(cr3) == (wus & (2u << 20)));
+    CHECK(t.lock_records("CR3") == 1);
+    CHECK(t.r.stop_mode_warnings() == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0351 40.8.3 and 41.7.3: a WUS write is a model_error under strict, the field reads old")
+{
+  for(auto const& one : {units[0], units[2]})
+  {
+    CAPTURE(one.name);
+    lock_scene t{one, true};
+    auto const wus = field_mask(one, "CR3", "WUS") & (1u << 20);
+    t.r.write(one.base + cr3, wus);
+    t.r.write(one.base + cr1, ue);
+    CHECK(t.refuses(cr3, 0));
+    CHECK(t.read(cr3) == wus);
+  }
+}
+
+TEST_CASE(
+    "RM0351 40.8.2 and 41.7.2: ADD with UE 1 is taken with RE 0 and kept with RE 1, L4 USART and "
+    "LPUART")
+{
+  for(auto const& one : {units[0], units[2]})
+  {
+    CAPTURE(one.name);
+    lock_scene t{one};
+    auto const add  = field_mask(one, "CR2", "ADD");
+    auto const low  = add & (0x5Au << 24);
+    auto const high = add & (0x11u << 24);
+    t.cpu(cr1, ue);
+    t.cpu(cr2, low);
+    CHECK(t.read(cr2) == low);
+    CHECK(t.lock_records("CR2") == 0);
+    t.cpu(cr1, ue | re);
+    t.cpu(cr2, high);
+    CHECK(t.read(cr2) == low);
+    CHECK(t.lock_records("CR2") == 1);
+    t.cpu(cr1, ue);
+    t.cpu(cr2, high);
+    CHECK(t.read(cr2) == high);
+    t.cpu(cr1, ue | re);
+    t.cpu(cr2, 0);
+    CHECK(t.read(cr2) == high);
+  }
+}
+
+TEST_CASE("RM0351 40.8.2: ABRMOD is locked only while ABREN is 1 on an L4 USART")
+{
+  lock_scene t{units[0]};
+  auto const abren = field_mask(units[0], "CR2", "ABREN");
+  auto const mode  = field_mask(units[0], "CR2", "ABRMOD") & (1u << 21);
+  t.cpu(cr1, ue);
+  t.cpu(cr2, mode);
+  CHECK(t.read(cr2) == mode);
+  t.cpu(cr1, 0);
+  t.cpu(cr2, abren | mode);
+  t.cpu(cr1, ue);
+  t.cpu(cr2, abren);
+  CHECK(t.read(cr2) == (abren | mode));
+}
+
+TEST_CASE("the L4 lock warning names RM0351")
+{
+  for(auto const& one : units)
+  {
+    CAPTURE(one.name);
+    lock_scene t{one};
+    t.cpu(cr1, ue);
+    t.cpu(brr, 0x345);
+    auto const found = std::ranges::find_if(t.r.logged, [](core::log_record const& record) {
+      return record.message.find("written with UE 1") != std::string::npos;
+    });
+    REQUIRE(found != t.r.logged.end());
+    CHECK(found->message.find("RM0351") != std::string::npos);
+    CHECK(found->message.find("RM0456") == std::string::npos);
+  }
+}
+
+TEST_CASE("an L4 locked write is a model_error under strict peripherals and the field reads old")
+{
+  struct leg
+  {
+    std::size_t   unit_index;
+    address       offset;
+    std::uint32_t value;
+    std::uint32_t control1;
+  };
+  for(auto const& entry : std::array<leg, 6>{
+          {{0, cr2, 1u << 11, ue},
+           {0, cr2, 0x5Au << 24, ue | re},
+           {0, brr, 0x345, ue},
+           {0, cr1, 1u << 12, ue},
+           {2, brr, 0x345, ue},
+           {2, cr2, 0x5Au << 24, ue | re}}
+  })
+  {
+    auto const& one = units[entry.unit_index];
+    CAPTURE(one.name);
+    CAPTURE(entry.offset);
+    lock_scene t{one, true};
+    if(entry.offset == cr1)
+    {
+      t.r.write(one.base + cr1, entry.control1 | entry.value);
+      CHECK(t.refuses(cr1, entry.control1));
+      CHECK(t.read(cr1) == (entry.control1 | entry.value));
+      continue;
+    }
+    t.r.write(one.base + entry.offset, entry.value);
+    t.r.write(one.base + cr1, entry.control1);
+    CHECK(t.refuses(entry.offset, 0));
+    CHECK(t.read(entry.offset) == entry.value);
+  }
+}
+
+TEST_CASE(
+    "RM0351 40.8.3: SCARCNT takes 0 with UE 1 and keeps a non-zero write on USART2, a debugger "
+    "write passes")
+{
+  lock_scene t{units[0]};
+  auto const count = field_mask(units[0], "CR3", "SCARCNT");
+  auto const five  = count & (5u << 17);
+  auto const three = count & (3u << 17);
+  t.cpu(cr3, five);
+  t.cpu(cr1, ue);
+  t.cpu(cr3, three);
+  CHECK(t.read(cr3) == five);
+  t.cpu(cr3, 0);
+  CHECK(t.read(cr3) == 0);
+  t.cpu(cr3, three);
+  CHECK(t.read(cr3) == 0);
+  t.r.write(usart2 + cr3, three);
+  CHECK(t.read(cr3) == three);
+}

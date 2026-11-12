@@ -317,15 +317,15 @@ constexpr std::array<std::string_view, 9>  usart_cr1{"FIFOEN", "M1",   "M0",  "D
 constexpr std::array<std::string_view, 15> usart_cr2{
     "ADD",  "MSBFIRST", "DATAINV", "TXINV", "RXINV", "SWAP",    "LINEN", "STOP",
     "CPOL", "CPHA",     "LBCL",    "LBDL",  "ADDM7", "DIS_NSS", "SLVEN"};
-constexpr std::array<std::string_view, 14> usart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
+constexpr std::array<std::string_view, 15> usart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
                                                      "OVRDIS",  "ONEBIT",  "CTSE", "RTSE", "SCEN",
-                                                     "NACK",    "HDSEL",   "IRLP", "IREN"};
+                                                     "NACK",    "HDSEL",   "IRLP", "IREN", "WUS"};
 constexpr std::array<std::string_view, 7>  lpuart_cr1{"M1",   "M0",  "DEAT", "DEDT",
                                                       "WAKE", "PCE", "PS"};
 constexpr std::array<std::string_view, 8>  lpuart_cr2{"ADD",   "ADDM7", "MSBFIRST", "DATAINV",
                                                       "TXINV", "RXINV", "SWAP",     "STOP"};
-constexpr std::array<std::string_view, 9>  lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
-                                                      "OVRDIS",  "CTSE",    "RTSE", "HDSEL"};
+constexpr std::array<std::string_view, 10> lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",   "DDRE",
+                                                      "OVRDIS",  "CTSE",    "RTSE", "HDSEL", "WUS"};
 constexpr std::array<std::string_view, 1>  whole_brr{"BRR"};
 constexpr std::array<std::string_view, 1>  whole_presc{"PRESCALER"};
 
@@ -334,6 +334,7 @@ struct lock
   std::string   reg;
   std::uint32_t offset{};
   std::uint32_t mask{};
+  std::uint32_t open_when_receiver_off{};
   bool          logged{};
 };
 
@@ -348,11 +349,13 @@ struct lock
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
  *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
  *        `<instance>_rx_dma` request follows RXNE, through the GPDMA peer, levels announced again
- *        in reset. With UE 1, a CPU or DMA write leaves the fields RM0456 66.8 and 67.7 lock
- *        while the USART is enabled at their value: CR1, CR2 and CR3 fields per instance kind,
- *        BRR and PRESC whole, ABRMOD while ABREN is 1, and SCARCNT unless the write is 0. The
- *        write logs once per register, a model_error under strict peripherals. A write that
- *        clears UE takes effect whole, which RM0456 leaves open, and debugger writes are never
+ *        in reset. With UE 1, a CPU or DMA write leaves the fields the manual locks, RM0456 66.8
+ *        and 67.7, RM0351 40.8 and 41.7, while the USART is enabled at their value: CR1, CR2 and
+ *        CR3 fields per instance kind, BRR and PRESC whole, ABRMOD while ABREN is 1, and SCARCNT
+ *        unless the write is 0. On the STM32L4 CLKEN is locked too, RM0351 40.8.2, WUS, RM0351
+ *        40.8.3 and 41.7.3, and ADD changes with UE 1 while RE is 0, RM0351 40.8.2 and 41.7.2.
+ *        The write logs once per register, a model_error under strict peripherals. A write that
+ *        clears UE takes effect whole, which the manual leaves open, and debugger writes are never
  *        locked. GTPR and AUTOCR are not served, so their locked fields are not enforced. Not
  *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
@@ -739,6 +742,7 @@ private:
   bool                                         no_baud_logged_{};
   bool                                         parity_tag_logged_{};
   std::vector<lock>                            locks_;
+  std::string_view                             manual_;
   std::uint32_t                                status_clears_{};
   std::uint32_t                                break_stop_half_bits_;
   bool                                         flow_control_;
@@ -956,6 +960,7 @@ usart::usart(
       }
     }
   }
+  manual_ = variant.manual;
   if(not sci2_)
   {
     auto const presc = prescaler_.has_value();
@@ -981,6 +986,18 @@ usart::usart(
       for(auto const& bits : describe(reg_name).fields)
       {
         if(std::ranges::contains(names, std::string_view{bits.name}))
+        {
+          auto const bit_mask = field(reg_name, bits.name).mask();
+          if(variant.add_open_with_receiver_off and reg_name == "CR2" and bits.name == "ADD")
+          {
+            entry.open_when_receiver_off |= bit_mask;
+          }
+          else
+          {
+            entry.mask |= bit_mask;
+          }
+        }
+        else if(variant.clken_locked and reg_name == "CR2" and bits.name == "CLKEN")
         {
           entry.mask |= field(reg_name, bits.name).mask();
         }
@@ -1088,6 +1105,14 @@ auto usart::on_write(
   {
     mask |= retransmissions_->mask();
   }
+  if(found->open_when_receiver_off != 0 and get(regs_, receive_) == 0)
+  {
+    mask &= ~found->open_when_receiver_off;
+  }
+  else
+  {
+    mask |= found->open_when_receiver_off;
+  }
   auto const kept = (merged & ~mask) | (stored & mask);
   if(kept != merged)
   {
@@ -1096,9 +1121,9 @@ auto usart::on_write(
       warn(
           found->reg,
           std::format(
-              "{} written with UE 1: RM0456 lets these fields change only with UE 0, they keep "
+              "{} written with UE 1: {} lets these fields change only with UE 0, they keep "
               "their value",
-              found->reg));
+              found->reg, manual_));
     }
     if(ctx_.strict_peripherals)
     {

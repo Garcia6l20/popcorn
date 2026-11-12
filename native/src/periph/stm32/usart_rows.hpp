@@ -189,6 +189,18 @@ struct usart_variant
    *        66.5.21.
    */
   bool break_ignores_cts = false;
+  /**
+   * @brief Reference manual named in the UE-lock warning, such as "RM0351". Only rows whose
+   *        locks are built read it: an `sci2` row never does.
+   */
+  std::string_view manual = "RM0456";
+  /** @brief CLKEN is written only with UE 0, RM0351 40.8.2. */
+  bool clken_locked = false;
+  /**
+   * @brief ADD is written with UE 1 while RE is 0, RM0351 40.8.2 and 41.7.2. Without it ADD
+   *        changes only with UE 0, RM0456 66.8.3 and 67.7.3.
+   */
+  bool add_open_with_receiver_off = false;
 };
 
 /** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
@@ -223,19 +235,24 @@ inline constexpr usart_variant l1_uart{
  *        control, RM0351 Table 251. The kernel clock is the CCIPR selection of the instance.
  */
 inline constexpr usart_variant l4_usart{
-    .mode_views         = false,
-    .fifo               = false,
-    .names              = sci3_names,
-    .break_keeps_tc_low = true};
+    .mode_views                 = false,
+    .fifo                       = false,
+    .names                      = sci3_names,
+    .break_keeps_tc_low         = true,
+    .manual                     = "RM0351",
+    .clken_locked               = true,
+    .add_open_with_receiver_off = true};
 /**
  * @brief STM32L4 LPUART1, RM0351 41.7: the L4 USART registers with BRR[19:0], no OVER8 and no
  *        RQR.TXFRQ, the kernel clock the CCIPR.LPUART1SEL selection.
  */
 inline constexpr usart_variant l4_lpuart{
-    .mode_views         = false,
-    .fifo               = false,
-    .names              = sci3_lpuart_names,
-    .break_keeps_tc_low = true};
+    .mode_views                 = false,
+    .fifo                       = false,
+    .names                      = sci3_lpuart_names,
+    .break_keeps_tc_low         = true,
+    .manual                     = "RM0351",
+    .add_open_with_receiver_off = true};
 
 /**
  * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
