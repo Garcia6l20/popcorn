@@ -20,6 +20,14 @@ namespace
 {
 namespace nb = reflex::py::nb;
 
+void mark_dead(std::shared_ptr<bool> const& dead) noexcept
+{
+  if(dead)
+  {
+    *dead = true;
+  }
+}
+
 struct view_scope
 {
   view_scope()                                     = default;
@@ -34,15 +42,18 @@ struct view_scope
 };
 }
 
-hook::hook(core::hook_handle handle, detail::host_ref host) noexcept
-    : handle_{std::move(handle)}, host_{std::move(host)}
+hook::hook(core::hook_handle handle, detail::host_ref host, std::shared_ptr<bool> dead) noexcept
+    : handle_{std::move(handle)}, host_{std::move(host)}, dead_{std::move(dead)}
 {}
 
 hook::~hook()
 {
   if(handle_.active())
   {
-    detail::retire(host_, [owned = std::move(handle_)] mutable { owned.reset(); });
+    detail::retire(host_, [owned = std::move(handle_), dead = dead_] mutable {
+      mark_dead(dead);
+      owned.reset();
+    });
   }
 }
 
@@ -53,6 +64,11 @@ void hook::remove()
     handle_.reset();
     return;
   }
+  if(auto const on = host_->host.lock(); on != nullptr and on->owns_engine())
+  {
+    retire();
+    return;
+  }
   detail::host_access(host_, [this] { handle_.reset(); });
 }
 
@@ -60,7 +76,10 @@ void hook::retire() noexcept
 {
   if(handle_.active())
   {
-    detail::retire(host_, [owned = std::move(handle_)] mutable { owned = core::hook_handle{}; });
+    detail::retire(host_, [owned = std::move(handle_), dead = dead_] mutable {
+      mark_dead(dead);
+      owned = core::hook_handle{};
+    });
   }
 }
 
@@ -146,10 +165,15 @@ auto call_view::args(std::vector<arch::value_kind> const& kinds, std::optional<a
 auto machine_handle::add_intercept(address at, nb::object handler, bool once) -> hook
 {
   auto callable = detail::held_bare(std::move(handler));
+  auto dead     = std::make_shared<bool>(false);
   auto handle   = access([&](core::machine& target) {
     return target.add_intercept(
         at,
-        [callable](core::intercept_call const& call) {
+        [callable, dead](core::intercept_call const& call) {
+          if(*dead)
+          {
+            return core::intercept_result::proceed();
+          }
           detail::gil_entry const locked;
           view_scope const        scope;
           return nb::cast<core::intercept_result>(
@@ -157,7 +181,7 @@ auto machine_handle::add_intercept(address at, nb::object handler, bool once) ->
         },
         once ? core::intercept_mode::once : core::intercept_mode::every);
   });
-  return hook{std::move(handle), slot_};
+  return hook{std::move(handle), slot_, std::move(dead)};
 }
 
 auto machine_handle::add_probe(address at, std::optional<bool> secure) -> probe_hook
@@ -210,21 +234,27 @@ auto machine_handle::add_return_hook(
     nb::object                           handler) -> hook
 {
   auto callable = detail::held_bare(std::move(handler));
+  auto dead     = std::make_shared<bool>(false);
   auto handle   = access([&](core::machine& target) {
-    return target.add_return_hook(at, args, returns, [callable](core::returned_call const& done) {
-      detail::gil_entry const locked;
-      detail::call_python([&] {
-        return (*callable)(returned_record{
-            .function     = done.function,
-            .occurrence   = done.occurrence,
-            .args         = done.args,
-            .value        = done.value,
-            .instructions = done.instructions.value,
+    return target.add_return_hook(
+        at, args, returns, [callable, dead](core::returned_call const& done) {
+          if(*dead)
+          {
+            return;
+          }
+          detail::gil_entry const locked;
+          detail::call_python([&] {
+            return (*callable)(returned_record{
+                .function     = done.function,
+                .occurrence   = done.occurrence,
+                .args         = done.args,
+                .value        = done.value,
+                .instructions = done.instructions.value,
+            });
+          });
         });
-      });
-    });
   });
-  return hook{std::move(handle), slot_};
+  return hook{std::move(handle), slot_, std::move(dead)};
 }
 
 auto machine_handle::add_return_log(
@@ -233,9 +263,15 @@ auto machine_handle::add_return_log(
     arch::value_kind                     returns,
     return_log const&                    log) -> hook
 {
+  auto dead   = std::make_shared<bool>(false);
   auto handle = access([&](core::machine& target) {
     return target.add_return_hook(
-        at, args, returns, [log, clock = &target.virtual_clock()](core::returned_call const& done) {
+        at, args, returns,
+        [log, dead, clock = &target.virtual_clock()](core::returned_call const& done) {
+          if(*dead)
+          {
+            return;
+          }
           log.append({
               .time_ps      = clock->time().ps,
               .occurrence   = done.occurrence,
@@ -245,7 +281,7 @@ auto machine_handle::add_return_log(
           });
         });
   });
-  return hook{std::move(handle), slot_};
+  return hook{std::move(handle), slot_, std::move(dead)};
 }
 
 return_log::return_log(std::uint64_t capacity) : state_{std::make_shared<state>()}
@@ -320,12 +356,17 @@ auto machine_handle::add_watch(
         std::format("a non-empty range within the 32-bit address space, not {} bytes", size));
   }
   auto callable = detail::held_bare(std::move(handler));
+  auto dead     = std::make_shared<bool>(false);
   auto handle   = access([&](core::machine& target) {
-    return target.add_watch(at, size, kind, [callable](core::watch_hit const& hit) {
+    return target.add_watch(at, size, kind, [callable, dead](core::watch_hit const& hit) {
+      if(*dead)
+      {
+        return core::watch_action::resume;
+      }
       detail::gil_entry const locked;
       return nb::cast<core::watch_action>(detail::call_python([&] { return (*callable)(hit); }));
     });
   });
-  return hook{std::move(handle), slot_};
+  return hook{std::move(handle), slot_, std::move(dead)};
 }
 }

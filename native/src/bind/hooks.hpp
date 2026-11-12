@@ -26,8 +26,14 @@ public:
    * @brief Owns a native hook handle.
    * @param handle The handle.
    * @param host The machine's host, through which remove() reaches the engine.
+   * @param dead Flag the hook's handler checks before it calls Python, set on the engine's
+   *        side when the hook is removed, so a hook removed from a handler runs no more while
+   *        its engine entry waits for the end of the slice. Null when the handler has none.
    */
-  [[= py::skip]] hook(core::hook_handle handle, detail::host_ref host) noexcept;
+  [[= py::skip]] hook(
+      core::hook_handle     handle,
+      detail::host_ref      host,
+      std::shared_ptr<bool> dead = {}) noexcept;
   /** @brief Takes over @p other's hook. */
   [[= py::skip]] hook(hook&& other) noexcept = default;
   /** @brief Not move-assignable: the old hook would skip retire(). */
@@ -36,7 +42,9 @@ public:
   ~hook();
 
   /**
-   * @brief Removes the hook, at once or at the end of the slice when called from a handler.
+   * @brief Removes the hook, at once while parked. From a handler of its machine the hook runs
+   *        no more from this call on, and its engine entry goes at the end of the slice. A second
+   *        call does nothing.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Remove the hook."}]] void remove();
@@ -69,8 +77,9 @@ public:
   [[= py::skip]] void give_back(core::hook_handle handle) noexcept;
 
 private:
-  core::hook_handle handle_;
-  detail::host_ref  host_;
+  core::hook_handle     handle_;
+  detail::host_ref      host_;
+  std::shared_ptr<bool> dead_;
 };
 
 /**

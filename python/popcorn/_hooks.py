@@ -240,7 +240,12 @@ class Intercept:
         return any(h.active() for h in self._hooks)
 
     def remove(self) -> None:
-        """Remove the hook, from its handler too, where it goes at the end of the slice."""
+        """Remove the hook. From a handler it runs no more from this call on, and its machine
+        side goes at the end of the slice. A second call does nothing.
+
+        Raises:
+            MachineRunning: Called while the machine runs, outside a handler of this machine.
+        """
         for hook in self._hooks:
             hook.remove()
         for key in self._keys:
@@ -496,7 +501,12 @@ class Watch:
         return self._hook.active()
 
     def remove(self) -> None:
-        """Remove the watch."""
+        """Remove the watch. From a handler it runs no more from this call on, and its machine
+        side goes at the end of the slice. A second call does nothing.
+
+        Raises:
+            MachineRunning: Called while the machine runs, outside a handler of this machine.
+        """
         self._hook.remove()
         self._table.drop(self._key)
 
