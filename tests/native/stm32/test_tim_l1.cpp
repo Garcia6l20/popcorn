@@ -91,10 +91,12 @@ struct rig
       part_description const& desc    = l152re(),
       std::string_view        image   = firmware,
       bool                    strict  = false,
-      bool                    trigger = false)
+      bool                    trigger = false,
+      double                  cpi     = 1.0)
       : part{desc}, elf{image}
   {
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.models             = stm32::factories({}, desc);
     options.strict_peripherals = strict;
     options.models.insert_or_assign(
@@ -1849,4 +1851,94 @@ TEST_CASE("an L152RE TIM6 and TIM7 read offset 0x08 as 0 and drop a write there 
           "TIM6", "TIM7"
   },
       {{"APB1ENR", "TIM6EN"}, {"APB1ENR", "TIM7EN"}});
+}
+
+TEST_CASE(
+    "RM0038 17.3.14: a TIM2 ETR edge inside the core cycle of the TIM3 wrap resets TIM3 before "
+    "it wraps, in both posting orders")
+{
+  for(double const cpi : {1.0, 4.0})
+  {
+    for(std::uint64_t const early : {1ull, 1'000ull, 100'000ull, 476'000ull})
+    {
+      for(bool const slave_first : {true, false})
+      {
+        CAPTURE(cpi);
+        CAPTURE(early);
+        CAPTURE(slave_first);
+        rig r{l152re(), firmware, false, true, cpi};
+        r.set("RCC", "AHBENR", "GPIOAEN", 1);
+        auto* const porta = r.f->model_of<stm32::gpio_port>("GPIOA");
+        REQUIRE(porta != nullptr);
+        porta->drive(0, false);
+        r.set("GPIOA", "MODER", "MODER0", 2);
+        r.set("GPIOA", "AFRL", "AFRL0", 1);
+        r.base("TIM2", 1);
+        r.master("TIM2");
+        r.set("TIM2", "CCMR1_Input", "CC1S", 1);
+        r.set("TIM2", "CCER", "CC1E", 1);
+        r.set("TIM2", "SMCR", "ECE", 1);
+        r.base("TIM3", 100);
+        r.write("TIM3", "CR2", master_update << 4);
+        r.slave("TIM3", 1, sms_reset);
+        auto& probe = r.probe("tim3_trgo");
+        probe.listen(true);
+        r.enable("TIM2");
+        auto const from = r.now();
+        auto const wrap = exact_ps(from, 101);
+        auto const edge = wrap - early;
+        porta->drive_at(0, true, vtime{from + 1 * us});
+        porta->drive_at(0, false, vtime{from + 2 * us});
+        if(slave_first)
+        {
+          r.enable("TIM3");
+          porta->drive_at(0, true, vtime{edge});
+        }
+        else
+        {
+          porta->drive_at(0, true, vtime{edge});
+          r.enable("TIM3");
+        }
+        r.run_until(wrap + 2 * us);
+        REQUIRE(probe.pulses.size() == 1);
+        CHECK(probe.pulses.front() < wrap);
+        CHECK(r.read("TIM3", "CNT") < 10);
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0038 17.3.15: a TIM2 update one timer clock before the TIM3 wrap resets TIM3 in both "
+    "enable orders")
+{
+  for(double const cpi : {1.0, 4.0})
+  {
+    for(bool const slave_first : {true, false})
+    {
+      CAPTURE(cpi);
+      CAPTURE(slave_first);
+      rig r{l152re(), firmware, false, true, cpi};
+      r.base("TIM2", 100);
+      r.master("TIM2");
+      r.base("TIM3", 101);
+      r.write("TIM3", "CR2", master_update << 4);
+      r.slave("TIM3", 1, sms_reset);
+      auto& probe = r.probe("tim3_trgo");
+      probe.listen(true);
+      auto const from = r.now();
+      if(slave_first)
+      {
+        r.enable("TIM3");
+        r.enable("TIM2");
+      }
+      else
+      {
+        r.enable("TIM2");
+        r.enable("TIM3");
+      }
+      r.run_until(from + 60 * us);
+      CHECK(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 101)});
+    }
+  }
 }

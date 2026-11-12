@@ -347,9 +347,7 @@ def test_the_finalizer_closes_the_loop_of_a_member_dropped_after_its_system(
     assert out == ["task finally"]
 
 
-def held_at_beside_a_link_arrival(
-    u575: popcorn.PartDescription, third: int
-) -> tuple[Log, list[int]]:
+def hooks_beside_a_link_arrival(u575: popcorn.PartDescription, third: int) -> tuple[Log, list[int]]:
     """A's frame from the device and its firmware's frame end one count apart at most, and a frame
     from member b lands on a's linked USART2 in that count."""
     log: Log = []
@@ -383,18 +381,18 @@ def held_at_beside_a_link_arrival(
         return log, [frame.arrival.ps for frame in tap.frames()]
 
 
-def test_a_held_at_beside_a_link_arrival_in_its_count_is_the_same_at_any_quantum(
+def test_hooks_beside_a_link_arrival_in_their_count_run_in_stamp_order_at_any_quantum(
     u575: popcorn.PartDescription,
 ) -> None:
-    log, frames = held_at_beside_a_link_arrival(u575, 20)
+    log, frames = hooks_beside_a_link_arrival(u575, 20)
     assert log[:3] == [
+        ("rts", 107_400_000, 107_400_000),
         ("frame", 107_500_000, 107_500_000),
         ("timer", 107_500_000, 107_500_000),
-        ("rts", 107_500_000, 107_500_000),
     ]
     assert frames == [107_500_000]
-    assert held_at_beside_a_link_arrival(u575, 5) == (log, frames)
-    assert held_at_beside_a_link_arrival(u575, 1) == (log, frames)
+    assert hooks_beside_a_link_arrival(u575, 5) == (log, frames)
+    assert hooks_beside_a_link_arrival(u575, 1) == (log, frames)
 
 
 def timer_at_195(u575: popcorn.PartDescription, third: int | None) -> list[tuple[str, int]]:

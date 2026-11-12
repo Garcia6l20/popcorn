@@ -69,7 +69,7 @@ protected:
  *        uart_port::receive, a break through uart_link_port::receive_at as a break frame, lane 1.
  *        So a data frame reaches the receiver one receiver frame time after its stop-bit end, as
  *        any host frame, while a break reaches it at its own end: a data frame and the break
- *        right after it land at the same count, the data frame first by lane.
+ *        right after it that land at the same count fire in time order, by lane at one time.
  */
 class POPCORN_API loopback_endpoint final : public uart_endpoint
 {

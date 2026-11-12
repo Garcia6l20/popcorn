@@ -78,12 +78,13 @@ class UartDevice(_core.UartDeviceBase):
     set is exact at any block shape. A register access stamps at the end of its block: `on_error`, a
     rising `on_rts`, and a frame the firmware started, whose end counts from its store.
 
-    Order: hooks and timers run as machine events in instruction count order. At one count lane,
-    then post order decides, the frame hooks ahead of `on_rts` and `on_error`, the timers behind
-    every other event of their count, and a hook's `at` is held at the last stamp, so `at == now`
-    in every hook and `time()` never goes back. `at` moves by under one instruction period, only at
-    this coincidence, the same way on every run. A timer sharing a count with a hook of a later
-    stamp runs in that hook's step, at that stamp, under one instruction period past its own.
+    Order: hooks and timers run as machine events in instruction count order. At one count hooks
+    run in stamp order, at one stamp lane, then post order decides, the frame hooks ahead of
+    `on_rts` and `on_error`. The timers run behind every other event of their count, and a hook's
+    `at` is held at the last stamp, so `at == now` in every hook and `time()` never goes back. `at`
+    moves by under one instruction period, only when a timer shares a count with a hook of a later
+    stamp, the same way on every run. That timer runs in the hook's step, at that stamp, under one
+    instruction period past its own.
 
     Frames: a frame reaches `on_frame` with its data bits, parity stripped, at its stop-bit end,
     the time `Frame.at` gives on a `UartStream`. With no `line` the device is in the firmware's

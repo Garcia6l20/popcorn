@@ -16,23 +16,51 @@ namespace
 {
 auto dispatch_key(event const& e) noexcept
 {
-  return std::tuple{e.at.value, e.lane, e.seq};
+  return std::tuple{e.at.value, e.order_ps, e.lane, e.seq};
 }
 
-auto instruction_of(std::uint64_t due_ps, clock const& time) -> icount
+struct placement
 {
+  icount at;
+  icount reached;
+};
+
+auto order_of(std::uint64_t due_ps, placement const& placed, clock const& time) -> std::uint64_t
+{
+  if(due_ps < time.epoch_time().ps)
+  {
+    return due_ps;
+  }
+  if(placed.reached != placed.at)
+  {
+    return due_ps;
+  }
+  constexpr auto saturated = std::numeric_limits<std::uint64_t>::max();
+  return due_ps == saturated or time.to_icount(vtime{due_ps + 1}) != placed.at ? at_boundary
+                                                                               : due_ps;
+}
+
+auto reached_of(std::uint64_t due_ps, clock const& time) -> icount
+{
+  return due_ps < time.epoch_time().ps ? icount{} : time.to_icount(vtime{due_ps});
+}
+
+auto instruction_of(std::uint64_t due_ps, clock const& time) -> placement
+{
+  auto const reached = reached_of(due_ps, time);
   if(due_ps <= time.time().ps)
   {
-    return time.now();
+    return {time.now(), reached};
   }
-  return std::max(time.now(), time.to_icount(vtime{due_ps}));
+  return {std::max(time.now(), reached), reached};
 }
 
-auto external_instruction_of(std::uint64_t due_ps, clock const& time) -> icount
+auto external_instruction_of(std::uint64_t due_ps, clock const& time) -> placement
 {
-  auto const from = vtime{std::max(due_ps, time.epoch_time().ps)};
-  return from.ps <= time.time().ps ? std::min(time.now(), time.to_icount(from))
-                                   : time.to_icount(from);
+  auto const from    = vtime{std::max(due_ps, time.epoch_time().ps)};
+  auto const reached = time.to_icount(from);
+  auto const at      = from.ps <= time.time().ps ? std::min(time.now(), reached) : reached;
+  return {at, due_ps < time.epoch_time().ps ? icount{} : reached};
 }
 }
 
@@ -155,13 +183,16 @@ auto scheduler::schedule(icount at, event_id id, std::uint64_t payload) -> std::
 auto scheduler::schedule_at(vtime due, event_id id, std::uint64_t payload, clock const& time)
     -> std::uint64_t
 {
+  auto const  placed = instruction_of(due.ps, time);
   event const added{
-      .at      = instruction_of(due.ps, time),
-      .seq     = next_seq_++,
-      .id      = id,
-      .payload = payload,
-      .due_ps  = due.ps,
-      .kind    = deadline::time};
+      .at       = placed.at,
+      .seq      = next_seq_++,
+      .id       = id,
+      .payload  = payload,
+      .due_ps   = due.ps,
+      .kind     = deadline::time,
+      .lane     = 0,
+      .order_ps = order_of(due.ps, placed, time)};
   queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
   refresh_earliest();
   return added.seq;
@@ -174,14 +205,16 @@ auto scheduler::schedule_at(
     std::uint32_t lane,
     clock const&  time) -> std::uint64_t
 {
+  auto const  placed = external_instruction_of(due.ps, time);
   event const added{
-      .at      = external_instruction_of(due.ps, time),
-      .seq     = lane_seq_base + next_lane_seq_++,
-      .id      = id,
-      .payload = payload,
-      .due_ps  = due.ps,
-      .kind    = deadline::time,
-      .lane    = lane};
+      .at       = placed.at,
+      .seq      = lane_seq_base + next_lane_seq_++,
+      .id       = id,
+      .payload  = payload,
+      .due_ps   = due.ps,
+      .kind     = deadline::time,
+      .lane     = lane,
+      .order_ps = order_of(due.ps, placed, time)};
   queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
   refresh_earliest();
   return added.seq;
@@ -195,7 +228,7 @@ auto scheduler::schedule_unnumbered(
     clock const&  time) -> std::uint64_t
 {
   event const added{
-      .at      = external_instruction_of(due.ps, time),
+      .at      = external_instruction_of(due.ps, time).at,
       .seq     = unnumbered_seq,
       .id      = id,
       .payload = payload,
@@ -213,8 +246,13 @@ void scheduler::rekey(clock const& time)
   {
     if(pending.kind == deadline::time)
     {
-      pending.at = pending.lane == 0 ? instruction_of(pending.due_ps, time)
-                                     : external_instruction_of(pending.due_ps, time);
+      auto const placed = pending.lane == 0 ? instruction_of(pending.due_ps, time)
+                                            : external_instruction_of(pending.due_ps, time);
+      pending.at        = placed.at;
+      if(pending.seq != unnumbered_seq)
+      {
+        pending.order_ps = order_of(pending.due_ps, placed, time);
+      }
     }
   }
   std::ranges::sort(queue_, {}, dispatch_key);

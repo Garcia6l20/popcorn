@@ -1663,11 +1663,11 @@ def rts_and_frame_at_one_count(
     return log, replied
 
 
-def test_a_hook_held_at_the_last_stamp_of_its_instruction_count_can_reply_at_its_at(
+def test_hooks_of_one_instruction_count_run_in_stamp_order_and_reply_at_their_at(
     u575: popcorn.PartDescription,
 ) -> None:
     log, replied = rts_and_frame_at_one_count(u575, 900_000)
-    assert log[:2] == [("frame", 89_500_000, 89_500_000), ("rts", 89_500_000, 89_500_000)]
+    assert log[:2] == [("rts", 89_400_000, 89_400_000), ("frame", 89_500_000, 89_500_000)]
     assert replied == [b"y"]
     log, replied = rts_and_frame_at_one_count(u575, 1_100_000)
     assert log[:2] == [("frame", 89_500_000, 89_500_000), ("rts", 89_600_000, 89_600_000)]

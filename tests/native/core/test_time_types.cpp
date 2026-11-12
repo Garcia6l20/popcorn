@@ -3,7 +3,10 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -176,4 +179,139 @@ TEST_CASE("the rate-change hook runs once per change, after the new epoch starts
   driver.on_rate_change({});
   clock.set_core_hz(4'000'000);
   CHECK(seen.size() == 2);
+}
+
+namespace
+{
+constexpr std::uint64_t period_ps = 250'000;
+
+auto seqs_of(popcorn::core::scheduler const& queue) -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> out;
+  for(auto const& one : queue.pending())
+  {
+    out.push_back(one.seq);
+  }
+  return out;
+}
+}
+
+TEST_CASE("time events due inside one instruction fire by their exact time, not posting order")
+{
+  keyed_queue q;
+  auto const  late  = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 1, q.clock);
+  auto const  early = q.queue.schedule_at(popcorn::vtime{9 * period_ps + 1}, owner, 2, q.clock);
+  REQUIRE(q.queue.pending()[0].at == q.queue.pending()[1].at);
+  CHECK(seqs_of(q.queue) == std::vector<std::uint64_t>{early, late});
+  CHECK(q.queue.pop_due(popcorn::icount{10})->payload == 2);
+  CHECK(q.queue.pop_due(popcorn::icount{10})->payload == 1);
+}
+
+TEST_CASE("an earlier host lane event fires before a local one of its count, a tie keeps the lane")
+{
+  keyed_queue q;
+  auto const  local = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 1, q.clock);
+  auto const  host  = q.queue.schedule_at(
+      popcorn::vtime{9 * period_ps + 1}, owner, 2, popcorn::core::host_lane, q.clock);
+  auto const host_tie = q.queue.schedule_at(
+      popcorn::vtime{10 * period_ps - 1}, owner, 3, popcorn::core::host_lane, q.clock);
+  auto const local_tie = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 4, q.clock);
+  CHECK(seqs_of(q.queue) == std::vector<std::uint64_t>{host, local, local_tie, host_tie});
+}
+
+TEST_CASE("a time event on an instruction boundary keeps posting order with an instruction one")
+{
+  keyed_queue q;
+  auto const  fixed  = q.queue.schedule(popcorn::icount{10}, owner, 1);
+  auto const  edge   = q.queue.schedule_at(popcorn::vtime{10 * period_ps}, owner, 2, q.clock);
+  auto const  inside = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 3, q.clock);
+  CHECK(q.queue.pending()[2].order_ps == popcorn::core::at_boundary);
+  CHECK(seqs_of(q.queue) == std::vector<std::uint64_t>{inside, fixed, edge});
+}
+
+TEST_CASE("an unnumbered event stays behind every event of its count, even one due later")
+{
+  keyed_queue q;
+  std::ignore = q.queue.schedule_unnumbered(
+      popcorn::vtime{9 * period_ps + 1}, owner, 1, popcorn::core::host_lane, q.clock);
+  auto const later = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 2, q.clock);
+  CHECK(
+      seqs_of(q.queue)
+      == std::vector<std::uint64_t>{later, popcorn::core::scheduler::unnumbered_seq});
+  q.clock.set_cpi(1.5);
+  REQUIRE(q.queue.pending()[0].at == q.queue.pending()[1].at);
+  CHECK(q.queue.pending().back().seq == popcorn::core::scheduler::unnumbered_seq);
+  CHECK(q.queue.pending().back().order_ps == popcorn::core::at_boundary);
+}
+
+TEST_CASE("a rate change that puts two time events on one count orders them by exact time")
+{
+  keyed_queue q;
+  auto const  second = q.queue.schedule_at(popcorn::vtime{11 * period_ps}, owner, 1, q.clock);
+  auto const  first  = q.queue.schedule_at(popcorn::vtime{10 * period_ps}, owner, 2, q.clock);
+  CHECK(seqs_of(q.queue) == std::vector<std::uint64_t>{first, second});
+  CHECK(q.queue.pending()[0].order_ps == popcorn::core::at_boundary);
+  q.clock.set_core_hz(1'000'000);
+  REQUIRE(q.queue.pending()[0].at == q.queue.pending()[1].at);
+  CHECK(q.queue.pending()[0].order_ps == 10 * period_ps);
+  CHECK(q.queue.pending()[1].order_ps == 11 * period_ps);
+  CHECK(seqs_of(q.queue) == std::vector<std::uint64_t>{first, second});
+}
+
+TEST_CASE("a time event due at the largest picosecond is on its boundary after a rate change")
+{
+  keyed_queue q;
+  q.driver.advance({100});
+  q.clock.set_cpi(2.0);
+  constexpr auto last = std::numeric_limits<std::uint64_t>::max();
+  std::ignore         = q.queue.schedule_at(popcorn::vtime{last}, owner, 1, q.clock);
+  std::ignore         = q.queue.schedule_at(popcorn::vtime{last}, owner, 2, 1, q.clock);
+  REQUIRE(q.queue.pending().size() == 2);
+  CHECK(q.queue.pending()[0].order_ps == popcorn::core::at_boundary);
+  CHECK(q.queue.pending()[1].order_ps == popcorn::core::at_boundary);
+  q.clock.set_cpi(1.0);
+  CHECK(q.queue.pending()[0].order_ps == popcorn::core::at_boundary);
+}
+
+TEST_CASE("at a core clock with a fractional period the last picosecond of a count is its boundary")
+{
+  popcorn::core::clock        clock{3'000'000};
+  popcorn::core::clock_driver driver{clock};
+  popcorn::core::scheduler    queue;
+  constexpr std::uint64_t     boundary = 3'333'333;
+  std::ignore = queue.schedule_at(popcorn::vtime{boundary}, owner, 1, clock);
+  std::ignore = queue.schedule_at(popcorn::vtime{boundary - 1}, owner, 2, clock);
+  std::ignore = queue.schedule_at(popcorn::vtime{boundary + 1}, owner, 3, clock);
+  REQUIRE(queue.pending().size() == 3);
+  auto const find = [&](std::uint64_t payload) -> popcorn::core::event const& {
+    return *std::ranges::find(queue.pending(), payload, &popcorn::core::event::payload);
+  };
+  CHECK(find(1).at.value == 10);
+  CHECK(find(1).order_ps == popcorn::core::at_boundary);
+  CHECK(find(2).at.value == 10);
+  CHECK(find(2).order_ps == boundary - 1);
+  CHECK(find(3).at.value == 11);
+  CHECK(find(3).order_ps == boundary + 1);
+}
+
+TEST_CASE("restore sorts the saved events by count, exact time, lane and seq")
+{
+  keyed_queue q;
+  std::ignore = q.queue.schedule_at(popcorn::vtime{10 * period_ps - 1}, owner, 1, q.clock);
+  std::ignore = q.queue.schedule_at(
+      popcorn::vtime{9 * period_ps + 1}, owner, 2, popcorn::core::host_lane, q.clock);
+  std::ignore = q.queue.schedule(popcorn::icount{10}, owner, 3);
+  std::ignore = q.queue.schedule_at(popcorn::vtime{9 * period_ps + 5}, owner, 4, 1, q.clock);
+  std::vector<popcorn::core::event> const sorted{
+      q.queue.pending().begin(), q.queue.pending().end()};
+  std::vector<popcorn::core::event> const reversed{sorted.rbegin(), sorted.rend()};
+  popcorn::core::scheduler                restored;
+  restored.restore(reversed, q.queue.next_seq(), q.queue.next_lane_seq());
+  CHECK(std::ranges::equal(restored.pending(), sorted));
+  std::vector<std::uint64_t> payloads;
+  for(auto const& one : sorted)
+  {
+    payloads.push_back(one.payload);
+  }
+  CHECK(payloads == std::vector<std::uint64_t>{2, 4, 1, 3});
 }

@@ -42,12 +42,17 @@ enum class[[= reflex::derive{reflex::Format}]] deadline
   time,
 };
 
+/** @brief event::order_ps of an event due on the instruction boundary of its count, behind every
+ * event due earlier inside that instruction. */
+inline constexpr std::uint64_t at_boundary = std::numeric_limits<std::uint64_t>::max();
+
 /** @brief Event in the queue, plain data so a snapshot copies it as is. */
 struct event
 {
   /** @brief Instruction count at which the event is due. */
   icount at;
-  /** @brief Sequence number from schedule(), orders events due at the same count. */
+  /** @brief Sequence number from schedule(), orders events due at the same count, time and
+   * lane. */
   std::uint64_t seq;
   /** @brief Owner and kind. */
   event_id id;
@@ -60,9 +65,15 @@ struct event
   deadline kind{deadline::instructions};
   /** @brief Delivery lane, 0 for an event of this machine, 1 and up for an event delivered from
    * another machine, host_lane for one a host command scheduled. Events due at the same count
-   * fire by lane, then by seq. A lane event keeps its own count when its due time has already
-   * passed. */
+   * fire by order_ps, then by lane, then by seq. A lane event keeps its own count when its due
+   * time has already passed. */
   std::uint32_t lane{};
+  /** @brief Time key among the events due at the same count: due_ps for a deadline::time event
+   * due before the instruction boundary of at, at_boundary for an event due on that boundary,
+   * an instruction one and a schedule_unnumbered() one. So an event due earlier inside one
+   * instruction fires first, whatever its lane and seq. Set by the scheduler at every schedule
+   * and rekey. */
+  std::uint64_t order_ps{at_boundary};
 
   /** @brief Member-wise equality. */
   friend auto operator==(event const&, event const&) -> bool = default;
@@ -71,7 +82,8 @@ struct event
 /**
  * @brief Lane of events a host command schedules at an exact virtual time, such as a bus hold
  *        posted from Python. Above every link lane, so such an event fires after the local and
- *        link events due at the same count, whatever boundary the command ran at.
+ *        link events due at the same count and the same time, whatever boundary the command
+ *        ran at, and in time order with the events due at other times of that count.
  */
 inline constexpr std::uint32_t host_lane = std::numeric_limits<std::uint32_t>::max();
 
@@ -86,9 +98,11 @@ static_assert(std::is_trivially_copyable_v<event_id>);
 static_assert(std::is_trivially_copyable_v<event>);
 
 /**
- * @brief Event queue of a machine, ordered by due count, then lane, then sequence number. Holds no
- *        callables: the run loop pops due events and dispatches each to its owner model.
- *        Neither copyable nor movable: event ports hold references to it.
+ * @brief Event queue of a machine, ordered by due count, then event::order_ps, then lane, then
+ *        sequence number. Events due inside one instruction fire in the order of their exact
+ *        times, events due at one time by lane, then in posting order. Holds no callables: the
+ *        run loop pops due events and dispatches each to its owner model. Neither copyable nor
+ *        movable: event ports hold references to it.
  */
 class POPCORN_API scheduler
 {

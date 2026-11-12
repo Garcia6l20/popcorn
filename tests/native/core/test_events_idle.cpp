@@ -1086,7 +1086,7 @@ TEST_CASE("a rate change in the held block gives the same order to early and lat
       {
         order.push_back(one.payload);
       }
-      CHECK(order == std::vector<std::uint64_t>{1, 2, 50});
+      CHECK(order == std::vector<std::uint64_t>{1, 50, 2});
     }
   }
 }

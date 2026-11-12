@@ -55,8 +55,9 @@ was answered.
 - A stamp a device or a timer set is exact at any block shape. A register access stamps at the end of
   its block: `on_error`, a rising `on_rts`, and a frame the firmware started, whose end counts from
   its store.
-- At one instruction count, lane then post order decide, the frame hooks ahead of `on_rts` and
-  `on_error`, and a hook's `at` is held at the last stamp, so `time()` never goes back.
+- At one instruction count hooks run in stamp order. At one stamp, lane then post order decide, the
+  frame hooks ahead of `on_rts` and `on_error`. A hook's `at` is held at the last stamp, so `time()`
+  never goes back.
 - A frame keeps its place on the time line. When the dispatch lag passes a frame time, two frames can
   land on one block boundary. A firmware polling slower than the frame rate overruns as on silicon.
   A straight-line block shorter than one frame time keeps the frames apart: that holds up to 160

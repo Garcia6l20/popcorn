@@ -44,10 +44,14 @@ the skips.
 
 ## Events
 
-Models schedule events on the scheduler. It orders them by due count, then lane, then sequence
-number. A deadline counts either executed instructions or virtual time. The loop dispatches
-every event due at the current count before it runs the engine, and it never runs the engine
-past the earliest pending deadline.
+Models schedule events on the scheduler. It orders them by due count, then by exact due time,
+then lane, then sequence number. Events due inside one instruction fire in time order, whatever
+their lane, so a host or link event due earlier in the instruction fires before a local one due
+later. An instruction-counted event and a time event due on the instruction boundary share the
+boundary's time and keep lane and posting order. The machine's loop event stays behind every
+other event of its count. A deadline counts either executed instructions or virtual time. The
+loop dispatches every event due at the current count before it runs the engine, and it never
+runs the engine past the earliest pending deadline.
 
 ## One turn of the loop
 

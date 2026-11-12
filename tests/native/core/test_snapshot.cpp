@@ -207,10 +207,13 @@ TEST_CASE("the clock hold survives the saved form")
 
 TEST_CASE("time-keyed events survive the saved form")
 {
-  auto data                          = filled();
-  data.events.pending.front().kind   = core::deadline::time;
-  data.events.pending.front().due_ps = 123'456'789;
-  CHECK(core::decode_snapshot(core::encode_snapshot(data)) == data);
+  auto data                            = filled();
+  data.events.pending.front().kind     = core::deadline::time;
+  data.events.pending.front().due_ps   = 123'456'789;
+  data.events.pending.front().order_ps = 123'456'789;
+  auto const back                      = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.events.pending.front().order_ps == 123'456'789);
+  CHECK(back == data);
 }
 
 TEST_CASE("a snapshot read back from bytes has no engine context")
