@@ -300,7 +300,7 @@ def test_an_image_file_gives_the_first_contents(tmp_path: Path) -> None:
         (lambda: At25sf(page_program=ps(1500)), "^page_program:"),
         (lambda: At25sf(reset=ns(-1)), "^reset:"),
         (lambda: Eeprom24xx(write_cycle=ps(1)), "^write_cycle:"),
-        (lambda: Eeprom24xx(0x07), "I2C target address"),
+        (lambda: Eeprom24xx(0x00), "I2C target address"),
         (lambda: Eeprom24xx(page_size=3), "^page_size:"),
         (lambda: Eeprom24xx(address_bytes=3), "^address_bytes:"),
         (lambda: Eeprom24xx(size=100), "^size:"),
