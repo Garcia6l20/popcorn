@@ -42,8 +42,16 @@ def cached_description(
     cubemx_db: Path | None = None,
     cmsis_header: Path | None = None,
 ) -> Path:
-    """Path of the cached JSON description of @p part, built on a miss."""
-    sources = find_sources(part, core=core, svd=svd, cubemx_db=cubemx_db, cmsis_header=cmsis_header)
+    """Path of the cached JSON description of @p part, built on a miss. MissingSource when no
+    CMSIS device header is found, as `ship` refuses a description without its IRQ names."""
+    sources = find_sources(
+        part,
+        core=core,
+        svd=svd,
+        cubemx_db=cubemx_db,
+        cmsis_header=cmsis_header,
+        require_cmsis_header=True,
+    )
     digests = compute_source_digests(sources)
     generator = generator_string()
     key = cache_key(sources.part, core, generator, digests)

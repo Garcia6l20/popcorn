@@ -64,8 +64,9 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v popcorn-cache:/cac
     ghcr.io/garcia6l20/popcorn:main pytest
 ```
 
-`POPCORN_CMSIS_DEVICE_DIRS` names the directories that hold the `stm32<family>xx.h` headers and is
-optional. A directory of prebuilt `<RefName>.json` descriptions needs no ST installation:
+`POPCORN_CMSIS_DEVICE_DIRS` names the directories that hold the `stm32<family>xx.h` headers. A
+local build reads the header from it or from `~/STM32Cube/Repository`, and raises `MissingSource`
+when it finds none. A directory of prebuilt `<RefName>.json` descriptions needs no ST installation:
 
 ```sh
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \

@@ -37,7 +37,8 @@ The modules are in `python/popcorn/stm32/description`:
   is no part name. It resolves as `STM32L151C6Tx`, `STM32L151C8Tx` and `STM32L151CBTx`, each with
   its own flash and RAM size. A local build takes the rzone file of the db when it has one for
   the part and the packaged rzone facts file otherwise. The CMSIS header is `<line>xx.h`, or
-  `<line><suffix>.h` for a part whose patch sets `[cmsis] suffix`.
+  `<line><suffix>.h` for a part whose patch sets `[cmsis] suffix`. `cached_description` raises
+  `MissingSource` naming the header and the directories searched when none is found.
 - `_svd.py` expands an SVD: `derivedFrom`, `dim`, clusters and property inheritance. It is a
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance

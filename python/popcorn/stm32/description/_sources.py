@@ -228,25 +228,47 @@ def _svd_exception(
     return None
 
 
-def _cmsis_header_path(refname: str, search: SearchPaths, suffix: str | None = None) -> Path | None:
-    stem = f"{line_name(refname).removesuffix('xx').lower()}{suffix or 'xx'}.h"
+def _cmsis_stem(refname: str, suffix: str | None) -> str:
+    return f"{line_name(refname).removesuffix('xx').lower()}{suffix or 'xx'}.h"
+
+
+def _cmsis_candidates(refname: str, search: SearchPaths, stem: str) -> list[Path]:
     if search.cmsis_device_dirs is not None:
-        for device_dir in search.cmsis_device_dirs:
-            candidate = device_dir / stem
-            if candidate.is_file():
-                return candidate
-        return None
+        return [device_dir / stem for device_dir in search.cmsis_device_dirs]
     if len(refname) < 7:
-        return None
+        return []
     family = refname[5:7]
     repo = Path("~/STM32Cube/Repository").expanduser()
-    for fw_dir in sorted(repo.glob(f"STM32Cube_FW_{family}_V*"), key=_version_key, reverse=True):
-        candidate = (
-            fw_dir / "Drivers" / "CMSIS" / "Device" / "ST" / f"STM32{family}xx" / "Include" / stem
-        )
+    return [
+        fw_dir / "Drivers" / "CMSIS" / "Device" / "ST" / f"STM32{family}xx" / "Include" / stem
+        for fw_dir in sorted(repo.glob(f"STM32Cube_FW_{family}_V*"), key=_version_key, reverse=True)
+    ]
+
+
+def _cmsis_header_path(refname: str, search: SearchPaths, suffix: str | None = None) -> Path | None:
+    stem = _cmsis_stem(refname, suffix)
+    for candidate in _cmsis_candidates(refname, search, stem):
         if candidate.is_file():
             return candidate
     return None
+
+
+def _missing_cmsis_header(refname: str, search: SearchPaths, suffix: str | None) -> MissingSource:
+    stem = _cmsis_stem(refname, suffix)
+    tried = [candidate.parent for candidate in _cmsis_candidates(refname, search, stem)]
+    repository = Path("~/STM32Cube/Repository").expanduser()
+    where = ", ".join(str(directory) for directory in tried)
+    if not tried:
+        where = (
+            f"no directory, {repository} holds no STM32Cube_FW_<family>_V*,"
+            " set POPCORN_CMSIS_DEVICE_DIRS"
+        )
+    return MissingSource(
+        refname,
+        "cmsis_header",
+        f"the CMSIS device header {stem} for the IRQ names, searched {where}",
+        path=tried[0] if tried else repository,
+    )
 
 
 def _require(
@@ -465,6 +487,7 @@ def find_sources(
     cubemx_db: Path | None = None,
     cmsis_header: Path | None = None,
     search: SearchPaths | None = None,
+    require_cmsis_header: bool = False,
 ) -> Sources:
     """Sources of @p part: db files by exact db lookup, the rzone file of the db or, when the db
     has none for the part, the packaged rzone facts file (`Sources.rzone_facts`), SVD by
@@ -474,9 +497,10 @@ def find_sources(
     whose [match] selects this part and the resolved SVD file name, the GPIO modes file of the
     part's GPIO IP version when it exists, None otherwise, and the die_ip_sources donors.
     MissingSource, a MissingInput and a DescriptionError, naming the path when a required source
-    does not exist: no CubeMX db, no existing SVD directory, an absent db or SVD file, an absent
-    rzone file with no packaged facts file, whose path it names. DescriptionError for an unknown
-    part in an existing db, or a source that exists but is not a file."""
+    does not exist: no CMSIS header with @p require_cmsis_header, naming the header and the
+    directories searched, no CubeMX db, no existing SVD directory, an absent db or SVD file, an
+    absent rzone file with no packaged facts file, whose path it names. DescriptionError for an
+    unknown part in an existing db, or a source that exists but is not a file."""
     search = search or default_search_paths()
     db_dir = cubemx_db or search.cubemx_db
     if absent(db_dir / "mcu"):
@@ -514,6 +538,8 @@ def find_sources(
     cmsis_header_path = (
         cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search, suffix)
     )
+    if cmsis_header_path is None and require_cmsis_header:
+        raise _missing_cmsis_header(refname, search, suffix)
 
     return Sources(
         part=refname,

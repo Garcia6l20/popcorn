@@ -66,8 +66,9 @@ under `$XDG_CACHE_HOME/popcorn/mcu`. It reads:
 - the CubeMX database, from `~/STM32CubeMX/db` or `POPCORN_CUBEMX_DB`.
 - the SVD, from STM32CubeCLT or STM32CubeIDE under `~/st`, or from `POPCORN_STM32_SVD_DIRS`, a
   `:`-separated list.
-- optionally, the CMSIS device header, from `~/STM32Cube/Repository/STM32Cube_FW_<family>_V*` or
-  `POPCORN_CMSIS_DEVICE_DIRS`, for the CMSIS interrupt names.
+- the CMSIS device header, from `~/STM32Cube/Repository/STM32Cube_FW_<family>_V*` or
+  `POPCORN_CMSIS_DEVICE_DIRS`, for the CMSIS interrupt names. Without it the build raises
+  `MissingSource` naming the header and the directories searched.
 
 `mcu()` takes the first of these sources:
 
