@@ -65,8 +65,7 @@ struct table_target::impl
   }
 };
 
-table_target::table_target(table_target_options options)
-    : impl_{std::make_unique<impl>(std::move(options))}
+table_target::table_target(table_target_options options) : impl_{std::in_place, std::move(options)}
 {}
 
 table_target::~table_target() = default;

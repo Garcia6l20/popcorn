@@ -12,6 +12,7 @@
 #include <format>
 #include <fstream>
 #include <initializer_list>
+#include <type_traits>
 #include <vector>
 
 #include <unistd.h>
@@ -21,6 +22,11 @@ namespace
 namespace devices = popcorn::periph::devices;
 using popcorn::reset_kind;
 using popcorn::vtime;
+
+static_assert(not std::is_copy_constructible_v<devices::eeprom_24xx>);
+static_assert(not std::is_move_constructible_v<devices::eeprom_24xx>);
+static_assert(not std::is_copy_constructible_v<devices::table_target>);
+static_assert(not std::is_move_constructible_v<devices::table_target>);
 
 constexpr std::uint64_t us = 1'000'000;
 constexpr std::uint64_t ms = 1'000 * us;

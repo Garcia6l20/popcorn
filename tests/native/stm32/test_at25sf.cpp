@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,6 +22,9 @@ namespace
 namespace devices = popcorn::periph::devices;
 using popcorn::reset_kind;
 using popcorn::vtime;
+
+static_assert(not std::is_copy_constructible_v<devices::at25sf>);
+static_assert(not std::is_move_constructible_v<devices::at25sf>);
 
 constexpr std::uint64_t us = 1'000'000;
 constexpr std::uint64_t ms = 1'000 * us;

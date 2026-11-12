@@ -151,6 +151,6 @@ public:
 
 private:
   struct POPCORN_HIDDEN impl;
-  std::unique_ptr<impl> impl_;
+  std::indirect<impl>   impl_;
 };
 }

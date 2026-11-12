@@ -139,8 +139,7 @@ struct eeprom_24xx::impl
   }
 };
 
-eeprom_24xx::eeprom_24xx(eeprom_24xx_options options)
-    : impl_{std::make_unique<impl>(std::move(options))}
+eeprom_24xx::eeprom_24xx(eeprom_24xx_options options) : impl_{std::in_place, std::move(options)}
 {}
 
 eeprom_24xx::~eeprom_24xx() = default;

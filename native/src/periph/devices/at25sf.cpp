@@ -441,7 +441,7 @@ struct at25sf::impl
   }
 };
 
-at25sf::at25sf(at25sf_options options) : impl_{std::make_unique<impl>(std::move(options))}
+at25sf::at25sf(at25sf_options options) : impl_{std::in_place, std::move(options)}
 {}
 
 at25sf::~at25sf() = default;
