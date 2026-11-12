@@ -2150,7 +2150,8 @@ struct target_rig
   explicit target_rig(
       target_part const& which      = target_parts[0],
       bool               strict     = false,
-      bool               controlled = true)
+      bool               controlled = true,
+      double             cpi        = 1.0)
       : part{which}
   {
     if(controlled)
@@ -2158,6 +2159,7 @@ struct target_rig
       board.i2c_controllers["I2C1"] = sink;
     }
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.strict_peripherals = strict;
     options.models             = stm32::factories(board, part.desc());
     f    = std::make_unique<stm32_fixture>(part.desc(), part.firmware, std::move(options));
@@ -4667,10 +4669,11 @@ struct timer_rig
   std::vector<core::log_record>  logged;
   core::hook_handle              logs;
 
-  explicit timer_rig(target_part const& which, bool strict = false) : part{which}
+  explicit timer_rig(target_part const& which, bool strict = false, double cpi = 1.0) : part{which}
   {
     board.i2c["I2C1"]          = {faulty};
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.strict_peripherals = strict;
     options.models             = stm32::factories(board, part.desc());
     f    = std::make_unique<stm32_fixture>(part.desc(), part.firmware, std::move(options));
@@ -8104,4 +8107,86 @@ TEST_CASE("a target that throws from stop still starts the START queued behind t
       std::runtime_error);
   b.run_until(b.now() + 300 * us);
   CHECK(b.f.field("I2C1", "ISR", "BUSY") == 1);
+}
+
+TEST_CASE(
+    "the STOP after a timeout leaves one kernel period after the expiry instant, not after the end "
+    "of the instruction that holds it, at cpi 1 to 4")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(double const cpi : {1.0, 2.0, 3.0, 4.0})
+    {
+      CAPTURE(cpi);
+      timer_rig  r{part, false, cpi};
+      auto const b = r.b();
+      r.timeout(timoutens);
+      b.command(0x33, 2, false, true);
+      r.run_until(r.now() + 20 * r.period());
+      auto const due = timeout_events(*r.f);
+      REQUIRE(due.size() == 1);
+      r.run_until(due[0] + 10 * r.period());
+      auto const& events = r.faulty->events;
+      REQUIRE_FALSE(events.empty());
+      REQUIRE(events.back().kind == 'P');
+      CHECK(events.back().at == due[0] + r.period());
+    }
+  }
+}
+
+TEST_CASE(
+    "a START the firmware requested during a peer transfer begins at the instant of the peer STOP, "
+    "not at the end of the instruction that holds it, at cpi 1 to 4")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(double const cpi : {1.0, 2.0, 3.0, 4.0})
+    {
+      CAPTURE(cpi);
+      target_rig r{part, false, true, cpi};
+      auto const b = r.b();
+      r.listen();
+      write_timing(b);
+      auto const base = r.now() + us;
+      auto const stop = base + target_ps + 20 * us + 137;
+      r.start(own, false, base, 1);
+      r.stop(stop, 2);
+      r.run_until(base + target_ps + 5 * us);
+      b.command(0x38, 0, false, true);
+      r.run_until(stop + 3 * us);
+      auto const due = due_of_kind(*r.f, "I2C1", 0);
+      REQUIRE(due.has_value());
+      CHECK(
+          *due - stop == (part.name == std::string_view{"STM32U575"} ? 25 * us : 3125 * us / 1000));
+    }
+  }
+}
+
+TEST_CASE(
+    "a target stretching the address phase past the SCL low timeout answers its peer at the expiry "
+    "instant, not at the end of the instruction that holds it, at cpi 1 to 4")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(double const cpi : {1.0, 2.0, 3.0, 4.0})
+    {
+      CAPTURE(cpi);
+      target_rig r{part, false, true, cpi};
+      auto const b = r.b();
+      r.listen(own, true);
+      write_timing(b);
+      b.write(b.at("I2C1", "TIMEOUTR"), timoutens);
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.run_until(base + target_ps + 5 * us);
+      auto const due = timeout_events(*r.f);
+      REQUIRE(due.size() == 1);
+      r.run_until(due[0] + 20 * us);
+      REQUIRE(r.sink->answers.size() == 1);
+      CHECK(r.sink->answers[0].at == due[0]);
+    }
+  }
 }

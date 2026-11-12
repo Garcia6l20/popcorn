@@ -618,13 +618,16 @@ private:
   void               load_point();
   void               ask_transmit();
   void               resume_read();
-  void               begin_read(i2c_port_entry& entry, std::uint8_t byte);
+  void               begin_read(
+      i2c_port_entry&              entry,
+      std::uint8_t                 byte,
+      std::optional<std::uint64_t> at = std::nullopt);
   void               target_reload();
   [[nodiscard]] auto held_entry(std::uint8_t phase) -> i2c_port_entry*;
-  void               release(i2c_port_entry& entry, bool ack);
-  void               port_stopped(i2c_port_entry const& entry);
-  void               target_transfer_ended(std::uint64_t at_ps);
-  auto               link_of(this auto& self, i2c_link_target const& target) -> auto&;
+  void release(i2c_port_entry& entry, bool ack, std::optional<std::uint64_t> at = std::nullopt);
+  void port_stopped(i2c_port_entry const& entry);
+  void target_transfer_ended(std::uint64_t at_ps);
+  auto link_of(this auto& self, i2c_link_target const& target) -> auto&;
   [[nodiscard]] auto matches(std::uint8_t address, bool read) const -> bool;
   void               warn_target_unsupported();
   [[nodiscard]] auto cycles_ps(std::uint64_t cycles) const -> std::optional<std::uint64_t>;
@@ -2236,10 +2239,10 @@ auto i2c::read_ended(i2c_port_entry const& entry) -> i2c_answer
   return {.ack = ack, .byte = entry.data};
 }
 
-void i2c::begin_read(i2c_port_entry& entry, std::uint8_t byte)
+void i2c::begin_read(i2c_port_entry& entry, std::uint8_t byte, std::optional<std::uint64_t> at)
 {
   stretch_ended(entry.due_ps);
-  auto const now  = ctx_.clock.time().ps;
+  auto const now  = at.value_or(ctx_.clock.time().ps);
   entry.kind      = entry_ending;
   entry.data      = byte;
   entry.due_ps    = now + entry.phase_ps;
@@ -2285,10 +2288,10 @@ auto i2c::held_entry(std::uint8_t phase) -> i2c_port_entry*
   return found != state_.port.entries.end() ? &*found : nullptr;
 }
 
-void i2c::release(i2c_port_entry& entry, bool ack)
+void i2c::release(i2c_port_entry& entry, bool ack, std::optional<std::uint64_t> at)
 {
   stretch_ended(entry.due_ps);
-  auto const now  = ctx_.clock.time().ps;
+  auto const now  = at.value_or(ctx_.clock.time().ps);
   entry.kind      = entry_released;
   entry.ack       = ack ? 1 : 0;
   entry.due_ps    = now;
@@ -2383,7 +2386,7 @@ void i2c::target_transfer_ended(std::uint64_t at_ps)
   state_.timer.released_ps.reset();
   if(waited and enabled() and step() == phase::idle and get(regs_, start_) != 0 and not held())
   {
-    begin_start(ctx_.clock.time().ps);
+    begin_start(at_ps);
   }
 }
 
@@ -2817,7 +2820,7 @@ void i2c::timed_out()
   {
     if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::address)))
     {
-      release(*held, true);
+      release(*held, true, due->at);
     }
     if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::write)))
     {
@@ -2843,7 +2846,8 @@ void i2c::timed_out()
   }
   else
   {
-    stop_on_timeout(timer.low_end_ps ? std::max(now, *timer.low_end_ps) : released());
+    stop_on_timeout(
+        timer.low_end_ps ? std::max(due->at, *timer.low_end_ps) : std::max(due->at, state_.end_ps));
   }
   timer.low_ps.reset();
   timer.low_end_ps.reset();

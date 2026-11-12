@@ -1180,13 +1180,18 @@ struct port_rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit port_rig(bool controlled = true, bool strict = false, std::string_view entry = "idle")
+  explicit port_rig(
+      bool             controlled = true,
+      bool             strict     = false,
+      std::string_view entry      = "idle",
+      double           cpi        = 1.0)
   {
     if(controlled)
     {
       board.i2c_controllers["I2C1"] = sink;
     }
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.models             = stm32::factories(board, l152re());
     options.strict_peripherals = strict;
     options.models.insert_or_assign(
@@ -4165,4 +4170,40 @@ TEST_CASE("a target that throws from stop still starts the START queued behind t
   run_throws(r, r.now_ps() + phase(4));
   r.idle_to(r.now_ps() + phase(2));
   CHECK((r.read(i2c1 + sr1) & 1u) != 0);
+}
+
+TEST_CASE(
+    "a START the firmware set during a port transfer begins at the instant of the port STOP, not "
+    "at the end of the instruction that holds it, at cpi 1 to 4")
+{
+  for(double const cpi : {1.0, 2.0, 3.0, 4.0})
+  {
+    CAPTURE(cpi);
+    port_rig const r{true, false, "idle", cpi};
+    r.write(i2c1 + ccr, 10);
+    r.write(i2c1 + trise, 3);
+    r.listen();
+    auto const t0 = r.now();
+    r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+    r.start(own + 1, false, t0 + us, 1);
+    auto const peer_stop = t0 + target_ps + 2 * us + 137;
+    r.stop(peer_stop, 2);
+    r.run_until(t0 + phase(1) + us);
+    r.cpu_write(i2c1 + cr1, pe | ack_bit | stop | start);
+    r.run_until(peer_stop + us / 4);
+    auto const& units = r.f->target->description().peripherals;
+    auto const  found =
+        std::ranges::find(units, std::string_view{"I2C1"}, &popcorn::peripheral_desc::name);
+    REQUIRE(found != units.end());
+    auto const                 owner = static_cast<std::uint32_t>(found - units.begin());
+    std::vector<std::uint64_t> dues;
+    for(auto const& event : r.f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner)
+      {
+        dues.push_back(event.due_ps);
+      }
+    }
+    CHECK(dues == std::vector<std::uint64_t>{peer_stop + phase(1)});
+  }
 }

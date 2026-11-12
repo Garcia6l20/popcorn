@@ -494,23 +494,23 @@ private:
   [[nodiscard]] auto length_ps(std::uint32_t periods) -> std::optional<std::uint64_t>;
   [[nodiscard]] auto power_on_offset() const -> std::uint64_t;
   [[nodiscard]] auto ticket_of(std::size_t index) const -> std::uint64_t;
-  void               begin(wire next, std::uint32_t periods);
-  void               begin_start();
-  void               check_timing();
-  void               check_unmodelled();
-  void               note(std::uint8_t warning, std::string_view reg, std::string message);
-  void               unmodelled(bool& logged, std::string_view name, std::string_view what);
-  void               phase_ended();
-  void               start_ended();
-  void               address_ended();
-  void               data_ended();
-  void               stop_ended();
-  void               receive_ended();
-  void               acknowledge_ended();
-  void               address_cleared();
-  void               data_written();
-  void               received_taken();
-  void               shift_out(std::uint8_t byte);
+  void begin(wire next, std::uint32_t periods, std::optional<std::uint64_t> at = std::nullopt);
+  void begin_start(std::optional<std::uint64_t> at = std::nullopt);
+  void check_timing();
+  void check_unmodelled();
+  void note(std::uint8_t warning, std::string_view reg, std::string message);
+  void unmodelled(bool& logged, std::string_view name, std::string_view what);
+  void phase_ended();
+  void start_ended();
+  void address_ended();
+  void data_ended();
+  void stop_ended();
+  void receive_ended();
+  void acknowledge_ended();
+  void address_cleared();
+  void data_written();
+  void received_taken();
+  void shift_out(std::uint8_t byte);
   [[nodiscard]] auto receiving() const -> bool;
   [[nodiscard]] auto stretchless() const -> bool;
   [[nodiscard]] auto pending_condition() -> bool;
@@ -544,7 +544,7 @@ private:
   [[nodiscard]] auto held_entry() -> i2c_port_entry*;
   void               release(i2c_port_entry& entry, bool ack);
   void               release_held();
-  void               target_ended();
+  void               target_ended(std::uint64_t at_ps);
   void               port_stopped(i2c_port_entry const& entry);
   void               rearm_port(i2c_port port, std::optional<reset_kind> kind);
   void               flags();
@@ -810,26 +810,26 @@ void i2c_l1::check_unmodelled()
   }
 }
 
-void i2c_l1::begin(wire next, std::uint32_t periods)
+void i2c_l1::begin(wire next, std::uint32_t periods, std::optional<std::uint64_t> at)
 {
   auto const ps = length_ps(periods);
   if(not ps)
   {
     return;
   }
-  auto const now      = ending_ ? state_.phase_end_ps : ctx_.clock.time().ps;
+  auto const now      = at ? *at : ending_ ? state_.phase_end_ps : ctx_.clock.time().ps;
   auto const from     = std::max(now, state_.released_ps);
   state_.phase        = static_cast<std::uint8_t>(next);
   state_.phase_end_ps = from + *ps;
   ctx_.events.schedule_at(vtime{state_.phase_end_ps}, phase_done, ++state_.generation, ctx_.clock);
 }
 
-void i2c_l1::begin_start()
+void i2c_l1::begin_start(std::optional<std::uint64_t> at)
 {
   check_unmodelled();
   check_timing();
   update(regs_, busy_, 1);
-  begin(wire::start, 1);
+  begin(wire::start, 1, at);
 }
 
 auto i2c_l1::pending_condition() -> bool
@@ -1847,7 +1847,7 @@ void i2c_l1::port_stopped(i2c_port_entry const& entry)
   {
     update(regs_, bus_error_, 1);
   }
-  target_ended();
+  target_ended(entry.due_ps);
   std::ranges::sort(reports);
   flags();
   for(auto const& [unit, phase] : reports)
@@ -1856,7 +1856,7 @@ void i2c_l1::port_stopped(i2c_port_entry const& entry)
   }
 }
 
-void i2c_l1::target_ended()
+void i2c_l1::target_ended(std::uint64_t at_ps)
 {
   auto const waited = state_.wire_busy != 0;
   if(state_.addressed != 0 or state_.last_ack != 0)
@@ -1889,7 +1889,7 @@ void i2c_l1::target_ended()
      and step() == wire::idle
      and not controlling())
   {
-    begin_start();
+    begin_start(at_ps);
   }
 }
 
