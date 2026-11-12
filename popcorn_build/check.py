@@ -54,6 +54,8 @@ def _xdist(jobs: int) -> list[str]:
 def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only.
 
+    The docs stage builds `site/` before the pytest stage, whose `tests/docs` read it.
+
     The build stages set the test and example switches ON: a package build persists them OFF in
     the same build directory. @p jobs sets the job count of every parallel stage, build, native
     tests, pytest, examples and the example collection, `DEFAULT_JOBS` when None. 1 runs the tests
@@ -76,6 +78,7 @@ def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list
     return [
         ("build", _pcons("-B", "build", *_pcons_jobs(jobs), *GATE_VARIABLES)),
         ("test", _pcons("-B", "build", "test", *_pcons_jobs(jobs), *native_stop)),
+        ("docs", _python_tool("popcorn_build.docs")),
         (
             "pytest",
             _python_tool("pytest", "-q", *pytest_stop, *_xdist(jobs), "tests/python", "tests/docs"),
@@ -89,7 +92,6 @@ def stages(asan: bool, jobs: int | None = None, fail_fast: bool = False) -> list
             "examples-parts",
             _python_tool("popcorn_build.example_runs", "parts", "--jobs", str(jobs), *runs_stop),
         ),
-        ("docs", _python_tool("popcorn_build.docs")),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),

@@ -61,3 +61,12 @@ def test_the_gate_of_record_runs_every_test(asan: bool) -> None:
     for _, command in stages(asan):
         assert "-x" not in command
         assert "--stop-on-fail" not in command
+
+
+def test_the_docs_stage_builds_the_site_before_the_pytest_stage_that_tests_it() -> None:
+    names = [name for name, _ in stages(False)]
+    assert names.index("docs") < names.index("pytest")
+
+
+def test_the_asan_gate_has_no_docs_stage() -> None:
+    assert [name for name, _ in stages(True)] == ["build", "test"]

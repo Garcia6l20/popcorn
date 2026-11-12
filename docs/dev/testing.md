@@ -147,13 +147,14 @@ file and run only the test that should catch it. Python tests import the package
 
 ## The check command
 
-`uv run pcons run check` is the whole gate, in this order: build, native tests, pytest on
-`tests/python` and `tests/docs`, the examples together, a collect-only pass over each example
-directory in its own process, one run per extra part of `popcorn_build/example_parts.py` over
-the examples that list it, where each example directory needs a test that ran on the part, the
-docs stage, pyright, ruff, black, clang-format and the layering check. It stops at the first
-failing stage. Every parallel stage runs 8 jobs. `-j N` sets that count and `-j 1` runs the
-tests serially. `--asan` runs the native suite in the asan variant only.
+`uv run pcons run check` is the whole gate, in this order: build, native tests, the docs stage,
+pytest on `tests/python` and `tests/docs`, the examples together, a collect-only pass over each
+example directory in its own process, one run per extra part of
+`popcorn_build/example_parts.py` over the examples that list it, where each example directory
+needs a test that ran on the part, pyright, ruff, black, clang-format and the layering check. The
+docs stage comes before pytest because the site icon case in `tests/docs` reads the built site.
+It stops at the first failing stage. Every parallel stage runs 8 jobs. `-j N` sets that count
+and `-j 1` runs the tests serially. `--asan` runs the native suite in the asan variant only.
 `--fail-fast` stops each test stage at its first failing test, through `--stop-on-fail` for the
 native suite, `-x` for pytest and the example runs. The example run stages also start no run after
 the first failure. Use it while iterating. The gate of record runs without it and reports every
