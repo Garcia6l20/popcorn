@@ -8,6 +8,7 @@ default ramp, so the tests check the same words, timing, samples and framing.
 """
 
 import itertools
+import struct
 from collections.abc import Callable, Iterator
 from typing import Protocol, cast, runtime_checkable
 
@@ -17,6 +18,7 @@ from popcorn import (
     ConfigError,
     Machine,
     MachineDescription,
+    ResetKind,
     Return,
     Snapshot,
     StopReason,
@@ -77,22 +79,21 @@ def framing(device: Framing) -> tuple[int, int, int]:
     return device.selects, device.deselects, device.bad_frames
 
 
-def short_model_state(saved: bytes, owner: str) -> bytes:
-    """`saved` with the last byte of the model state of `owner` dropped, as a corrupt file holds
-    it, every enclosing BSON length adjusted so that only the model sees the damage."""
-    data = bytearray(saved)
+def locate_model_state(data: bytes | bytearray, owner: str) -> tuple[int, int, tuple[int, ...]]:
+    """The offset and size of the model state of `owner` in the BSON `data`, and the offsets of
+    every enclosing document and of its binary element."""
 
     def length(at: int) -> int:
         return int.from_bytes(data[at : at + 4], "little")
 
-    def shorten(doc: int, parents: tuple[int, ...]) -> bool:
+    def find(doc: int, parents: tuple[int, ...]) -> tuple[int, int, tuple[int, ...]] | None:
         at, end, named = doc + 4, doc + length(doc), None
         while at < end - 1:
             kind, key_end = data[at], data.index(0, at + 1)
             key, at = data[at + 1 : key_end].decode(), key_end + 1
             if kind in (0x03, 0x04):
-                if shorten(at, (*parents, doc)):
-                    return True
+                if found := find(at, (*parents, doc)):
+                    return found
                 at += length(at)
             elif kind == 0x02:
                 if key == "owner":
@@ -101,17 +102,47 @@ def short_model_state(saved: bytes, owner: str) -> bytes:
             elif kind == 0x05:
                 size = length(at)
                 if key == "data" and named == owner:
-                    del data[at + 4 + size]
-                    for start in (*parents, doc, at):
-                        data[start : start + 4] = (length(start) - 1).to_bytes(4, "little")
-                    return True
+                    return at + 5, size, (*parents, doc, at)
                 at += 5 + size
             else:
                 at += BSON_FIXED_SIZES[kind]
-        return False
+        return None
 
-    assert shorten(0, ())
+    found = find(0, ())
+    assert found
+    return found
+
+
+def model_state(saved: bytes, owner: str) -> bytes:
+    """The model state bytes of `owner` in the snapshot `saved`."""
+    at, size, _ = locate_model_state(saved, owner)
+    return saved[at : at + size]
+
+
+def short_model_state(saved: bytes, owner: str) -> bytes:
+    """`saved` with the last byte of the model state of `owner` dropped, as a corrupt file holds
+    it, every enclosing BSON length adjusted so that only the model sees the damage."""
+    data = bytearray(saved)
+    at, size, starts = locate_model_state(data, owner)
+    del data[at + size - 1]
+    for start in starts:
+        data[start : start + 4] = (int.from_bytes(data[start : start + 4], "little") - 1).to_bytes(
+            4, "little"
+        )
     return bytes(data)
+
+
+def adc_cursor(machine: Machine) -> tuple[int, int]:
+    """The saved `frame` and `channel` of the ADC, the two words after its counters in the
+    state of SPI1, which holds the state of the devices attached to it."""
+    state = model_state(machine.snapshot().to_bytes(), "SPI1")
+    counters = struct.pack("<3I", *framing(adc(machine)))
+    at = state.find(counters)
+    assert at >= 0, f"counters {counters.hex()} not in the SPI1 state"
+    matches = state.count(counters)
+    assert matches == 1, f"counters {counters.hex()} found {matches} times in the SPI1 state"
+    frame, channel = struct.unpack_from("<2I", state, at + len(counters))
+    return frame, channel
 
 
 def adc_on(description: MachineDescription, cs: str) -> SpiTargetBase:
@@ -348,3 +379,29 @@ async def test_rngrst_resets_the_plugin_model_and_holds_its_writes(native_plugin
     assert not rng.held_in_reset
     rng.CR.write(1 << RNGEN_BIT)
     assert rng.CR.value == 1 << RNGEN_BIT
+
+
+async def test_a_brown_out_reset_clears_the_example_adc_frame_and_channel(
+    native_plugin: Machine,
+) -> None:
+    await run_to_adc_done(native_plugin)
+    assert 0 not in adc_cursor(native_plugin)
+    native_plugin.reset(ResetKind.BROWN_OUT)
+    assert adc_cursor(native_plugin) == (0, 0)
+
+
+async def test_a_power_on_reset_clears_the_example_adc_frame_and_channel(
+    native_plugin: Machine,
+) -> None:
+    await run_to_adc_done(native_plugin)
+    assert 0 not in adc_cursor(native_plugin)
+    native_plugin.reset(ResetKind.POWER_ON)
+    assert adc_cursor(native_plugin) == (0, 0)
+
+
+async def test_a_pin_reset_keeps_the_example_adc_frame_and_channel(native_plugin: Machine) -> None:
+    await run_to_adc_done(native_plugin)
+    before = adc_cursor(native_plugin)
+    assert 0 not in before
+    native_plugin.reset(ResetKind.PIN)
+    assert adc_cursor(native_plugin) == before
