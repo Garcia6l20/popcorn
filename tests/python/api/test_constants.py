@@ -176,7 +176,7 @@ def test_an_enum_parametrizes_at_collection_without_a_machine(
         def test_channel(channel):
             assert 0 <= channel <= 2
         """)
-    result = pytester.runpytest_inprocess("-q")
+    result = pytester.runpytest_inprocess("-q", "-o", "asyncio_default_fixture_loop_scope=function")
     result.assert_outcomes(passed=3)
 
 
