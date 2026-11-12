@@ -430,8 +430,13 @@ class Entry:
 
 def _write_atomic(path: Path, data: bytes) -> None:
     part = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    part.write_bytes(data)
-    part.replace(path)
+    try:
+        part.write_bytes(data)
+        part.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            part.unlink(missing_ok=True)
+        raise
 
 
 @contextlib.asynccontextmanager

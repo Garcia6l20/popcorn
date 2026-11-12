@@ -1,5 +1,6 @@
 """JSON cache of built PartDescriptions, keyed by part, core and the resolved sources' digests."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -68,6 +69,11 @@ def cached_description(
 
     cache_root.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp_path.write_text(text, encoding="utf-8")
-    os.replace(tmp_path, path)
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
     return path

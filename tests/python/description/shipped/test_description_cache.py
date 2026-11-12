@@ -1,4 +1,6 @@
 import json
+import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -175,3 +177,86 @@ def test_the_cache_key_and_the_dump_carry_the_models_schema_version() -> None:
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     assert cache_key("P", None, "g", {"a": "b"}) == hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _fail_after_a_partial_write(error: BaseException | type[BaseException]) -> Callable[..., int]:
+    def write_text(self: Path, data: str, *args: object, **kwargs: object) -> int:
+        self.write_bytes(data.encode()[:1])
+        raise error
+
+    return write_text
+
+
+def _fail_replace(error: BaseException | type[BaseException]) -> Callable[..., None]:
+    def replace(*args: object, **kwargs: object) -> None:
+        raise error
+
+    return replace
+
+
+def _stub_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    def build(sources: Sources) -> None:
+        return None
+
+    def check(*args: object, **kwargs: object) -> None:
+        return None
+
+    def dump(description: object) -> str:
+        return "{}"
+
+    monkeypatch.setattr("popcorn.stm32.description._cache.build_description", build)
+    monkeypatch.setattr("popcorn.stm32.description._cache.check_bounds", check)
+    monkeypatch.setattr("popcorn.stm32.description._cache.dump_json", dump)
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_a_failed_replace_leaves_no_tmp_file_in_the_description_cache(
+    u575_sources: Sources,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[BaseException],
+) -> None:
+    _stub_the_build(monkeypatch)
+    monkeypatch.setattr(os, "replace", _fail_replace(error))
+    with pytest.raises(error):
+        cached_description("STM32U575QGIx", cache_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_a_failed_write_leaves_no_tmp_file_in_the_description_cache(
+    u575_sources: Sources,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[BaseException],
+) -> None:
+    _stub_the_build(monkeypatch)
+    monkeypatch.setattr(Path, "write_text", _fail_after_a_partial_write(error))
+    with pytest.raises(error):
+        cached_description("STM32U575QGIx", cache_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_good_description_write_leaves_exactly_the_cached_file(
+    u575_sources: Sources, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_the_build(monkeypatch)
+    path = cached_description("STM32U575QGIx", cache_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_a_failed_cleanup_does_not_hide_the_description_write_error(
+    u575_sources: Sources, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unlink_path = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if ".tmp." in self.name:
+            raise PermissionError("unlink refused")
+        unlink_path(self, missing_ok=missing_ok)
+
+    _stub_the_build(monkeypatch)
+    monkeypatch.setattr(os, "replace", _fail_replace(OSError("disk full")))
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(OSError, match="disk full"):
+        cached_description("STM32U575QGIx", cache_dir=tmp_path)
