@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 import functools
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -221,6 +221,27 @@ def _is_u32(value: object, lowest: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and lowest <= value < 1 << 32
 
 
+def refused_audio(key: str, sais: Sequence[str] | None = None) -> ConfigError:
+    """The refusal of an `audio` key that names no SAI with the built-in model."""
+    listed = "" if sais is None else f", one of {', '.join(sais) or 'none'}"
+    return ConfigError(
+        f"audio.{key}: an SAI with the built-in model{listed}",
+        key=f"audio.{key}",
+        expected="an SAI with the built-in model",
+    )
+
+
+def refused_modelled_audio(
+    audio: Mapping[str, Mapping[Block, AudioOptions]],
+    aliases: Mapping[str, str],
+    modelled: Collection[str],
+) -> None:
+    """Raise for the first `audio` key whose SAI has a Python or plugin model in `modelled`."""
+    for key in audio:
+        if aliases.get(key, key) in modelled:
+            raise refused_audio(key)
+
+
 def checked_audio(
     audio: Mapping[str, Mapping[Block, AudioOptions]],
     sais: Sequence[str],
@@ -231,11 +252,7 @@ def checked_audio(
     for key, blocks in audio.items():
         name = aliases.get(key, key)
         if name not in sais:
-            raise ConfigError(
-                f"audio.{key}: an SAI with the built-in model, one of {', '.join(sais) or 'none'}",
-                key=f"audio.{key}",
-                expected="an SAI with the built-in model",
-            )
+            raise refused_audio(key, sais)
         if name in checked:
             raise ConfigError(
                 f"audio.{key}: {name} is listed twice, once through an alias",

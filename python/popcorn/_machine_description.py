@@ -294,7 +294,8 @@ class Periph:
             machine description lists in `plugins`.
         devices: Devices on the bus of an I2C or SPI peripheral, or the one device on a UART.
         connect: "pty" bridges a UART, or the first CDC ACM function of a USB device controller
-            with a `host`, to a pseudo terminal on every machine built.
+            with a `host`, to a pseudo terminal on every machine built. Not allowed with a
+            Python board model.
         audio: What the board wires to each audio block of an SAI with the built-in model.
         host: The virtual host of a USB device controller with the built-in model.
     """
@@ -682,14 +683,15 @@ class MachineDescription:
                 controller on one that is not an SPI bus, a controller has an address or a
                 cs, two `devices` keys name
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
-                that is not an SAI with the built-in model, or `host` on one that is not a USB
-                device controller with the built-in model. `Machine(option_bytes=)` refuses
+                that is not an SAI with the built-in model, `host` on one that is not a USB
+                device controller with the built-in model, `connect` is not "pty" or is on a
+                peripheral with a Python board model. `Machine(option_bytes=)` refuses
                 `option_bytes`, `Machine(rng=)` refuses `rng`.
             MissingInput: An image, `svd` or `description` file, a plugin's source directory
                 or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
-            ModelError: A `connect` peripheral is neither a UART nor a USB device controller
-                with a `host`.
+            ModelError: A `connect` peripheral with a plugin board model or the built-in model
+                is neither a UART nor a USB device controller with a `host`.
         """
         check_machine_name(name)
         check_inputs(self)
@@ -770,11 +772,8 @@ class MachineDescription:
             name=name,
         )
         for periph_name, periph in self.board.items():
-            if periph.connect is None:
-                continue
-            if periph.connect != "pty":
-                raise _plain_error(f"board.{periph_name}.connect", f'"pty", not "{periph.connect}"')
-            m.board.pty(periph_name)
+            if periph.connect is not None:
+                m.board.pty(periph_name)
         for index, init in enumerate(boot.memory_init):
             key = f"boot.memory_init[{index}]"
             try:
@@ -857,6 +856,13 @@ class MachineDescription:
                         f"a popcorn.model.Model subclass, not {_reference(periph.model.cls)}",
                     )
                 self._check_params(model, (), dict(periph.model.params), key)
+            if periph.connect is not None:
+                if periph.connect != "pty":
+                    raise _plain_error(f"{key}.connect", f'"pty", not "{periph.connect}"')
+                if isinstance(periph.model, Use):
+                    raise _plain_error(
+                        f"{key}.connect", "a UART or USB device controller with the built-in model"
+                    )
             for index, device in enumerate(periph.devices):
                 at = f"{key}.devices[{index}]"
                 cls = device.cls

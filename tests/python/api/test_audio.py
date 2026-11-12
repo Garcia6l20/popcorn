@@ -15,7 +15,7 @@ from typing import Literal, cast, override
 
 import popcorn
 import pytest
-from popcorn import StopReason
+from popcorn import StopReason, _core
 from popcorn.board import AudioFrame, AudioLayout, AudioOptions, AudioStream, I2CTarget
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -235,6 +235,25 @@ def test_audio_options_are_checked(
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Machine(u575, audio=audio)
     assert caught.value.key == key
+
+
+@pytest.mark.parametrize("key", ["SAI1", "SEC_SAI1"])
+def test_audio_on_an_sai_with_a_python_model_is_refused_before_the_handle(
+    u575: popcorn.PartDescription, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_handle(*_: object, **__: object) -> object:
+        raise AssertionError("the native handle was built")
+
+    monkeypatch.setattr(_core, "MachineHandle", no_handle)
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Machine(u575, models={"SAI1": Silent}, audio={key: {"A": AudioOptions()}})
+    assert caught.value.key == f"audio.{key}"
+    assert caught.value.expected == "an SAI with the built-in model"
+
+
+def test_the_same_audio_without_the_model_builds(u575: popcorn.PartDescription) -> None:
+    m = popcorn.Machine(u575, audio={"SEC_SAI1": {"A": AudioOptions()}})
+    assert m.periph.SAI1.audio("A") is not None
 
 
 def test_the_accessor_refuses_other_blocks_and_peripherals(

@@ -20,7 +20,7 @@ import textwrap
 import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import assert_type, cast
+from typing import Literal, assert_type, cast
 
 import popcorn
 import pytest
@@ -406,11 +406,70 @@ def test_audio_beside_a_board_model_is_refused_before_any_build(
     assert error.expected == "an audio block of an SAI with the built-in model"
 
 
-@pytest.mark.parametrize("kind", KINDS)
-def test_a_pty_on_a_board_model_that_is_no_uart_raises_model_error(kit: Plugin, kind: str) -> None:
-    periph = popcorn.Periph(model=model_of(kind, kit), connect="pty")
+@pytest.mark.parametrize("board", ["USART1", "OTG_FS"])
+def test_a_pty_beside_a_python_board_model_is_refused_before_any_build(
+    kit: Plugin, board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(machine_description, "Machine", no_machine)
+    monkeypatch.setattr(Plugin, "built", no_build)
+    periph = popcorn.Periph(model=popcorn.Use(Plain), connect="pty")
+    description = popcorn.MachineDescription(
+        part=PART, images=[], plugins=[kit], board={board: periph}
+    )
+    for _ in range(2):
+        error = refused(description.machine)
+        assert error.key == f"board.{board}.connect"
+        assert error.expected == "a UART or USB device controller with the built-in model"
+
+
+def test_a_refused_pty_leaves_the_same_board_without_the_model_buildable(kit: Plugin) -> None:
+    refused_periph = popcorn.Periph(model=popcorn.Use(Plain), connect="pty")
+    assert refused(described(kit, USART1=refused_periph).machine).key == "board.USART1.connect"
+    m = described(kit, USART1=popcorn.Periph(connect="pty")).machine()
+    assert set(m.board.ptys) == {"USART1"}
+
+
+def test_a_pty_on_a_plugin_uart_model_bridges(kit: Plugin) -> None:
+    m = described(kit, USART1=popcorn.Periph(model=kit.model("uart"), connect="pty")).machine()
+    assert set(m.board.ptys) == {"USART1"}
+    assert os.path.exists(m.board.ptys["USART1"])
+
+
+def test_a_pty_on_a_plugin_model_that_is_no_uart_raises_model_error(kit: Plugin) -> None:
+    periph = popcorn.Periph(model=kit.model("rng"), connect="pty")
     with pytest.raises(ModelError):
         described(kit, USART1=periph).machine()
+
+
+@pytest.mark.parametrize("kind", [*KINDS, "built-in"])
+def test_a_connection_other_than_pty_is_refused_before_any_build(
+    kit: Plugin, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(machine_description, "Machine", no_machine)
+    monkeypatch.setattr(Plugin, "built", no_build)
+    model = None if kind == "built-in" else model_of(kind, kit)
+    periph = popcorn.Periph(model=model, connect=cast("Literal['pty']", "socket"))
+    error = refused(described(kit, USART1=periph).machine)
+    assert error.key == "board.USART1.connect"
+    assert error.expected == '"pty", not "socket"'
+
+
+@pytest.mark.parametrize("key", ["SAI1", "SEC_SAI1"])
+def test_audio_on_an_sai_with_a_plugin_model_is_refused_before_the_handle(
+    kit: Plugin, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loaded = _records.load(kit, kit.built())
+    description = described().part_description()
+    monkeypatch.setattr(_core, "MachineHandle", no_machine)
+    error = refused(
+        lambda: popcorn.Machine(
+            description,
+            _plugin_models={"SAI1": (loaded, "rng")},
+            audio={key: {"A": AudioOptions()}},
+        )
+    )
+    assert error.key == f"audio.{key}"
+    assert error.expected == "an SAI with the built-in model"
 
 
 def test_a_plugin_uart_attaches_and_sends(kit: Plugin) -> None:

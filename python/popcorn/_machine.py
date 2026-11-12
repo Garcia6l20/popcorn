@@ -75,6 +75,7 @@ from popcorn._machine_checks import (
     model_makers,
     option_bytes_config,
     pty_opener,
+    refused_modelled_audio,
     submitted,
     uart_attacher,
 )
@@ -387,8 +388,9 @@ class Machine:
                 `I2CController` next to another device on its bus, or two images share a name.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
                 with a Python model or one no built-in model serves.
-                With `audio`: a key that is not an SAI with the built-in model, two keys naming
-                one SAI, a block other than A or B, a decimation below 1 or a negative frame
+                With `audio`, before anything is built: a key whose SAI has a Python or plugin
+                model. With `audio`: a key that is not an SAI with the built-in model, two keys
+                naming one SAI, a block other than A or B, a decimation below 1 or a negative frame
                 rate, or a `clocked_by` naming no device of `devices`, named as
                 `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
                 controller with the built-in model, two keys naming one controller, a bus reset
@@ -431,6 +433,8 @@ class Machine:
         config.python_models = model_makers(description, models or {})
         chosen = chosen_plugin_models(description, models or {}, _plugin_models or {})
         config.plugin_models = chosen
+        aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
+        refused_modelled_audio(audio or {}, aliases, {*(models or {}), *chosen})
         attached = checked_devices(description, devices or {}, models or {}, chosen)
         config.python_devices = {name: list(targets) for name, targets in attached.items()}
         if rcc is not None:
@@ -445,7 +449,6 @@ class Machine:
             if not isinstance(cast(object, rng), RngOptions):
                 raise TypeError(f"rng: expected an RngOptions, not {type(rng).__qualname__}")
             config.rng_seed = rng.seed
-        aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
         config.slice_instructions = slice_instructions
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
