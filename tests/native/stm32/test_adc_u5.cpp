@@ -56,11 +56,13 @@ constexpr std::uint32_t all_channels = 0xF'FFFF;
 auto options_with(
     stm32::supply_options            supply,
     popcorn::part_description const& description,
-    bool                             strict) -> core::machine_options
+    bool                             strict,
+    double                           cpi = 1.0) -> core::machine_options
 {
   stm32::board board{};
   board.supply               = supply;
   auto options               = popcorn::testing::stm32_options();
+  options.cpi                = cpi;
   options.models             = stm32::factories(board, description);
   options.strict_peripherals = strict;
   return options;
@@ -72,8 +74,9 @@ struct adc_fixture : stm32_fixture
       popcorn::part_description const& description = u575(),
       stm32::supply_options            supply      = {},
       bool                             clocked     = true,
-      bool                             strict      = false)
-      : stm32_fixture{description, "rcc_ll", options_with(supply, description, strict)}
+      bool                             strict      = false,
+      double                           cpi         = 1.0)
+      : stm32_fixture{description, "rcc_ll", options_with(supply, description, strict, cpi)}
   {
     set("pc", sym("rcc_ll", "idle"));
     if(clocked)
@@ -2557,6 +2560,45 @@ TEST_CASE(
     }
     CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
   }
+}
+
+TEST_CASE(
+    "a TIM1 CC1 falling edge 0.25 timer clock before the end of the previous conversion, given "
+    "ahead of the machine time, is ignored as busy, the edge after the end starts, U5")
+{
+  for(auto const cpi : {1.0, 4.0})
+    for(std::uint32_t const ccr : {1u, 2u, 3u, 4u})
+    {
+      CAPTURE(cpi);
+      CAPTURE(ccr);
+      adc_fixture const f{u575(), {}, true, false, cpi};
+      f.port().drive(5, 1'000'000);
+      f.enable();
+      f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+      f.write("ADC1", "ADC_SQR1", 5u << 6);
+      f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+      f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+      f.write("TIM1", "ARR", 5);
+      f.write("TIM1", "CCR1", ccr);
+      f.write("TIM1", "EGR", 1);
+      f.write("TIM1", "SR", 0);
+      auto const from = f.now();
+      f.put("TIM1", "CR1", "CEN", 1);
+      constexpr std::uint64_t    tick = 250'000;
+      std::vector<std::uint32_t> sampled;
+      std::vector<std::uint32_t> second;
+      for(std::uint64_t k = 0; k < 20; ++k)
+      {
+        f.run_until(from + (ccr + 12 * k + 4) * tick);
+        sampled.push_back(f.isr("EOSMP"));
+        f.write("ADC1", "ADC_ISR", eosmp);
+        static_cast<void>(f.cpu_read("ADC_DR"));
+        f.run_until(from + (ccr + 12 * k + 10) * tick);
+        second.push_back(f.isr("EOSMP"));
+      }
+      CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
+      CHECK(second == std::vector<std::uint32_t>(20, 0u));
+    }
 }
 
 TEST_CASE(
