@@ -325,6 +325,12 @@ private:
   cpu_set_t saved_{};
 };
 
+template <typename Future> auto bounded_get(Future& pending)
+{
+  REQUIRE(pending.wait_for(std::chrono::seconds{20}));
+  return pending.get();
+}
+
 struct rig
 {
   std::vector<core::member_ref>              members;
@@ -374,7 +380,7 @@ struct rig
       auto const held = sys->lock();
       pending = sys->resume(held, until ? std::optional{core::sys_time{*until}} : std::nullopt);
     }
-    return pending.get();
+    return bounded_get(pending);
   }
 
   auto goal(std::size_t member, core::member_goal wanted) -> core::host_future<core::goal_reached>
@@ -625,7 +631,7 @@ TEST_CASE("a pause requested right after resume ends that flight")
   }
   r.sys->request_pause();
   release.open();
-  CHECK(pending.get().reason == core::pause_reason::requested);
+  CHECK(bounded_get(pending).reason == core::pause_reason::requested);
 }
 
 TEST_CASE("a reset done behind the system's back fails the next resume")
@@ -720,7 +726,7 @@ TEST_CASE("halted members advance with their events and pause at the barrier on 
   }
   std::this_thread::sleep_for(std::chrono::milliseconds{20});
   r.sys->request_pause();
-  auto const stopped = pending.get();
+  auto const stopped = bounded_get(pending);
   CHECK(stopped.reason == core::pause_reason::requested);
   CHECK(stopped.windows > 0);
   auto const held = r.sys->lock();
@@ -750,7 +756,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
   release.open();
-  auto const stopped = pending.get();
+  auto const stopped = bounded_get(pending);
   CHECK(stopped.reason == core::pause_reason::requested);
   auto const held = r.sys->lock();
   CHECK(r.sys->time_of(held, 0) == stopped.at);
@@ -790,7 +796,7 @@ TEST_CASE("work timing counts every barrier round while measured and stays zero 
     }
     std::this_thread::sleep_for(std::chrono::milliseconds{1});
     r.sys->request_pause();
-    auto const halted = pending.get();
+    auto const halted = bounded_get(pending);
     REQUIRE(halted.reason == core::pause_reason::requested);
     CHECK(halted.work.rounds == halted.windows + halted.phase_b + 2);
     phase_b = halted.phase_b;
@@ -828,7 +834,7 @@ TEST_CASE("close while members run and wait parks every member and ends the paus
     }
     std::this_thread::sleep_for(std::chrono::microseconds{round * 37});
     r.sys->close();
-    CHECK(pending.get().reason == core::pause_reason::closed);
+    CHECK(bounded_get(pending).reason == core::pause_reason::closed);
     for(auto const& one : r.members)
     {
       CHECK(parked(one));
@@ -985,8 +991,8 @@ TEST_CASE("goals to two addresses deliver each at its point, the released one ha
     REQUIRE(first.reason == core::pause_reason::delivered);
     CHECK(first.member == 0);
     REQUIRE(a.done());
-    CHECK(a.get().stopped.reason == stop_reason::address);
-    CHECK(a.get().at == first.at);
+    CHECK(bounded_get(a).stopped.reason == stop_reason::address);
+    CHECK(bounded_get(a).at == first.at);
     CHECK_FALSE(b.done());
     {
       auto const held = r.sys->lock();
@@ -997,7 +1003,7 @@ TEST_CASE("goals to two addresses deliver each at its point, the released one ha
     auto const second = r.run({});
     order.push_back(delivered(second));
     REQUIRE(second.member == 1);
-    CHECK(b.get().stopped.reason == stop_reason::address);
+    CHECK(bounded_get(b).stopped.reason == stop_reason::address);
     CHECK(r.now_of(0) == second.at.ps);
     r.release(1);
     {
@@ -1112,13 +1118,13 @@ TEST_CASE("a system that fails to link a member leaves the members it linked fre
   }
   CHECK_THROWS_AS(r.build(variants()[0]), popcorn::machine_busy);
   r.members[1].on->cancel(0);
-  CHECK_THROWS_AS(std::ignore = busy.get(), core::operation_cancelled);
+  CHECK_THROWS_AS(std::ignore = bounded_get(busy), core::operation_cancelled);
   core::host_future<core::goal_result> own;
   {
     auto const held_host = r.members[0].on->lock();
     own                  = r.members[0].on->run(held_host, 0, core::run_goal{.budget = icount{10}});
   }
-  CHECK(own.get().stopped.reason == stop_reason::budget);
+  CHECK(bounded_get(own).stopped.reason == stop_reason::budget);
 }
 
 TEST_CASE("a system with no arrival hook runs the same windows as one with a counting hook")
@@ -1166,7 +1172,7 @@ auto close_holding(rig& r, std::atomic<bool> const& held) -> core::host_future<c
   }
   held.wait(false);
   r.sys->close();
-  REQUIRE(pending.get().reason == core::pause_reason::closed);
+  REQUIRE(bounded_get(pending).reason == core::pause_reason::closed);
   return endless;
 }
 
@@ -1180,7 +1186,7 @@ TEST_CASE("a closed system releases its members before its closed pause is out")
     auto const held_host = r.members[1].on->lock();
     own                  = r.members[1].on->run(held_host, 0, core::run_goal{.budget = icount{10}});
   }
-  CHECK(own.get().stopped.reason == stop_reason::budget);
+  CHECK(bounded_get(own).stopped.reason == stop_reason::budget);
   core::access(*r.members[1].on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
 }
 
@@ -1239,7 +1245,7 @@ TEST_CASE("a lone goal posted while its closed system is destroyed reads no link
   destroyed.store(true, std::memory_order_relaxed);
   poster.join();
   on.cancel(0);
-  CHECK_THROWS_AS(std::ignore = own.get(), core::operation_cancelled);
+  CHECK_THROWS_AS(std::ignore = bounded_get(own), core::operation_cancelled);
   core::access(on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
 }
 
@@ -1263,7 +1269,7 @@ TEST_CASE("a member goal arriving at its until address stops there with nothing 
       }
       auto goal = r.goal(1, std::move(wanted));
       REQUIRE(r.run({}).member == 1);
-      auto const reached  = goal.get();
+      auto const reached  = bounded_get(goal);
       auto const executed = [&] {
         auto const held = r.sys->lock();
         return r.sys->executed_of(held, 1).value;
@@ -1305,11 +1311,11 @@ TEST_CASE("a member goal with several until addresses stops at the first one rea
     };
     auto first = r.goal(1, both());
     REQUIRE(r.run({}).member == 1);
-    CHECK(first.get().stopped.reason == stop_reason::address);
+    CHECK(bounded_get(first).stopped.reason == stop_reason::address);
     CHECK(pc_of(r) == near);
     auto second = r.goal(1, both());
     REQUIRE(r.run({}).member == 1);
-    CHECK(second.get().stopped.reason == stop_reason::address);
+    CHECK(bounded_get(second).stopped.reason == stop_reason::address);
     CHECK(pc_of(r) == far);
     auto const held = r.sys->lock();
     CHECK(r.sys->executed_of(held, 1).value == 300);
@@ -1335,7 +1341,7 @@ TEST_CASE("a goal posted to a halted member while paused starts at the delivered
     r.release(0);
     auto const second = r.run({});
     REQUIRE(second.member == 1);
-    CHECK(c.get().stopped.reason == stop_reason::budget);
+    CHECK(bounded_get(c).stopped.reason == stop_reason::budget);
     CHECK(
         core::access(
             *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; })
@@ -1397,7 +1403,7 @@ TEST_CASE("goal stops past a barrier dispatch the lane event before them at any 
         auto       goal    = r.goal(1, wanted());
         auto const stopped = r.run({});
         REQUIRE(stopped.member == 1);
-        CHECK(goal.get().stopped.reason == reason);
+        CHECK(bounded_get(goal).stopped.reason == reason);
         std::vector<std::uint64_t> order;
         core::access(*r.members[1].on, 0, [&](core::machine&) {
           for(auto const& one : made.module->event_log)
@@ -1436,7 +1442,7 @@ TEST_CASE("a stamped write on a halted member lands exactly at its time during a
       landed               = r.members[1].on->post(held_host, 0, [](core::machine&) {}, at);
     }
     REQUIRE(r.run({}).member == 0);
-    CHECK(landed.get() == at);
+    CHECK(bounded_get(landed) == at);
   }
 }
 
@@ -1460,7 +1466,7 @@ TEST_CASE("a stamped write on a sleeping goal member lands at its time, not at t
       landed               = r.members[1].on->post(held_host, 0, [](core::machine&) {}, at);
     }
     REQUIRE(r.run({}).member == 0);
-    CHECK(landed.get() == at);
+    CHECK(bounded_get(landed) == at);
   }
 }
 
@@ -1496,7 +1502,7 @@ TEST_CASE("a stamp overshot by a block past the barrier sees every event up to t
               vtime{made.start.ps + static_cast<std::uint64_t>(stamp_at)});
         }
         REQUIRE(r.run(150 * us_ps).reason == core::pause_reason::system_time);
-        CHECK(landed.get().ps >= made.start.ps + 100 * us_ps);
+        CHECK(bounded_get(landed).ps >= made.start.ps + 100 * us_ps);
         CHECK(seen == std::vector<std::uint64_t>{1, 3});
         if(reference)
         {
@@ -1544,8 +1550,8 @@ TEST_CASE("a pause right after a held slice leaves a stamp to a plain run, after
     auto const held_host = r.members[1].on->lock();
     plain                = r.members[1].on->run(held_host, 0, {.budget = icount{1}});
   }
-  std::ignore = plain.get();
-  CHECK(landed.get().ps >= made.start.ps + 100 * us_ps);
+  std::ignore = bounded_get(plain);
+  CHECK(bounded_get(landed).ps >= made.start.ps + 100 * us_ps);
   CHECK(seen == std::vector<std::uint64_t>{1, 3});
 }
 
@@ -1579,9 +1585,9 @@ TEST_CASE("members asleep with nothing due pause as IDLE at the latest quiescent
     CHECK(stopped.member == 1);
     CHECK(r.now_of(0) == stopped.at.ps);
     CHECK(r.now_of(1) == stopped.at.ps);
-    CHECK(a.get().stopped.reason == stop_reason::idle);
-    CHECK(b.get().stopped.reason == stop_reason::idle);
-    CHECK(a.get().at == stopped.at);
+    CHECK(bounded_get(a).stopped.reason == stop_reason::idle);
+    CHECK(bounded_get(b).stopped.reason == stop_reason::idle);
+    CHECK(bounded_get(a).at == stopped.at);
     auto const start = core::access(
         *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; });
     CHECK(start == static_cast<std::uint64_t>(stopped.at.ps));
@@ -1615,14 +1621,14 @@ TEST_CASE("a member waiting on a timer past the barrier is not idle")
   }
   std::this_thread::sleep_for(std::chrono::milliseconds{20});
   r.sys->request_pause();
-  auto const stopped = pending.get();
+  auto const stopped = bounded_get(pending);
   CHECK(stopped.reason == core::pause_reason::requested);
   CHECK(stopped.windows > 10);
   CHECK_FALSE(timed.done());
   CHECK_FALSE(other.done());
   auto const held = r.sys->lock();
   r.sys->withdraw(held, 0);
-  CHECK_THROWS_AS(std::ignore = timed.get(), core::operation_cancelled);
+  CHECK_THROWS_AS(std::ignore = bounded_get(timed), core::operation_cancelled);
   CHECK_THROWS_AS(r.sys->withdraw(held, 0), std::logic_error);
   CHECK(r.sys->undecided(held).empty());
 }
@@ -1637,7 +1643,7 @@ TEST_CASE("an IDLE pause resolves goals that are not open and keeps the open one
   auto       open        = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
   auto const stopped     = r.run({});
   REQUIRE(stopped.reason == core::pause_reason::idle);
-  CHECK(closed_goal.get().stopped.reason == stop_reason::idle);
+  CHECK(bounded_get(closed_goal).stopped.reason == stop_reason::idle);
   CHECK_FALSE(open.done());
   auto const held = r.sys->lock();
   CHECK(r.sys->undecided(held) == std::vector<std::size_t>{0});
@@ -1757,7 +1763,7 @@ TEST_CASE("a member stop parks a sleeping running member at the stop's time, at 
     REQUIRE(stopped.reason == core::pause_reason::delivered);
     CHECK(stopped.member == 1);
     CHECK(stopped.at.ps >= parking_stop);
-    CHECK(stopping.get().at == stopped.at);
+    CHECK(bounded_get(stopping).at == stopped.at);
     CHECK_FALSE(sleeping.done());
     CHECK(r.now_of(0) == stopped.at.ps);
     CHECK(sleeper_clock(r, 0) == stopped.at.ps);
@@ -1796,7 +1802,8 @@ TEST_CASE("a sleeping member that ran past a member stop's time stays where it f
   }
 }
 
-TEST_CASE("a parked member's goal stops nothing on its way to the member stop's time")
+TEST_CASE(
+    "a sleeper's open goal is asked once when its core falls asleep, before a member stop's time")
 {
   for(auto const& how : {variants()[0], variants()[1]})
   {
@@ -1817,13 +1824,84 @@ TEST_CASE("a parked member's goal stops nothing on its way to the member stop's 
     auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
     auto const stopped  = r.run({});
     REQUIRE(stopped.reason == core::pause_reason::delivered);
-    CHECK(stopped.member == 1);
-    CHECK(stopping.get().at == stopped.at);
-    CHECK_FALSE(sleeping.done());
-    CHECK(wake.woken->load() == 1);
-    CHECK(wake.held->load() == 0);
-    CHECK(asked->load() == 0);
+    CHECK(stopped.member == 0);
+    CHECK(stopped.at.ps < parking_stop);
+    auto const reached = bounded_get(sleeping);
+    CHECK(reached.stopped.reason == stop_reason::user);
+    CHECK(reached.at == stopped.at);
+    CHECK(asked->load() == 1);
+    CHECK_FALSE(stopping.done());
+    CHECK(wake.woken->load() == 0);
     CHECK(r.now_of(0) == stopped.at.ps);
+  }
+}
+
+TEST_CASE(
+    "a sleeper's open goal is asked once at its fall, not again while it stays asleep across "
+    "rounds")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake const wake;
+    rig             r{
+        .members = {sleeper_woken_at_park(wake), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto const asked           = std::make_shared<std::atomic<int>>(0);
+    auto       sleeping        = r.goal(
+        0, {.until  = popcorn::address{0x0800'0001},
+            .budget = icount{100},
+            .exact  = icount{100},
+            .stop_when =
+                [asked] {
+                  ++*asked;
+                  return false;
+                },
+            .open = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(bounded_get(stopping).at == stopped.at);
+    CHECK_FALSE(sleeping.done());
+    CHECK(asked->load() == 1);
+  }
+}
+
+TEST_CASE("a second goal of a member that stays asleep is asked at once, after a parked round")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake const wake;
+    rig             r{
+        .members = {sleeper_woken_at_park(wake), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto const asked           = std::make_shared<std::atomic<int>>(0);
+    auto const goal_for        = [&asked] {
+      return core::member_goal{
+          .until     = popcorn::address{0x0800'0001},
+          .budget    = icount{100},
+          .exact     = icount{100},
+          .stop_when = [asked] { return ++*asked > 0; },
+          .open      = true};
+    };
+    auto       first     = r.goal(0, goal_for());
+    auto       stop      = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const delivered = r.run({});
+    REQUIRE(delivered.reason == core::pause_reason::delivered);
+    CHECK(bounded_get(first).stopped.reason == stop_reason::user);
+    CHECK(asked->load() == 1);
+    r.release(0);
+    auto       second = r.goal(0, goal_for());
+    auto const next   = r.run({});
+    REQUIRE(next.reason == core::pause_reason::delivered);
+    CHECK(bounded_get(second).stopped.reason == stop_reason::user);
+    CHECK(asked->load() == 2);
   }
 }
 
@@ -1855,7 +1933,7 @@ TEST_CASE("an error a model event raises on a sleeper's way to a member stop's t
     CHECK(next.member == 0);
     CHECK(next.at == stopped.at);
     CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
-    CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+    CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), test_failure);
   }
 }
 
@@ -1948,7 +2026,7 @@ TEST_CASE("an error found on a sleeper's way to a member stop's time holds it th
             [](core::machine& m) { return m.mem().read(sym("idle", "ticks"), 4).value_or(1); })
         == 0);
     CHECK(r.now_of(0) == stopped.at.ps);
-    CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+    CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), test_failure);
   }
 }
 
@@ -1978,7 +2056,7 @@ TEST_CASE("a stop found on a sleeper's way to a member stop's time goes with the
       auto const held = r.sys->lock();
       r.sys->withdraw(held, 0);
     }
-    CHECK_THROWS_AS(std::ignore = sleeping.get(), core::operation_cancelled);
+    CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), core::operation_cancelled);
     auto       again = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
     auto       later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
     auto const next  = r.run({});
@@ -2034,7 +2112,7 @@ TEST_CASE("a boundary hook that throws before a sleeper moves ends its move with
       CHECK(next.at == stopped.at);
       CHECK(executed() == before);
       CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
-      CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+      CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), test_failure);
     }
   }
 }
@@ -2075,7 +2153,7 @@ TEST_CASE("an error a model event raises during an IDLE move lands at the pause 
             [](core::machine& m) { return m.mem().read(sym("idle", "ticks"), 4).value_or(1); })
         == 0);
     CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
-    CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+    CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), test_failure);
   }
 }
 
@@ -2162,7 +2240,7 @@ TEST_CASE("a TIME or requested pause shows each link through its earliest member
   }
   REQUIRE_FALSE(pending.done());
   r.sys->request_pause();
-  auto const stopped = pending.get();
+  auto const stopped = bounded_get(pending);
   REQUIRE(stopped.reason == core::pause_reason::requested);
   CHECK(r.now_of(0) + 10 * static_cast<std::int64_t>(us_ps) < stopped.at.ps);
   CHECK(r.links[0]->released.empty());
@@ -2246,7 +2324,7 @@ TEST_CASE("input landing on a sleeper as it runs on to a member stop's time is t
     CHECK(next.member == 0);
     CHECK(next.at >= stopped.at);
     REQUIRE(sleeping.done());
-    CHECK(sleeping.get().at == next.at);
+    CHECK(bounded_get(sleeping).at == next.at);
   }
 }
 
@@ -2269,7 +2347,7 @@ TEST_CASE("a member parked by a member stop resets at the stop's time")
       CHECK(r.sys->time_of(held, 0) == stopped.at);
       CHECK(r.sys->base_of(0) == stopped.at);
     }
-    CHECK_THROWS_AS(std::ignore = sleeping.get(), core::operation_cancelled);
+    CHECK_THROWS_AS(std::ignore = bounded_get(sleeping), core::operation_cancelled);
     CHECK(r.links[0]->sender_resets == std::vector{stopped.at.ps});
     auto       later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
     auto const next  = r.run({});
@@ -2375,7 +2453,7 @@ TEST_CASE("an error in a halted member before a resolution found later in its wi
     REQUIRE(stopped.reason == core::pause_reason::error);
     CHECK(stopped.member == 1);
     CHECK(stopped.at.ps == 50 * 250'000);
-    CHECK_THROWS_AS(std::ignore = goal.get(), test_failure);
+    CHECK_THROWS_AS(std::ignore = bounded_get(goal), test_failure);
   }
 }
 
@@ -2417,11 +2495,11 @@ TEST_CASE("a reset request under the stop policy resolves the goal, reset_and_co
     REQUIRE(stopped.reason == core::pause_reason::delivered);
     if(policy == popcorn::core::reset_request_policy::stop)
     {
-      CHECK(goal.get().stopped.reason == stop_reason::reset_request);
+      CHECK(bounded_get(goal).stopped.reason == stop_reason::reset_request);
     }
     else
     {
-      CHECK(goal.get().stopped.reason == stop_reason::budget);
+      CHECK(bounded_get(goal).stopped.reason == stop_reason::budget);
       CHECK(r.links[0]->receiver_resets.size() == 1);
     }
   }
@@ -2462,7 +2540,7 @@ TEST_CASE("base_of is read from another thread while a member resets mid-run")
   auto       goal    = r.goal(1, {.budget = icount{5000}});
   auto const stopped = r.run({});
   REQUIRE(stopped.reason == core::pause_reason::delivered);
-  CHECK(goal.get().stopped.reason == stop_reason::budget);
+  CHECK(bounded_get(goal).stopped.reason == stop_reason::budget);
   done.store(true, std::memory_order_release);
   reader.join();
   auto const after = r.sys->base_of(1).ps;
@@ -2490,9 +2568,9 @@ TEST_CASE("close fails every pending goal with machine_closed")
   }
   std::this_thread::sleep_for(std::chrono::milliseconds{5});
   r.sys->close();
-  CHECK(pending.get().reason == core::pause_reason::closed);
-  CHECK_THROWS_AS(std::ignore = a.get(), core::machine_closed);
-  CHECK_THROWS_AS(std::ignore = b.get(), core::machine_closed);
+  CHECK(bounded_get(pending).reason == core::pause_reason::closed);
+  CHECK_THROWS_AS(std::ignore = bounded_get(a), core::machine_closed);
+  CHECK_THROWS_AS(std::ignore = bounded_get(b), core::machine_closed);
 }
 
 TEST_CASE("finish clears every hold and settles every link at the last pause point")
@@ -2530,13 +2608,13 @@ TEST_CASE("a link with something left to deliver keeps the system from IDLE")
   }
   std::this_thread::sleep_for(std::chrono::milliseconds{5});
   r.sys->request_pause();
-  auto const refused = pending.get();
+  auto const refused = bounded_get(pending);
   CHECK(refused.reason == core::pause_reason::requested);
   CHECK(refused.windows > 0);
   CHECK_FALSE(a.done());
   r.links[0]->busy = false;
   CHECK(r.run({}).reason == core::pause_reason::idle);
-  CHECK(a.get().stopped.reason == stop_reason::idle);
+  CHECK(bounded_get(a).stopped.reason == stop_reason::idle);
 }
 
 TEST_CASE("two stops in one window and in two windows give the same pause sequence")
@@ -2663,7 +2741,7 @@ TEST_CASE("the system destructor returns after the last pause's callbacks releas
     pending.on_done([]() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds{200}); });
     registered.count_down();
     REQUIRE(pending.wait_for(std::chrono::seconds{10}));
-    CHECK(pending.get().reason == core::pause_reason::error);
+    CHECK(bounded_get(pending).reason == core::pause_reason::error);
     CHECK(counted_alive.load() == 1);
   }
   r.sys.reset();
@@ -2772,7 +2850,7 @@ TEST_CASE("a halted member whose next event lies past the barrier runs no slice 
     }
     std::this_thread::sleep_for(std::chrono::milliseconds{1});
     r.sys->request_pause();
-    auto const stopped = pending.get();
+    auto const stopped = bounded_get(pending);
     REQUIRE(stopped.reason == core::pause_reason::requested);
     windows += static_cast<std::int64_t>(stopped.windows);
     slices += static_cast<std::int64_t>(stopped.slices);
@@ -2873,7 +2951,7 @@ TEST_CASE("finish fails a goal still pending with operation_cancelled")
     r.sys->finish(held);
   }
   REQUIRE(pending.done());
-  CHECK_THROWS_AS(std::ignore = pending.get(), core::operation_cancelled);
+  CHECK_THROWS_AS(std::ignore = bounded_get(pending), core::operation_cancelled);
 }
 
 namespace
@@ -2942,10 +3020,10 @@ TEST_CASE("open goals asleep on IDLE wait until a stamp wakes one member, then a
           },
           vtime{local + 900 * 250'000 + 50 * us_ps});
     }
-    std::ignore = landed.get();
+    std::ignore = bounded_get(landed);
     REQUIRE(both_asleep(r, pending));
     r.sys->request_pause();
-    auto const stopped = pending.get();
+    auto const stopped = bounded_get(pending);
     CHECK(stopped.reason == core::pause_reason::requested);
     CHECK_FALSE(a.done());
     CHECK_FALSE(b.done());
@@ -2954,7 +3032,7 @@ TEST_CASE("open goals asleep on IDLE wait until a stamp wakes one member, then a
     });
     CHECK(logged == 900 + 200 + 100);
     auto dump = r.dump();
-    dump.push_back(landed.get().ps);
+    dump.push_back(bounded_get(landed).ps);
     dump.push_back(logged);
     if(reference)
     {
@@ -2981,8 +3059,8 @@ TEST_CASE("close and wake reach a system asleep on IDLE inside open goals")
   r.sys->wake();
   REQUIRE(both_asleep(r, pending));
   r.sys->close();
-  CHECK(pending.get().reason == core::pause_reason::closed);
-  CHECK_THROWS_AS(std::ignore = a.get(), core::machine_closed);
+  CHECK(bounded_get(pending).reason == core::pause_reason::closed);
+  CHECK_THROWS_AS(std::ignore = bounded_get(a), core::machine_closed);
   CHECK(parked(r.members[0]));
   CHECK(parked(r.members[1]));
 }
@@ -3011,7 +3089,7 @@ TEST_CASE("an idle attempt hands frames at its earliest member, so a fault past 
     REQUIRE(both_asleep(r, pending));
     CHECK(drained->load() < 222 * us_ps);
     r.sys->request_pause();
-    CHECK(pending.get().reason == core::pause_reason::requested);
+    CHECK(bounded_get(pending).reason == core::pause_reason::requested);
   }
 }
 
@@ -3052,7 +3130,7 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
     }
     REQUIRE(both_asleep(r, pending));
     r.sys->request_pause();
-    auto const stopped = pending.get();
+    auto const stopped = bounded_get(pending);
     REQUIRE(stopped.reason == core::pause_reason::requested);
     return stopped.slices;
   };
@@ -3138,12 +3216,12 @@ TEST_CASE("a sleep hook that throws pauses the system on that error once")
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held);
   }
-  auto const stopped = pending.get();
+  auto const stopped = bounded_get(pending);
   REQUIRE(stopped.reason == core::pause_reason::error);
   CHECK(stopped.member == 1);
   CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
   CHECK(thrown.load() == 1);
-  CHECK_THROWS_AS(std::ignore = b.get(), test_failure);
+  CHECK_THROWS_AS(std::ignore = bounded_get(b), test_failure);
   CHECK(parked(r.members[0]));
   CHECK(parked(r.members[1]));
 }
@@ -3539,7 +3617,7 @@ auto stamp_after_pause(bool reload) -> stamp_seen
   {
     REQUIRE(r.run({}).reason == core::pause_reason::idle);
   }
-  return {.log = seen, .at = static_cast<std::int64_t>(landed.get().ps)};
+  return {.log = seen, .at = static_cast<std::int64_t>(bounded_get(landed).ps)};
 }
 }
 
@@ -3612,8 +3690,8 @@ TEST_CASE("equal stamps on a linked member keep their order when the due event i
   }
   CHECK_FALSE(second.done());
   REQUIRE(r.run({}).reason == core::pause_reason::idle);
-  std::ignore = first.get();
-  std::ignore = second.get();
+  std::ignore = bounded_get(first);
+  std::ignore = bounded_get(second);
   CHECK(order == std::vector<int>{1, 2});
 }
 
@@ -3672,8 +3750,8 @@ auto lone_stamp_after(bool through_snapshot) -> std::vector<std::uint64_t>
     auto const held = lone.on->lock();
     plain           = lone.on->run(held, 0, {.until_time = vtime{at.ps + us_ps}});
   }
-  std::ignore = plain.get();
-  CHECK(landed.get() == at);
+  std::ignore = bounded_get(plain);
+  CHECK(bounded_get(landed) == at);
   return seen;
 }
 }
@@ -3731,8 +3809,8 @@ TEST_CASE("a dispatch cut short after one held event keeps a stamp behind the ne
     auto const held = lone.on->lock();
     plain           = lone.on->run(held, 0, {.budget = icount{1}});
   }
-  std::ignore = plain.get();
-  std::ignore = landed.get();
+  std::ignore = bounded_get(plain);
+  std::ignore = bounded_get(landed);
   CHECK(seen == std::vector<std::uint64_t>{1, 2});
 }
 

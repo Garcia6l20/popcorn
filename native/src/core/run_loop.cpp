@@ -964,6 +964,22 @@ auto machine::run_state::asks_stop(slice_request const& request) -> bool
 
 auto machine::run_state::idle_jump(slice_request const& request) -> std::optional<slice_end>
 {
+  if(request.stop_when
+     and request.stop_when_events_only
+     and request.execute
+     and not core_held
+     and not idle_asked)
+  {
+    if(stop_requested())
+    {
+      return handle_requests();
+    }
+    idle_asked = true;
+    if(asks_stop(request))
+    {
+      return slice_end{.stopped = make_stop(stop_reason::user, {}, std::nullopt), .asked = true};
+    }
+  }
   auto const next = owner.scheduler_.next_deadline();
   if(not next and not request.until_time)
   {
@@ -1241,7 +1257,8 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   executed = {};
   if(not request.continues_count)
   {
-    since_ask = {};
+    since_ask  = {};
+    idle_asked = false;
   }
   jumped         = {};
   wall_countdown = wall_check_blocks;
@@ -1355,6 +1372,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     }
     executed.value += ran;
     retired.value += ran;
+    if(ran != 0)
+    {
+      idle_asked = false;
+    }
     if(leaving)
     {
       set_exits(exit_list(request));

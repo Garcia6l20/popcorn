@@ -1349,6 +1349,9 @@ struct machine::run_state
   icount retired{};
   /** @brief Instructions the clock moved by idle jumps in the slice. */
   icount jumped{};
+  /** @brief Whether the stop_when of this slice was asked for the core's current fall into
+   * idle, cleared when the core executes an instruction. */
+  bool idle_asked = false;
   /** @brief Instructions of the earlier slices of one run that ended at a wall-dependent point
    * with stop_when set, counted against max_instructions of a slice that continues them. The
    * window runs from the first such slice's start, not from the last stop_when ask. */

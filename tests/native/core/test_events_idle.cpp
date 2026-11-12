@@ -1544,6 +1544,141 @@ TEST_CASE("stop_when_events_only asks stop_when after events, never at the slice
   CHECK(g.module->timer_expiries == 3);
 }
 
+TEST_CASE("a stop_when asked only after events is asked once when the core falls idle")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const start = f.target->virtual_clock().now().value;
+  std::ignore      = f.module->attached_events().schedule(icount{start + 1200}, 1, 1);
+  auto       calls = 0;
+  auto const stop  = f.run_to_stop(
+      {.stop_when             = [&calls] { return ++calls >= 2; },
+       .stop_quiescent        = true,
+       .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(calls == 2);
+  CHECK(f.module->event_log.size() == 1);
+}
+
+TEST_CASE("the idle ask lands at the sleep instant with an event inside the window and with none")
+{
+  auto const first_ask = [](std::uint64_t event_at) {
+    auto f = booted("idle");
+    f.set("pc", sym("idle", "idle_forever"));
+    auto const& clock = f.target->virtual_clock();
+    auto const  start = clock.now().value;
+    auto const  until = vtime{clock.time().ps + ps_per_second / 1000};
+    std::ignore       = f.module->attached_events().schedule(icount{start + event_at}, 1, 1);
+    std::optional<std::uint64_t> at;
+    std::ignore = f.run_to_stop(
+        {.until_time = until,
+         .stop_when =
+             [&] {
+               if(not at)
+               {
+                 at = clock.now().value - start;
+               }
+               return false;
+             },
+         .stop_quiescent        = true,
+         .stop_when_events_only = true});
+    REQUIRE(at.has_value());
+    return *at;
+  };
+  CHECK(first_ask(1200) == first_ask(10'000'000'000));
+}
+
+TEST_CASE("a requested stop beats the stop_when at the idle ask")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto asked = 0;
+  f.module->attached_services().request_stop(stop_reason::user, "requested");
+  auto const stop = f.run_to_stop(
+      {.stop_when             = [&asked] { return ++asked > 0; },
+       .stop_quiescent        = true,
+       .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(asked == 0);
+}
+
+TEST_CASE("a stop_when false at the idle ask leaves the idle stop unchanged")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto       asked = 0;
+  auto const stop  = f.run_to_stop(
+      {.stop_when =
+           [&asked] {
+             ++asked;
+             return false;
+           },
+       .stop_quiescent        = true,
+       .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::idle);
+  CHECK(asked == 1);
+}
+
+TEST_CASE("a stop_when not asked only after events is not asked at the idle fall")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto       asked = 0;
+  auto const stop  = f.run_to_stop(
+      {.stop_when =
+           [&asked] {
+             ++asked;
+             return false;
+           },
+       .stop_quiescent = true});
+  CHECK(stop.reason == stop_reason::idle);
+  CHECK(asked == 0);
+}
+
+TEST_CASE("a fall that spans two slices is asked once")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const& clock = f.target->virtual_clock();
+  auto        asked = 0;
+  auto const  ask   = [&asked] {
+    ++asked;
+    return false;
+  };
+  auto const first = f.run(
+      {.until_time            = vtime{clock.time().ps + ps_per_second / 1000},
+       .stop_when             = ask,
+       .stop_when_events_only = true});
+  REQUIRE(first.stopped.has_value());
+  CHECK(first.stopped->reason == stop_reason::time);
+  CHECK(asked == 1);
+  auto const second = f.run(
+      {.until_time            = vtime{clock.time().ps + ps_per_second / 1000},
+       .stop_when             = ask,
+       .stop_when_events_only = true,
+       .continues_count       = true});
+  REQUIRE(second.stopped.has_value());
+  CHECK(second.stopped->reason == stop_reason::time);
+  CHECK(asked == 1);
+}
+
+TEST_CASE("a core that wakes and falls idle again asks again, once per fall")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_entry"));
+  auto       asks = std::vector<std::uint64_t>{};
+  auto const stop = f.run_to_stop(
+      {.stop_when =
+           [&] {
+             asks.push_back(f.module->timer_expiries);
+             return f.module->timer_expiries == 3;
+           },
+       .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(f.module->timer_expiries == 3);
+  CHECK(asks == std::vector<std::uint64_t>{0, 1, 1, 2, 2, 3});
+}
+
 TEST_CASE("a predicate made true by executed code stops at the next event at any slicing")
 {
   auto const run = [](std::uint64_t slice) {

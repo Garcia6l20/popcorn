@@ -203,8 +203,9 @@ struct slice_request
    * that stop is the caller's bookkeeping too: pc unlocated, no trace stop record. For a scheduler
    * of several machines that keeps a quiescent member where it fell asleep. */
   bool stop_quiescent{};
-  /** @brief Evaluate stop_when only after a dispatched event, never at a slice end, so a slice
-   * end set by max_instructions or a bound never decides the user stop. */
+  /** @brief Evaluate stop_when after a dispatched event and once when the core falls asleep,
+   * at that instant whatever the next event or until_time is, never at another slice end, so a
+   * slice end set by max_instructions or a bound never decides the user stop. */
   bool stop_when_events_only{};
   /** @brief Whether this slice continues the instruction count of the caller's previous slice,
    * which ended at the wall budget, a host stop request or a mail post with stop_when set. The

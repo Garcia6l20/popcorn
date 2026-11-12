@@ -104,6 +104,8 @@ struct goal_run
   sys_time                           start{};
   std::uint64_t                      executed{};
   bool                               system{};
+  bool                               began{};
+  bool                               requested{};
 };
 
 using settled = std::expected<goal_reached, std::exception_ptr>;
@@ -390,6 +392,7 @@ public:
     if(one.goal)
     {
       one.goal->executed += result.executed.value;
+      one.goal->began = one.goal->began or std::exchange(one.goal->requested, false);
     }
     if(target.resets() != one.resets)
     {
@@ -627,6 +630,8 @@ private:
       request.budget_left        = left(wanted.budget, one.goal->executed);
       request.exact_instructions = left(wanted.exact, one.goal->executed);
       request.leave_until        = one.goal->executed == 0;
+      request.continues_count    = one.goal->began;
+      one.goal->requested        = true;
       if(wanted.stop_when)
       {
         request.stop_when = std::ref(one.goal->goal.stop_when);

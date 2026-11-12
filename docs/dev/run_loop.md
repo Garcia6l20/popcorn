@@ -108,7 +108,8 @@ to the next hit.
 instruction cap of one million and the wall budget of one millisecond, read every 256 blocks,
 only end the slice so the caller can yield. `exact_instructions` runs whole blocks up to the
 last block boundary before the count, then single-steps the rest. `stop_when` is evaluated
-after each dispatched event and at a slice end set by `max_instructions`, never per
+after each dispatched event, at a slice end set by `max_instructions` and, for a request with
+`stop_when_events_only`, once when the core falls asleep, never per
 instruction and never at a slice end set by the wall budget, a host stop request or a mail
 post (`slice_end::wall_dependent`), so the stop point depends on the emulated input alone.
 The run state carries the executed and jumped instructions of earlier wall-dependent slice

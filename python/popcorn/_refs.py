@@ -358,7 +358,9 @@ class Condition:
 
     Inside a free run it is evaluated natively, no Python, after every dispatched event and at
     slice ends: a wait on it ends at the first event boundary or slice end after the value
-    changed, the boundary a parked `run(stop_when=)` sees. Parked, `wait_for` runs its `ready`
+    changed, the boundary a parked `run(stop_when=)` sees. A member of a linked system asks it
+    after every dispatched event and once each time its core falls asleep, at the instant it
+    falls asleep, never at another slice end. Parked, `wait_for` runs its `ready`
     as a `stop_when`.
 
         link_up = m.ref.var("link").up
