@@ -951,3 +951,66 @@ TEST_CASE(
     CHECK(s.read(cr3) == 0);
   }
 }
+
+TEST_CASE(
+    "RM0351 40.8.5: GTPR written with UE 1 keeps its value on an L4 USART and UART, one record")
+{
+  for(auto const& one : {units[0], units[1]})
+  {
+    CAPTURE(one.name);
+    constexpr address gtpr = 0x10;
+    lock_scene        t{one};
+    auto const        gt = field_mask(one, "GTPR", "GT") & 0x0500;
+    t.r.write(one.base + gtpr, gt);
+    t.cpu(cr1, ue);
+    t.cpu(gtpr, 0);
+    t.cpu(gtpr, 0);
+    CHECK(t.read(gtpr) == gt);
+    CHECK(t.lock_records("GTPR") == 1);
+    lock_scene s{one, true};
+    s.r.write(one.base + gtpr, gt);
+    s.r.write(one.base + cr1, ue);
+    CHECK(s.refuses(gtpr, 0));
+    CHECK(s.read(gtpr) == gt);
+  }
+}
+
+TEST_CASE(
+    "RM0351 40.8.5: an L4 GTPR set of GT or PSC is a not-modelled warning, a model_error under "
+    "strict")
+{
+  constexpr address gtpr = 0x10;
+  for(auto const* field : {"GT", "PSC"})
+  {
+    CAPTURE(field);
+    lock_scene t{units[0]};
+    auto const bit = field_mask(units[0], "GTPR", field) & -field_mask(units[0], "GTPR", field);
+    t.cpu(gtpr, bit);
+    t.cpu(gtpr, 0);
+    t.cpu(gtpr, bit);
+    CHECK(
+        std::ranges::count_if(
+            t.r.logged,
+            [](core::log_record const& record) {
+              return record.message.find("are not modelled") != std::string::npos;
+            })
+        == 1);
+    lock_scene s{units[0], true};
+    CHECK(s.refuses(gtpr, bit));
+    CHECK(s.read(gtpr) == 0);
+  }
+}
+
+TEST_CASE("RM0351 41.7: the L4 LPUART claims no GTPR and no AUTOCR, the USART claims GTPR only")
+{
+  lock_scene t{units[0]};
+  auto const claimed = [&](std::string_view name) {
+    auto const* model = t.r.f->target->model(name);
+    REQUIRE(model != nullptr);
+    return model->claims();
+  };
+  CHECK(std::ranges::contains(claimed("USART2"), std::string{"GTPR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("USART2"), std::string{"AUTOCR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("LPUART1"), std::string{"GTPR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("LPUART1"), std::string{"AUTOCR"}));
+}

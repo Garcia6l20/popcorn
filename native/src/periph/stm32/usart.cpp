@@ -327,8 +327,11 @@ constexpr std::array<std::string_view, 8>  lpuart_cr2{"ADD",   "ADDM7", "MSBFIRS
 constexpr std::array<std::string_view, 12> lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",
                                                       "DDRE",    "OVRDIS",  "CTSE", "RTSE",
                                                       "HDSEL",   "WUS",     "WUS0", "WUS1"};
-constexpr std::array<std::string_view, 1>  whole_brr{"BRR"};
-constexpr std::array<std::string_view, 1>  whole_presc{"PRESCALER"};
+constexpr std::array<std::string_view, 2>  gtpr_locked{"GT", "PSC"};
+constexpr std::array<std::string_view, 5>  autocr_locked{
+    "TRIGSEL", "IDLEDIS", "TRIGEN", "TRIGPOL", "TDN"};
+constexpr std::array<std::string_view, 1> whole_brr{"BRR"};
+constexpr std::array<std::string_view, 1> whole_presc{"PRESCALER"};
 
 struct lock
 {
@@ -337,6 +340,7 @@ struct lock
   std::uint32_t mask{};
   std::uint32_t open_when_receiver_off{};
   bool          logged{};
+  bool          unmodelled_logged{};
 };
 
 /**
@@ -359,7 +363,11 @@ struct lock
  *        RM0481 57.7.3.
  *        The write logs once per register, a model_error under strict peripherals. A write that
  *        clears UE takes effect whole, which the manual leaves open, and debugger writes are never
- *        locked. GTPR and AUTOCR are not served, so their locked fields are not enforced. Not
+ *        locked. GTPR and AUTOCR are stored registers where the description has them: GT, PSC,
+ *        TRIGSEL, IDLEDIS, TRIGEN, TRIGPOL and TDN are locked like the other fields, RM0456
+ *        66.8.7, 66.8.16 and 67.7.14, RM0481 56.8.7, RM0351 40.8.5. A write that sets GT, PSC or
+ *        TRIGEN logs one warning per register and raises model_error under strict peripherals,
+ *        the guard time, the prescaler and the autonomous trigger act on nothing. Not
  *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
  *        For a link to another machine, the endpoint hears each frame when its start bit leaves,
@@ -487,7 +495,12 @@ struct lock
  * - The model runs in Run mode only. A CPU or DMA write that sets CR1.UESM, CR3.UCESM, CR3.WUFIE or
  *   CR3.WUS, or on the STM32H5 its bits WUS0 and WUS1, logs one `model_warning` and raises
  *   `ModelError` under `strict_peripherals` before the store, on every family. WUF stays 0.
- * - GTPR and AUTOCR are not served, so the locks on their fields are not enforced.
+ * - GTPR and AUTOCR are stored registers, locked while UE is 1 like the other fields. GT, PSC and
+ *   TRIGEN act on nothing: a CPU or DMA write that sets one logs one `model_warning` per register
+ *   and raises `ModelError` under `strict_peripherals` before the store. TRIGSEL, IDLEDIS,
+ *   TRIGPOL and TDN are stored and act on nothing without a warning. A firmware access to the
+ *   two registers is not listed in the unmodelled access report, the `model_warning` for GT, PSC
+ *   and TRIGEN is the signal.
  *
  * @group all rule
  * - IDLE is never gated on RXFNE, which RM0456 66.8.10 does.
@@ -663,6 +676,7 @@ private:
   void               flags();
   void               interrupts();
   void               warn_unsupported();
+  void               note_unmodelled(lock& entry, std::uint32_t stored, std::uint32_t written);
   [[nodiscard]] auto bit(std::optional<field_ref> const& flag) const -> std::uint32_t;
   [[nodiscard]] auto sci3_field(std::string_view reg_name, std::string_view name) const
       -> std::optional<field_ref>;
@@ -746,6 +760,7 @@ private:
   bool                                         no_baud_logged_{};
   bool                                         parity_tag_logged_{};
   std::vector<lock>                            locks_;
+  std::vector<field_ref>                       unmodelled_;
   std::string_view                             manual_;
   std::uint32_t                                status_clears_{};
   std::uint32_t                                break_stop_half_bits_;
@@ -969,21 +984,34 @@ usart::usart(
   if(not sci2_)
   {
     auto const presc = prescaler_.has_value();
-    auto const tables = low_power_ ? std::array<locked_fields, 5>{{{cr1_, lpuart_cr1},
+    auto const tables = low_power_ ? std::array<locked_fields, 7>{{{cr1_, lpuart_cr1},
                                                                    {"CR2", lpuart_cr2},
                                                                    {"CR3", lpuart_cr3},
                                                                    {"BRR", whole_brr},
-                                                                   {"PRESC", whole_presc}}}
-                                   : std::array<locked_fields, 5>{{{cr1_, usart_cr1},
+                                                                   {"PRESC", whole_presc},
+                                                                   {"GTPR", gtpr_locked},
+                                                                   {"AUTOCR", autocr_locked}}}
+                                   : std::array<locked_fields, 7>{{{cr1_, usart_cr1},
                                                                    {"CR2", usart_cr2},
                                                                    {"CR3", usart_cr3},
                                                                    {"BRR", whole_brr},
-                                                                   {"PRESC", whole_presc}}};
+                                                                   {"PRESC", whole_presc},
+                                                                   {"GTPR", gtpr_locked},
+                                                                   {"AUTOCR", autocr_locked}}};
     for(auto const& [reg_name, names] : tables)
     {
+      auto const stored_only = reg_name == "GTPR" or reg_name == "AUTOCR";
       if(reg_name == "PRESC" and not presc)
       {
         continue;
+      }
+      if(stored_only and not std::ranges::contains(desc.registers, reg_name, &register_desc::name))
+      {
+        continue;
+      }
+      if(stored_only)
+      {
+        bind(std::array<write_entry<usart>, 1>{{{reg_name, nullptr}}});
       }
       auto& entry  = locks_.emplace_back();
       entry.reg    = reg_name == cr1_ ? std::string{"CR1"} : std::string{reg_name};
@@ -1026,6 +1054,18 @@ usart::usart(
     if(auto const found = optional(reg_name, bits))
     {
       stop_mode_.push_back(*found);
+    }
+  }
+  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 3>{
+          {{"GTPR", "GT"}, {"GTPR", "PSC"}, {"AUTOCR", "TRIGEN"}}
+  })
+  {
+    if(not sci2_ and std::ranges::contains(desc.registers, reg_name, &register_desc::name))
+    {
+      if(auto const found = optional(reg_name, bits))
+      {
+        unmodelled_.push_back(*found);
+      }
     }
   }
   auto_baud_       = optional("CR2", "ABREN");
@@ -1096,14 +1136,15 @@ auto usart::on_write(
     }
   }
   auto const found = std::ranges::find(locks_, word, &lock::offset);
-  if(found == locks_.end() or access.by == initiator::debugger or not enabled())
+  if(found == locks_.end() or access.by == initiator::debugger)
   {
     return dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   auto const stored = regs.peek(word);
   auto const merged = merge_write(stored, offset, size, value);
-  if(word == enable_.offset and enable_.of(merged) == 0)
+  if(not enabled() or (word == enable_.offset and enable_.of(merged) == 0))
   {
+    note_unmodelled(*found, stored, merged);
     return dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   auto mask = found->mask;
@@ -1140,7 +1181,32 @@ auto usart::on_write(
       throw model_error(desc_.name, found->reg, word);
     }
   }
+  note_unmodelled(*found, stored, kept);
   return dispatch_model::on_write(regs, word, 4, old, kept, access);
+}
+
+void usart::note_unmodelled(lock& entry, std::uint32_t stored, std::uint32_t written)
+{
+  auto const sets = std::ranges::any_of(unmodelled_, [&](field_ref const& bits) {
+    return bits.offset == entry.offset and (bits.of(written) & ~bits.of(stored)) != 0;
+  });
+  if(not sets)
+  {
+    return;
+  }
+  if(not std::exchange(entry.unmodelled_logged, true))
+  {
+    warn(
+        entry.reg,
+        std::format(
+            "{} sets GT, PSC or TRIGEN: the guard time, the prescaler and the autonomous trigger "
+            "are not modelled, the value is stored and acts on nothing",
+            entry.reg));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, entry.reg, entry.offset);
+  }
 }
 
 void usart::reset(register_file&, reset_kind kind)

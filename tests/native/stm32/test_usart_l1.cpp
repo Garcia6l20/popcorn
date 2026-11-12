@@ -840,3 +840,20 @@ TEST_CASE(
     CHECK(records->empty());
   }
 }
+
+TEST_CASE("RM0038 27.6.7: an L1 GTPR is plain storage, written with UE 1 and nothing logs")
+{
+  constexpr address gtpr_offset = 0x18;
+  rig               r{"idle"};
+  auto const        records = std::make_shared<std::vector<core::log_record>>();
+  auto const        sink    = r.f->target->add_log_sink(
+      [records](core::log_record const& record) { records->push_back(record); });
+  auto const* const model = r.f->target->model("USART1");
+  REQUIRE(model != nullptr);
+  CHECK_FALSE(std::ranges::contains(model->claims(), std::string{"GTPR"}));
+  r.write(0x4002'3820, r.read(0x4002'3820) | (1u << 14));
+  r.cpu_write(usart1 + cr1, ue);
+  r.cpu_write(usart1 + gtpr_offset, 0x0A05);
+  CHECK(r.read(usart1 + gtpr_offset) == 0x0A05);
+  CHECK(records->empty());
+}

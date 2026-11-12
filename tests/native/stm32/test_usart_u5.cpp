@@ -4356,3 +4356,216 @@ TEST_CASE("RM0456 66.8.6: BRR written with UE 1 is held on UART4, its own row")
   CHECK(t.logged.size() == 1);
   CHECK(t.logged[0].peripheral == "UART4");
 }
+
+namespace
+{
+auto u5_mask(std::string_view peripheral, std::string_view reg_name, std::string_view field_name)
+    -> std::uint32_t
+{
+  static auto const desc = u575();
+  auto const        unit =
+      std::ranges::find(desc.peripherals, peripheral, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != desc.peripherals.end());
+  auto const reg_found =
+      std::ranges::find(unit->registers, reg_name, &popcorn::register_desc::name);
+  REQUIRE(reg_found != unit->registers.end());
+  auto const bits = std::ranges::find(reg_found->fields, field_name, &popcorn::field_desc::name);
+  REQUIRE(bits != reg_found->fields.end());
+  return (bits->width >= 32 ? 0xFFFF'FFFFu : ((1u << bits->width) - 1u)) << bits->lsb;
+}
+
+auto records_with(locked_rig const& t, std::string_view text) -> std::ptrdiff_t
+{
+  return std::ranges::count_if(t.logged, [&](core::log_record const& record) {
+    return record.message.find(text) != std::string::npos;
+  });
+}
+
+auto claims_of(locked_rig const& t, std::string_view unit_name) -> std::vector<std::string>
+{
+  auto const* model = t.r.f->target->model(unit_name);
+  REQUIRE(model != nullptr);
+  return model->claims();
+}
+}
+
+TEST_CASE("RM0456 66.8.7: GTPR written with UE 1 keeps its value on a U5 USART and logs once")
+{
+  locked_rig t;
+  auto const gt  = u5_mask("USART1", "GTPR", "GT") & 0x0500;
+  auto const psc = u5_mask("USART1", "GTPR", "PSC") & 0x03;
+  t.debugger("USART1", "GTPR", gt | psc);
+  t.cpu("USART1", "CR1_enabled", ue);
+  t.cpu("USART1", "GTPR", 0);
+  t.cpu("USART1", "GTPR", 0);
+  CHECK(t.read("USART1", "GTPR") == (gt | psc));
+  CHECK(records_with(t, "GTPR written with UE 1") == 1);
+  t.cpu("USART1", "GTPR", 0xFFFF);
+  CHECK(t.read("USART1", "GTPR") == (gt | psc));
+}
+
+TEST_CASE("RM0456 66.8.16 and 67.7.14: AUTOCR written with UE 1 keeps its fields, TECLREN is free")
+{
+  for(auto const unit_name : {"USART1", "LPUART1"})
+  {
+    CAPTURE(unit_name);
+    locked_rig t;
+    auto const sel   = u5_mask(unit_name, "AUTOCR", "TRIGSEL") & (5u << 19);
+    auto const idle  = u5_mask(unit_name, "AUTOCR", "IDLEDIS");
+    auto const teclr = u5_mask(unit_name, "AUTOCR", "TECLREN");
+    auto const keep  = u5_mask(unit_name, "AUTOCR", "TRIGSEL")
+                     | u5_mask(unit_name, "AUTOCR", "IDLEDIS")
+                     | u5_mask(unit_name, "AUTOCR", "TRIGEN")
+                     | u5_mask(unit_name, "AUTOCR", "TRIGPOL")
+                     | u5_mask(unit_name, "AUTOCR", "TDN");
+    t.debugger(unit_name, "AUTOCR", sel | idle);
+    t.cpu(unit_name, std::string_view{unit_name} == "LPUART1" ? "CR1" : "CR1_enabled", ue);
+    t.cpu(unit_name, "AUTOCR", teclr | keep);
+    CHECK(t.read(unit_name, "AUTOCR") == (teclr | sel | idle));
+    t.cpu(unit_name, "AUTOCR", 0);
+    CHECK(t.read(unit_name, "AUTOCR") == (sel | idle));
+    CHECK(records_with(t, "AUTOCR written with UE 1") == 1);
+  }
+}
+
+TEST_CASE("GTPR and AUTOCR written with UE 0 are stored whole and read back")
+{
+  locked_rig t;
+  t.cpu("USART1", "GTPR", 0x0000);
+  auto const trigsel = u5_mask("USART1", "AUTOCR", "TRIGSEL") & (3u << 19);
+  t.cpu("USART1", "AUTOCR", trigsel | u5_mask("USART1", "AUTOCR", "TDN"));
+  CHECK(t.read("USART1", "AUTOCR") == (trigsel | u5_mask("USART1", "AUTOCR", "TDN")));
+  t.cpu("USART1", "GTPR", 0x0A05);
+  CHECK(t.read("USART1", "GTPR") == 0x0A05);
+}
+
+TEST_CASE("TECLREN keeps taking writes with UE 1 on a U5 USART")
+{
+  locked_rig t;
+  auto const teclr = u5_mask("USART1", "AUTOCR", "TECLREN");
+  t.debugger("USART1", "AUTOCR", teclr);
+  t.cpu("USART1", "CR1_enabled", ue);
+  t.cpu("USART1", "AUTOCR", 0);
+  CHECK(t.read("USART1", "AUTOCR") == 0);
+  t.cpu("USART1", "AUTOCR", teclr);
+  CHECK(t.read("USART1", "AUTOCR") == teclr);
+  CHECK(records_with(t, "AUTOCR written with UE 1") == 0);
+}
+
+TEST_CASE("setting GT, PSC or TRIGEN logs the not-modelled warning once, TRIGSEL alone does not")
+{
+  struct leg
+  {
+    std::string_view reg_name;
+    std::string_view field_name;
+    bool             warns;
+  };
+  for(auto const& entry : std::array<leg, 5>{
+          {{"GTPR", "GT", true},
+           {"GTPR", "PSC", true},
+           {"AUTOCR", "TRIGEN", true},
+           {"AUTOCR", "TRIGSEL", false},
+           {"AUTOCR", "TRIGPOL", false}}
+  })
+  {
+    CAPTURE(entry.reg_name);
+    CAPTURE(entry.field_name);
+    locked_rig t;
+    auto const bit = u5_mask("USART1", entry.reg_name, entry.field_name)
+                   & -u5_mask("USART1", entry.reg_name, entry.field_name);
+    t.cpu("USART1", entry.reg_name, bit);
+    CHECK(t.read("USART1", entry.reg_name) == bit);
+    CHECK(records_with(t, "are not modelled") == (entry.warns ? 1 : 0));
+    t.cpu("USART1", entry.reg_name, 0);
+    t.cpu("USART1", entry.reg_name, bit);
+    CHECK(records_with(t, "are not modelled") == (entry.warns ? 1 : 0));
+  }
+  locked_rig c;
+  c.debugger("USART1", "GTPR", 0x0101);
+  c.cpu("USART1", "GTPR", 0);
+  CHECK(c.read("USART1", "GTPR") == 0);
+  CHECK(records_with(c, "are not modelled") == 0);
+  locked_rig other;
+  other.cpu("USART1", "GTPR", 0x0001);
+  other.cpu("USART1", "AUTOCR", u5_mask("USART1", "AUTOCR", "TRIGEN"));
+  CHECK(records_with(other, "are not modelled") == 2);
+}
+
+TEST_CASE("a strict machine refuses GT, PSC and TRIGEN set and a locked GTPR write, old value kept")
+{
+  locked_rig t{true};
+  auto const reset = t.read("USART1", "AUTOCR");
+  CHECK(t.refuses("USART1", "GTPR", 0x0100));
+  CHECK(t.read("USART1", "GTPR") == 0);
+  CHECK(t.refuses("USART1", "GTPR", 0x0001));
+  CHECK(t.read("USART1", "GTPR") == 0);
+  auto const trigen = u5_mask("USART1", "AUTOCR", "TRIGEN");
+  CHECK(t.refuses("USART1", "AUTOCR", reset | trigen));
+  CHECK(t.read("USART1", "AUTOCR") == reset);
+  auto const sel = u5_mask("USART1", "AUTOCR", "TRIGSEL") & (1u << 19);
+  t.cpu("USART1", "AUTOCR", reset | sel);
+  CHECK(t.read("USART1", "AUTOCR") == (reset | sel));
+  t.debugger("USART1", "GTPR", 0x0200);
+  t.debugger("USART1", "CR1_enabled", ue);
+  CHECK(t.refuses("USART1", "GTPR", 0));
+  CHECK(t.read("USART1", "GTPR") == 0x0200);
+  CHECK(t.refuses("USART1", "AUTOCR", reset));
+  CHECK(t.read("USART1", "AUTOCR") == (reset | sel));
+}
+
+TEST_CASE("RM0456 66.8: GTPR and AUTOCR are claimed where the description has them")
+{
+  locked_rig t;
+  auto const has = [&](std::string_view unit_name, std::string_view reg_name) {
+    auto const claimed = claims_of(t, unit_name);
+    return std::ranges::contains(claimed, std::string{reg_name});
+  };
+  CHECK(has("USART1", "GTPR"));
+  CHECK(has("USART1", "AUTOCR"));
+  CHECK(has("UART4", "GTPR"));
+  CHECK(has("UART4", "AUTOCR"));
+  CHECK(has("LPUART1", "AUTOCR"));
+  CHECK_FALSE(has("LPUART1", "GTPR"));
+}
+
+TEST_CASE("GTPR and AUTOCR survive a save and a load")
+{
+  locked_rig t;
+  t.debugger("USART1", "GTPR", 0x0A05);
+  t.debugger("USART1", "AUTOCR", 0x8008'0007);
+  auto const saved = t.r.f->target->snapshot();
+  t.debugger("USART1", "GTPR", 0);
+  t.debugger("USART1", "AUTOCR", 0);
+  t.r.f->target->restore(saved);
+  CHECK(t.read("USART1", "GTPR") == 0x0A05);
+  CHECK(t.read("USART1", "AUTOCR") == 0x8008'0007);
+}
+
+TEST_CASE("CPU accesses to the claimed GTPR and AUTOCR are not in the unmodelled report")
+{
+  locked_rig t;
+  t.r.f->target->enable_coverage({}, true);
+  auto* const probe = t.r.f->model_of<bus_probe>("DAC1");
+  REQUIRE(probe != nullptr);
+  for(auto const* unit_name : {"USART1", "UART4"})
+  {
+    for(auto const* reg_name : {"GTPR", "AUTOCR"})
+    {
+      auto const at = address_of(*t.r.f, unit_name, reg_name);
+      REQUIRE(probe->context.services.read(at, 4, popcorn::initiator::cpu).has_value());
+      REQUIRE(probe->context.services.write(at, 4, 0, popcorn::initiator::cpu).has_value());
+    }
+  }
+  CHECK(t.r.f->target->coverage().unmodelled.empty());
+}
+
+TEST_CASE("RM0456 66.8.7 and 66.8.16: a reset restores GTPR to 0 and AUTOCR to 0x80000000")
+{
+  locked_rig t;
+  t.cpu("USART1", "GTPR", 0x0A05);
+  t.cpu("USART1", "AUTOCR", 0x0008'0007);
+  CHECK(t.read("USART1", "GTPR") == 0x0A05);
+  t.r.f->target->reset();
+  CHECK(t.read("USART1", "GTPR") == 0);
+  CHECK(t.read("USART1", "AUTOCR") == 0x8000'0000);
+}

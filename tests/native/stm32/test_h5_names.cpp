@@ -932,3 +932,63 @@ TEST_CASE(
     CHECK(count(s, "written with UE 1") == 0);
   }
 }
+
+TEST_CASE("RM0481 56.8.7: GTPR written with UE 1 keeps its value on an H5 USART and UART")
+{
+  for(auto const& which : {usart2, uart4})
+  {
+    CAPTURE(which.name);
+    lock_scene t{which};
+    auto const gt = t.mask("GTPR", "GT") & 0x0500;
+    t.debugger("GTPR", gt);
+    t.cpu("CR1_enabled", t.mask("CR1_enabled", "UE"));
+    t.cpu("GTPR", 0);
+    t.cpu("GTPR", 0);
+    CHECK(t.get("GTPR") == gt);
+    CHECK(t.lock_records("GTPR") == 1);
+    lock_scene s{which, true};
+    s.debugger("GTPR", gt);
+    s.debugger("CR1_enabled", s.mask("CR1_enabled", "UE"));
+    CHECK(s.refuses("GTPR", 0));
+    CHECK(s.get("GTPR") == gt);
+  }
+}
+
+TEST_CASE(
+    "RM0481 56.8.7: an H5 GTPR set of GT or PSC is a not-modelled warning, a model_error under "
+    "strict")
+{
+  for(auto const* field : {"GT", "PSC"})
+  {
+    CAPTURE(field);
+    lock_scene t{usart2};
+    auto const bit = t.mask("GTPR", field) & -t.mask("GTPR", field);
+    t.cpu("GTPR", bit);
+    t.cpu("GTPR", 0);
+    t.cpu("GTPR", bit);
+    CHECK(
+        std::ranges::count_if(
+            t.logged,
+            [](core::log_record const& record) {
+              return record.message.find("are not modelled") != std::string::npos;
+            })
+        == 1);
+    lock_scene s{usart2, true};
+    CHECK(s.refuses("GTPR", bit));
+    CHECK(s.get("GTPR") == 0);
+  }
+}
+
+TEST_CASE("RM0481 57.7: the H5 LPUART claims no GTPR and no AUTOCR, the USART claims GTPR only")
+{
+  lock_scene t{usart2};
+  auto const claimed = [&](std::string_view name) {
+    auto const* model = t.f.target->model(name);
+    REQUIRE(model != nullptr);
+    return model->claims();
+  };
+  CHECK(std::ranges::contains(claimed("USART2"), std::string{"GTPR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("USART2"), std::string{"AUTOCR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("LPUART"), std::string{"GTPR"}));
+  CHECK_FALSE(std::ranges::contains(claimed("LPUART"), std::string{"AUTOCR"}));
+}
