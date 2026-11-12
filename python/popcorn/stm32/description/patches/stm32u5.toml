@@ -54,24 +54,6 @@ on_write = "one_to_set"
 source = "RM0456 Rev 7, 34.7.3 ADC control register (ADC_CR): ADCAL, ADSTP, ADSTART, ADDIS and ADEN of ADC4 are rs, set by software writing 1, a write of 0 keeps them. ST's STM32U5 SVDs give read-only"
 
 [[fields]]
-instances = ["ADC12"]
-registers = ["ADC12_CCR"]
-add = { name = "DUAL", lsb = 0, width = 5, acc = "read_write", reset = 0 }
-source = "RM0456 Rev 7, 33.7.2 ADC12_CCR: DUAL[4:0] in bits 4:0 selects the dual ADC mode. The STM32U5 SVDs have no DUAL"
-
-[[fields]]
-instances = ["ADC12"]
-registers = ["ADC12_CCR"]
-add = { name = "DELAY", lsb = 8, width = 4, acc = "read_write", reset = 0 }
-source = "RM0456 Rev 7, 33.7.2 ADC12_CCR: DELAY[3:0] in bits 11:8 is the delay between the two sampling phases of the interleaved dual mode. The STM32U5 SVDs have no DELAY"
-
-[[fields]]
-instances = ["ADC12"]
-registers = ["ADC12_CCR"]
-add = { name = "DAMDF", lsb = 14, width = 2, acc = "read_write", reset = 0 }
-source = "RM0456 Rev 7, 33.7.2 ADC12_CCR: DAMDF[1:0] in bits 15:14 selects the dual ADC mode data format. The STM32U5 SVDs have no DAMDF"
-
-[[fields]]
 instances = ["EXTI"]
 registers = ["EXTI_RPR1"]
 fields = ["RPIF0", "RPIF1", "RPIF2", "RPIF3", "RPIF4", "RPIF5", "RPIF6", "RPIF7", "RPIF8", "RPIF9", "RPIF10", "RPIF11", "RPIF12", "RPIF13", "RPIF14", "RPIF15", "RPIF16", "RPIF17", "RPIF18", "RPIF19", "RPIF20", "RPIF21", "RPIF22", "RPIF23", "RPIF24", "RPIF25"]

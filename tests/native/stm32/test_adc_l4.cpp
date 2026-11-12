@@ -3275,6 +3275,23 @@ TEST_CASE(
   CHECK(run.warnings.empty());
 }
 
+TEST_CASE("an L476 description with no ADC_Common DUAL field is a config_error at construction")
+{
+  auto description = l476rc();
+  auto unit        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC_Common"}, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != description.peripherals.end());
+  auto const* const named = popcorn::find_register(*unit, "ADC_CCR");
+  REQUIRE(named != nullptr);
+  auto ccr = std::ranges::find(unit->registers, named->name, &popcorn::register_desc::name);
+  REQUIRE(ccr != unit->registers.end());
+  REQUIRE(std::erase_if(ccr->fields, [](auto const& f) { return f.name == "DUAL"; }) == 1);
+  stm32::board board{};
+  auto         options = popcorn::testing::stm32_options();
+  options.models       = stm32::factories(board, description);
+  CHECK_THROWS_AS(stm32_fixture(description, firmware, std::move(options)), popcorn::config_error);
+}
+
 TEST_CASE(
     "the L476 pad tables hold every external channel of ADC1 to ADC3, ADC2 IN9 missing throws "
     "config_error naming it, no table passes")

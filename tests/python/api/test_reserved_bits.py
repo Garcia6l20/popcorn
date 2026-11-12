@@ -31,11 +31,10 @@ def test_the_dbgmcu_idcode_keeps_the_bits_outside_its_fields(part: str) -> None:
     assert idcode.reset & ~covered != 0
 
 
-def test_the_u5_adc12_ccr_holds_dual_delay_and_damdf() -> None:
+def test_the_u5_adc12_ccr_of_a_part_with_one_adc_has_no_dual_delay_and_damdf() -> None:
     m = popcorn.Machine(mcu("STM32U575QGIx"))
     ccr = m.periph.ADC12.ADC12_CCR if hasattr(m.periph.ADC12, "ADC12_CCR") else m.periph.ADC12.CCR
     ccr.write(0xFFFF_FFFF)
-    assert ccr.read() == 0x01FC_CF1F
-    assert ccr.DUAL == 0x1F
-    assert ccr.DELAY == 0xF
-    assert ccr.DAMDF == 0x3
+    assert ccr.read() == 0x01FC_0000
+    for name in ("DUAL", "DELAY", "DAMDF"):
+        assert not hasattr(ccr, name)

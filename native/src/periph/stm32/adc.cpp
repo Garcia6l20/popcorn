@@ -288,7 +288,8 @@ struct u5_adc
   static constexpr std::string_view common_sensor       = "VSENSESEL";
   static constexpr std::string_view common_prescaler    = "PRESC";
   static constexpr std::string_view common_clock_mode   = {};
-  static constexpr std::string_view common_dual         = {};
+  static constexpr std::string_view common_dual         = "DUAL";
+  static constexpr bool             dual_optional       = true;
   static constexpr std::string_view common_status       = {};
   static constexpr bool             regulator_flag      = true;
   static constexpr std::size_t      result_depth        = 8;
@@ -404,6 +405,7 @@ struct h5_adc
   static constexpr std::string_view common_prescaler   = "PRESC";
   static constexpr std::string_view common_clock_mode  = "CKMODE";
   static constexpr std::string_view common_dual        = "DUAL";
+  static constexpr bool             dual_optional      = false;
   static constexpr std::string_view common_status      = "ADC_CSR";
   static constexpr std::string_view status_master      = "ADC1";
   static constexpr std::string_view status_slave       = "ADC2";
@@ -552,6 +554,7 @@ struct l4_adc
   static constexpr std::string_view common_prescaler   = "PRESC";
   static constexpr std::string_view common_clock_mode  = "CKMODE";
   static constexpr std::string_view common_dual        = "DUAL";
+  static constexpr bool             dual_optional      = false;
   static constexpr std::string_view common_status      = "ADC_CSR";
   static constexpr std::string_view status_master      = "ADC1";
   static constexpr std::string_view status_slave       = "ADC2";
@@ -963,7 +966,10 @@ adc_common_model<Traits>::adc_common_model(model_context& ctx, peripheral_desc c
   }
   if constexpr(not Traits::common_dual.empty())
   {
-    dual_ = field(Traits::common_register, Traits::common_dual);
+    if(not Traits::dual_optional or this->has_field(Traits::common_register, Traits::common_dual))
+    {
+      dual_ = field(Traits::common_register, Traits::common_dual);
+    }
   }
   if constexpr(not Traits::common_status.empty())
   {

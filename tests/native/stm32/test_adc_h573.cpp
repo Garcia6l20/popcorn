@@ -1201,6 +1201,24 @@ TEST_CASE("ADC_CSR reads ADC1 ADC_ISR bits 10:0 at 10:0 and ADC2's at 26:16")
   CHECK(r.read("ADCC", "ADC_CSR") == (1u | 1u << 16));
 }
 
+TEST_CASE("an H573 description with no ADCC DUAL field is a config_error at construction")
+{
+  auto description = h573();
+  auto unit        = std::ranges::find(
+      description.peripherals, std::string_view{"ADCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != description.peripherals.end());
+  auto const* const named = popcorn::find_register(*unit, "ADC_CCR");
+  REQUIRE(named != nullptr);
+  auto ccr = std::ranges::find(unit->registers, named->name, &popcorn::register_desc::name);
+  REQUIRE(ccr != unit->registers.end());
+  REQUIRE(std::erase_if(ccr->fields, [](auto const& f) { return f.name == "DUAL"; }) == 1);
+  stm32::board board{};
+  board.supply.vdda_mv = vdda_mv;
+  auto options         = popcorn::testing::stm32_options();
+  options.models       = stm32::factories(board, description);
+  CHECK_THROWS_AS(stm32_fixture(description, firmware, std::move(options)), popcorn::config_error);
+}
+
 TEST_CASE("the H573 ADC1 and ADC2 have bank A only: bank B is a config_error, its masks 0")
 {
   rig const r;

@@ -1043,6 +1043,49 @@ TEST_CASE("a reserved PRESC divides by 256 and logs once, a model_error when str
 
 namespace
 {
+auto with_dual_field() -> popcorn::part_description
+{
+  auto description = u575();
+  auto unit        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC12"}, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != description.peripherals.end());
+  auto const* const named = popcorn::find_register(*unit, "ADC12_CCR");
+  REQUIRE(named != nullptr);
+  auto ccr = std::ranges::find(unit->registers, named->name, &popcorn::register_desc::name);
+  REQUIRE(ccr != unit->registers.end());
+  REQUIRE(
+      not std::ranges::contains(ccr->fields, std::string_view{"DUAL"}, &popcorn::field_desc::name));
+  ccr->fields.push_back({.name = "DUAL", .lsb = 0, .width = 5});
+  return description;
+}
+}
+
+TEST_CASE(
+    "a part without the DUAL field builds and takes CCR writes, one with it logs a DUAL write once")
+{
+  {
+    adc_fixture const f;
+    CHECK_NOTHROW(f.write("ADC12", "ADC12_CCR", 6u));
+  }
+  auto const                    dual = with_dual_field();
+  adc_fixture const             f{dual};
+  std::vector<core::log_record> logged;
+  auto const                    sink = recorder(f, logged);
+  f.write("ADC12", "ADC12_CCR", 0u);
+  CHECK(logged.empty());
+  f.write("ADC12", "ADC12_CCR", 6u);
+  f.write("ADC12", "ADC12_CCR", 1u);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].peripheral == "ADC12");
+  CHECK(logged[0].message.contains("DUAL"));
+  adc_fixture const strict{dual, {}, true, true};
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.target->mem().write(strict.at("ADC12", "ADC12_CCR"), 4, 6u)),
+      popcorn::model_error);
+}
+
+namespace
+{
 constexpr std::uint32_t    res12          = 1u << 2;
 constexpr std::uint32_t    ovrmod         = 1u << 12;
 constexpr std::uint32_t    discen         = 1u << 16;
