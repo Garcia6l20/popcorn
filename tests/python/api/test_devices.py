@@ -557,9 +557,18 @@ def test_a_device_serves_one_live_machine(u575: popcorn.PartDescription) -> None
     assert again.board.devices("I2C1") == (device,)
 
 
+@pytest.mark.parametrize("address", [0x01, 0x04, 0x05, 0x07, 0x77])
+def test_a_target_sits_at_any_address_from_0x01_to_0x77(
+    u575: popcorn.PartDescription, address: int
+) -> None:
+    device = I2CTarget(address)
+    machine = popcorn.Machine(u575, devices={"I2C1": [device]})
+    assert machine.board.devices("I2C1") == (device,)
+
+
 def test_bad_addresses_and_chip_selects_are_value_errors() -> None:
-    for address in (0x07, 0x78, True):
-        with pytest.raises(ValueError, match="0x08 to 0x77"):
+    for address in (0x00, 0x78, True):
+        with pytest.raises(ValueError, match="0x01 to 0x77"):
             I2CTarget(address)
     for cs in ("A4", "PA16", "pa4", "PA", ""):
         with pytest.raises(ValueError, match="pin name"):
@@ -796,9 +805,9 @@ def jedec_entry(*, address: int | None = None, cs: str | None = None) -> popcorn
             "an I2C bus of STM32U575QGIx",
         ),
         (
-            {"I2C1": popcorn.Periph(devices=[eeprom_entry(address=0x07)])},
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(address=0x00)])},
             "board.I2C1.devices[0].address",
-            "an I2C target address is 0x08 to 0x77, not 7",
+            "an I2C target address is 0x01 to 0x77, not 0",
         ),
         (
             {"I2C1": popcorn.Periph(devices=[eeprom_entry(size=0)])},

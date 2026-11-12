@@ -72,13 +72,13 @@ def cs_of(device: _core.SpiTargetBase) -> str | None:
 
 
 def check_address(address: int) -> None:
-    """Refuse `address` unless it is a 7-bit I2C target address, 0x08 to 0x77.
+    """Refuse `address` unless it is a 7-bit I2C target address, 0x01 to 0x77.
 
     Raises:
         ValueError: It is not.
     """
-    if isinstance(address, bool) or not 0x08 <= address <= 0x77:
-        raise ValueError(f"an I2C target address is 0x08 to 0x77, not {address!r}")
+    if isinstance(address, bool) or not 0x01 <= address <= 0x77:
+        raise ValueError(f"an I2C target address is 0x01 to 0x77, not {address!r}")
 
 
 def _own_names(cls: type) -> set[str]:

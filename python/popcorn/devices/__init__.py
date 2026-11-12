@@ -295,7 +295,7 @@ class Eeprom24xx(_native.Eeprom24xxBase):
         """Create the EEPROM, its array erased or read from `image`.
 
         Args:
-            address: 7-bit bus address, 0x08 to 0x77.
+            address: 7-bit bus address, 0x01 to 0x77.
             size: Array size in bytes, a multiple of `page_size`, at most 256 with one address
                 byte and 65536 with two.
             address_bytes: Word address bytes, 1 or 2.
@@ -391,7 +391,7 @@ class TableTarget(_native.TableTargetBase):
         """Create the target.
 
         Args:
-            address: 7-bit bus address, 0x08 to 0x77.
+            address: 7-bit bus address, 0x01 to 0x77.
             register_bytes: Register address bytes a write starts with, 1 to 4, most
                 significant first.
             replies: The bytes a read from each register returns.

@@ -82,7 +82,7 @@ class I2CTarget(_core.I2CTargetBase):
         """Answer `address`.
 
         Raises:
-            ValueError: `address` is not a 7-bit target address, 0x08 to 0x77.
+            ValueError: `address` is not a 7-bit target address, 0x01 to 0x77.
         """
         check_address(address)
         super().__init__()
