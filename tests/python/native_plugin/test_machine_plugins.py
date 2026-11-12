@@ -342,6 +342,30 @@ def test_a_plugin_factory_the_python_check_missed_is_refused_natively(kit: Plugi
     assert error.expected == "a model plugin kit registers, one of rng, uart"
 
 
+def test_a_plugin_model_on_a_peripheral_the_part_lacks_handed_to_machine_is_refused_natively(
+    kit: Plugin,
+) -> None:
+    loaded = _records.load(kit, kit.built())
+    description = described().part_description()
+    error = refused(lambda: popcorn.Machine(description, _plugin_models={"NOPE": (loaded, "rng")}))
+    assert error.key == "_plugin_models.NOPE"
+    assert error.expected == "a peripheral of the description"
+
+
+def test_a_plugin_model_beside_a_board_model_handed_to_machine_is_refused_natively(
+    kit: Plugin,
+) -> None:
+    loaded = _records.load(kit, kit.built())
+    description = described().part_description()
+    error = refused(
+        lambda: popcorn.Machine(
+            description, models={"RNG": Plain}, _plugin_models={"RNG": (loaded, "rng")}
+        )
+    )
+    assert error.key == "_plugin_models.RNG"
+    assert error.expected == "one board model"
+
+
 def model_of(kind: str, kit: Plugin, cls: type[Model] = Plain) -> popcorn.Use | PluginModel:
     return popcorn.Use(cls) if kind == "Python" else kit.model("rng")
 
