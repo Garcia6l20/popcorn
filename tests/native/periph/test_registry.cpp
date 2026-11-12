@@ -2,6 +2,8 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 
+#include "../../../native/src/periph/registry_internal.hpp"
+
 #include "../support/inert_model.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -470,4 +472,55 @@ TEST_CASE("an access inside a served range reaches the model")
   auto const base = target.peripheral("TESTDEV").description().base;
   CHECK(target.mem().read(base + 0x1fc, 4) == 0xa000'01fcu);
   CHECK(target.mem().read(base + 0x100, 4) == 0xa000'0100u);
+}
+
+TEST_CASE("an erase-by-glob register still replaces any entry of the same glob")
+{
+  periph::register_model("testdev", "v1*", tagged("built-in"));
+  periph::register_python_model_factory("testdev", "v1*", tagged("python"));
+  CHECK(periph::registration_count("testdev", "v1*") == 2);
+  periph::register_model("testdev", "v1*", tagged("public"));
+  CHECK(periph::registration_count("testdev", "v1*") == 1);
+  core::machine target{m33(), popcorn::testing::test_arch_factory(), {}};
+  CHECK(tag_of(target, "TESTDEV") == "public");
+  periph::register_model("testdev", "v1*", {});
+  CHECK_FALSE(periph::has_registration("testdev", "v1*"));
+}
+
+TEST_CASE("a python registration shadows an entry of the same glob and its removal restores it")
+{
+  periph::register_model("testdev", "v1*", tagged("built-in"));
+  periph::register_python_model_factory("testdev", "v1*", tagged("python"));
+  CHECK(periph::registration_count("testdev", "v1*") == 2);
+  core::machine shadowed{m33(), popcorn::testing::test_arch_factory(), {}};
+  CHECK(tag_of(shadowed, "TESTDEV") == "python");
+  CHECK(periph::unregister_python_model_factory("testdev", "v1*"));
+  CHECK(periph::registration_count("testdev", "v1*") == 1);
+  core::machine restored{m33(), popcorn::testing::test_arch_factory(), {}};
+  CHECK(tag_of(restored, "TESTDEV") == "built-in");
+  CHECK_FALSE(periph::unregister_python_model_factory("testdev", "v1*"));
+  CHECK(periph::registration_count("testdev", "v1*") == 1);
+  periph::register_model("testdev", "v1*", {});
+}
+
+TEST_CASE("registering python twice for one glob leaves one python entry")
+{
+  periph::register_model("testdev", "v1*", tagged("built-in"));
+  for(int round = 0; round < 1000; ++round)
+  {
+    periph::register_python_model_factory("testdev", "v1*", tagged("python"));
+  }
+  CHECK(periph::registration_count("testdev", "v1*") == 2);
+  CHECK(periph::unregister_python_model_factory("testdev", "v1*"));
+  CHECK(periph::registration_count("testdev", "v1*") == 1);
+  periph::register_model("testdev", "v1*", {});
+}
+
+TEST_CASE("an exact glob query does not match a broader registered glob")
+{
+  periph::register_model("testdev", "*", tagged("broad"));
+  CHECK(periph::has_registration("testdev", "*"));
+  CHECK_FALSE(periph::has_registration("testdev", "v1*"));
+  CHECK(periph::registration_count("testdev", "v1*") == 0);
+  periph::register_model("testdev", "*", {});
 }

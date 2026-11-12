@@ -150,13 +150,26 @@ private:
 [[= py::doc{"Route an IP to the Python model popcorn.model registers for it."}]] void
     register_python_model(std::string const& ip, std::string const& version_glob);
 
+/** @brief What unregister_python_model() removed. */
+enum class[[= py::rename{"RemovedEntry"}]] removed_entry : std::uint8_t
+{
+  none,
+  python,
+  other,
+};
+
 /**
- * @brief Removes a registration of register_python_model().
+ * @brief Removes the registration of register_python_model() for an IP and glob, which serves
+ *        the registration of that glob below it again. With none, removes the registration of
+ *        that glob of any other origin.
  * @param ip IP name.
  * @param version_glob Glob of the registration.
+ * @return Which registration was removed: the one of register_python_model(), one of another
+ *         origin, or none when the glob had no registration.
  */
-[[= py::doc{"Remove a registration of register_python_model."}]] void
-    unregister_python_model(std::string const& ip, std::string const& version_glob);
+[[= py::doc{"Remove a registration of register_python_model, and say which one went."}]] auto
+    unregister_python_model(std::string const& ip, std::string const& version_glob)
+        -> removed_entry;
 
 /**
  * @brief Glob of the registration, built-in or Python, that serves a peripheral of an IP and IP

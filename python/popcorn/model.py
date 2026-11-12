@@ -594,8 +594,9 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
 
     For vendor packages: `@register("tim", "v2.*")`. The class takes no constructor
     parameters. A later registration of the same IP and glob replaces it, a model wired
-    explicitly to a peripheral takes precedence. A machine fixture takes the registrations in
-    force when its test starts.
+    explicitly to a peripheral takes precedence. A built-in model of the same IP and glob
+    serves again once `unregister` removes the registration. A machine fixture takes the
+    registrations in force when its test starts.
     """
 
     def install(cls: M) -> M:
@@ -604,7 +605,6 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
         _core.register_python_model(ip, version_glob)
         _REGISTERED[(ip, version_glob)] = functools.partial(build_model, cls)
         registered_classes[(ip, version_glob)] = cls
-        unregistered.discard((ip, version_glob))
         registry_changed()
         return cls
 
@@ -612,11 +612,16 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
 
 
 def unregister(ip: str, version_glob: str = "*") -> None:
-    """Remove a registration of `register()`, for machines built from now on."""
-    _core.unregister_python_model(ip, version_glob)
+    """Remove a registration of `register()`, for machines built from now on.
+
+    A built-in model of the same IP and glob serves again. With no registration of `register()`
+    for that glob, the call removes the built-in model of that glob.
+    """
+    removed = _core.unregister_python_model(ip, version_glob)
     _REGISTERED.pop((ip, version_glob), None)
     registered_classes.pop((ip, version_glob), None)
-    unregistered.add((ip, version_glob))
+    if removed is _core.RemovedEntry.other:
+        unregistered.add((ip, version_glob))
     registry_changed()
 
 

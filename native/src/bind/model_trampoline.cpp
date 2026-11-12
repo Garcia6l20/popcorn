@@ -1,3 +1,4 @@
+#include "../periph/registry_internal.hpp"
 #include "models.hpp"
 #include "python_callable.hpp"
 
@@ -269,7 +270,7 @@ namespace popcorn::bind
 {
 void register_python_model(std::string const& ip, std::string const& version_glob)
 {
-  periph::register_model(
+  periph::register_python_model_factory(
       ip, version_glob,
       [ip, version_glob](periph::model_context& ctx, peripheral_desc const& desc) {
         auto                    made = detail::current_build();
@@ -283,9 +284,19 @@ void register_python_model(std::string const& ip, std::string const& version_glo
       });
 }
 
-void unregister_python_model(std::string const& ip, std::string const& version_glob)
+auto unregister_python_model(std::string const& ip, std::string const& version_glob)
+    -> removed_entry
 {
+  if(periph::unregister_python_model_factory(ip, version_glob))
+  {
+    return removed_entry::python;
+  }
+  if(not periph::has_registration(ip, version_glob))
+  {
+    return removed_entry::none;
+  }
   periph::register_model(ip, version_glob, {});
+  return removed_entry::other;
 }
 
 auto registered_model_glob(std::string const& ip, std::string const& ip_version)

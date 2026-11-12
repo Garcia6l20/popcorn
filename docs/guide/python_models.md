@@ -68,7 +68,8 @@ board model wins over the global registry.
 `machine.model("RNG")` returns the model object of a parked machine.
 
 `popcorn.model.register("ip", "version-glob")` registers a class for every peripheral of an IP in
-machines built afterwards, and `unregister` removes it. Prefer the board for tests, because a
+machines built afterwards, and `unregister` removes it, which serves a built-in model of the
+same IP and glob again. Prefer the board for tests, because a
 registration lasts for the whole process.
 
 ## Register names

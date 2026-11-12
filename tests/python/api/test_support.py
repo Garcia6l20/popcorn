@@ -239,11 +239,69 @@ print({s.name: s.model for s in support(part)}["CRC"], served)
 """
 
 
-def test_a_builtin_its_python_replacement_unregistered_shows_as_no_model() -> None:
+def test_a_builtin_its_python_replacement_unregistered_serves_again() -> None:
     run = subprocess.run(
         [sys.executable, "-c", UNREGISTERED_BUILTIN], capture_output=True, text=True, check=True
     )
-    assert run.stdout.split() == ["None", "False"]
+    assert run.stdout.split() == ["builtin", "True"]
+
+
+SHADOWED_BUILTIN = """
+import gc
+import weakref
+
+import popcorn
+from popcorn.model import Model, on_read
+from popcorn.pytest._cache import cache_key
+from popcorn.stm32 import mcu, support
+
+
+class Crc(Model):
+    @on_read("DR")
+    def dr(self):
+        return 0xC0DE
+
+
+project = popcorn.MachineDescription(part="STM32U575QGIx", images=[])
+part = mcu("STM32U575QGIx")
+base = next(p for p in part.peripherals if p.name == "CRC").base
+
+
+def served():
+    try:
+        return hex(popcorn.Machine(part).mem.u32[base])
+    except popcorn.ModelError:
+        return None
+
+
+def model():
+    return {s.name: s.model for s in support(part)}["CRC"]
+
+
+before_key = cache_key(project, False)
+before_model = model()
+popcorn.model.register("CRC", "integtest1_v2_0")(Crc)
+ref = weakref.ref(Crc)
+print("shadowed", served(), model(), cache_key(project, False) != before_key)
+popcorn.model.unregister("CRC", "integtest1_v2_0")
+del Crc
+gc.collect()
+print("restored", served(), model() == before_model, cache_key(project, False) == before_key)
+print("class dead", ref() is None)
+popcorn.model.unregister("CRC", "integtest1_v2_0")
+print("peeled twice", served(), model(), cache_key(project, False) != before_key)
+"""
+
+
+def test_a_python_model_shadows_a_builtin_and_two_unregisters_remove_both() -> None:
+    run = subprocess.run(
+        [sys.executable, "-c", SHADOWED_BUILTIN], capture_output=True, text=True, check=True
+    )
+    lines = run.stdout.splitlines()
+    assert lines[0] == "shadowed 0xc0de python True"
+    assert lines[1] == "restored 0x0 True True"
+    assert lines[2] == "class dead True"
+    assert lines[3] == "peeled twice None None True"
 
 
 ROW_PARTS = [
@@ -453,3 +511,65 @@ def test_the_h503_hash_refuses_the_reserved_algo_01_under_strict() -> None:
     with pytest.raises(ModelError):
         m.mem.u32[base] = 1 << 17
     assert m.mem.u32[base] == 0
+
+
+REMOVED_BUILTIN_THEN_PYTHON = """
+import popcorn
+from popcorn.model import Model
+from popcorn.pytest._cache import cache_key, registry_digest
+from popcorn.stm32 import mcu
+
+
+class Crc(Model):
+    pass
+
+
+project = popcorn.MachineDescription(part="STM32U575QGIx", images=[])
+part = mcu("STM32U575QGIx")
+base = next(p for p in part.peripherals if p.name == "CRC").base
+
+
+def served():
+    try:
+        popcorn.Machine(part).mem.u32[base]
+    except popcorn.ModelError:
+        return False
+    return True
+
+
+popcorn.model.unregister("CRC", "integtest1_v2_0")
+removed_digest, removed_key = registry_digest(), cache_key(project, False)
+popcorn.model.register("CRC", "integtest1_v2_0")(Crc)
+popcorn.model.unregister("CRC", "integtest1_v2_0")
+print("still removed", served(), registry_digest() == removed_digest != "")
+print("same key", cache_key(project, False) == removed_key)
+"""
+
+UNREGISTER_WITH_NO_ENTRY = """
+import popcorn
+from popcorn.pytest._cache import registry_digest
+from popcorn.stm32 import mcu
+
+part = mcu("STM32U575QGIx")
+base = next(p for p in part.peripherals if p.name == "CRC").base
+popcorn.model.unregister("CRC", "no_such_version")
+popcorn.Machine(part).mem.u32[base]
+print("untouched", repr(registry_digest()))
+"""
+
+
+def test_a_builtin_unregistered_stays_removed_after_a_python_registration_comes_and_goes() -> None:
+    run = subprocess.run(
+        [sys.executable, "-c", REMOVED_BUILTIN_THEN_PYTHON],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert run.stdout.splitlines() == ["still removed False True", "same key True"]
+
+
+def test_an_unregister_of_a_glob_with_no_entry_changes_nothing() -> None:
+    run = subprocess.run(
+        [sys.executable, "-c", UNREGISTER_WITH_NO_ENTRY], capture_output=True, text=True, check=True
+    )
+    assert run.stdout.splitlines() == ["untouched ''"]

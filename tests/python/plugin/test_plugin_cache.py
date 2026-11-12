@@ -574,7 +574,7 @@ def test_c_unregistered(machine):
 """,
     )
     result.assert_outcomes(passed=3)
-    assert summary(result).startswith("popcorn: 3 key(s)")
+    assert summary(result).startswith("popcorn: 2 key(s)")
 
 
 @pytest.mark.timeout(60)

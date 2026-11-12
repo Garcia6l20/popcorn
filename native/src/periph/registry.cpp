@@ -1,9 +1,11 @@
 #include "../plugin/guard.hpp"
 #include "register_layer.hpp"
+#include "registry_internal.hpp"
 
 #include <popcorn/core/services.hpp>
 #include <popcorn/periph/model.hpp>
 
+#include <algorithm>
 #include <mutex>
 #include <optional>
 #include <ranges>
@@ -23,6 +25,7 @@ struct registration
   std::string   ip;
   std::string   glob;
   model_factory factory;
+  bool          python = false;
 };
 
 struct registry
@@ -83,6 +86,50 @@ void register_model(std::string_view ip, std::string_view ip_version_glob, model
   }
   entries.entries.push_back(
       {.ip = std::string{ip}, .glob = std::string{ip_version_glob}, .factory = std::move(factory)});
+}
+
+void register_python_model_factory(
+    std::string_view ip,
+    std::string_view ip_version_glob,
+    model_factory    factory)
+{
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  std::erase_if(entries.entries, [&](registration const& entry) {
+    return entry.python and entry.ip == ip and entry.glob == ip_version_glob;
+  });
+  entries.entries.push_back(
+      {.ip      = std::string{ip},
+       .glob    = std::string{ip_version_glob},
+       .factory = std::move(factory),
+       .python  = true});
+}
+
+auto unregister_python_model_factory(std::string_view ip, std::string_view ip_version_glob) -> bool
+{
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  return std::erase_if(
+             entries.entries,
+             [&](registration const& entry) {
+               return entry.python and entry.ip == ip and entry.glob == ip_version_glob;
+             })
+      != 0;
+}
+
+auto registration_count(std::string_view ip, std::string_view ip_version_glob) -> std::size_t
+{
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  return static_cast<std::size_t>(
+      std::ranges::count_if(entries.entries, [&](registration const& entry) {
+        return entry.ip == ip and entry.glob == ip_version_glob;
+      }));
+}
+
+auto has_registration(std::string_view ip, std::string_view ip_version_glob) -> bool
+{
+  return registration_count(ip, ip_version_glob) != 0;
 }
 
 namespace

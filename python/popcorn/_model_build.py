@@ -21,8 +21,8 @@ registered_classes: dict[tuple[str, str], type[object]] = {}
 """Class of each `popcorn.model.register()` registration, by IP and glob."""
 
 unregistered: set[tuple[str, str]] = set()
-"""IP and glob of each registration `popcorn.model.unregister()` removed, built-in ones included,
-until `register()` sets them again."""
+"""IP and glob of each registration `popcorn.model.unregister()` removed with no Python
+registration of that glob above it, built-in ones included."""
 
 _generation = 0
 
