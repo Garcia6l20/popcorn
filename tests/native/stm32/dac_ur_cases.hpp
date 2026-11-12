@@ -92,9 +92,15 @@ struct bench
   bench(bench const&)                    = delete;
   auto operator=(bench const&) -> bench& = delete;
 
-  explicit bench(rig const& which, bool strict = false, part_description desc = {}) : r{which}
+  explicit bench(
+      rig const&       which,
+      bool             strict = false,
+      part_description desc   = {},
+      double           cpi    = 1.0)
+      : r{which}
   {
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.strict_peripherals = strict;
     f                          = std::make_unique<stm32_fixture>(
         desc.part.empty() ? which.desc() : std::move(desc), which.firmware, std::move(options));
@@ -909,6 +915,45 @@ TEST_CASE(
     CHECK((b.read("SR") & dac_ur::dmaudr1) == 0);
   }
   CHECK(b.logged.empty());
+}
+
+TEST_CASE(
+    "RM0456 35.4.10 and RM0481 30.4.10 sample and hold with double data, inferred: the second load "
+    "of a pair starts the sample phase at its own instant, at cpi 1 and 4")
+{
+  auto const&             r             = dac_ur::the_rig();
+  constexpr std::uint64_t lsi_period_ps = 31'250'000;
+  for(double const cpi : {1.0, 4.0})
+  {
+    CAPTURE(cpi);
+    dac_ur::bench b{r, false, {}, cpi};
+    auto const    tim6 = r.triggers[4];
+    b.lsi_on();
+    b.write("MCR", dac_ur::double1 | 4u);
+    b.write("SHSR1", 20);
+    b.write("SHHR", 5);
+    b.write("SHRR", 5);
+    b.write("CR", dac_ur::en1 | dac_ur::ten1 | dac_ur::tsel1(5) | dac_ur::dmaen1);
+    b.ready();
+    b.write("DHR12R1", 0x0400'0800);
+    b.dma_channel(2, "DHR12R1", {0x0C00'0200, 0x0100'0300});
+    for(auto const pair : {0, 1})
+    {
+      CAPTURE(pair);
+      auto const when = b.now_ps();
+      b.f->model_of<stm32::trigger_sink>(r.instance)
+          ->triggered(tim6, stm32::trigger_edge::rising, when);
+      auto const loads = b.events(0);
+      REQUIRE(loads.size() == 1);
+      b.idle_to(when + 100 * dac_ur::cycles(1, r.hclk_hz));
+      auto const phases = b.events(4);
+      REQUIRE(phases.size() == 1);
+      if(pair == 1)
+      {
+        CHECK(phases[0] - loads[0] == 21 * lsi_period_ps);
+      }
+    }
+  }
 }
 
 TEST_CASE(

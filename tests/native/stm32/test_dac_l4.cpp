@@ -133,9 +133,10 @@ struct rig
     });
   }
 
-  explicit rig(bool strict = false)
+  explicit rig(bool strict = false, double cpi = 1.0)
   {
     auto options               = popcorn::testing::stm32_options();
+    options.cpi                = cpi;
     options.models             = stm32::factories(stm32::board{}, l476rc());
     options.strict_peripherals = strict;
     f = std::make_unique<stm32_fixture>(l476rc(), firmware, std::move(options));
@@ -2072,4 +2073,26 @@ TEST_CASE(
   fresh.write(dac1 + cr, 0);
   CHECK(fresh.pad().analog_level(4) == 0);
   CHECK(fresh.pad().analog_level(5) == 0);
+}
+
+TEST_CASE(
+    "a SWTRIG1 load starts the sample phase at its own instant, not at the end of the instruction "
+    "that holds it, inferred, at cpi 1 and 4")
+{
+  for(double const cpi : {1.0, 4.0})
+  {
+    CAPTURE(cpi);
+    rig const r{false, cpi};
+    sample_and_hold(r, 20, 5);
+    auto const at = r.now_ps();
+    r.write(dac1 + cr, en1 | ten1 | software1);
+    r.idle_to(at + 21 * lsi);
+    r.write(dac1 + dhr12r1, 0x123);
+    r.idle_to(r.now_ps() + 6 * lsi);
+    auto const triggered = r.now_ps();
+    r.write(dac1 + swtrgr, 1);
+    r.idle_to(triggered + 8 * cycle);
+    CHECK(r.read(dac1 + dor1) == 0x123);
+    CHECK(r.pending(4) == std::vector<std::uint64_t>{triggered + cycle + 11 * lsi});
+  }
 }

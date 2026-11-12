@@ -488,7 +488,7 @@ private:
   void               mirror();
   void               request(std::size_t channel, std::uint64_t due, load_kind kind);
   void               catch_up(std::size_t channel, std::uint64_t ps);
-  void               transfer(std::size_t channel, load_kind kind);
+  void               transfer(std::size_t channel, load_kind kind, std::uint64_t at_ps);
   [[nodiscard]] auto wave_term(std::size_t channel) -> std::uint32_t;
   void               release(std::size_t channel);
   [[nodiscard]] auto live_code(std::size_t channel) const -> std::uint32_t;
@@ -505,7 +505,7 @@ private:
   void               settle_busy(std::size_t channel, std::uint64_t ps);
   [[nodiscard]] auto lsi_periods_ps(std::uint64_t periods) const -> std::uint64_t;
   [[nodiscard]] auto phase_periods(std::size_t channel, sample_phase which) const -> std::uint64_t;
-  void               start_sample(std::size_t channel);
+  void               start_sample(std::size_t channel, std::uint64_t from_ps);
   void               advance_phase(std::size_t channel, std::uint64_t ps);
   void               schedule_phase(std::size_t channel);
   void               hold_phase(std::size_t channel);
@@ -874,7 +874,7 @@ void dac::control_written(std::uint32_t old, std::uint32_t now)
     }
     else if(unit.enable.of(old) == 0 and get(regs_, unit.mode) >= 4)
     {
-      start_sample(channel);
+      start_sample(channel, now_ps());
     }
   }
   for(std::size_t channel = 0; channel < channels; ++channel)
@@ -1260,7 +1260,7 @@ template <holding Which> void dac::holding_written(std::uint32_t old, std::uint3
     store(channel, *data[channel]);
     if(changed and state_.phase[channel] != std::to_underlying(sample_phase::off))
     {
-      start_sample(channel);
+      start_sample(channel, now_ps());
     }
   }
   mirror();
@@ -1314,6 +1314,7 @@ void dac::catch_up(std::size_t channel, std::uint64_t ps)
   while(state_.due_ps[first] != 0 and state_.due_ps[first] <= ps)
   {
     auto const kind = static_cast<load_kind>(state_.triggered[first]);
+    auto const at   = state_.due_ps[first];
     for(auto slot = first; slot + 1 < first + depth; ++slot)
     {
       state_.due_ps[slot]    = state_.due_ps[slot + 1];
@@ -1321,7 +1322,7 @@ void dac::catch_up(std::size_t channel, std::uint64_t ps)
     }
     state_.due_ps[first + depth - 1]    = 0;
     state_.triggered[first + depth - 1] = 0;
-    transfer(channel, kind);
+    transfer(channel, kind, at);
     if(state_.due_ps[first] != 0)
     {
       ctx_.events.schedule_at(
@@ -1364,7 +1365,7 @@ auto dac::wave_term(std::size_t channel) -> std::uint32_t
   return value;
 }
 
-void dac::transfer(std::size_t channel, load_kind kind)
+void dac::transfer(std::size_t channel, load_kind kind, std::uint64_t at_ps)
 {
   auto const& unit = channel_[channel];
   auto const  twin = kind == load_kind::hardware
@@ -1376,7 +1377,7 @@ void dac::transfer(std::size_t channel, load_kind kind)
     update(regs_, unit.dorstat, 1);
     if(state_.phase[channel] != std::to_underlying(sample_phase::off))
     {
-      start_sample(channel);
+      start_sample(channel, at_ps);
     }
     drive_output(channel);
     return;
@@ -1390,7 +1391,7 @@ void dac::transfer(std::size_t channel, load_kind kind)
   regs_.poke(unit.output.offset, std::min(data_mask, data + term));
   if(state_.phase[channel] != std::to_underlying(sample_phase::off))
   {
-    start_sample(channel);
+    start_sample(channel, at_ps);
   }
   drive_output(channel);
   if(kind != load_kind::hardware or get(regs_, unit.dma) == 0)
@@ -1583,14 +1584,14 @@ auto dac::phase_periods(std::size_t channel, sample_phase which) const -> std::u
   return 0;
 }
 
-void dac::start_sample(std::size_t channel)
+void dac::start_sample(std::size_t channel, std::uint64_t from_ps)
 {
   cancel_phase(channel);
   state_.phase[channel]    = std::to_underlying(sample_phase::sample);
   state_.phase_ps[channel] = 0;
   if(auto const span = lsi_periods_ps(phase_periods(channel, sample_phase::sample)); span != 0)
   {
-    state_.phase_ps[channel] = now_ps() + span;
+    state_.phase_ps[channel] = from_ps + span;
     schedule_phase(channel);
   }
 }
@@ -1652,7 +1653,7 @@ void dac::resume_phase(std::size_t channel)
   }
   if(current == sample_phase::sample)
   {
-    start_sample(channel);
+    start_sample(channel, now_ps());
     return;
   }
   if(auto const span = lsi_periods_ps(phase_periods(channel, current)); span != 0)
