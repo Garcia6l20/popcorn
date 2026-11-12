@@ -354,20 +354,24 @@ struct lock
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
  *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
  *        `<instance>_rx_dma` request follows RXNE, through the GPDMA peer, levels announced again
- *        in reset. With UE 1, a CPU or DMA write leaves the fields the manual locks, RM0456 66.8
- *        and 67.7, RM0351 40.8 and 41.7, while the USART is enabled at their value: CR1, CR2 and
- *        CR3 fields per instance kind, BRR and PRESC whole, ABRMOD while ABREN is 1, and SCARCNT
- *        unless the write is 0. The STM32L4 locks CLKEN too, RM0351 40.8.2. The STM32L4 and the
- *        STM32H5 lock WUS, RM0351 40.8.3 and 41.7.3, RM0481 56.8.4 and 57.7.4. ADD changes with
- *        UE 1 while RE is 0 on the STM32L4, RM0351 40.8.2 and 41.7.2, and on the STM32H5 LPUART,
- *        RM0481 57.7.3.
- *        The write logs once per register, a model_error under strict peripherals. A write that
- *        clears UE takes effect whole, which the manual leaves open, and debugger writes are never
- *        locked. GTPR and AUTOCR are stored registers where the description has them: GT, PSC,
- *        TRIGSEL, IDLEDIS, TRIGEN, TRIGPOL and TDN are locked like the other fields, RM0456
- *        66.8.7, 66.8.16 and 67.7.14, RM0481 56.8.7, RM0351 40.8.5. A write that sets GT, PSC or
- *        TRIGEN logs one warning per register and raises model_error under strict peripherals,
- *        the guard time, the prescaler and the autonomous trigger act on nothing. Not
+ *        in reset. With UE 1, a CPU or DMA write leaves the fields the manual locks at their
+ *        value: RM0456 66.8 and 67.7 on the STM32U5, RM0481 56.8 and 57.7 on the STM32H5, RM0351
+ *        40.8 and 41.7 on the STM32L4, the CR1, CR2 and CR3 fields per instance kind, BRR and
+ *        PRESC whole, ABRMOD while ABREN is 1 and SCARCNT unless the write is 0. The STM32L4
+ *        locks CLKEN too, RM0351 40.8.2. The STM32L4 and the STM32H5 lock WUS, RM0351 40.8.3 and
+ *        41.7.3, RM0481 56.8.4 and 57.7.4. ADD changes with UE 1 while RE is 0 on the STM32L4,
+ *        RM0351 40.8.2 and 41.7.2, and on the STM32H5 LPUART, RM0481 57.7.3. The write logs once
+ *        per register and is a model_error under strict peripherals. The held value of a refused
+ *        write, a CR1 write that clears UE taking effect whole, no lock on CLKEN on the STM32U5
+ *        and the STM32H5, the same lock for DMA writes, TECLREN taking writes and an STM32L1
+ *        USART taking every write with UE 1 are inferred: the manuals say "can only be written"
+ *        or nothing at all. SCARCNT written 0 is taken, RM0456 66.8.4, RM0481 56.8.4, RM0351
+ *        40.8.3 allow only 0 with UE 1. Debugger writes are never locked. GTPR and AUTOCR are
+ *        stored registers where the description has them: GT, PSC, TRIGSEL, IDLEDIS, TRIGEN,
+ *        TRIGPOL and TDN are locked as the other fields, RM0456 66.8.7, 66.8.16 and 67.7.14,
+ *        RM0481 56.8.7, RM0351 40.8.5, TECLREN is not. A write that sets GT, PSC or TRIGEN logs
+ *        one warning per register and raises model_error under strict peripherals, the guard
+ *        time, the prescaler and the autonomous trigger act on nothing. Not
  *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
  *        For a link to another machine, the endpoint hears each frame when its start bit leaves,
@@ -484,8 +488,8 @@ struct lock
  *        SBK and lets the frame in flight end before the output stops, RM0038 27.6.4. The
  *        kernel clock is the APB clock of the bus the instance's address lies on,
  *        `usart_variant::kernel_buses`. Without `usart_variant::flow_control` CTSE and RTSE log
- *        one warning and change nothing. Nothing is locked while UE is 1, RWU mute mode is
- *        logged as not modelled, LBD never sets.
+ *        one warning and change nothing. Nothing is locked while UE is 1, RM0038 27.6, inferred.
+ *        RWU mute mode is logged as not modelled, LBD never sets.
  *
  * @limits usart USART, UART and LPUART
  *
@@ -495,14 +499,38 @@ struct lock
  * - The model runs in Run mode only. A CPU or DMA write that sets CR1.UESM, CR3.UCESM, CR3.WUFIE or
  *   CR3.WUS, or on the STM32H5 its bits WUS0 and WUS1, logs one `model_warning` and raises
  *   `ModelError` under `strict_peripherals` before the store, on every family. WUF stays 0.
- * - GTPR and AUTOCR are stored registers, locked while UE is 1 like the other fields. GT, PSC and
- *   TRIGEN act on nothing: a CPU or DMA write that sets one logs one `model_warning` per register
- *   and raises `ModelError` under `strict_peripherals` before the store. TRIGSEL, IDLEDIS,
- *   TRIGPOL and TDN are stored and act on nothing without a warning. A firmware access to the
- *   two registers is not listed in the unmodelled access report, the `model_warning` for GT, PSC
- *   and TRIGEN is the signal.
+ * - GTPR and AUTOCR are stored registers. GT, PSC and TRIGEN act on nothing: a CPU or DMA write
+ *   that sets one logs one `model_warning` per register and raises `ModelError` under
+ *   `strict_peripherals` before the store. TRIGSEL, IDLEDIS, TRIGPOL and TDN are stored and act
+ *   on nothing without a warning. A firmware access to the two registers is not listed in the
+ *   unmodelled access report, the `model_warning` for GT, PSC and TRIGEN is the signal.
  *
  * @group all rule
+ * - With UE 1 a CPU or DMA write leaves the fields the manual locks at their value: RM0456 66.8
+ *   and 67.7 on the STM32U5, RM0481 56.8 and 57.7 on the STM32H5, RM0351 40.8 and 41.7 on the
+ *   STM32L4. These are the CR1, CR2 and CR3 fields the manual writes only with UE 0, BRR and
+ *   PRESC whole, ABRMOD while ABREN is 1 and SCARCNT unless the write is 0. The write logs once
+ *   per register and raises `ModelError` under `strict_peripherals`. Debugger writes pass.
+ * - ADD changes with UE 1 while RE is 0 on the STM32L4 USART and LPUART and on the STM32H5
+ *   LPUART, RM0351 40.8.2 and 41.7.2, RM0481 57.7.3. On the STM32U5 and the STM32H5 USART it
+ *   changes only with UE 0, RM0456 66.8.3 and 67.7.3, RM0481 56.8.3. CLKEN is locked on the
+ *   STM32L4 USART, RM0351 40.8.2. WUS is locked on the STM32L4, as WUS0 and WUS1 on the STM32H5,
+ *   RM0351 40.8.3 and 41.7.3, RM0481 56.8.4 and 57.7.4.
+ * - GT and PSC, RM0456 66.8.7, RM0481 56.8.7, RM0351 40.8.5, and TRIGSEL, IDLEDIS, TRIGEN,
+ *   TRIGPOL and TDN, RM0456 66.8.16 and 67.7.14, change only with UE 0 and are held as the
+ *   fields above. RM0456 66.8.7 and 66.8.16 state the lock, the readback is inferred.
+ * - TECLREN, bit 31 of AUTOCR, takes writes with UE 1: RM0456 66.8.16 and 67.7.14 name bits 31:23
+ *   reserved and no lock for it, inferred.
+ * - A refused write leaves the field at its old value and reads it back. The manuals say the
+ *   field "can only be written when the USART is disabled (UE = 0)" and state neither what a
+ *   refused write does nor what the field reads, inferred.
+ * - A CR1 write that clears UE takes effect whole, locked fields included. RM0456 66.8.1 leaves
+ *   the case of one word clearing UE and changing a locked field open, inferred.
+ * - SCARCNT written 0 with UE 1 is taken: RM0456 66.8.4, RM0481 56.8.4 and RM0351 40.8.3 allow
+ *   only 0 then. A non-zero write is held, as a refused write.
+ * - CLKEN is not locked on the STM32U5 and the STM32H5: RM0456 66.8.3 and RM0481 56.8.3 give
+ *   the field no UE sentence, inferred.
+ * - The lock applies to DMA writes as to CPU writes, the manuals name no initiator, inferred.
  * - IDLE is never gated on RXFNE, which RM0456 66.8.10 does.
  * - BUSY does not follow frames from other machines.
  * - An aborted frame delivers nothing and holds the line until the abort. The chip would see a
@@ -521,6 +549,8 @@ struct lock
  *   inferred: the manuals do not state it, and the model's sampler may differ from the chip's.
  *
  * @group l1 rule
+ * - RM0038 27.6 names no field written only with UE 0, so an STM32L1 USART takes every write with
+ *   UE 1, inferred.
  * - STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
  *   way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
  * - The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,
