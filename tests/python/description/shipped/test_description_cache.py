@@ -84,7 +84,7 @@ def test_a_missing_cmsis_header_with_no_directory_to_search_names_the_repository
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("POPCORN_CMSIS_DEVICE_DIRS")
+    monkeypatch.delenv("POPCORN_CMSIS_DEVICE_DIRS", raising=False)
     with pytest.raises(MissingSource) as caught:
         cached_description(
             "STM32U575QGIx",

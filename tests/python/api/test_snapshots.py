@@ -6,6 +6,9 @@ import asyncio
 import json
 import os
 import stat
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +17,7 @@ import pytest
 from popcorn.units import VirtualDuration, ms
 
 from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
-from .snapshot_doc import bson
+from .snapshot_doc import bson, length_fields
 
 USART_ELF = ROOT / "examples" / "stm32u575" / "usart" / "prebuilt" / "usart_echo.elf"
 
@@ -143,6 +146,68 @@ def test_malformed_saved_forms_name_the_key_and_the_file(
         popcorn.Snapshot.load(old)
     assert (version.value.key, version.value.file) == ("format", str(old))
     assert isinstance(version.value.__cause__, popcorn.ConfigError)
+
+
+HOSTILE_LENGTH = 0x7FFFFFFF
+LENGTH_EDIT = HOSTILE_LENGTH.to_bytes(4, "little")
+
+HOSTILE_DECODER = """
+import resource
+import sys
+from pathlib import Path
+
+import popcorn
+
+
+def mapped_bytes() -> int:
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmSize:"):
+            return int(line.split()[1]) * 1024
+    raise SystemExit("no VmSize")
+
+
+limit = mapped_bytes() + (1 << 30)
+resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+try:
+    bytearray(0x80000000)
+except MemoryError:
+    pass
+else:
+    raise SystemExit("the cap does not bite")
+for name in sys.argv[1:]:
+    try:
+        popcorn.Snapshot.from_bytes(Path(name).read_bytes())
+    except popcorn.ConfigError as error:
+        if error.key != "bytes":
+            raise SystemExit(f"{name}: key {error.key}")
+    else:
+        raise SystemExit(f"{name}: decoded")
+print("refused", len(sys.argv) - 1)
+"""
+
+
+def test_a_snapshot_with_hostile_lengths_raises_config_error_within_a_memory_cap(
+    machines: Machines, tmp_path: Path
+) -> None:
+    good = machines().snapshot().to_bytes()
+    fields = length_fields(good)
+    names: list[str] = []
+    for kind, offsets in fields.items():
+        assert offsets, kind
+        for index, offset in enumerate(offsets[:3]):
+            edited = good[:offset] + LENGTH_EDIT + good[offset + 4 :]
+            path = tmp_path / f"{kind}{index}.snap"
+            path.write_bytes(edited)
+            names.append(str(path))
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(HOSTILE_DECODER), *names],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=100,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.splitlines()[-1] == f"refused {len(names)}"
 
 
 def test_save_writes_the_whole_file_with_umask_permissions(

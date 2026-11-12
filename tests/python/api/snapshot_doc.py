@@ -46,3 +46,33 @@ def bson(data: bytes, at: int = 0) -> dict[str, object]:
             raise ValueError(f"BSON element type {kind:#x} at {name}")
         found[name] = value
     return found
+
+
+def length_fields(data: bytes, at: int = 0, nested: bool = False) -> dict[str, list[int]]:
+    """The offsets of the int32 length fields of the string, binary and sub-document elements
+    of the BSON document at `at`, by kind, in document order."""
+    found: dict[str, list[int]] = {"string": [], "binary": [], "document": []}
+    (size,) = struct.unpack_from("<i", data, at)
+    if nested:
+        found["document"].append(at)
+    end = at + size - 1
+    at += 4
+    while at < end:
+        kind = data[at]
+        at = data.index(0, at + 1) + 1
+        if kind in (0x03, 0x04):
+            for name, offsets in length_fields(data, at, True).items():
+                found[name].extend(offsets)
+            at += struct.unpack_from("<i", data, at)[0]
+        elif kind in (0x02, 0x05):
+            found["string" if kind == 0x02 else "binary"].append(at)
+            at += (4 if kind == 0x02 else 5) + struct.unpack_from("<i", data, at)[0]
+        elif kind in (0x01, 0x09, 0x11, 0x12):
+            at += 8
+        elif kind == 0x10:
+            at += 4
+        elif kind == 0x08:
+            at += 1
+        elif kind != 0x0A:
+            raise ValueError(f"BSON element type {kind:#x}")
+    return found
