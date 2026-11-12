@@ -317,15 +317,16 @@ constexpr std::array<std::string_view, 9>  usart_cr1{"FIFOEN", "M1",   "M0",  "D
 constexpr std::array<std::string_view, 15> usart_cr2{
     "ADD",  "MSBFIRST", "DATAINV", "TXINV", "RXINV", "SWAP",    "LINEN", "STOP",
     "CPOL", "CPHA",     "LBCL",    "LBDL",  "ADDM7", "DIS_NSS", "SLVEN"};
-constexpr std::array<std::string_view, 15> usart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
-                                                     "OVRDIS",  "ONEBIT",  "CTSE", "RTSE", "SCEN",
-                                                     "NACK",    "HDSEL",   "IRLP", "IREN", "WUS"};
+constexpr std::array<std::string_view, 17> usart_cr3{
+    "TXFTCFG", "RXFTCFG", "DEP",   "DEM",  "DDRE", "OVRDIS", "ONEBIT", "CTSE", "RTSE",
+    "SCEN",    "NACK",    "HDSEL", "IRLP", "IREN", "WUS",    "WUS0",   "WUS1"};
 constexpr std::array<std::string_view, 7>  lpuart_cr1{"M1",   "M0",  "DEAT", "DEDT",
                                                       "WAKE", "PCE", "PS"};
 constexpr std::array<std::string_view, 8>  lpuart_cr2{"ADD",   "ADDM7", "MSBFIRST", "DATAINV",
                                                       "TXINV", "RXINV", "SWAP",     "STOP"};
-constexpr std::array<std::string_view, 10> lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",   "DDRE",
-                                                      "OVRDIS",  "CTSE",    "RTSE", "HDSEL", "WUS"};
+constexpr std::array<std::string_view, 12> lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",
+                                                      "DDRE",    "OVRDIS",  "CTSE", "RTSE",
+                                                      "HDSEL",   "WUS",     "WUS0", "WUS1"};
 constexpr std::array<std::string_view, 1>  whole_brr{"BRR"};
 constexpr std::array<std::string_view, 1>  whole_presc{"PRESCALER"};
 
@@ -352,8 +353,10 @@ struct lock
  *        in reset. With UE 1, a CPU or DMA write leaves the fields the manual locks, RM0456 66.8
  *        and 67.7, RM0351 40.8 and 41.7, while the USART is enabled at their value: CR1, CR2 and
  *        CR3 fields per instance kind, BRR and PRESC whole, ABRMOD while ABREN is 1, and SCARCNT
- *        unless the write is 0. On the STM32L4 CLKEN is locked too, RM0351 40.8.2, WUS, RM0351
- *        40.8.3 and 41.7.3, and ADD changes with UE 1 while RE is 0, RM0351 40.8.2 and 41.7.2.
+ *        unless the write is 0. The STM32L4 locks CLKEN too, RM0351 40.8.2. The STM32L4 and the
+ *        STM32H5 lock WUS, RM0351 40.8.3 and 41.7.3, RM0481 56.8.4 and 57.7.4. ADD changes with
+ *        UE 1 while RE is 0 on the STM32L4, RM0351 40.8.2 and 41.7.2, and on the STM32H5 LPUART,
+ *        RM0481 57.7.3.
  *        The write logs once per register, a model_error under strict peripherals. A write that
  *        clears UE takes effect whole, which the manual leaves open, and debugger writes are never
  *        locked. GTPR and AUTOCR are not served, so their locked fields are not enforced. Not
@@ -774,6 +777,7 @@ consteval auto fifo_named(usart_variant const& variant) -> bool
 }
 
 static_assert(fifo_named(with_views_usart));
+static_assert(fifo_named(h5_usart));
 static_assert(fifo_named(u5_lpuart));
 static_assert(fifo_named(h5_lpuart));
 static_assert(fifo_named(l1_usart));
@@ -2532,9 +2536,13 @@ namespace
 {
 constexpr auto usart_row_table = std::to_array<builtin>({
     row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
-        {.ip = "USART", .ip_version_glob = "sci3_v2*", .families = family::u5 | family::h5}),
+        {.ip = "USART", .ip_version_glob = "sci3_v2*", .families = family::u5}),
+    row_of<^^usart_factory, ^^h5_usart, ^^board::uarts>(
+        {.ip = "USART", .ip_version_glob = "sci3_v2*", .families = family::h5}),
     row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
-        {.ip = "UART", .ip_version_glob = "sci2_*", .families = family::u5 | family::h5}),
+        {.ip = "UART", .ip_version_glob = "sci2_*", .families = family::u5}),
+    row_of<^^usart_factory, ^^h5_usart, ^^board::uarts>(
+        {.ip = "UART", .ip_version_glob = "sci2_*", .families = family::h5}),
     row_of<^^usart_factory, ^^l1_usart, ^^board::uarts>(
         {.ip = "USART", .ip_version_glob = "sci2_*", .families = family::l1}),
     row_of<^^usart_factory, ^^l1_uart, ^^board::uarts>(

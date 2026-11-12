@@ -4233,3 +4233,23 @@ TEST_CASE("the firmware's frames reach a device whose line equals the guest's as
   CHECK(same == none);
   CHECK(std::ranges::none_of(same, [](heard_event const& event) { return event.error; }));
 }
+
+TEST_CASE("the U5 lock warning names RM0456 on USART1 and LPUART1")
+{
+  for(auto const& [unit_name, reg_name] : {
+          std::pair<std::string_view, std::string_view>{"USART1",  "CR1_enabled"},
+          std::pair<std::string_view, std::string_view>{"LPUART1", "CR1"        }
+  })
+  {
+    CAPTURE(unit_name);
+    locked_rig t;
+    t.cpu(unit_name, reg_name, ue);
+    t.cpu(unit_name, "BRR", 0x345);
+    auto const found = std::ranges::find_if(t.logged, [](core::log_record const& record) {
+      return record.message.find("written with UE 1") != std::string::npos;
+    });
+    REQUIRE(found != t.logged.end());
+    CHECK(found->message.find("RM0456") != std::string::npos);
+    CHECK(found->message.find("RM0481") == std::string::npos);
+  }
+}

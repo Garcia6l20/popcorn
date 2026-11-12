@@ -4,6 +4,7 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
 #include <popcorn/periph/model.hpp>
@@ -13,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -496,4 +498,374 @@ TEST_CASE("RM0481 9.6: the H573 DCACHE raises the line DCACHE1_IRQn")
        .until_time       = popcorn::vtime{f.target->virtual_clock().time().ps + 20'000'000}});
   CHECK((read(f, "DCACHE", "DCACHE_SR") & bit_of(f, "DCACHE", "DCACHE_SR", "CMDENDF")) != 0);
   CHECK(pending(f, line));
+}
+
+namespace
+{
+struct h5_unit
+{
+  std::string_view name;
+  bool             low_power;
+};
+
+constexpr h5_unit usart2{"USART2", false};
+constexpr h5_unit uart4{"UART4", false};
+constexpr h5_unit lpuart{"LPUART", true};
+
+auto mask_of(
+    stm32_fixture const& f,
+    std::string_view     peripheral,
+    std::string_view     reg,
+    std::string_view     field) -> std::uint32_t
+{
+  auto const* found = popcorn::find_register(f.target->peripheral(peripheral).description(), reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  return (bits->width >= 32 ? 0xFFFF'FFFFu : ((1u << bits->width) - 1u)) << bits->lsb;
+}
+
+struct lock_scene
+{
+  stm32_fixture                 f;
+  std::vector<core::log_record> logged;
+  core::hook_handle             sink;
+  std::string_view              unit;
+
+  static auto options_of(bool strict) -> core::machine_options
+  {
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = strict;
+    options.models.insert_or_assign(
+        "CRC", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          return std::make_shared<bus_probe>(ctx);
+        });
+    return options;
+  }
+
+  explicit lock_scene(h5_unit const& which, bool strict = false)
+      : f{h5(h573(), options_of(strict))},
+        sink{f.target->add_log_sink(
+            [this](core::log_record const& record) { logged.push_back(record); })},
+        unit{which.name}
+  {
+    auto const bus   = which.low_power ? "RCC_APB3ENR" : "RCC_APB1LENR";
+    auto const field = which.low_power ? std::string{"LPUART1EN"} : std::string{which.name} + "EN";
+    write(f, "RCC", bus, read(f, "RCC", bus) | mask_of(f, "RCC", bus, field));
+  }
+
+  void debugger(std::string_view reg, std::uint32_t value) const
+  {
+    write(f, unit, reg, value);
+  }
+
+  [[nodiscard]] auto get(std::string_view reg) const -> std::uint32_t
+  {
+    return read(f, unit, reg);
+  }
+
+  [[nodiscard]] auto mask(std::string_view reg, std::string_view field) const -> std::uint32_t
+  {
+    return mask_of(f, unit, reg, field);
+  }
+
+  void cpu(std::string_view reg, std::uint32_t value) const
+  {
+    auto* const probe = f.model_of<bus_probe>("CRC");
+    REQUIRE(probe != nullptr);
+    REQUIRE(
+        probe->context.services.write(address_of(f, unit, reg), 4, value, popcorn::initiator::cpu)
+            .has_value());
+  }
+
+  [[nodiscard]] auto refuses(std::string_view reg, std::uint32_t value) const -> bool
+  {
+    auto* const probe = f.model_of<bus_probe>("CRC");
+    REQUIRE(probe != nullptr);
+    try
+    {
+      static_cast<void>(probe->context.services.write(
+          address_of(f, unit, reg), 4, value, popcorn::initiator::cpu));
+    }
+    catch(popcorn::model_error const&)
+    {
+      return true;
+    }
+    return false;
+  }
+
+  [[nodiscard]] auto lock_records(std::string_view reg) const -> std::ptrdiff_t
+  {
+    return std::ranges::count_if(logged, [&](core::log_record const& record) {
+      return record.reg == reg and record.message.find("written with UE 1") != std::string::npos;
+    });
+  }
+};
+
+struct h5_field
+{
+  std::string_view reg;
+  std::string_view field;
+  std::string_view section;
+};
+
+constexpr std::array<h5_field, 40> usart_fields{
+    {{"CR1_enabled", "FIFOEN", "56.8.1"},
+     {"CR1_enabled", "M1", "56.8.1"},
+     {"CR1_enabled", "M0", "56.8.1"},
+     {"CR1_enabled", "DEAT", "56.8.1"},
+     {"CR1_enabled", "DEDT", "56.8.1"},
+     {"CR1_enabled", "OVER8", "56.8.1"},
+     {"CR1_enabled", "WAKE", "56.8.1"},
+     {"CR1_enabled", "PCE", "56.8.1"},
+     {"CR1_enabled", "PS", "56.8.1"},
+     {"CR2", "ADD", "56.8.3"},
+     {"CR2", "MSBFIRST", "56.8.3"},
+     {"CR2", "DATAINV", "56.8.3"},
+     {"CR2", "TXINV", "56.8.3"},
+     {"CR2", "RXINV", "56.8.3"},
+     {"CR2", "SWAP", "56.8.3"},
+     {"CR2", "LINEN", "56.8.3"},
+     {"CR2", "STOP", "56.8.3"},
+     {"CR2", "CPOL", "56.8.3"},
+     {"CR2", "CPHA", "56.8.3"},
+     {"CR2", "LBCL", "56.8.3"},
+     {"CR2", "LBDL", "56.8.3"},
+     {"CR2", "ADDM7", "56.8.3"},
+     {"CR2", "DIS_NSS", "56.8.3"},
+     {"CR2", "SLVEN", "56.8.3"},
+     {"CR3", "TXFTCFG", "56.8.4"},
+     {"CR3", "RXFTCFG", "56.8.4"},
+     {"CR3", "SCEN", "56.8.4"},
+     {"CR3", "NACK", "56.8.4"},
+     {"CR3", "HDSEL", "56.8.4"},
+     {"CR3", "IRLP", "56.8.4"},
+     {"CR3", "IREN", "56.8.4"},
+     {"CR3", "DEP", "56.8.4"},
+     {"CR3", "DEM", "56.8.4"},
+     {"CR3", "DDRE", "56.8.4"},
+     {"CR3", "OVRDIS", "56.8.4"},
+     {"CR3", "ONEBIT", "56.8.4"},
+     {"CR3", "CTSE", "56.8.4"},
+     {"CR3", "RTSE", "56.8.4"},
+     {"CR3", "WUS0", "56.8.4"},
+     {"CR3", "WUS1", "56.8.4"}}
+};
+constexpr std::array<h5_field, 25> lpuart_fields{
+    {{"CR1_enabled", "M1", "57.7.1"},   {"CR1_enabled", "M0", "57.7.1"},
+     {"CR1_enabled", "DEAT", "57.7.1"}, {"CR1_enabled", "DEDT", "57.7.1"},
+     {"CR1_enabled", "WAKE", "57.7.1"}, {"CR1_enabled", "PCE", "57.7.1"},
+     {"CR1_enabled", "PS", "57.7.1"},   {"CR2", "MSBFIRST", "57.7.3"},
+     {"CR2", "DATAINV", "57.7.3"},      {"CR2", "TXINV", "57.7.3"},
+     {"CR2", "RXINV", "57.7.3"},        {"CR2", "SWAP", "57.7.3"},
+     {"CR2", "STOP", "57.7.3"},         {"CR2", "ADDM7", "57.7.3"},
+     {"CR3", "DEP", "57.7.4"},          {"CR3", "DEM", "57.7.4"},
+     {"CR3", "DDRE", "57.7.4"},         {"CR3", "OVRDIS", "57.7.4"},
+     {"CR3", "TXFTCFG", "57.7.4"},      {"CR3", "RXFTCFG", "57.7.4"},
+     {"CR3", "CTSE", "57.7.4"},         {"CR3", "RTSE", "57.7.4"},
+     {"CR3", "HDSEL", "57.7.4"},        {"CR3", "WUS0", "57.7.4"},
+     {"CR3", "WUS1", "57.7.4"}}
+};
+
+void pin_locked(h5_unit const& which, h5_field const& entry)
+{
+  CAPTURE(which.name);
+  CAPTURE(entry.field);
+  lock_scene t{which};
+  auto const mask = t.mask(entry.reg, entry.field);
+  if(entry.reg == "CR1_enabled")
+  {
+    auto const enable = t.mask("CR1_enabled", "UE");
+    t.cpu("CR1_enabled", mask | enable);
+    REQUIRE(t.get("CR1_enabled") == (mask | enable));
+    t.cpu("CR1_enabled", enable);
+    CHECK(t.get("CR1_enabled") == (mask | enable));
+    t.cpu("CR1_enabled", 0);
+    CHECK(t.get("CR1_enabled") == 0);
+    return;
+  }
+  t.cpu(entry.reg, mask);
+  REQUIRE(t.get(entry.reg) == mask);
+  t.cpu("CR1_enabled", t.mask("CR1_enabled", "UE"));
+  t.cpu(entry.reg, 0);
+  CHECK(t.get(entry.reg) == mask);
+  t.cpu("CR1_enabled", 0);
+  t.cpu(entry.reg, 0);
+  CHECK(t.get(entry.reg) == 0);
+}
+}
+
+TEST_CASE("RM0481 56.8 and 57.7: every UE-locked H5 field holds with UE 1")
+{
+  auto const pin_each = [](h5_unit const& which, auto const& table) {
+    for(auto const& entry : table)
+    {
+      SUBCASE(
+          std::string{which.name}
+              .append(" ")
+              .append(entry.section)
+              .append(" ")
+              .append(entry.field)
+              .c_str())
+      {
+        pin_locked(which, entry);
+      }
+    }
+  };
+  pin_each(usart2, usart_fields);
+  pin_each(lpuart, lpuart_fields);
+}
+
+TEST_CASE("RM0481 56.8.6 and 57.7.6: BRR and PRESC hold with UE 1 on USART2 and the LPUART")
+{
+  for(auto const& which : {usart2, lpuart})
+  {
+    for(auto const* reg : {"BRR", "PRESC"})
+    {
+      CAPTURE(which.name);
+      CAPTURE(reg);
+      lock_scene t{which};
+      t.cpu(reg, 0x5);
+      t.cpu("CR1_enabled", t.mask("CR1_enabled", "UE"));
+      t.cpu(reg, 0x2);
+      CHECK(t.get(reg) == 0x5);
+    }
+  }
+}
+
+TEST_CASE("RM0481 56.8.1 and 57.7.1: FIFOEN is held on the USART and free on the LPUART")
+{
+  lock_scene a{usart2};
+  auto const fifo   = a.mask("CR1_enabled", "FIFOEN");
+  auto const enable = a.mask("CR1_enabled", "UE");
+  a.cpu("CR1_enabled", enable);
+  a.cpu("CR1_enabled", enable | fifo);
+  CHECK(a.get("CR1_enabled") == enable);
+  lock_scene b{lpuart};
+  auto const lp_fifo   = b.mask("CR1_enabled", "FIFOEN");
+  auto const lp_enable = b.mask("CR1_enabled", "UE");
+  b.cpu("CR1_enabled", lp_enable);
+  b.cpu("CR1_enabled", lp_enable | lp_fifo);
+  CHECK(b.get("CR1_enabled") == (lp_enable | lp_fifo));
+}
+
+TEST_CASE("RM0481 56.8.3: ABRMOD is locked only while ABREN is 1 on an H5 USART")
+{
+  lock_scene t{usart2};
+  auto const abren  = t.mask("CR2", "ABREN");
+  auto const mode   = t.mask("CR2", "ABRMOD") & (1u << 21);
+  auto const enable = t.mask("CR1_enabled", "UE");
+  t.cpu("CR1_enabled", enable);
+  t.cpu("CR2", mode);
+  CHECK(t.get("CR2") == mode);
+  t.cpu("CR1_enabled", 0);
+  t.cpu("CR2", abren | mode);
+  t.cpu("CR1_enabled", enable);
+  t.cpu("CR2", abren);
+  CHECK(t.get("CR2") == (abren | mode));
+}
+
+TEST_CASE("RM0481 56.8.4 and 57.7.4: WUS written with UE 1 keeps its value, one lock record")
+{
+  for(auto const& which : {usart2, lpuart})
+  {
+    for(auto const* bit : {"WUS0", "WUS1"})
+    {
+      CAPTURE(which.name);
+      CAPTURE(bit);
+      lock_scene t{which};
+      auto const wus = t.mask("CR3", bit);
+      t.cpu("CR3", wus);
+      t.cpu("CR1_enabled", t.mask("CR1_enabled", "UE"));
+      t.cpu("CR3", 0);
+      t.cpu("CR3", 0);
+      CHECK(t.get("CR3") == wus);
+      CHECK(t.lock_records("CR3") == 1);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 56.8.4 and 57.7.4: a WUS write is a model_error under strict, the field reads old")
+{
+  for(auto const& which : {usart2, lpuart})
+  {
+    for(auto const* bit : {"WUS0", "WUS1"})
+    {
+      CAPTURE(which.name);
+      CAPTURE(bit);
+      lock_scene t{which, true};
+      auto const wus = t.mask("CR3", bit);
+      t.debugger("CR3", wus);
+      t.debugger("CR1_enabled", t.mask("CR1_enabled", "UE"));
+      CHECK(t.refuses("CR3", 0));
+      CHECK(t.get("CR3") == wus);
+    }
+  }
+}
+
+TEST_CASE("RM0481 57.7.3: ADD with UE 1 is kept with RE 1 and taken with RE 0 on the H5 LPUART")
+{
+  lock_scene t{lpuart};
+  auto const add    = t.mask("CR2", "ADD");
+  auto const enable = t.mask("CR1_enabled", "UE");
+  auto const rx     = t.mask("CR1_enabled", "RE");
+  auto const low    = add & (0x5Au << 24);
+  auto const high   = add & (0x11u << 24);
+  t.cpu("CR1_enabled", enable);
+  t.cpu("CR2", low);
+  CHECK(t.get("CR2") == low);
+  CHECK(t.lock_records("CR2") == 0);
+  t.cpu("CR1_enabled", enable | rx);
+  t.cpu("CR2", high);
+  CHECK(t.get("CR2") == low);
+  CHECK(t.lock_records("CR2") == 1);
+  t.cpu("CR1_enabled", enable);
+  t.cpu("CR2", high);
+  CHECK(t.get("CR2") == high);
+}
+
+TEST_CASE("RM0481 56.8.3: ADD with UE 1 is kept on an H5 USART even with RE 0")
+{
+  lock_scene t{usart2};
+  auto const add    = t.mask("CR2", "ADD");
+  auto const enable = t.mask("CR1_enabled", "UE");
+  t.cpu("CR2", add & (0x5Au << 24));
+  t.cpu("CR1_enabled", enable);
+  t.cpu("CR2", add & (0x11u << 24));
+  CHECK(t.get("CR2") == (add & (0x5Au << 24)));
+  CHECK(t.lock_records("CR2") == 1);
+}
+
+TEST_CASE("an H5 ADD write refused by the lock is a model_error under strict, the field reads old")
+{
+  lock_scene a{lpuart, true};
+  auto const add    = a.mask("CR2", "ADD") & (0x5Au << 24);
+  auto const enable = a.mask("CR1_enabled", "UE");
+  a.debugger("CR2", add);
+  a.debugger("CR1_enabled", enable | a.mask("CR1_enabled", "RE"));
+  CHECK(a.refuses("CR2", 0));
+  CHECK(a.get("CR2") == add);
+  lock_scene b{usart2, true};
+  b.debugger("CR2", add);
+  b.debugger("CR1_enabled", enable);
+  CHECK(b.refuses("CR2", 0));
+  CHECK(b.get("CR2") == add);
+}
+
+TEST_CASE("the H5 lock warning names RM0481")
+{
+  for(auto const& which : {usart2, uart4, lpuart})
+  {
+    CAPTURE(which.name);
+    lock_scene t{which};
+    t.cpu("CR1_enabled", t.mask("CR1_enabled", "UE"));
+    t.cpu("BRR", 0x345);
+    auto const found = std::ranges::find_if(t.logged, [](core::log_record const& record) {
+      return record.message.find("written with UE 1") != std::string::npos;
+    });
+    REQUIRE(found != t.logged.end());
+    CHECK(found->message.find("RM0481") != std::string::npos);
+    CHECK(found->message.find("RM0456") == std::string::npos);
+  }
 }

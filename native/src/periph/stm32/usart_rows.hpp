@@ -197,19 +197,24 @@ struct usart_variant
   /** @brief CLKEN is written only with UE 0, RM0351 40.8.2. */
   bool clken_locked = false;
   /**
-   * @brief ADD is written with UE 1 while RE is 0, RM0351 40.8.2 and 41.7.2. Without it ADD
-   *        changes only with UE 0, RM0456 66.8.3 and 67.7.3.
+   * @brief ADD is written with UE 1 while RE is 0, RM0351 40.8.2 and 41.7.2, RM0481 57.7.3.
+   *        Without it ADD changes only with UE 0, RM0456 66.8.3 and 67.7.3, RM0481 56.8.3.
    */
   bool add_open_with_receiver_off = false;
 };
 
-/** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
+/** @brief STM32U5 USART and UART, RM0456 66.8. */
 inline constexpr usart_variant with_views_usart{};
+/** @brief STM32H5 USART and UART, RM0481 56.8. */
+inline constexpr usart_variant h5_usart{.manual = "RM0481"};
 /** @brief STM32U5 LPUART, RM0456 67.7, one `CR1` and one `ISR`. */
 inline constexpr usart_variant u5_lpuart{.mode_views = false};
 /** @brief STM32H5 LPUART, RM0481 57.7: the register views of the USART, and the CMSIS header
  *         names its line `LPUART1_IRQn` for the peripheral `LPUART`. */
-inline constexpr usart_variant h5_lpuart{.irq_name = "LPUART1_IRQn"};
+inline constexpr usart_variant h5_lpuart{
+    .irq_name                   = "LPUART1_IRQn",
+    .manual                     = "RM0481",
+    .add_open_with_receiver_off = true};
 /** @brief STM32L1 USART and UART, RM0038 27.6, clocked by the APB bus of their address. */
 inline constexpr usart_variant l1_usart{
     .mode_views           = false,
