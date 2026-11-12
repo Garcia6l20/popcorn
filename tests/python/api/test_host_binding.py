@@ -10,6 +10,7 @@ import gc
 import logging
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import textwrap
@@ -592,13 +593,16 @@ def _text(data: str | bytes | None) -> str:
     return data.decode(errors="replace") if isinstance(data, bytes) else data
 
 
+CHILD_PROLOGUE = "import signal\nsignal.signal(signal.SIGINT, signal.default_int_handler)\n"
+
+
 def run_child(
     script: str, timeout: float, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
     try:
         return subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(script)],
+            [sys.executable, "-c", CHILD_PROLOGUE + textwrap.dedent(script)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -611,6 +615,29 @@ def run_child(
             f"stdout:\n{_text(expired.stdout)}\nstderr:\n{_text(expired.stderr)}",
             pytrace=False,
         )
+
+
+def test_a_child_started_under_an_ignored_sigint_still_takes_keyboard_interrupt() -> None:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal dispositions can only be changed from the main thread")
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        child = run_child(
+            """
+            import os
+            import signal
+
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+                signal.pause()
+            except KeyboardInterrupt:
+                print("caught")
+            """,
+            timeout=10,
+        )
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert child.stdout.strip() == "caught", child.stderr
 
 
 def test_an_interpreter_exits_with_a_live_machine_thread() -> None:
