@@ -623,8 +623,12 @@ class PtyBridge:
 
     Host input not yet delivered to a UART is kept across a restore. Bytes already in the
     UART's receiver return to the snapshot's state. Host input not yet taken by a USB device
-    returns to what the snapshot held. Opening or closing the pty sends nothing to the device:
-    a CDC function keeps the DTR its host set at configuration.
+    returns to what the snapshot held. A UART keeps its state when a tool opens or closes the pty.
+    The first open of a CDC pty by a tool sends SET_CONTROL_LINE_STATE with DTR and RTS set,
+    unless the device has both set, and the close that leaves no tool holding the pty sends it
+    with both clear, as a `ttyACM` port does. Both are seen at the next slice boundary. While a
+    tool holds the pty, DTR and RTS are raised again after a restore, a detach and attach, or an
+    open before the device is configured.
 
     Bytes for the host wait in a buffer while no tool reads the pty. The buffer keeps the last
     64 KiB: older bytes are dropped, with one warning naming the pty on the `popcorn` logger,

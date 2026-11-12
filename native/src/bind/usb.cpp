@@ -102,7 +102,19 @@ template <typename Body> auto cdc_link::locked(Body&& body) const
 auto cdc_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
 {
   auto const attachments = locked([](usb::cdc_channel& channel) { return channel.attachments; });
-  return std::make_unique<detail::cdc_pty_link>(hub_, function_, attachments);
+  auto       line        = *this;
+  line.host_.reset();
+  return std::make_unique<detail::cdc_pty_link>(
+      hub_, function_, attachments, [line = std::move(line)](bool dtr, bool rts) mutable {
+        try
+        {
+          return line.post_line_state(dtr, rts);
+        }
+        catch(config_error const&)
+        {
+          return false;
+        }
+      });
 }
 
 namespace
@@ -316,6 +328,17 @@ auto cdc_link::set_line_coding(
 {
   auto [setup, data] = line_coding_setup(baud, stop_bits, parity, data_bits);
   return request(setup, std::move(data));
+}
+
+auto cdc_link::post_line_state(bool dtr, bool rts) -> bool
+{
+  usb::deferred_warnings const deferred;
+  auto const                   id = request_locked(control_line_setup(dtr, rts), {});
+  if(id != 0)
+  {
+    forget(id);
+  }
+  return id != 0;
 }
 
 auto cdc_link::set_control_line_state(bool dtr, bool rts) -> std::uint32_t

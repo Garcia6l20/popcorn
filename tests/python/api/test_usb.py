@@ -15,6 +15,7 @@ import gc
 import logging
 import os
 import re
+import subprocess
 import sys
 import termios
 import threading
@@ -33,6 +34,7 @@ from popcorn._streams import Waited
 from popcorn.board import (
     CdcLineCoding,
     CdcPacket,
+    CdcStream,
     HidReport,
     HidStream,
     UacFrame,
@@ -1594,6 +1596,197 @@ def test_a_cdc_pty_opens_again_once_the_last_client_closed_it(
     os.close(first)
     asyncio.run(m.run(for_=ms(1)))
     os.close(open_client())
+
+
+def pty_machine(
+    options: UsbHostOptions, u575: popcorn.PartDescription
+) -> tuple[popcorn.Machine, UsbHost, str]:
+    m = usb_machine(u575, options)
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    path = m.board.pty("OTG_FS")
+    asyncio.run(m.run(for_=ms(5)))
+    return m, host, path
+
+
+def settle(m: popcorn.Machine) -> None:
+    asyncio.run(m.run(for_=ms(5)))
+
+
+def run_until_dtr(m: popcorn.Machine, cdc: CdcStream, dtr: bool) -> None:
+    for _ in range(40):
+        if cdc.dtr == dtr:
+            return
+        settle(m)
+
+
+def test_a_cdc_pty_open_raises_dtr_and_the_last_close_drops_it(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    assert (cdc.dtr, cdc.rts, line_states(host)) == (False, False, [0])
+
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert (cdc.dtr, cdc.rts, line_states(host)) == (True, True, [0, 3])
+
+    os.close(fd)
+    settle(m)
+    assert (cdc.dtr, cdc.rts, line_states(host)) == (False, False, [0, 3, 0])
+
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert (cdc.dtr, line_states(host)) == (True, [0, 3, 0, 3])
+    os.close(fd)
+    m.board.close()
+
+
+def test_a_cdc_pty_open_sends_nothing_while_dtr_is_already_set(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(), u575)
+    assert line_states(host) == [3]
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert line_states(host) == [3]
+    os.close(fd)
+    settle(m)
+    assert (host.cdc().dtr, line_states(host)) == (False, [3, 0])
+    m.board.close()
+
+
+def test_a_cdc_pty_open_and_close_loop_toggles_dtr_every_round(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    for _ in range(6):
+        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        settle(m)
+        assert cdc.dtr
+        os.close(fd)
+        settle(m)
+        assert not cdc.dtr
+    assert line_states(host) == [0, *([3, 0] * 6)]
+    link = usb_link_of(host.cdc())
+    assert [id for id in range(1, 200) if link.take_result(id) is not None] == []
+    m.board.close()
+
+
+def test_a_cdc_pty_quick_open_and_close_in_one_slice_shows_both_edges(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+    settle(m)
+    assert (host.cdc().dtr, line_states(host)) == (False, [0, 3, 0])
+    m.board.close()
+
+
+def test_a_tool_that_opens_the_cdc_pty_before_configuration_gets_dtr_once_configured(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(dtr=False, rts=False))
+    host = m.periph.OTG_FS.host
+    path = m.board.pty("OTG_FS")
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    asyncio.run(host.wait_configured(for_=s(2)))
+    run_until_dtr(m, host.cdc(), True)
+    assert (host.cdc().dtr, host.cdc().rts) == (True, True)
+    assert line_states(host) == [0, 3]
+    os.close(fd)
+    settle(m)
+    assert line_states(host) == [0, 3, 0]
+    m.board.close()
+
+
+def test_a_restore_while_a_tool_holds_the_cdc_pty_raises_dtr_again(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    early = m.snapshot()
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert cdc.dtr
+    m.restore(early)
+    assert not cdc.dtr
+    run_until_dtr(m, cdc, True)
+    assert (cdc.dtr, cdc.rts) == (True, True)
+    os.close(fd)
+    settle(m)
+    assert not cdc.dtr
+    m.board.close()
+
+
+def test_a_restore_with_no_tool_holding_the_cdc_pty_sends_nothing(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, _ = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    early = m.snapshot()
+    settle(m)
+    m.restore(early)
+    settle(m)
+    assert (host.cdc().dtr, line_states(host)) == (False, [0])
+    m.board.close()
+
+
+def test_a_device_change_while_a_tool_holds_the_cdc_pty_raises_dtr_again(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert host.cdc().dtr
+    asyncio.run(host.detach())
+    asyncio.run(host.attach())
+    asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(host.cdc().wait_ready(for_=s(1)))
+    run_until_dtr(m, host.cdc(), True)
+    assert (host.cdc().dtr, host.cdc().rts) == (True, True)
+    os.close(fd)
+    settle(m)
+    assert not host.cdc().dtr
+    m.board.close()
+
+
+def test_a_cdc_pty_holder_forked_from_the_tool_keeps_dtr_until_the_last_close(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    child = subprocess.Popen(["sleep", "60"], stdin=fd)
+    try:
+        os.close(fd)
+        settle(m)
+        assert cdc.dtr
+        settle(m)
+        assert cdc.dtr
+    finally:
+        child.kill()
+        child.wait()
+    settle(m)
+    assert (cdc.dtr, line_states(host)) == (False, [0, 3, 0])
+    m.board.close()
+
+
+def test_a_second_tool_keeps_dtr_until_the_last_of_them_closed_the_cdc_pty(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    first = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    second = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    os.close(first)
+    settle(m)
+    assert cdc.dtr
+    os.close(second)
+    settle(m)
+    assert (cdc.dtr, line_states(host)) == (False, [0, 3, 0])
+    m.board.close()
 
 
 def test_a_log_error_at_a_consuming_await_keeps_its_result(

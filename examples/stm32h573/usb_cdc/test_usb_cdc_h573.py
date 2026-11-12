@@ -15,7 +15,6 @@ set. `machine.board.pty("USB")` bridges the same function to a host pty, which a
 opens.
 """
 
-import asyncio
 import itertools
 import os
 import select
@@ -227,13 +226,17 @@ async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(usb_cdc: Ma
     assert usb_cdc.board.ptys == {"USB": path}
     async with usb_cdc.running():
         assert serial_client(path, b"ping") == b"PING"
-        (requests,) = await usb_cdc.read(usb_cdc.ref.periph.USB.host.requests)
-        before = len(requests)
-        await asyncio.sleep(0.1)
+    await usb_cdc.run(
+        for_=ms(100),
+        stop_when=lambda _: (
+            sum(r.request == SET_CONTROL_LINE_STATE for r in host.requests[earlier:]) >= 2
+        ),
+    )
+    before = len(host.requests)
+    await usb_cdc.run(for_=ms(5))
     assert len(host.requests) == before
-    assert not [
-        r for r in host.requests[earlier:] if r.request == SET_CONTROL_LINE_STATE and r.value != 3
-    ]
+    states = [r.value for r in host.requests[earlier:] if r.request == SET_CONTROL_LINE_STATE]
+    assert states == [3, 0]
     with pytest.raises(RuntimeError, match="bridged"):
         await host.cdc().read(1)
 

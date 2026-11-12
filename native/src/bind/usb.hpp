@@ -355,6 +355,8 @@ private:
   [[nodiscard]] auto
       request_command(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) const
       -> access_op;
+  /** @brief Posts a SET_CONTROL_LINE_STATE as the engine owner and forgets its result. */
+  auto post_line_state(bool dtr, bool rts) -> bool;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::cdc_hub> hub_;

@@ -61,12 +61,30 @@ set `TIOCEXCL` on the pty frees it by closing it: once the last tool closed the 
 too, also while a tool still holds the pty open. The bridge clears the flag at the next slice
 boundary. A close or a re-enumeration the firmware drives happens inside a run and is cleared
 before the machine parks. A close, `detach()` or `attach()` on a parked machine is cleared on the
-next run, so run the machine before the reopen. The bridge finds the tools that still hold the pty by scanning `/proc/*/fd`, once per close of
-an exclusive pty. A tool of another user, another pid namespace, a `hidepid` mount or a
+next run, so run the machine before the reopen. The bridge finds the tools that still hold the
+pty by scanning `/proc/*/fd`, as described below for a CDC pty, and once per close of an
+exclusive UART pty. A tool of another user, another pid namespace, a `hidepid` mount or a
 non-dumpable process is invisible to the scan and does not keep the flag. A child forked with the
 pty open holds it as on a real port, so the flag stays until the child closes it or exits. If the
 kernel refuses the inotify watch the bridge needs, `machine.board.pty()` still works, logs one
 warning and clears the flag only at a detach or attach. UART ptys behave the same way.
+
+A CDC pty drives DTR like a `ttyACM` port. The first open of the pty by a tool sends
+SET_CONTROL_LINE_STATE with DTR and RTS set, unless the device already has both set. The close
+that leaves no tool holding the pty sends it with both clear, so the firmware sees a falling DTR
+edge between two tool runs and a rising one at the next. The close drops the lines whatever the
+tool's `HUPCL` setting. The bridge sees opens and closes at the slice boundary, like the byte
+bridging. A tool that opens and closes the pty inside one slice makes both edges. A close
+followed by a reopen inside one slice that leaves a tool holding the pty makes none. A child
+forked with the pty open and a second tool keep DTR set until the last of them closed it.
+
+While a tool holds the pty, DTR and RTS are raised again once a configured driver exists after
+an open before enumeration, a `restore()` or a `detach()` and `attach()` that left them clear.
+A close with no tool holding the pty sends nothing while no driver is configured. The bridge
+walks `/proc` once for the tools holding the pty and re-checks the ones it found at the next
+closes, so a close costs a walk only when none of them is left. Without the inotify watch the
+line state stays as the host set it at configuration. A UART pty and a `CdcLink` used without a
+pty keep the line state the host set.
 
 ## HID
 

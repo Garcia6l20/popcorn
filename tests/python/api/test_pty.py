@@ -205,3 +205,19 @@ def test_an_idle_free_run_frees_a_pty_when_its_exclusive_client_closes(
             return await asyncio.to_thread(close_exclusively_then_reopen)
 
     assert asyncio.run(body())
+
+
+def test_opening_and_closing_a_uart_pty_sends_nothing_to_the_firmware(
+    board: popcorn.Machine,
+) -> None:
+    path = board.board.pty("USART1")
+    for _ in range(3):
+        os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+        asyncio.run(board.run(for_=ms(2)))
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        asyncio.run(board.run(for_=ms(2)))
+        with pytest.raises(BlockingIOError):
+            os.read(fd, 64)
+    finally:
+        os.close(fd)

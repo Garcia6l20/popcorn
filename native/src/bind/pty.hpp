@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,6 +22,15 @@ namespace popcorn::bind::detail
 {
 /** @brief Bytes a pty keeps for the host while no tool reads it. */
 inline constexpr std::size_t pty_outgoing_limit = 64 * 1024;
+
+/** @brief A change of the host tools holding a pty. */
+enum class session_edge : std::uint8_t
+{
+  /** @brief The first tool opened the pty. */
+  opened,
+  /** @brief The last tool closed the pty. */
+  closed,
+};
 
 /** @brief The byte link a pty bridge moves bytes through. Python-free. */
 class pty_link
@@ -55,6 +65,40 @@ public:
   {
     return false;
   }
+
+  /** @brief Whether the link acts on host_opened() and host_closed(). The bridge reads the opens
+   * of the pty and scans /proc at every close only for a link that does. */
+  [[nodiscard]] virtual auto wants_sessions() const -> bool
+  {
+    return false;
+  }
+
+  /** @brief Whether the link has a line state to settle at the next pump. Called by the thread
+   * that owns the engine. */
+  [[nodiscard]] virtual auto unsettled() const -> bool
+  {
+    return false;
+  }
+
+  /** @brief Settles the line state the host tools holding the pty call for. Called by the thread
+   * that owns the engine after every pump of the bridge that found unsettled() true. */
+  virtual void settle()
+  {}
+
+  /** @brief A host tool opened the pty and none had it open. Called by the thread that owns the
+   * engine, before the bytes the tool wrote. */
+  virtual void host_opened()
+  {}
+
+  /** @brief The last host tool closed the pty. Called by the thread that owns the engine, after
+   * the bytes the tool wrote. */
+  virtual void host_closed()
+  {}
+
+  /** @brief Forgets what the link remembers of the device and settles the line state again, at a
+   * restore. */
+  virtual void discard() noexcept
+  {}
 };
 
 /** @brief A file descriptor owned alone, closed on destruction. */
@@ -127,7 +171,7 @@ public:
     return master_.get();
   }
 
-  /** @brief How many times a close of an exclusive pty made the bridge scan /proc. */
+  /** @brief How many times the bridge walked /proc for tools holding the pty. */
   [[nodiscard]] auto scans() const noexcept -> std::size_t
   {
     return scans_;
@@ -153,13 +197,38 @@ public:
   }
 
   /**
-   * @brief Moves bytes both ways: take_input() into the link, then flush().
+   * @brief Moves bytes both ways: take_sessions() and take_input() into the link, then flush().
    * @return The warning of flush().
    */
   auto pump() -> std::optional<std::string>;
 
   /** @brief Reads what the host wrote, until the pty has no more. */
   [[nodiscard]] auto take_input() -> std::vector<std::uint8_t>;
+
+  /**
+   * @brief Reads the opens and closes of the pty since the last call, and clears TIOCEXCL after
+   *        the last close. A close makes the bridge scan /proc for the tools still holding the
+   *        pty, so a forked child or a second tool keeps it open. A close and an open between two
+   *        calls that leave a tool holding the pty make no change.
+   * @return The changes of the host tools holding the pty, in order, empty for a link that does
+   *         not want sessions.
+   */
+  [[nodiscard]] auto take_sessions() -> std::vector<session_edge>;
+
+  /**
+   * @brief Delivers sessions and input to the link: every change but a trailing close, the
+   *        input, then that close.
+   * @param sessions What take_sessions() returned.
+   * @param input What take_input() returned.
+   */
+  void deliver(std::vector<session_edge> const& sessions, std::vector<std::uint8_t> const& input)
+      const;
+
+  /** @brief Whether pump_all() has work for the bridge besides what it read. */
+  [[nodiscard]] auto settling() const -> bool
+  {
+    return link_->unsettled();
+  }
 
   /** @brief The link, shared so input can be sent without holding the bridge. */
   [[nodiscard]] auto link() const noexcept -> std::shared_ptr<pty_link>
@@ -189,9 +258,11 @@ private:
   std::vector<std::uint8_t>          outgoing_;
   std::shared_ptr<std::atomic<bool>> wants_write_ = std::make_shared<std::atomic<bool>>(false);
   bool                               overflowed_  = false;
+  bool                               held_        = false;
+  std::vector<std::string>           holders_;
 
-  void               release_exclusive_after_last_close();
-  [[nodiscard]] auto held_by_a_client() const -> bool;
+  [[nodiscard]] auto walk_holders(bool first_only) -> std::vector<std::string>;
+  [[nodiscard]] auto still_held() const -> bool;
 };
 
 /** @brief A UART as a pty link: host bytes enter its receiver, the low 8 bits of each frame out. */
@@ -222,20 +293,60 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    * @param attachments The channel's attachment count now, the baseline of device_changed().
+   * @param post Posts a SET_CONTROL_LINE_STATE with DTR and RTS as the engine owner, false when
+   *        no driver is bound. It returns false when the machine is gone and throws nothing.
    */
   cdc_pty_link(
-      std::shared_ptr<periph::usb::cdc_hub> hub,
-      std::size_t                           function,
-      std::uint64_t                         attachments) noexcept;
+      std::shared_ptr<periph::usb::cdc_hub>     hub,
+      std::size_t                               function,
+      std::uint64_t                             attachments,
+      std::move_only_function<bool(bool, bool)> post) noexcept;
 
   void               send(std::span<std::uint8_t const> bytes) override;
   void               drain(std::vector<std::uint8_t>& out) override;
   [[nodiscard]] auto device_changed() -> bool override;
 
+  [[nodiscard]] auto wants_sessions() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto unsettled() const -> bool override
+  {
+    return unsettled_;
+  }
+
+  /** @brief Raises DTR and RTS once a driver is configured, unless the device has them set. */
+  void settle() override;
+  /** @brief Posts SET_CONTROL_LINE_STATE with DTR and RTS, unless the device has them set. A
+   * device with no configured driver is settled at the next pump that finds one. */
+  void host_opened() override;
+  /** @brief Posts SET_CONTROL_LINE_STATE with DTR and RTS clear, unless the device has them so
+   * or no driver is configured. */
+  void host_closed() override;
+  /** @brief Forgets the request in flight and raises again while a tool holds the pty. A restore
+   * settles at the restore instant, whatever the restored device does about enumeration. */
+  void discard() noexcept override;
+
 private:
-  std::shared_ptr<periph::usb::cdc_hub> hub_;
-  std::size_t                           function_;
-  std::uint64_t                         seen_{};
+  struct line_view
+  {
+    bool         ready;
+    std::uint8_t lines;
+  };
+
+  std::shared_ptr<periph::usb::cdc_hub>     hub_;
+  std::size_t                               function_;
+  std::uint64_t                             seen_{};
+  std::move_only_function<bool(bool, bool)> post_;
+  std::optional<std::uint8_t>               requested_;
+  std::uint64_t                             requested_at_{};
+  bool                                      tool_holds_ = false;
+  bool                                      unsettled_  = false;
+
+  auto view() -> line_view;
+  void raise();
+  void request(std::uint8_t lines);
 };
 /** @brief A warning of a bridge, for the machine's log. */
 struct pty_warning
