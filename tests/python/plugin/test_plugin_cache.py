@@ -684,3 +684,97 @@ def test_the_registry_digest_covers_removed_and_replaced_registrations(tmp_path:
     assert lines[-3] == "digests 0 1 2"
     assert lines[-2] == "empty True"
     assert lines[-1] == "identity digest=d strict=False | digest=d strict=False registry=r"
+
+
+NO_SOURCE_KEYS = """
+import sys
+import types
+
+import popcorn
+from popcorn.model import Model
+from popcorn.pytest._cache import cache_key
+
+mode = sys.argv[1]
+if mode == "dash-c":
+    namespace = globals()
+else:
+    module = types.ModuleType("generated_models")
+    if mode == "not-a-file":
+        module.__file__ = "<string>"
+    if mode == "loader":
+        module.__file__ = "<string>"
+        module.__loader__ = types.SimpleNamespace()
+    sys.modules["generated_models"] = module
+    namespace = module.__dict__
+exec(
+    "from popcorn.model import Model\\n"
+    "class First(Model):\\n    pass\\n"
+    "class Second(Model):\\n    pass\\n",
+    namespace,
+)
+
+
+def key(cls):
+    board = {"GPDMA1": popcorn.Periph(model=popcorn.Use(cls))}
+    project = popcorn.MachineDescription(part="STM32U575QGIx", images=[], board=board)
+    return cache_key(project, False)
+
+
+first = namespace["First"]
+print("keys", key(first) == key(first))
+"""
+
+
+@pytest.mark.parametrize("mode", ["no-file", "not-a-file", "loader", "dash-c"])
+def test_a_model_class_with_no_source_file_is_keyed_by_its_name(tmp_path: Path, mode: str) -> None:
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    try:
+        mcu("STM32U575QGIx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32U575 description: {error}")
+    result = subprocess.run(
+        [sys.executable, "-c", NO_SOURCE_KEYS, mode],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=100,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "keys True"
+
+
+REGISTERED_NO_SOURCE = """
+import popcorn
+from popcorn.model import Model, register
+from popcorn.pytest._cache import cache_key
+
+
+class Dma(Model):
+    pass
+
+
+register("GPDMA", "STM32U5_dma3_*")(Dma)
+project = popcorn.MachineDescription(part="STM32U575QGIx", images=[])
+print("keys", cache_key(project, False) == cache_key(project, False))
+"""
+
+
+def test_a_registered_class_with_no_source_file_is_keyed_without_raising() -> None:
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    try:
+        mcu("STM32U575QGIx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32U575 description: {error}")
+    result = subprocess.run(
+        [sys.executable, "-c", REGISTERED_NO_SOURCE],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=100,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "keys True"

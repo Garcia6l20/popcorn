@@ -69,14 +69,23 @@ def recorded_inputs(project: MachineDescription) -> dict[str, object]:
     }
 
 
-def _class_source(cls: type) -> str:
+def _source_file(cls: type) -> Path | None:
     try:
         source = inspect.getsourcefile(cls)
-    except TypeError:
-        source = None
+    except TypeError, OSError:
+        return None
+    if source is None or not Path(source).is_file():
+        return None
+    return Path(source)
+
+
+def _class_source(cls: type) -> str:
+    """The source file and its digest of `cls`, or `module.qualname` for a class with no
+    source file, which an edit of the class then leaves out of the key."""
+    source = _source_file(cls)
     if source is None:
         return f"{cls.__module__}.{cls.__qualname__}"
-    return f"{source} {_file_digest(Path(source))}"
+    return f"{source} {_file_digest(source)}"
 
 
 def _prefixes(name: str) -> list[str]:
@@ -122,14 +131,11 @@ def imported_sources(cls: type) -> list[str]:
     inside a function, with the packages on the way to each, one level deep. Modules of
     popcorn, of the Python installation and of site-packages are left out, as versions cover
     them."""
-    try:
-        source = inspect.getsourcefile(cls)
-    except TypeError:
-        return []
-    if source is None or not Path(source).is_file():
+    source = _source_file(cls)
+    if source is None:
         return []
     try:
-        tree = ast.parse(Path(source).read_bytes(), source)
+        tree = ast.parse(source.read_bytes(), str(source))
     except SyntaxError:
         return []
     module = sys.modules.get(cls.__module__)
@@ -138,7 +144,7 @@ def imported_sources(cls: type) -> list[str]:
     return sorted(
         f"imports {origin} {_file_digest(origin)}"
         for origin in origins
-        if origin is not None and origin != Path(source) and not _versioned(origin.resolve())
+        if origin is not None and origin != source and not _versioned(origin.resolve())
     )
 
 
