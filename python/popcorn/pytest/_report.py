@@ -13,10 +13,10 @@ from typing import cast
 
 import pytest
 
-from popcorn import EmulationError, Machine, MachineRunning, Stop, System
+from popcorn import EmulationError, Machine, MachineRunning, ModelError, Stop, System
 from popcorn._obs import FormatError
 from popcorn.pytest._options import SETTINGS
-from popcorn.report import stop_report
+from popcorn.report import call_stack, stop_report
 from popcorn.trace import ALL
 
 _REGISTERS = (
@@ -216,6 +216,10 @@ def exception_stop(error: BaseException | None) -> Stop | None:
 
 
 KEPT_RUNNING = "  machine kept running, state not read"
+MMIO_PC_NOTE = (
+    "note: a model error is raised at the end of the block holding the access, so the registers"
+    " and the first frame of a machine that raised it can be later than the accessing instruction"
+)
 PARK_TRIES = 3
 
 
@@ -237,6 +241,12 @@ def section_text(
     lines: list[str] = []
     if stop is not None and stop not in last:
         lines += [f"exception stop: {stop}", ""]
+    model_error = _run_error(error)
+    if model_error is not None and stop is None and None in last:
+        lines += [f"the test raised: {type(model_error).__name__}: {model_error}"]
+        if model_error.peripheral:
+            lines += [MMIO_PC_NOTE]
+        lines += [""]
     for entry, read in zip(tracked, reads, strict=True):
         if read is None:
             lines += [f"{entry.label} ({entry.key}):", KEPT_RUNNING, ""]
@@ -289,6 +299,13 @@ def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
         for row in range(0, len(names), 4):
             cells = [f"{name:>4} {values[name]:#010x}" for name in names[row : row + 4]]
             lines.append("  " + "  ".join(cells))
+        lines.append("call stack:")
+        try:
+            frames = call_stack(machine)
+        except Exception as broken:
+            lines.append(f"  could not be followed: {type(broken).__name__}: {broken}")
+        else:
+            lines.extend(f"  #{index} {frame}" for index, frame in enumerate(frames))
         dump = machine.ring.dump(last=ring, collapse=True) if ring else ""
         if dump:
             lines.append("trace ring:")
@@ -296,6 +313,25 @@ def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
     if not ring:
         lines.append(RING_HINT)
     return _indent("\n".join(lines))
+
+
+def _run_error(error: BaseException | None) -> ModelError | None:
+    """The first `ModelError` of `error`, depth first through exception groups, causes and
+    contexts: the error of a model that ended the run with no stop."""
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ModelError):
+            return current
+        pending.append(current.__cause__ or current.__context__)
+        if isinstance(current, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], current)
+            pending.extend(reversed(group.exceptions))
+    return None
 
 
 def _indent(text: str) -> str:

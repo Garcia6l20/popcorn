@@ -48,6 +48,10 @@ Fault classes and addresses:
   store multiple ends at the faulting access, where silicon makes the remaining ones.
 
 A failing test's report decodes the fault registers and shows the call stack.
+A test that raised a `ModelError`, such as from a strict model, shows the error once, and each
+machine with no stop shows its registers and the call stack from them. A model error is raised
+at the end of the block holding the access, so the first frame of the machine that raised it can
+be later than the accessing instruction, often in its caller.
 
 ## The firmware takes the fault
 

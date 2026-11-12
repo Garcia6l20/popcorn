@@ -210,19 +210,7 @@ def stop_report(
         return int(getattr(machine.reg, name)) if value is None else value
 
     registers = {name: register(name) for name in _CORE_REGISTERS}
-    psp = register("psp")
-
-    read32, functions = stack_access(machine)
-    raw = unwind(
-        read32,
-        functions,
-        registers["pc"],
-        registers["lr"],
-        registers["sp"],
-        psp,
-        _secure_sp(machine, registers["xpsr"]),
-    )
-    frames = tuple(_frame(machine, read32, f) for f in raw)
+    frames = call_stack(machine, captured)
     bits: dict[str, tuple[str, ...]] = {}
     sfar = None
     if stop.fault is not None:
@@ -240,6 +228,38 @@ def stop_report(
         except OSError as error:
             text = f"ring unavailable: {error}"
     return Report(stop, registers, bits, frames, text, sfar)
+
+
+def call_stack(
+    machine: Machine, captured: Mapping[str, int] | None = None
+) -> tuple[StackFrame, ...]:
+    """The call stack of `machine`, innermost first, from its registers, `captured` standing in
+    for any it holds, with the source location of every frame.
+
+    Args:
+        machine: The machine, stopped.
+        captured: Register values to use in place of the machine's own, by name.
+
+    Raises:
+        MachineRunning: The machine is busy, outside its handlers.
+    """
+    held: Mapping[str, int] = captured or {}
+
+    def register(name: str) -> int:
+        value = held.get(name)
+        return int(getattr(machine.reg, name)) if value is None else value
+
+    read32, functions = stack_access(machine)
+    raw = unwind(
+        read32,
+        functions,
+        register("pc"),
+        register("lr"),
+        register("sp"),
+        register("psp"),
+        _secure_sp(machine, register("xpsr")),
+    )
+    return tuple(_frame(machine, read32, f) for f in raw)
 
 
 def _secure_sp(machine: Machine, xpsr: int) -> int | None:

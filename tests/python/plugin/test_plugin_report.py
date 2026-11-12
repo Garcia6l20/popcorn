@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
+import re
+from pathlib import Path
 
-from .helpers import FAULT_ELF, write_conftest, write_project
+import popcorn
+import pytest
+from popcorn.pytest import _report as report
+
+from .helpers import FAULT_ELF, M33_JSON, MODEL_ELF, write_conftest, write_project
 
 pytest_plugins = ["pytester"]
 
@@ -626,3 +631,120 @@ def test_an_end_a_wait_returned_is_not_raised_again_at_teardown(
     result = run(pytester)
     result.assert_outcomes(passed=1)
     result.stdout.no_fnmatch_line("*ERROR at teardown*")
+
+
+STRICT_FREE_RUN = """
+from popcorn.units import ms
+
+async def test_strict(machine):
+    machine.reg.lr = machine.sym("ready") | 1
+    machine.reg.pc = machine.sym("touch_unmodelled") & ~1
+    machine.start()
+    await machine.wait_for(machine.ref.mem.u32[machine.sym("sink")].eq(1), for_=ms(1))
+"""
+
+
+def test_a_model_error_run_reports_the_error_and_the_call_stack(
+    pytester: pytest.Pytester,
+) -> None:
+    write_conftest(pytester)
+    write_project(pytester, until=None, elf=MODEL_ELF, extra="strict=True,")
+    pytester.makepyfile(STRICT_FREE_RUN)
+    result = run(pytester)
+    assert result.parseoutcomes()["failed"] == 1
+    result.stdout.fnmatch_lines(
+        [
+            HEADER,
+            "the test raised: ModelError: *UNMODELLED*",
+            "note: a model error is raised at the end of the block holding the access*",
+            "machine (*):",
+            "  no last stop: the machine stands where its last run, if any, left it",
+            "  registers:",
+            "  call stack:",
+            "    #0 * ready+* *model.c:*",
+        ]
+    )
+
+
+def bare_machine(tmp_path: Path) -> popcorn.Machine:
+    code = tmp_path / "fw.bin"
+    code.write_bytes(b"\xfe\xe7" * 64)
+    machine = popcorn.Machine(
+        popcorn.load_description(M33_JSON), image=popcorn.Image.bin(code, 0x0800_0000)
+    )
+    machine.reg.pc = 0x0800_0010
+    machine.reg.lr = 0x0800_0021
+    machine.reg.sp = 0x200C_0000
+    return machine
+
+
+def test_an_image_without_dwarf_shows_the_frames_as_addresses(tmp_path: Path) -> None:
+    text = report._machine_text(  # pyright: ignore[reportPrivateUsage]
+        bare_machine(tmp_path), None, 0
+    )
+    assert "call stack:" in text
+    assert re.search(r"#0 0x08000010$", text, re.MULTILINE)
+    assert "could not be followed" not in text
+
+
+def test_an_unwind_that_raises_leaves_the_registers_and_a_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: object, **__: object) -> object:
+        raise RuntimeError("stack unreadable")
+
+    monkeypatch.setattr(report, "call_stack", broken)
+    text = report._machine_text(  # pyright: ignore[reportPrivateUsage]
+        bare_machine(tmp_path), None, 0
+    )
+    assert "registers:" in text
+    assert "pc 0x08000010" in text
+    assert "could not be followed: RuntimeError: stack unreadable" in text
+
+
+TWO_MACHINES = """
+import popcorn
+
+async def test_two(machine, machine_factory, description):
+    other = machine_factory(description)
+    raise popcorn.ModelError("boom", peripheral="UART1", register="CR1")
+"""
+
+
+def test_a_model_error_is_printed_once_not_per_machine(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, until=None, elf=MODEL_ELF)
+    pytester.makepyfile(TWO_MACHINES)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    text = result.stdout.str()
+    assert text.count("the test raised: ModelError: boom") == 1
+    assert text.count("no last stop: the machine stands") == 2
+    assert text.count("note: a model error is raised") == 1
+
+
+def test_a_model_error_without_a_peripheral_has_no_note(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, until=None, elf=MODEL_ELF)
+    pytester.makepyfile("""
+        import popcorn
+
+        def test_plain(machine):
+            raise popcorn.ModelError("boom")
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    text = result.stdout.str()
+    assert "the test raised: ModelError: boom" in text
+    assert "note: a model error is raised" not in text
+
+
+def test_an_assertion_prints_no_model_error_line(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile("""
+        def test_no_run(machine):
+            assert False
+        """)
+    result = run(pytester)
+    assert "the test raised" not in result.stdout.str()
