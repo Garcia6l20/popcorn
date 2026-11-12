@@ -30,6 +30,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -586,6 +587,23 @@ struct locked_rig
     REQUIRE(probe->context.services
                 .write(address_of(*r.f, peripheral, reg), 4, value, popcorn::initiator::cpu)
                 .has_value());
+  }
+
+  [[nodiscard]] auto
+      refuses(std::string_view peripheral, std::string_view reg, std::uint32_t value) const -> bool
+  {
+    auto* const probe = r.f->model_of<bus_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    try
+    {
+      static_cast<void>(probe->context.services.write(
+          address_of(*r.f, peripheral, reg), 4, value, popcorn::initiator::cpu));
+    }
+    catch(popcorn::model_error const&)
+    {
+      return true;
+    }
+    return false;
   }
 
   void dma(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
@@ -4252,4 +4270,89 @@ TEST_CASE("the U5 lock warning names RM0456 on USART1 and LPUART1")
     CHECK(found->message.find("RM0456") != std::string::npos);
     CHECK(found->message.find("RM0481") == std::string::npos);
   }
+}
+
+TEST_CASE(
+    "RM0456 66.8.3 and 67.7.3: ADD with UE 1 is kept on a U5 USART and LPUART whatever RE says")
+{
+  for(auto const& [unit_name, control1, section] : {
+          std::tuple<std::string_view, std::string_view, std::string_view>{
+                                                                           "USART1",  "CR1_enabled", "66.8.3"},
+          std::tuple<std::string_view, std::string_view, std::string_view>{
+                                                                           "LPUART1", "CR1",         "67.7.3"}
+  })
+  {
+    CAPTURE(unit_name);
+    CAPTURE(section);
+    for(auto const receiver : {0u, 1u << 2})
+    {
+      CAPTURE(receiver);
+      locked_rig t;
+      t.cpu(unit_name, "CR2", 0x5Au << 24);
+      t.cpu(unit_name, control1, ue | receiver);
+      t.cpu(unit_name, "CR2", 0x11u << 24);
+      CHECK(t.read(unit_name, "CR2") == (0x5Au << 24));
+      CHECK(t.logged.size() == 1);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 66.8 and 67.7: FIFOEN written with UE 1 is held on the USART, taken on the LPUART")
+{
+  constexpr std::uint32_t fifoen = 1u << 29;
+  locked_rig              t;
+  t.cpu("USART1", "CR1_enabled", ue);
+  t.cpu("USART1", "CR1_enabled", ue | fifoen);
+  CHECK(t.read("USART1", "CR1_enabled") == ue);
+  t.cpu("LPUART1", "CR1", ue);
+  t.cpu("LPUART1", "CR1", ue | fifoen);
+  CHECK(t.read("LPUART1", "CR1") == (ue | fifoen));
+}
+
+TEST_CASE(
+    "RM0456 66.8: a strict machine refuses every locked U5 write and reads the old value back")
+{
+  struct leg
+  {
+    std::string_view unit_name;
+    std::string_view control1;
+    std::string_view reg_name;
+    std::uint32_t    value;
+    std::uint32_t    enable;
+  };
+  for(auto const& entry : std::array<leg, 6>{
+          {{"USART1", "CR1_enabled", "CR1_enabled", 1u << 12, ue},
+           {"USART1", "CR1_enabled", "CR2", 2u << 12, ue},
+           {"USART1", "CR1_enabled", "CR3", 1u << 15, ue},
+           {"USART1", "CR1_enabled", "BRR", 416, ue},
+           {"USART1", "CR1_enabled", "PRESC", 3, ue},
+           {"LPUART1", "CR1", "BRR", 0x300, ue}}
+  })
+  {
+    CAPTURE(entry.unit_name);
+    CAPTURE(entry.reg_name);
+    locked_rig t{true};
+    auto const control = entry.reg_name == entry.control1;
+    t.debugger(
+        entry.unit_name, entry.reg_name, control ? (entry.enable | entry.value) : entry.value);
+    t.debugger(
+        entry.unit_name, entry.control1, control ? (entry.enable | entry.value) : entry.enable);
+    auto const old = t.read(entry.unit_name, entry.reg_name);
+    CHECK(t.refuses(entry.unit_name, entry.reg_name, control ? entry.enable : 0u));
+    CHECK(t.read(entry.unit_name, entry.reg_name) == old);
+    CHECK(t.logged.size() == 1);
+  }
+}
+
+TEST_CASE("RM0456 66.8.6: BRR written with UE 1 is held on UART4, its own row")
+{
+  locked_rig t;
+  t.set_bit("RCC", "RCC_APB1ENR1", 19);
+  t.cpu("UART4", "BRR", 0x345);
+  t.cpu("UART4", "CR1_enabled", ue);
+  t.cpu("UART4", "BRR", 0x400);
+  CHECK(t.read("UART4", "BRR") == 0x345);
+  CHECK(t.logged.size() == 1);
+  CHECK(t.logged[0].peripheral == "UART4");
 }

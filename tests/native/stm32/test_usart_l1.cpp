@@ -813,3 +813,30 @@ TEST_CASE("RM0038 27.6.1: a write of 0 over a set ORE and IDLE leaves both, clea
     CHECK((r.read(usart1 + sr) & (ore | idle_flag | rxne)) == (ore | idle_flag));
   }
 }
+
+TEST_CASE(
+    "RM0038 27.6: BRR, CR1 M and OVER8 and CR2 STOP written with UE 1 are taken, nothing logs")
+{
+  constexpr address brr_offset = 0x08;
+  constexpr address cr2_offset = 0x10;
+  for(auto const base : {address{0x4001'3800}, address{0x4000'4C00}})
+  {
+    CAPTURE(base);
+    rig        r{"idle"};
+    auto const records = std::make_shared<std::vector<core::log_record>>();
+    auto const sink    = r.f->target->add_log_sink(
+        [records](core::log_record const& record) { records->push_back(record); });
+    r.write(0x4002'3820, r.read(0x4002'3820) | (1u << 14));
+    r.write(0x4002'3824, r.read(0x4002'3824) | (1u << 19));
+    constexpr std::uint32_t m     = 1u << 12;
+    constexpr std::uint32_t over8 = 1u << 15;
+    r.cpu_write(base + cr1, ue);
+    r.cpu_write(base + brr_offset, 0x123);
+    r.cpu_write(base + cr1, ue | m | over8);
+    r.cpu_write(base + cr2_offset, 2u << 12);
+    CHECK(r.read(base + brr_offset) == 0x123);
+    CHECK(r.read(base + cr1) == (ue | m | over8));
+    CHECK(r.read(base + cr2_offset) == (2u << 12));
+    CHECK(records->empty());
+  }
+}
