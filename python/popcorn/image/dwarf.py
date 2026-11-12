@@ -88,7 +88,8 @@ class BaseType:
 
 @dataclass(frozen=True, slots=True)
 class PointerType:
-    """A DW_TAG_pointer_type; `target` is None for `void*`."""
+    """A DW_TAG_pointer_type; `target` is None for `void*`, else a TypeId that
+    `Machine.resolve_type` resolves."""
 
     target: TypeId | None
     size: int
@@ -96,7 +97,8 @@ class PointerType:
 
 @dataclass(frozen=True, slots=True)
 class Member:
-    """One field of a StructType: byte offset, plus bitfield position when applicable."""
+    """One field of a StructType: byte offset, plus bitfield position when applicable. `type` is a
+    TypeId that `Machine.resolve_type` resolves."""
 
     name: str
     offset: int
@@ -118,7 +120,8 @@ class StructType:
 
 @dataclass(frozen=True, slots=True)
 class ArrayType:
-    """A DW_TAG_array_type; a count is None for an unbounded or flexible dimension."""
+    """A DW_TAG_array_type; a count is None for an unbounded or flexible dimension. `element` is a
+    TypeId that `Machine.resolve_type` resolves."""
 
     element: TypeId
     counts: tuple[int | None, ...]
@@ -135,7 +138,8 @@ class EnumType:
 
 @dataclass(frozen=True, slots=True)
 class Typedef:
-    """A DW_TAG_typedef; `target` is None for a typedef of void."""
+    """A DW_TAG_typedef; `target` is None for a typedef of void, else a TypeId that
+    `Machine.resolve_type` resolves."""
 
     name: str
     target: TypeId | None
@@ -143,7 +147,8 @@ class Typedef:
 
 @dataclass(frozen=True, slots=True)
 class Qualified:
-    """A const/volatile/restrict/atomic wrapper around another type."""
+    """A const/volatile/restrict/atomic wrapper around another type, `target` a TypeId that
+    `Machine.resolve_type` resolves."""
 
     qualifier: Qualifier
     target: TypeId | None
@@ -151,7 +156,8 @@ class Qualified:
 
 @dataclass(frozen=True, slots=True)
 class FunctionType:
-    """A DW_TAG_subroutine_type: the pointee shape of a function pointer."""
+    """A DW_TAG_subroutine_type: the pointee shape of a function pointer. `returns` and `params` are
+    TypeIds that `Machine.resolve_type` resolves."""
 
     returns: TypeId | None
     params: tuple[TypeId, ...]

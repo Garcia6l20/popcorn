@@ -6,16 +6,27 @@ import asyncio
 import os
 import re
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import popcorn
+import popcorn._machine as machine_module
 import pytest
 from popcorn import Var
 from popcorn._image_view import _ElfBytes as ElfBytes  # pyright: ignore[reportPrivateUsage]
-from popcorn.image.dwarf import ArrayType, BaseType, DebugInfo, Encoding, StructType
+from popcorn.image.dwarf import (
+    ArrayType,
+    BaseType,
+    DebugInfo,
+    DebugInfoError,
+    Encoding,
+    EnumType,
+    Qualified,
+    StructType,
+    Typedef,
+)
 
-from .conftest import VIEWS_ELF, run_bounded
+from .conftest import HOOKS_ELF, VIEWS_ELF, run_bounded
 
 
 def test_struct_array_member_equals_a_raw_read(views: popcorn.Machine) -> None:
@@ -215,3 +226,142 @@ def test_image_view_raises_outside_loadable_segments(views: popcorn.Machine) -> 
     with pytest.raises(popcorn.ImageError, match="cross the edge") as caught:
         elf.read(end - 2, 4)
     assert caught.value.segment.isdigit()
+
+
+def test_a_typedef_target_of_m_types_resolves_through_resolve_type(
+    views: popcorn.Machine,
+) -> None:
+    route_kind = views.types["route_kind"]
+    assert isinstance(route_kind, Typedef)
+    assert route_kind.target is not None
+    enum = views.resolve_type(route_kind.target)
+    assert isinstance(enum, EnumType)
+    assert dict(enum.values) == {
+        "ROUTE_NONE": 0,
+        "ROUTE_UART": 3,
+        "ROUTE_CAN": 7,
+    }
+    assert views.strip_type(route_kind.target) == enum
+
+
+def test_strip_type_follows_typedef_and_const_to_the_base_type(views: popcorn.Machine) -> None:
+    info = views._debug_infos()[0]  # pyright: ignore[reportPrivateUsage]
+    chain = next(
+        type_id
+        for type_id, found in info.by_id.items()
+        if isinstance(found, Qualified)
+        and found.target is not None
+        and isinstance(info.by_id[found.target], Typedef)
+    )
+    one_step = views.resolve_type(chain)
+    assert isinstance(one_step, Qualified)
+    stripped = views.strip_type(chain)
+    assert isinstance(stripped, BaseType)
+    assert stripped == info.strip(chain)
+
+
+def test_strip_type_of_a_typedef_of_void_raises(
+    views: popcorn.Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = views._images[0]  # pyright: ignore[reportPrivateUsage]
+    void = DebugInfo(
+        by_id={1: Typedef(name="nothing_t", target=None)},
+        types={"nothing_t": 1},
+        variables={},
+        functions={},
+    )
+
+    def only_void(_images: Sequence[popcorn.Image]) -> list[tuple[popcorn.Image, DebugInfo]]:
+        return [(image, void)]
+
+    monkeypatch.setattr(machine_module, "debug_infos", only_void)
+    with pytest.raises(DebugInfoError):
+        views.strip_type(1)
+
+
+def test_resolve_type_refuses_an_unknown_image_and_an_unknown_id(
+    views: popcorn.Machine,
+) -> None:
+    with pytest.raises(popcorn.SymbolError):
+        views.resolve_type(0, image="nope")
+    with pytest.raises(popcorn.ConfigError) as caught:
+        views.resolve_type(1 << 40)
+    assert caught.value.key == "type_id"
+
+
+def two_images(m33: popcorn.PartDescription) -> popcorn.Machine:
+    return popcorn.Machine(
+        m33,
+        image=[
+            popcorn.Image.elf(VIEWS_ELF, name="views"),
+            popcorn.Image.elf(HOOKS_ELF, name="hooks", load=False),
+        ],
+    )
+
+
+def test_with_two_images_an_id_needs_image_and_resolves_in_that_image(
+    m33: popcorn.PartDescription,
+) -> None:
+    m = two_images(m33)
+    found = m._debug_infos()  # pyright: ignore[reportPrivateUsage]
+    infos = dict(zip(("views", "hooks"), found, strict=True))
+    route_kind = infos["views"].types["route_kind"]
+    with pytest.raises(popcorn.ConfigError) as caught:
+        m.resolve_type(route_kind)
+    assert (caught.value.key, caught.value.expected) == (
+        "image",
+        "the name of one of the loaded ELF images, views, hooks",
+    )
+    assert isinstance(m.resolve_type(route_kind, image="views"), Typedef)
+    other = infos["hooks"].by_id
+    foreign = next(type_id for type_id in other if type_id not in infos["views"].by_id)
+    assert m.resolve_type(foreign, image="hooks") == other[foreign]
+    with pytest.raises(popcorn.ConfigError):
+        m.resolve_type(foreign, image="views")
+
+
+def patched_infos(
+    monkeypatch: pytest.MonkeyPatch, machine: popcorn.Machine, info: DebugInfo
+) -> None:
+    image = machine._images[0]  # pyright: ignore[reportPrivateUsage]
+
+    def only(_images: Sequence[popcorn.Image]) -> list[tuple[popcorn.Image, DebugInfo]]:
+        return [(image, info)]
+
+    monkeypatch.setattr(machine_module, "debug_infos", only)
+
+
+@pytest.mark.timeout(5)
+def test_strip_type_of_a_typedef_cycle_raises(
+    views: popcorn.Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = DebugInfo(
+        by_id={1: Typedef(name="a_t", target=2), 2: Typedef(name="b_t", target=1)},
+        types={"a_t": 1},
+        variables={},
+        functions={},
+    )
+    patched_infos(monkeypatch, views, loop)
+    with pytest.raises(DebugInfoError, match="cycle"):
+        views.strip_type(1)
+
+
+def test_strip_type_of_a_dangling_target_raises_debug_info_error(
+    views: popcorn.Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dangling = DebugInfo(
+        by_id={1: Typedef(name="a_t", target=99)},
+        types={"a_t": 1},
+        variables={},
+        functions={},
+    )
+    patched_infos(monkeypatch, views, dangling)
+    with pytest.raises(DebugInfoError, match="99"):
+        views.strip_type(1)
+
+
+def test_resolve_type_needs_an_elf_image_with_dwarf(m33: popcorn.PartDescription) -> None:
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Machine(m33).resolve_type(0)
+    assert caught.value.key == "image"
+    assert "with DWARF" in caught.value.expected

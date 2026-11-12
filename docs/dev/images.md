@@ -39,7 +39,9 @@ popcorn reads DWARF itself:
   number of operations.
 
 Python gets types and variables through `Machine.var` and `Machine.types`, and `Constants`
-exposes macros.
+exposes macros. A `TypeId` inside a type, such as `Typedef.target`, belongs to one image:
+`Machine.resolve_type` and `Machine.strip_type` resolve it, with `image=` naming the image when
+several ELF images are loaded.
 
 ## Images in a machine
 

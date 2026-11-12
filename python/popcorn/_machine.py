@@ -138,7 +138,7 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
     from popcorn._system import System
-    from popcorn.image.dwarf import DebugInfo, DebugType
+    from popcorn.image.dwarf import DebugInfo, DebugType, TypeId
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
@@ -1390,11 +1390,81 @@ class Machine:
     @property
     def types(self) -> dict[str, DebugType]:
         """Named types of the loaded ELF images' DWARF, typedefs included, a later image winning
-        a clash."""
+        a clash. A `target`, `element` or member type of a result is a `TypeId` of its image:
+        `resolve_type` gives the type back."""
         merged: dict[str, DebugType] = {}
         for info in self._debug_infos():
             merged.update((name, info.resolve(type_id)) for name, type_id in info.types.items())
         return merged
+
+    def resolve_type(self, type_id: TypeId, *, image: str | None = None) -> DebugType:
+        """The type a `TypeId` of `types` names, such as `Typedef.target`, a member type or a
+        function parameter or return type.
+
+        A `TypeId` belongs to one image's DWARF and stays valid while that ELF file is
+        unchanged. It reads the files, never the machine, so it is callable parked or running,
+        from any thread.
+
+        Args:
+            type_id: A `TypeId` read from a type of `types`.
+            image: The name of the image the `TypeId` comes from. May be omitted when one
+                loaded ELF image has DWARF.
+
+        Raises:
+            ConfigError: `image` is omitted with several ELF images loaded, no loaded ELF image
+                has DWARF or `image` names one with none, or no type has `type_id` in the image.
+            SymbolError: No image is named `image`.
+        """
+        return self._resolved(type_id, image)[1]
+
+    def strip_type(self, type_id: TypeId, *, image: str | None = None) -> DebugType:
+        """The type under the typedefs and qualifiers of `type_id`, as `resolve_type` finds it.
+
+        Args:
+            type_id: A `TypeId` read from a type of `types`.
+            image: The name of the image the `TypeId` comes from, as for `resolve_type`.
+
+        Raises:
+            ConfigError: As `resolve_type`.
+            SymbolError: As `resolve_type`.
+            DebugInfoError: The chain ends in void or loops, or a target in it names no type.
+        """
+        from popcorn.image.dwarf import DebugInfoError
+
+        info, _ = self._resolved(type_id, image)
+        try:
+            return info.strip(type_id)
+        except KeyError as missing:
+            raise DebugInfoError(f"strip: no type has id {missing.args[0]}") from None
+
+    def _resolved(self, type_id: TypeId, image: str | None) -> tuple[DebugInfo, DebugType]:
+        info = self._type_info(image)
+        try:
+            return info, info.resolve(type_id)
+        except KeyError:
+            raise ConfigError(
+                f"type_id: no type has id {type_id} in the DWARF of the image",
+                key="type_id",
+                expected="a TypeId read from a type of Machine.types",
+            ) from None
+
+    def _type_info(self, image: str | None) -> DebugInfo:
+        selected = [info for _, info in debug_infos(selected_images(self._images, image))]
+        if len(selected) == 1:
+            return selected[0]
+        names = [named.name for named, _ in debug_infos(self._images) if named.name is not None]
+        listed = ", ".join(names) if names else "none"
+        if not selected:
+            raise ConfigError(
+                "image: no loaded ELF image with DWARF to read the type from",
+                key="image",
+                expected=f"an ELF image with DWARF, one of {listed}",
+            )
+        raise ConfigError(
+            f"image: a TypeId belongs to one image, name it with image=, one of {listed}",
+            key="image",
+            expected=f"the name of one of the loaded ELF images, {listed}",
+        )
 
     def _debug_infos(self) -> list[DebugInfo]:
         return [info for _, info in debug_infos(self._images)]
