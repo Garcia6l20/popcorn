@@ -3342,7 +3342,7 @@ void tim::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   state_.scheduled = 0;
-  catch_up(now_ps());
+  catch_up(std::min(state_.due_ps, now_ps()));
   settle();
 }
 

@@ -1942,3 +1942,86 @@ TEST_CASE(
     }
   }
 }
+
+TEST_CASE(
+    "RM0038 17.3.15: a TIM2 update between a TIM3 compare match and the TIM3 wrap in one "
+    "instruction resets TIM3 before its wrap, in both enable orders")
+{
+  for(double const cpi : {1.0, 4.0})
+  {
+    for(bool const slave_first : {true, false})
+    {
+      CAPTURE(cpi);
+      CAPTURE(slave_first);
+      rig r{l152re(), firmware, false, true, cpi};
+      r.base("TIM2", 101);
+      r.master("TIM2");
+      r.base("TIM3", 102);
+      r.write("TIM3", "CCR1", 101);
+      r.set("TIM3", "DIER", "CC1IE", 1);
+      r.write("TIM3", "CR2", master_update << 4);
+      r.slave("TIM3", 1, sms_reset);
+      auto& probe = r.probe("tim3_trgo");
+      probe.listen(true);
+      auto const from = r.now();
+      if(slave_first)
+      {
+        r.enable("TIM3");
+        r.enable("TIM2");
+      }
+      else
+      {
+        r.enable("TIM2");
+        r.enable("TIM3");
+      }
+      r.run_until(from + 60 * us);
+      CHECK(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 102)});
+    }
+  }
+}
+
+TEST_CASE(
+    "a snapshot taken before the instruction that holds a TIM3 compare match, a TIM2 update and a "
+    "TIM3 wrap restores to the same TIM3 reset order at cpi 4")
+{
+  rig r{l152re(), firmware, false, true, 4.0};
+  r.base("TIM2", 101);
+  r.master("TIM2");
+  r.base("TIM3", 102);
+  r.write("TIM3", "CCR1", 101);
+  r.set("TIM3", "DIER", "CC1IE", 1);
+  r.write("TIM3", "CR2", master_update << 4);
+  r.slave("TIM3", 1, sms_reset);
+  auto& probe = r.probe("tim3_trgo");
+  probe.listen(true);
+  auto const from = r.now();
+  r.enable("TIM3");
+  r.enable("TIM2");
+  r.run_until(from + exact_ps(from, 98) - from);
+  auto const taken = r.now();
+  REQUIRE(taken < exact_ps(from, 101));
+  {
+    auto const& units = r.f->target->description().peripherals;
+    auto const  found =
+        std::ranges::find(units, std::string_view{"TIM3"}, &popcorn::peripheral_desc::name);
+    REQUIRE(found != units.end());
+    auto const owner   = static_cast<std::uint32_t>(found - units.begin());
+    auto       pending = false;
+    for(auto const& event : r.f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner and event.id.kind == 0)
+      {
+        pending = true;
+        CHECK(event.due_ps > taken);
+      }
+    }
+    REQUIRE(pending);
+  }
+  auto const saved = r.f->target->snapshot();
+  r.run_until(from + 60 * us);
+  REQUIRE(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 102)});
+  r.f->target->restore(saved);
+  probe.pulses.clear();
+  r.run_until(from + 60 * us);
+  CHECK(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 102)});
+}
