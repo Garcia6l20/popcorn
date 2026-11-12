@@ -381,3 +381,18 @@ TEST_CASE("RM0351 6.4.13: a PWRRST pulse resets every PWR register and the range
   CHECK(f.field("PWR", "CR4", "VBE") == 0);
   CHECK(level(f) == 0);
 }
+
+TEST_CASE(
+    "RM0351 5.4.1: a strict forbidden VOS write leaves the other bits of CR1 at their old value")
+{
+  auto       strict = parked(strict_options());
+  auto&      regs   = strict.target->peripheral("PWR");
+  auto const word   = regs.peek(0);
+  REQUIRE(strict.field("PWR", "CR1", "DBP") == 0);
+  CHECK_THROWS_AS(
+      (void)strict.target->model("PWR")->on_write(
+          regs, 0, 4, word, (word & ~(3u << 9)) | (1u << 8), {.pc = 0, .now = icount{0}}),
+      popcorn::model_error);
+  CHECK(strict.field("PWR", "CR1", "VOS") == 1);
+  CHECK(strict.field("PWR", "CR1", "DBP") == 0);
+}

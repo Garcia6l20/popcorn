@@ -2017,3 +2017,182 @@ TEST_CASE("a VOS write that lowers the range under a running PLL warns once at t
   CHECK(limits() == 1);
   CHECK(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
 }
+
+namespace
+{
+void write_vos(stm32_fixture const& f, std::uint32_t vos)
+{
+  auto&       regs  = f.target->peripheral("PWR");
+  auto const* found = popcorn::find_register(regs.description(), std::string_view{"PWR_VOSR"});
+  auto const  bits =
+      std::ranges::find(found->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+  static_cast<void>(f.target->model("PWR")->on_write(
+      regs, found->offset, 4, regs.peek(found->offset), vos << bits->lsb,
+      {.pc = 0, .now = icount{0}}));
+}
+
+void configure_pll3(stm32_fixture const& f)
+{
+  set_field(f, "RCC_PLL3CFGR", "PLL3SRC", 2);
+  set_field(f, "RCC_PLL3CFGR", "PLL3M", 0);
+  set_field(f, "RCC_PLL3DIVR", "PLL3N", 25);
+  set_field(f, "RCC_PLL3DIVR", "PLL3P", 1);
+  set_field(f, "RCC_PLL3CFGR", "PLL3PEN", 1);
+}
+
+void enable_pll3(stm32_fixture const& f)
+{
+  auto&      regs = f.target->peripheral("RCC");
+  auto const at   = offset_of("RCC_CR");
+  static_cast<void>(f.target->model("RCC")->on_write(
+      regs, at, 4, regs.peek(at), peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL3ON"),
+      {.pc = 0, .now = icount{0}}));
+}
+
+auto limit_warnings(std::vector<core::log_record> const& logged) -> std::ptrdiff_t
+{
+  return std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  });
+}
+
+auto vos_field(stm32_fixture const& f) -> std::uint32_t
+{
+  return f.field("PWR", "PWR_VOSR", "VOS");
+}
+
+auto strict_options(bool strict) -> core::machine_options
+{
+  auto options               = with_listener();
+  options.strict_peripherals = strict;
+  return options;
+}
+
+void start_hsi_and_msi(stm32_fixture const& f)
+{
+  write(f, "RCC_CR", bit_of("RCC_CR", "HSION") | bit_of("RCC_CR", "MSISON"));
+  idle_until(f, std::chrono::microseconds{150});
+}
+}
+
+TEST_CASE("a VOS write to a range that puts a running PLL outside its limits raises under strict")
+{
+  auto f = idle_fixture(strict_options(true));
+  start_hsi_and_msi(f);
+  set_range(f, 3);
+  configure_pll3(f);
+  enable_pll3(f);
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
+  CHECK_THROWS_AS(write_vos(f, 1), popcorn::model_error);
+  CHECK(vos_field(f) == 3);
+  CHECK(f.field("PWR", "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(range_level(f) == 0);
+  CHECK(f.model_of<stm32::voltage_range_source>("PWR")->target_level() == 0);
+  idle_until(f, std::chrono::microseconds{200});
+  CHECK(range_level(f) == 0);
+  auto const& desc = f.target->peripheral("PWR").description();
+  auto const* vosr = popcorn::find_register(desc, std::string_view{"PWR_VOSR"});
+  auto const  field =
+      std::ranges::find(vosr->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+  CHECK_NOTHROW(
+      static_cast<void>(f.target->mem().write(desc.base + vosr->offset, 4, 1u << field->lsb)));
+  CHECK(vos_field(f) == 1);
+}
+
+TEST_CASE(
+    "a VOS write that puts a running PLL outside its limits warns once, the settle adds no "
+    "second warning")
+{
+  auto                          f = idle_fixture(strict_options(false));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  start_hsi_and_msi(f);
+  set_range(f, 3);
+  configure_pll3(f);
+  enable_pll3(f);
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(limit_warnings(logged) == 0);
+  write_vos(f, 1);
+  CHECK(limit_warnings(logged) == 1);
+  CHECK(vos_field(f) == 1);
+  idle_until(f, std::chrono::microseconds{200});
+  REQUIRE(range_level(f) == 2);
+  CHECK(limit_warnings(logged) == 1);
+}
+
+TEST_CASE("a PLL enabled between a VOS write to a lower range and its settle raises under strict")
+{
+  auto f = idle_fixture(strict_options(true));
+  start_hsi_and_msi(f);
+  set_range(f, 3);
+  configure_pll3(f);
+  write_vos(f, 1);
+  REQUIRE(range_level(f) == 0);
+  CHECK_THROWS_AS(enable_pll3(f), popcorn::model_error);
+  CHECK(f.field("RCC", "RCC_CR", "PLL3ON") == 0);
+  idle_until(f, std::chrono::microseconds{200});
+  REQUIRE(range_level(f) == 2);
+  CHECK_THROWS_AS(enable_pll3(f), popcorn::model_error);
+}
+
+TEST_CASE("a VOS write with the PLL off, or to a better range, raises nothing under strict")
+{
+  auto f = idle_fixture(strict_options(true));
+  start_hsi_and_msi(f);
+  set_range(f, 3);
+  configure_pll3(f);
+  CHECK_NOTHROW(write_vos(f, 1));
+  idle_until(f, std::chrono::microseconds{200});
+  CHECK(range_level(f) == 2);
+  CHECK_THROWS_AS(enable_pll3(f), popcorn::model_error);
+  CHECK_NOTHROW(write_vos(f, 3));
+  idle_until(f, std::chrono::microseconds{200});
+  CHECK(range_level(f) == 0);
+  CHECK_NOTHROW(enable_pll3(f));
+  idle_until(f, std::chrono::microseconds{150});
+  CHECK(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
+  CHECK_NOTHROW(write_vos(f, 3));
+}
+
+TEST_CASE(
+    "a PLL enabled while a VOS write to a higher range is in flight is checked against the range "
+    "still applied")
+{
+  auto f = idle_fixture(strict_options(true));
+  start_hsi_and_msi(f);
+  configure_pll3(f);
+  write_vos(f, 3);
+  REQUIRE(range_level(f) == 3);
+  REQUIRE(f.model_of<stm32::voltage_range_source>("PWR")->target_level() == 0);
+  CHECK_THROWS_AS(enable_pll3(f), popcorn::model_error);
+  CHECK(f.field("RCC", "RCC_CR", "PLL3ON") == 0);
+  idle_until(f, std::chrono::microseconds{200});
+  REQUIRE(range_level(f) == 0);
+  CHECK_NOTHROW(enable_pll3(f));
+}
+
+TEST_CASE("a refused strict VOS write leaves BOOSTEN at its old value")
+{
+  auto f = idle_fixture(strict_options(true));
+  start_hsi_and_msi(f);
+  set_range(f, 3);
+  configure_pll3(f);
+  enable_pll3(f);
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL3RDY") == 1);
+  REQUIRE(f.field("PWR", "PWR_VOSR", "BOOSTEN") == 0);
+  auto&       regs  = f.target->peripheral("PWR");
+  auto const* vosr  = popcorn::find_register(regs.description(), std::string_view{"PWR_VOSR"});
+  auto const  field = [&](std::string_view name) {
+    return std::ranges::find(vosr->fields, name, &popcorn::field_desc::name)->lsb;
+  };
+  auto const word = (1u << field("VOS")) | (1u << field("BOOSTEN"));
+  CHECK_THROWS_AS(
+      static_cast<void>(f.target->model("PWR")->on_write(
+          regs, vosr->offset, 4, regs.peek(vosr->offset), word, {.pc = 0, .now = icount{0}})),
+      popcorn::model_error);
+  CHECK(f.field("PWR", "PWR_VOSR", "BOOSTEN") == 0);
+  CHECK(vos_field(f) == 3);
+}

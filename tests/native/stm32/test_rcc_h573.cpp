@@ -1546,3 +1546,128 @@ TEST_CASE("a VOS write that lowers the range under a running PLL1 warns once at 
   CHECK(limits() == 1);
   CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
 }
+
+namespace
+{
+void write_vos(stm32_fixture const& f, std::uint32_t vos)
+{
+  auto&       regs  = f.target->peripheral("PWR");
+  auto const* found = popcorn::find_register(regs.description(), std::string_view{"PWR_VOSCR"});
+  auto const  bits =
+      std::ranges::find(found->fields, std::string_view{"VOS"}, &popcorn::field_desc::name);
+  static_cast<void>(f.target->model("PWR")->on_write(
+      regs, found->offset, 4, regs.peek(found->offset), vos << bits->lsb,
+      {.pc = 0, .now = icount{0}}));
+}
+
+void configure_pll1(stm32_fixture const& f, std::uint32_t p)
+{
+  set(f, "RCC_PLL1CFGR", "PLL1SRC", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1VCOSEL", 0);
+  set(f, "RCC_PLL1CFGR", "DIVM1", 4);
+  set(f, "RCC_PLL1DIVR", "PLL1N", 49);
+  set(f, "RCC_PLL1DIVR", "PLL1P", p - 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+}
+
+void enable_pll1(stm32_fixture const& f)
+{
+  auto&      regs = f.target->peripheral("RCC");
+  auto const at   = offset_of("RCC_CR");
+  static_cast<void>(f.target->model("RCC")->on_write(
+      regs, at, 4, regs.peek(at), peek(f, "RCC_CR") | lsb_of("RCC_CR", "PLL1ON"),
+      {.pc = 0, .now = icount{0}}));
+}
+
+auto limit_warnings(std::vector<core::log_record> const& logged) -> std::ptrdiff_t
+{
+  return std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.message.contains("outside its limits");
+  });
+}
+
+auto vos_field(stm32_fixture const& f) -> std::uint32_t
+{
+  return f.field("PWR", "PWR_VOSCR", "VOS");
+}
+
+auto strict_options(bool strict) -> core::machine_options
+{
+  auto options               = with_listener();
+  options.strict_peripherals = strict;
+  return options;
+}
+}
+
+TEST_CASE("H5 VOS3 to VOS0 under a running PLL1 raises nothing, VOS0 to VOS3 raises under strict")
+{
+  auto f = idle_fixture(strict_options(true));
+  configure_pll1(f, 4);
+  enable_pll1(f);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK_NOTHROW(write_vos(f, 3));
+  idle_until(f, std::chrono::microseconds{100});
+  REQUIRE(range_level(f) == 0);
+  set(f, "RCC_CR", "PLL1ON", 0);
+  idle_until(f, delay);
+  configure_pll1(f, 2);
+  enable_pll1(f);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK_THROWS_AS(write_vos(f, 0), popcorn::model_error);
+  CHECK(vos_field(f) == 3);
+  CHECK(f.model_of<stm32::voltage_range_source>("PWR")->target_level() == 0);
+  idle_until(f, std::chrono::microseconds{100});
+  CHECK(range_level(f) == 0);
+}
+
+TEST_CASE("H5 VOS write to a range that puts a running PLL1 outside its limits warns once")
+{
+  auto                          f = idle_fixture(strict_options(false));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  set_range(f, 3);
+  configure_pll1(f, 2);
+  enable_pll1(f);
+  idle_until(f, delay);
+  REQUIRE(limit_warnings(logged) == 0);
+  write_vos(f, 0);
+  CHECK(limit_warnings(logged) == 1);
+  idle_until(f, std::chrono::microseconds{100});
+  REQUIRE(range_level(f) == 3);
+  CHECK(limit_warnings(logged) == 1);
+}
+
+TEST_CASE("H5 PLL1 enabled during the VOS0 to VOS3 steps raises under strict")
+{
+  auto f = idle_fixture(strict_options(true));
+  set_range(f, 3);
+  configure_pll1(f, 2);
+  write_vos(f, 0);
+  idle_until(f, std::chrono::microseconds{15});
+  REQUIRE(range_level(f) == 0);
+  CHECK_THROWS_AS(enable_pll1(f), popcorn::model_error);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  idle_until(f, std::chrono::microseconds{100});
+  REQUIRE(range_level(f) == 3);
+  CHECK_THROWS_AS(enable_pll1(f), popcorn::model_error);
+}
+
+TEST_CASE(
+    "H5 PLL1 enabled while a VOS write to a higher range is in flight is checked against the "
+    "range still applied")
+{
+  auto f = idle_fixture(strict_options(true));
+  configure_pll1(f, 2);
+  write_vos(f, 3);
+  idle_until(f, std::chrono::microseconds{15});
+  REQUIRE(range_level(f) == 3);
+  REQUIRE(f.model_of<stm32::voltage_range_source>("PWR")->target_level() == 0);
+  CHECK_THROWS_AS(enable_pll1(f), popcorn::model_error);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  idle_until(f, std::chrono::microseconds{100});
+  REQUIRE(range_level(f) == 0);
+  CHECK_NOTHROW(enable_pll1(f));
+}

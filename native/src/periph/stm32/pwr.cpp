@@ -306,6 +306,11 @@ struct pwr_variant
  * - STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50
  *   us by default. A write that steps to a higher voltage clears VOSRDY for that delay, one that
  *   steps to a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+ * - STM32U5 and STM32H5: a firmware VOS write to a lower performance range under a running PLL
+ *   that is outside its limits at that range logs the RCC warning of the PLL. Under
+ *   `strict_peripherals` it raises `model_error` and the register keeps its whole word, so VOS and
+ *   BOOSTEN read their old values. A debugger write is not checked. The raise is an inferred
+ *   response, RM0456 10.5.4 and RM0481 10.5 order the sequence and do not give it.
  *
  * @group h5 rule
  * - STM32H5: a VOS write moves ACTVOS one level toward VOS at once and one more level every 10.4
@@ -393,6 +398,7 @@ public:
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto active_level() const -> std::uint32_t override;
+  [[nodiscard]] auto target_level() const -> std::uint32_t override;
   [[nodiscard]] auto io_supply_valid() const -> bool override;
   [[nodiscard]] auto usb_supply_valid() const -> bool override;
   auto               on_write(
@@ -1137,12 +1143,32 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
     }
     if(ctx_.strict_peripherals)
     {
+      regs_.poke(level.offset, old);
       throw model_error(desc_.name, std::string{reg}, level.offset);
     }
     return;
   }
   if(level.of(now) != level.of(old))
   {
+    if(variant_.vos_levels[level.of(now)] > variant_.vos_levels[level.of(old)]
+       and writer_ != initiator::debugger)
+    {
+      auto refused = false;
+      for(auto* const peer : ctx_.peers.all())
+      {
+        if(auto* const guard = dynamic_cast<voltage_range_guard*>(peer))
+        {
+          refused = guard->voltage_range_refused(variant_.vos_levels[level.of(now)]) or refused;
+        }
+      }
+      if(refused and ctx_.strict_peripherals)
+      {
+        regs_.poke(level.offset, old);
+        throw model_error(
+            desc_.name, std::string{variant_.fields[std::to_underlying(pwr_role::vos)].name.reg},
+            level.offset);
+      }
+    }
     if(variant_.vos_levels[level.of(now)] < variant_.vos_levels[level.of(old)])
     {
       update(regs_, names_[pwr_role::vos_ready], variant_.vos_ready_set ? 0 : 1);
@@ -1278,6 +1304,11 @@ auto pwr::active_level() const -> std::uint32_t
     return state_.settled_level;
   }
   return variant_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
+}
+
+auto pwr::target_level() const -> std::uint32_t
+{
+  return variant_.vos_levels[get(regs_, names_[pwr_role::vos])];
 }
 
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)

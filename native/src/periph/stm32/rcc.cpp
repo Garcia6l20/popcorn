@@ -492,10 +492,16 @@ template <typename Signal> struct bus_gate
  * outputs up to 210, 210, 160 and 88 MHz. VOS3 is the range after a reset, RM0481 10.5.2.
  * - A PLL enabled outside its limits logs one model warning per PLL per machine life, naming the
  *   numbers, and the PLL still locks. Under `strict_peripherals` the write that sets `PLLxON`
- *   raises `model_error` and `PLLxON` reads 0. A VOS write that lowers the range under a running
- *   PLL logs the same warning when the new range applies. The outputs and dividers read are
- *   those of the `PLLxON` write and of the range change. The manuals say the PLL output is not
- *   guaranteed outside the limits and do not say `PLLxRDY` stays low, inferred.
+ *   raises `model_error` and `PLLxON` reads 0. A firmware VOS write that lowers the range under a
+ *   running PLL is checked against the range it selects and logs the same warning at the write.
+ *   RM0456 10.5.4 reduces the system frequency before VOS is lowered, and the RM0481 10.5 example
+ *   disables the PLL before VOS3. Under `strict_peripherals` the PWR write raises
+ *   `model_error` and the register keeps its whole word, an inferred response, the manuals do not
+ *   say what silicon does when VOS is lowered under a PLL above the limits. A `PLLxON` write
+ *   between a lowering VOS write and the new range applying is checked against the lower
+ *   performance of the two ranges, inferred. The outputs and dividers read are those of the
+ *   `PLLxON` write and of the range change. The manuals say the PLL output is not guaranteed
+ *   outside the limits and do not say `PLLxRDY` stays low, inferred.
  *
  * @group h5 rule "STM32H5 HSIDIV"
  * - STM32H5: `RCC_CR.HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI and takes a write in
@@ -603,6 +609,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
                         public kernel_gate,
                         public clock_output_port,
                         public voltage_range_listener,
+                        public voltage_range_guard,
                         public trustzone_aware
 {
   using base   = dispatch_model<rcc_model<Traits>, rcc_state<Traits>>;
@@ -664,6 +671,7 @@ public:
   }
   void               force_lsi() override;
   void               on_voltage_range_change() override;
+  [[nodiscard]] auto voltage_range_refused(std::uint32_t level) -> bool override;
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
   [[nodiscard]] auto clock_hz(std::string_view port, std::uint8_t pin) const
@@ -712,7 +720,8 @@ private:
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
   [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t;
-  [[nodiscard]] auto pll_violations(std::size_t pll) const -> std::string;
+  [[nodiscard]] auto pll_violations(std::size_t pll, std::uint32_t level) const -> std::string;
+  [[nodiscard]] auto worst_level() const -> std::optional<std::uint32_t>;
   void               check_pll_enable(
       std::string_view reg,
       std::uint32_t    word,
@@ -1454,31 +1463,37 @@ void rcc_model<Traits>::oscillators_written(
 }
 
 template <typename Traits>
-auto rcc_model<Traits>::pll_violations(std::size_t pll) const -> std::string
+auto rcc_model<Traits>::worst_level() const -> std::optional<std::uint32_t>
+{
+  std::optional<std::uint32_t> level;
+  for(auto* const peer : this->ctx_.peers.all())
+  {
+    if(auto const* const range = dynamic_cast<voltage_range_source const*>(peer))
+    {
+      level = std::max(range->active_level(), range->target_level());
+    }
+  }
+  return level;
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::pll_violations(std::size_t pll, [[maybe_unused]] std::uint32_t level) const
+    -> std::string
 {
   if constexpr(requires { Traits::pll_limit_tables; })
   {
-    std::optional<std::uint32_t> level;
-    for(auto* const peer : this->ctx_.peers.all())
-    {
-      if(auto const* const range = dynamic_cast<voltage_range_source const*>(peer))
-      {
-        level = range->active_level();
-      }
-    }
     auto const& fields = pll_[pll];
     auto const& node   = Traits::pll_nodes[pll];
     auto const  table  = fields.vcosel ? get(regs_, *fields.vcosel) : 0u;
     auto const  origin = std::to_underlying(pll_input(pll));
-    if(not level
-       or *level >= pll_limit_levels
+    if(level >= pll_limit_levels
        or table >= Traits::pll_limit_tables.size()
        or origin >= std::to_underlying(source::pll1)
        or Traits::oscillators[origin].rate == nullptr)
     {
       return {};
     }
-    auto const&       limits = Traits::pll_limit_tables[table][*level];
+    auto const&       limits = Traits::pll_limit_tables[table][level];
     rate_inputs const inputs{
         .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
     auto const input   = Traits::oscillators[origin].rate(inputs);
@@ -1528,7 +1543,7 @@ auto rcc_model<Traits>::pll_violations(std::size_t pll) const -> std::string
     }
     return std::format(
         "PLL{} is on at {}{}, outside its limits: {}", pll + 1, Traits::pll_level_label,
-        *level + Traits::pll_level_first, text);
+        level + Traits::pll_level_first, text);
   }
   return {};
 }
@@ -1550,8 +1565,9 @@ void rcc_model<Traits>::check_pll_enable(
     {
       continue;
     }
-    auto const pll  = at - std::to_underlying(source::pll1);
-    auto       text = pll_violations(pll);
+    auto const level = worst_level();
+    auto const pll   = at - std::to_underlying(source::pll1);
+    auto       text  = level ? pll_violations(pll, *level) : std::string{};
     if(text.empty())
     {
       continue;
@@ -1566,18 +1582,35 @@ void rcc_model<Traits>::check_pll_enable(
 
 template <typename Traits> void rcc_model<Traits>::on_voltage_range_change()
 {
+  auto const level = worst_level();
+  if(not level)
+  {
+    return;
+  }
+  static_cast<void>(voltage_range_refused(*level));
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::voltage_range_refused(std::uint32_t level) -> bool
+{
+  auto refused = false;
   for(std::size_t pll = 0; pll < pll_.size(); ++pll)
   {
     if(not is_on(static_cast<source>(std::to_underlying(source::pll1) + pll)))
     {
       continue;
     }
-    if(auto text = pll_violations(pll);
-       not text.empty() and not std::exchange(pll_range_logged_[pll], true))
+    if(auto text = pll_violations(pll, level); not text.empty())
     {
-      this->warn(Traits::oscillators[std::to_underlying(source::pll1) + pll].reg, std::move(text));
+      refused = true;
+      if(not std::exchange(pll_range_logged_[pll], true))
+      {
+        this->warn(
+            Traits::oscillators[std::to_underlying(source::pll1) + pll].reg, std::move(text));
+      }
     }
   }
+  return refused;
 }
 
 template <typename Traits>

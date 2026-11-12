@@ -26,6 +26,10 @@ public:
    *         range 1 to 4 of PWR_SVMSR.ACTVOS are the levels 0 to 3. */
   [[nodiscard]] virtual auto active_level() const -> std::uint32_t = 0;
 
+  /** @brief Performance level the VOS field selects, equal to active_level() when no change is
+   *         pending. A change in flight applies it at the end of its ready delay. */
+  [[nodiscard]] virtual auto target_level() const -> std::uint32_t = 0;
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~voltage_range_source() = default;
@@ -55,5 +59,36 @@ public:
 protected:
   /** @brief Destroys the listener, only through its model. */
   ~voltage_range_listener() = default;
+};
+
+/**
+ * @brief Model asked by the PWR model before it starts a change to a lower performance level.
+ *        Found by `dynamic_cast` over the machine's peers.
+ */
+class voltage_range_guard
+{
+public:
+  /** @brief Creates the guard. */
+  voltage_range_guard() = default;
+  /** @brief Not copyable. */
+  voltage_range_guard(voltage_range_guard const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(voltage_range_guard const&) -> voltage_range_guard& = delete;
+  /** @brief Not movable. */
+  voltage_range_guard(voltage_range_guard&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(voltage_range_guard&&) -> voltage_range_guard& = delete;
+
+  /**
+   * @brief A write selects a lower performance level.
+   * @param level The level the write selects.
+   * @return Whether the running configuration is outside its limits at @p level. The guard
+   *         has logged it.
+   */
+  [[nodiscard]] virtual auto voltage_range_refused(std::uint32_t level) -> bool = 0;
+
+protected:
+  /** @brief Destroys the guard, only through its model. */
+  ~voltage_range_guard() = default;
 };
 }
