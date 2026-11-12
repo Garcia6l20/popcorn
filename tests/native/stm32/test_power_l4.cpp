@@ -281,6 +281,24 @@ TEST_CASE("RM0351 5.4: a strict function enable raises, the register stays, a se
   }
 }
 
+TEST_CASE("RM0351 5.1.5: PWR_CR4 VBE and VBRS are stored under strict_peripherals with no log")
+{
+  auto                          f = parked(strict_options());
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const word   = (1u << bits_of("CR4", "VBE").lsb) | (1u << bits_of("CR4", "VBRS").lsb);
+  auto&      regs   = f.target->peripheral("PWR");
+  auto const offset = offset_of("CR4");
+  REQUIRE(f.target->model("PWR")
+              ->on_write(regs, offset, 4, regs.peek(offset), word, {.pc = 0, .now = icount{0}})
+              .has_value());
+  REQUIRE(f.target->mem().write(pwr_desc().base + offset, 4, word).has_value());
+  CHECK(f.field("PWR", "CR4", "VBE") == 1);
+  CHECK(f.field("PWR", "CR4", "VBRS") == 1);
+  CHECK(logged.empty());
+}
+
 TEST_CASE("RM0351 5.4.1 and 5.4.2: DBP, USV, IOSV, PLS and EIWUL are stored with no log record")
 {
   auto                          f = parked(strict_options());

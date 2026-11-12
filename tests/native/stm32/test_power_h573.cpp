@@ -305,9 +305,13 @@ TEST_CASE("RM0481 10.11.7: PWR_BDCR survives every reset but a power-on one")
 namespace
 {
 constexpr auto backup_functions = std::to_array<std::pair<std::string_view, std::uint32_t>>({
-    {"BREN",  1u << 0},
     {"MONEN", 1u << 1},
-    {"VBE",   1u << 8},
+});
+
+constexpr auto stored_backup_fields = std::to_array<std::pair<std::string_view, std::uint32_t>>({
+    {"BREN", 1u << 0},
+    {"VBE",  1u << 8},
+    {"VBRS", 1u << 9},
 });
 }
 
@@ -338,6 +342,30 @@ TEST_CASE("RM0481 10.11.7: a firmware enable of a backup function warns once per
     CHECK(logged[0].kind == core::log_kind::model_warning);
     CHECK(logged[0].reg == "PWR_BDCR");
     CHECK(logged[0].message.starts_with(name));
+  }
+}
+
+TEST_CASE("RM0481 10.11.7: BREN, VBE and VBRS are stored under strict_peripherals with no log")
+{
+  for(auto const& [name, bit] : stored_backup_fields)
+  {
+    CAPTURE(name);
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = true;
+    rig                           r{"h573_pwr_ll", std::move(options)};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto&      regs   = r.f.target->peripheral("PWR");
+    auto const offset = r.at("PWR_BDCR") - regs.description().base;
+    REQUIRE(r.f.target->model("PWR")
+                ->on_write(regs, offset, 4, regs.peek(offset), bit, {.pc = 0, .now = icount{0}})
+                .has_value());
+    CHECK(r.get("PWR_BDCR", name) == 1);
+    auto const seen = r.f.target->mem().read(r.at("PWR_BDCR"), 4);
+    REQUIRE(seen.has_value());
+    CHECK((*seen & bit) == bit);
+    CHECK(logged.empty());
   }
 }
 

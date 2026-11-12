@@ -550,9 +550,13 @@ TEST_CASE(
 namespace
 {
 constexpr auto backup_functions = std::to_array<std::pair<std::string_view, std::string_view>>({
-    {"PWR_BDCR1", "BREN" },
     {"PWR_BDCR1", "MONEN"},
-    {"PWR_BDCR2", "VBE"  },
+});
+
+constexpr auto stored_backup_fields = std::to_array<std::pair<std::string_view, std::string_view>>({
+    {"PWR_BDCR1", "BREN"},
+    {"PWR_BDCR2", "VBE" },
+    {"PWR_BDCR2", "VBRS"},
 });
 
 auto field_word(supply_rig const& r, std::string_view reg, std::string_view name) -> std::uint32_t
@@ -585,6 +589,26 @@ TEST_CASE(
     CHECK(logged[0].kind == core::log_kind::model_warning);
     CHECK(logged[0].reg == reg);
     CHECK(logged[0].message.starts_with(name));
+  }
+}
+
+TEST_CASE("RM0456 10.10.9 and 10.10.10: BREN, VBE and VBRS are stored under strict mode, no log")
+{
+  for(auto const& [reg, name] : stored_backup_fields)
+  {
+    CAPTURE(name);
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = true;
+    supply_rig                    r{u575(), std::move(options)};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    r.cpu_write(reg, field_word(r, reg, name));
+    CHECK(field(r.f, reg, name) == 1);
+    auto const seen = r.f.target->mem().read(r.at(reg), 4);
+    REQUIRE(seen.has_value());
+    CHECK((*seen & field_word(r, reg, name)) == field_word(r, reg, name));
+    CHECK(logged.empty());
   }
 }
 

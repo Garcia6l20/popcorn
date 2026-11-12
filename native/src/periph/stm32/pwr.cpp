@@ -292,11 +292,15 @@ struct pwr_variant
  * @group u5,h5 unmodelled
  * - The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
  *   modelled. A deep-sleep WFI idles as a plain WFI.
- * - The backup regulator, the backup domain monitoring and the VBAT charging that `BREN`, `MONEN`
- *   and `VBE` enable are not modelled, in `PWR_BDCR1` and `PWR_BDCR2` on the U5 and `PWR_BDCR` on
- *   the H5. A firmware write that sets one from 0 logs one warning per field per machine life and
- *   stores the bit. Under `strict_peripherals` it is a `model_error` and the register keeps its
- *   value before the write.
+ * - The backup domain monitoring that `MONEN` enables is not modelled, in `PWR_BDCR1` on the U5
+ *   and `PWR_BDCR` on the H5: its flags and tamper detection are not modelled. A firmware write
+ *   that sets `MONEN` from 0 logs one warning per machine life and stores the bit. Under
+ *   `strict_peripherals` it is a `model_error` and the register keeps its value before the write.
+ * - `BREN`, the backup RAM retention in Standby and VBAT modes, and `VBE` and `VBRS`, the VBAT
+ *   battery charging and its resistor, are stored and have no modelled effect, in `PWR_BDCR1` and
+ *   `PWR_BDCR2` on the U5, RM0456 10.10.9 and 10.10.10, and in `PWR_BDCR` on the H5, RM0481
+ *   10.11.7. A write of them logs nothing and raises nothing under `strict_peripherals`. The L4
+ *   `PWR_CR4.VBE` and `PWR_CR4.VBRS` are stored, RM0351 5.1.5.
  *
  * @group u5 rule
  * - STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50
@@ -726,9 +730,7 @@ constexpr auto u5_system_reset_kept = std::to_array<field_name>({
 });
 
 constexpr auto u5_unmodelled = std::to_array<field_name>({
-    {"PWR_BDCR1", "BREN" },
     {"PWR_BDCR1", "MONEN"},
-    {"PWR_BDCR2", "VBE"  },
 });
 
 constexpr auto u5_backup_reset_kept = std::to_array<field_name>({
@@ -737,9 +739,7 @@ constexpr auto u5_backup_reset_kept = std::to_array<field_name>({
 });
 
 constexpr auto h5_unmodelled = std::to_array<field_name>({
-    {"PWR_BDCR", "BREN" },
     {"PWR_BDCR", "MONEN"},
-    {"PWR_BDCR", "VBE"  },
 });
 
 constexpr auto h5_system_reset_kept = std::to_array<field_name>({
