@@ -112,6 +112,7 @@ struct adc_l1_state
   bool          regular_resume{};
   bool          injected_frozen{};
   std::uint64_t injected_delay_until_ps{};
+  std::uint64_t injected_end_ps{};
   std::uint8_t  injected_rank{};
   std::uint8_t  injected_left{};
   std::uint64_t queued{};
@@ -206,7 +207,10 @@ struct trigger_selection
  *        due, and that rank converts again when the injected group ends, once the delay of the
  *        regular conversion before it has passed, 12.9. A regular trigger or SWSTART during the
  *        injected group starts the regular group at its end. A JSWSTART or an injected trigger
- *        while the injected group runs is ignored, JSWSTART cleared, inferred. A write of
+ *        while the injected group runs is ignored, JSWSTART cleared, inferred, and so is an
+ *        injected trigger edge that falls before the end of the group in the core cycle that
+ *        holds the end, inferred, board check: an injected edge within the last core cycle of
+ *        an injected conversion. A write of
  *        ADC_JSQR during the injected group drops it and resumes an interrupted regular
  *        conversion, 12.7.1. A write of ADC_JSQR, or of ADC_SQR1 to ADC_SQR5, between JDISCEN or
  *        DISCEN subgroups starts the next trigger's group at its first conversion, inferred.
@@ -363,6 +367,7 @@ private:
   [[nodiscard]] auto listened() const -> trigger_selection;
   [[nodiscard]] auto blocked(std::uint64_t ps) const -> bool;
   [[nodiscard]] auto injected_blocked(std::uint64_t ps) const -> bool;
+  [[nodiscard]] auto injected_ended_early(std::uint64_t ps) const -> bool;
   void               check_selection(trigger_selection const& was, trigger_selection const& will);
   void               retune(trigger_selection const& was);
   void               notify(trigger_selection const& selection);
@@ -1108,6 +1113,7 @@ void adc_l1_model::take_edge(bool regular, bool injected, std::uint64_t at_ps)
   if(injected
      and regular
      and not state_.injecting
+     and not injected_ended_early(at_ps)
      and not injected_blocked(at_ps)
      and not regular_busy()
      and not blocked(at_ps))
@@ -1203,6 +1209,11 @@ auto adc_l1_model::blocked(std::uint64_t ps) const -> bool
 auto adc_l1_model::injected_blocked(std::uint64_t ps) const -> bool
 {
   return state_.injected_frozen or ps < state_.injected_delay_until_ps;
+}
+
+auto adc_l1_model::injected_ended_early(std::uint64_t ps) const -> bool
+{
+  return ps < state_.injected_end_ps;
 }
 
 void adc_l1_model::release_freeze()
@@ -1353,7 +1364,7 @@ void adc_l1_model::regular_start(std::uint64_t start_ps, std::uint64_t edge_ps, 
 
 void adc_l1_model::injected_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software)
 {
-  if(state_.injecting or injected_blocked(edge_ps))
+  if(state_.injecting or injected_ended_early(edge_ps) or injected_blocked(edge_ps))
   {
     if(software and not(state_.waiting_clock and state_.injecting))
     {
@@ -1701,7 +1712,8 @@ void adc_l1_model::finish_injected()
     signal();
     return;
   }
-  state_.injecting = false;
+  state_.injecting       = false;
+  state_.injected_end_ps = end;
   if(std::exchange(state_.regular_resume, false))
   {
     begin(std::max(end, state_.delay_until_ps));
@@ -1812,10 +1824,11 @@ void adc_l1_model::stop_engine()
     ctx_.events.cancel(seq - 1);
   }
   ++state_.generation;
-  state_.converting    = false;
-  state_.end_ps        = 0;
-  state_.waiting_clock = false;
-  state_.start_pending = false;
+  state_.converting      = false;
+  state_.end_ps          = 0;
+  state_.injected_end_ps = 0;
+  state_.waiting_clock   = false;
+  state_.start_pending   = false;
 }
 
 void adc_l1_model::abort_regular()

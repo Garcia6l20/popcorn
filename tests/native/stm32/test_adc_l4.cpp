@@ -3503,6 +3503,63 @@ TEST_CASE(
   }
 }
 
+namespace
+{
+void injected_edge_in_last_cycle(bool continuous)
+{
+  rig const r;
+  r.set("RCC", "AHB2ENR", "GPIOAEN", 1);
+  r.set("GPIOA", "MODER", "MODER15", 0);
+  r.enable();
+  auto* const pins = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(pins != nullptr);
+  pins->drive(15, false);
+  if(continuous)
+  {
+    r.write("ADC1", "ADC_CFGR", cont);
+    r.start(1);
+  }
+  r.write("ADC1", "ADC_JSQR", jsqr({1}, 1, 6));
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  for(std::uint32_t k = 0; k < 20; ++k)
+  {
+    CAPTURE(k);
+    auto const first = r.now() + 10 * us + 123 + k * 37;
+    pins->drive_at(15, true, vtime{first});
+    pins->drive_at(15, false, vtime{first + 100'000});
+    auto const end = first
+                   + edge_after(first, cycle_ps)
+                   + (12 + 8 * 15) * cycle_ps / 8
+                   + (continuous ? cycle_ps : 0);
+    r.run_until(first + 600'000);
+    REQUIRE(r.isr("JEOC") == 0);
+    REQUIRE((end - 1 + cycle_ps - 1) / cycle_ps == (end + cycle_ps - 1) / cycle_ps);
+    pins->drive_at(15, true, vtime{end - 1});
+    pins->drive_at(15, false, vtime{end - 1 + 100'000});
+    r.run_until(end + 1 * us);
+    CHECK(r.isr("JEOC") == 1);
+    static_cast<void>(r.cpu_read("ADC1", "ADC_JDR1"));
+    r.run_until(end + 12 * us);
+    CHECK(r.isr("JEOC") == 0);
+  }
+}
+}
+
+TEST_CASE(
+    "an EXTI line 15 edge 1 ps before the end of the previous injected conversion, in the core "
+    "cycle that holds the end, is ignored as busy on the L4, 20 times")
+{
+  injected_edge_in_last_cycle(false);
+}
+
+TEST_CASE(
+    "an EXTI line 15 edge 1 ps before the end of the previous injected conversion, in the core "
+    "cycle that holds the end, is ignored as busy on the L4 over a continuous regular group, 20 "
+    "times")
+{
+  injected_edge_in_last_cycle(true);
+}
+
 TEST_CASE(
     "a machine reset forgets the end of the last conversion, an early EXTI line 11 edge converts, "
     "L4")

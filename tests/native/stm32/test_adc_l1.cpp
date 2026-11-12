@@ -3420,6 +3420,44 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "an EXTI line 15 edge 1 ps before the end of the previous injected conversion, in the core "
+    "cycle that holds the end, is ignored as busy, 20 times")
+{
+  adc_rig const r;
+  r.power();
+  r.poke("SYSCFG", 0x14, 1u << 12);
+  r.write(jsqr, 5u << 15);
+  r.write(cr2, adon | (1u << 20) | (15u << 16));
+  auto* const gpio = r.f.model_of<stm32::gpio_port>("GPIOB");
+  REQUIRE(gpio != nullptr);
+  constexpr std::uint64_t core_cycle = 476'837;
+  std::uint32_t           converted  = 0;
+  for(std::uint32_t k = 0; k < 20; ++k)
+  {
+    CAPTURE(k);
+    auto const first = r.now() + 10 * us + 123 + k * 37;
+    gpio->drive_at(15, true, vtime{first});
+    gpio->drive_at(15, false, vtime{first + 100 * ns});
+    r.run_until(first + 600 * ns);
+    REQUIRE((r.read(sr) & jstrt) != 0);
+    r.write(sr, 0);
+    auto const end = r.due();
+    REQUIRE(end > first + 100 * ns);
+    auto const inside = end - 1;
+    REQUIRE((inside + core_cycle - 1) / core_cycle == (end + core_cycle - 1) / core_cycle);
+    gpio->drive_at(15, true, vtime{inside});
+    gpio->drive_at(15, false, vtime{inside + 100 * ns});
+    r.run_until(end + 600 * ns);
+    CHECK((r.read(sr) & jstrt) == 0);
+    if((r.read(sr) & jeoc) != 0)
+    {
+      ++converted;
+    }
+  }
+  CHECK(converted == 20);
+}
+
+TEST_CASE(
     "an EXTI line 11 edge before the old end of a conversion aborted by a sequence write starts "
     "a new one")
 {

@@ -756,6 +756,7 @@ struct l4_adc_state
   std::array<adc_edge, 2>      edges{};
   std::uint32_t                edge_generation{};
   std::uint64_t                end_ps{};
+  std::uint64_t                injected_end_ps{};
   std::uint32_t                calibration_generation{};
   bool                         calibration_waiting{};
   std::uint64_t                enable_lock_ps{};
@@ -1280,6 +1281,10 @@ struct adc_clock
  *        with JEXTEN set ignores the injected triggers, JAUTO with DISCEN or JDISCEN converts as
  *        JAUTO alone, and JAUTO with ROVSE 1 and JOVSE 0 oversamples the regular ranks only,
  *        RM0351 18.4.30, each logged once, a model_error under strict_peripherals.
+ *        An injected trigger edge that falls before the end of an injected group is ignored,
+ *        RM0351 18.4.18: "Any hardware triggers which occur while a conversion is ongoing are
+ *        ignored". An edge after the end in the same core cycle is ignored the same way,
+ *        inferred.
  *        With JQDIS 0 a CPU or DMA ADC_JSQR write goes through the queue of context, RM0351
  *        18.4.21, with the one stage of ES0250 2.8.1 at JQM 0: a write before the waiting context
  *        is consumed sets JQOVF and is ignored. ADC_JSQR reads the active context. JEOS consumes
@@ -1679,6 +1684,7 @@ private:
   [[nodiscard]] auto length() const -> std::size_t;
   [[nodiscard]] auto busy() const -> bool;
   [[nodiscard]] auto ended_early(std::uint64_t edge_ps) const -> bool;
+  [[nodiscard]] auto injected_ended_early(std::uint64_t edge_ps) const -> bool;
   [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
   [[nodiscard]] auto is_external(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
@@ -2242,6 +2248,12 @@ template <typename Traits> auto adc_model<Traits>::busy() const -> bool
 template <typename Traits> auto adc_model<Traits>::ended_early(std::uint64_t edge_ps) const -> bool
 {
   return not busy() and edge_ps < state_.end_ps;
+}
+
+template <typename Traits>
+auto adc_model<Traits>::injected_ended_early(std::uint64_t edge_ps) const -> bool
+{
+  return not injecting() and edge_ps < state_.injected_end_ps;
 }
 
 template <typename Traits>
@@ -3756,7 +3768,7 @@ template <typename Traits> void adc_model<Traits>::fire_injected(adc_edge& slot)
 
 template <typename Traits> void adc_model<Traits>::start_triggered_injected(std::uint64_t at_ps)
 {
-  if(injecting())
+  if(injecting() or injected_ended_early(at_ps))
   {
     return;
   }
@@ -3878,7 +3890,8 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
     state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(rank + 1u);
     if(last or injected_discontinuous())
     {
-      state_.injecting = false;
+      state_.injecting       = false;
+      state_.injected_end_ps = end;
       if(software)
       {
         update(regs_, injected_start_, 0);
@@ -3903,8 +3916,9 @@ template <typename Traits> void adc_model<Traits>::abort_injected()
       state_.converting    = false;
       state_.waiting_clock = false;
     }
-    state_.injecting     = false;
-    state_.injected_rank = 0;
+    state_.injecting       = false;
+    state_.injected_end_ps = 0;
+    state_.injected_rank   = 0;
   }
 }
 
