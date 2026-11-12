@@ -7,7 +7,9 @@ with one that fills in `popcorn_build.version.popcorn_version` when `version` is
 `build_sdist` ships the files git tracks, submodules included, so git-ignored paths such as
 `local/`, `build-*` and the `.pyi` copies of build outputs never reach the archive. A tree with no
 git data keeps the file walk of pcons. The patches of `pcons.pyproject._load_pyproject` and
-`_sdist_files` are the only coupling to pcons internals.
+`_sdist_files` are the couplings to pcons internals. A third reader is
+`tests/python/toolchain/test_package_build_jobs.py`, which calls `pcons.pyproject._jobs` to prove
+that the `[tool.pcons] jobs` key is honored.
 """
 
 from __future__ import annotations

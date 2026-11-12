@@ -55,6 +55,7 @@ strict = true
 [tool.pcons]
 variant = "release"
 variables = { POPCORN_BUILD_TESTS = "OFF", POPCORN_BUILD_EXAMPLES = "OFF" }
+jobs = 8
 
 [tool.ruff]
 target-version = "py314"
