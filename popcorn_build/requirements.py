@@ -21,6 +21,7 @@ from popcorn_build.config import VARIANT, build_dir, project_dir
 from popcorn_build.firmware import toolchain_found
 from popcorn_build.manifest import is_firmware_only, packages_to_fetch
 from popcorn_build.options import build_examples, build_tests
+from popcorn_build.package_key import package_version, resolve
 
 deps_file = project_dir / "deps.toml"
 deps_dir = build_dir / "deps"
@@ -107,16 +108,21 @@ def _submodule_cmake_package(name: str, options: dict[str, str], library: str) -
     commit = pinned or _git(source, "rev-parse", "HEAD")
     dirty = not pinned and _git(source, "status", "--porcelain") != ""
     digest = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()[:12]
-    key = f"{commit}+{digest}"
+    version = package_version(commit, digest, dirty)
     label = f"{commit[:12]}-dirty" if dirty else commit[:12]
-    pkg_file = pkg_dir / f"{name}.pcons-pkg.toml"
-    if not dirty and pkg_file.exists():
-        built = PackageDescription.from_toml(pkg_file)
-        if built.version == key and (Path(built.prefix) / "lib" / library).exists():
-            return Path(built.prefix), label
     if dirty:
         print(f"popcorn: third_party/{name} has local changes, rebuilding {name}", file=sys.stderr)
-    return Path(_build_cmake_package(name, source, key, options).prefix), label
+    prefix = resolve(
+        pkg_dir / f"{name}.pcons-pkg.toml",
+        deps_dir / "build" / name,
+        version,
+        dirty,
+        library,
+        lambda built_version: Path(
+            _build_cmake_package(name, source, built_version, options).prefix
+        ),
+    )
+    return prefix, label
 
 
 prefixes = _fetch_missing()
