@@ -115,6 +115,7 @@ struct pwr_state
   std::array<std::uint32_t, 2> generation{};
   std::uint32_t                settled_level{};
   std::uint32_t                regulator_generation{};
+  std::uint64_t                due_ps{};
 
   friend auto operator==(pwr_state const&, pwr_state const&) -> bool = default;
 };
@@ -317,8 +318,9 @@ struct pwr_variant
  *   us, and VOSRDY and ACTVOSRDY set 15.2 us after the last step. VOS3 to VOS0 reads 0x4000, 0x8000
  *   and 0xC000 in PWR_VOSSR, then 0xE008 36 us after the write, as measured on an STM32H573. A step
  *   to a lower voltage keeps VOSRDY set and takes the same steps, and a change of one or two levels
- *   follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH checks its latency
- *   against the range of the last ready.
+ *   follows the same rule. Each step and the ready event are due at the write time plus their
+ *   offset, whatever the instruction period. The measurement covers VOS3 to VOS0 only. FLASH checks
+ *   its latency against the range of the last ready.
  * - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
  * - STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
  *   part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
@@ -1104,6 +1106,7 @@ void pwr::reset(register_file& regs, reset_kind kind)
     regs.poke(bits.offset, bits.with(regs.peek(bits.offset), value));
   }
   state_.settled_level = variant_.vos_levels[get(regs, names_[pwr_role::active_vos])];
+  state_.due_ps        = 0;
   if(kind == reset_kind::peripheral)
   {
     tell_usb_supply(supplied);
@@ -1177,6 +1180,7 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
     auto const generation = ++state_.generation[voltage_ready];
     if(variant_.stepping)
     {
+      state_.due_ps = ctx_.clock.time().ps;
       step_active(*variant_.stepping, generation);
     }
     else
@@ -1282,14 +1286,11 @@ void pwr::step_active(vos_stepping const& stepping, std::uint64_t generation)
     active = active < target ? active + 1 : active - 1;
     update(regs_, names_[pwr_role::active_vos], active);
   }
-  if(active == target)
-  {
-    schedule_in(stepping.settle, voltage_ready, generation);
-  }
-  else
-  {
-    schedule_in(stepping.step, voltage_step, generation);
-  }
+  auto const settled = active == target;
+  state_.due_ps +=
+      static_cast<std::uint64_t>((settled ? stepping.settle : stepping.step).count()) * 1000u;
+  ctx_.events.schedule_at(
+      vtime{state_.due_ps}, settled ? voltage_ready : voltage_step, generation, ctx_.clock);
 }
 
 auto pwr::active_ready() const -> bool

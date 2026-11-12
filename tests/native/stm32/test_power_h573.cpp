@@ -90,6 +90,37 @@ struct rig
   {
     return f.target->snapshot().data().events.pending.size();
   }
+
+  [[nodiscard]] auto dues() const -> std::vector<std::uint64_t>
+  {
+    auto const& units = f.target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, std::string_view{"PWR"}, &popcorn::peripheral_desc::name)
+        - units.begin());
+    std::vector<std::uint64_t> out;
+    for(auto const& event : f.target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner)
+      {
+        out.push_back(event.due_ps);
+      }
+    }
+    std::ranges::sort(out);
+    return out;
+  }
+
+  [[nodiscard]] auto time() const -> std::uint64_t
+  {
+    return f.target->virtual_clock().time().ps;
+  }
+
+  void run_past_due(std::uint64_t due) const
+  {
+    while(not dues().empty() and dues()[0] == due)
+    {
+      run_for(1 * us);
+    }
+  }
 };
 }
 
@@ -666,4 +697,78 @@ TEST_CASE("an H573 description without PWR_VOSCR.VOS throws config_error at TZEN
           desc, popcorn::arch::armv8m::factory(),
           popcorn::testing::h573_secure_rig::options({.tzen = true})),
       popcorn::config_error);
+}
+
+TEST_CASE(
+    "H5 VOS changes land each ACTVOS step and VOSRDY at the exact due at any instruction period")
+{
+  constexpr std::uint64_t step   = 10'400'000;
+  constexpr std::uint64_t settle = 15'200'000;
+  for(auto const cpi : {0.7, 1.5, 8.0})
+  {
+    for(auto const to_vos0 : {true, false})
+    {
+      CAPTURE(cpi);
+      CAPTURE(to_vos0);
+      auto options = popcorn::testing::stm32_options();
+      options.cpi  = cpi;
+      rig r{"h573_pwr_ll", std::move(options)};
+      if(not to_vos0)
+      {
+        r.write("PWR_VOSCR", 3u << 4);
+        r.run_for(60 * us);
+        REQUIRE(r.dues().empty());
+      }
+      auto const written = r.time();
+      r.write("PWR_VOSCR", to_vos0 ? 3u << 4 : 0u);
+      REQUIRE(r.dues() == std::vector<std::uint64_t>{written + step});
+      r.run_past_due(written + step);
+      REQUIRE(r.dues() == std::vector<std::uint64_t>{written + 2 * step});
+      r.run_past_due(written + 2 * step);
+      REQUIRE(r.dues() == std::vector<std::uint64_t>{written + 2 * step + settle});
+      r.run_past_due(written + 2 * step + settle);
+      CHECK(r.dues().empty());
+      CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
+      CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 1);
+    }
+  }
+}
+
+TEST_CASE(
+    "a snapshot taken between two H5 ACTVOS steps restores and the next link lands on its due")
+{
+  constexpr std::uint64_t step    = 10'400'000;
+  constexpr std::uint64_t settle  = 15'200'000;
+  auto                    options = popcorn::testing::stm32_options();
+  options.cpi                     = 1.5;
+  rig        r{"h573_pwr_ll", std::move(options)};
+  auto const written = r.time();
+  r.write("PWR_VOSCR", 3u << 4);
+  r.run_past_due(written + step);
+  REQUIRE(r.dues() == std::vector<std::uint64_t>{written + 2 * step});
+  auto const saved = r.f.target->snapshot();
+  r.run_for(40 * us);
+  REQUIRE(r.dues().empty());
+  r.f.target->restore(saved);
+  REQUIRE(r.dues() == std::vector<std::uint64_t>{written + 2 * step});
+  r.run_past_due(written + 2 * step);
+  CHECK(r.dues() == std::vector<std::uint64_t>{written + 2 * step + settle});
+}
+
+TEST_CASE("a second H5 VOS write during the steps restarts the chain from the write time")
+{
+  constexpr std::uint64_t step    = 10'400'000;
+  auto                    options = popcorn::testing::stm32_options();
+  options.cpi                     = 1.5;
+  rig        r{"h573_pwr_ll", std::move(options)};
+  auto const first = r.time();
+  r.write("PWR_VOSCR", 3u << 4);
+  r.run_for(14 * us);
+  r.write("PWR_VOSCR", 0);
+  auto const again = r.time();
+  REQUIRE(r.dues() == std::vector<std::uint64_t>{first + 2 * step, again + step});
+  r.run_past_due(first + 2 * step);
+  REQUIRE(r.dues() == std::vector<std::uint64_t>{again + step});
+  r.run_past_due(again + step);
+  CHECK(r.dues() == std::vector<std::uint64_t>{again + step + 15'200'000});
 }
