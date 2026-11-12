@@ -134,8 +134,9 @@ For anything a condition cannot say, pass a predicate:
 ```
 
 `wait_until(predicate, for_=)` returns the virtual time at which `predicate(machine)` first held,
-or `None`. The predicate is sync and runs at event boundaries and slice ends, never per
-instruction.
+or `None`. The predicate is sync and runs after each dispatched event and at instruction-count slice
+ends, never per instruction and never at a wall-budget slice end. A predicate over state no
+event marks is asked up to `slice_instructions` (1e6 by default) instructions late.
 
 ## Call a firmware function
 

@@ -543,6 +543,39 @@ public:
   }
 };
 
+class event_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  bool          armed      = false;
+  bool          chained    = false;
+  std::uint32_t dispatched = 0;
+
+  void seed()
+  {
+    std::ignore = attached_events().schedule(attached_clock().now(), 1, 0);
+  }
+
+  auto deliver_pending() -> popcorn::arch::trap_result override
+  {
+    if(armed)
+    {
+      std::ignore = attached_events().schedule(attached_clock().now(), 1, 0);
+    }
+    return test_arch::deliver_pending();
+  }
+
+  void on_event(std::uint32_t, std::uint64_t payload) override
+  {
+    ++dispatched;
+    if(chained)
+    {
+      std::ignore = attached_events().schedule(attached_clock().now(), 1, payload + 1);
+    }
+  }
+};
+
 class abort_pend_arch final : public popcorn::testing::test_arch
 {
 public:
@@ -867,6 +900,175 @@ TEST_CASE("stop_when is evaluated at the slice end")
   CHECK(asked);
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::user);
+  CHECK(slice.executed.value >= 1000);
+}
+
+TEST_CASE("a stop_when true after a write is seen at the next instruction-count slice end")
+{
+  auto          f     = alu(1'000'000);
+  std::uint64_t asks  = 0;
+  auto const    slice = f.run(
+      {.max_instructions = icount{777}, .wall_budget = std::chrono::seconds{60}, .stop_when = [&] {
+         ++asks;
+         return f.target->regs().read(*f.target->regs().find("r0")) < 1'000'000;
+       }});
+  CHECK(asks == 1);
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.stopped->reason == stop_reason::user);
+  CHECK(slice.executed.value >= 777);
+  CHECK(slice.executed.value < 777 + 8);
+}
+
+TEST_CASE("a wall-expired slice end asks no predicate")
+{
+  std::uint64_t asks    = 0;
+  auto          counted = [&] {
+    ++asks;
+    return true;
+  };
+  SUBCASE("the engine hook ends the slice on a pure compute loop")
+  {
+    auto       f     = alu(1'000'000);
+    auto const slice = f.run(
+        {.max_instructions = icount{1'000'000'000},
+         .wall_budget      = std::chrono::nanoseconds{1},
+         .stop_when        = counted});
+    CHECK_FALSE(slice.stopped.has_value());
+    CHECK(slice.executed.value > 0);
+    CHECK(asks == 0);
+  }
+  SUBCASE("a due event with the wall already expired is not preceded by an ask")
+  {
+    auto f = boot_with<event_arch>(m33());
+    f.set("pc", sym("run", "straight"));
+    f.module->armed  = true;
+    auto const slice = f.run(
+        {.max_instructions = icount{1'000'000'000},
+         .wall_budget      = std::chrono::nanoseconds{1},
+         .stop_when        = counted});
+    CHECK_FALSE(slice.stopped.has_value());
+    CHECK(slice.executed.value == 0);
+    CHECK(f.module->dispatched == 0);
+    CHECK(asks == 0);
+  }
+  SUBCASE("the dispatch loop's wall exit asks after each event and not at the exit")
+  {
+    auto f = boot_with<event_arch>(m33());
+    f.set("pc", sym("run", "straight"));
+    f.module->chained = true;
+    f.module->seed();
+    auto const slice = f.run(
+        {.max_instructions = icount{1'000'000'000},
+         .wall_budget      = std::chrono::nanoseconds{1},
+         .stop_when        = [&] {
+           ++asks;
+           return false;
+         }});
+    CHECK_FALSE(slice.stopped.has_value());
+    CHECK(f.module->dispatched == 256);
+    CHECK(asks == f.module->dispatched);
+  }
+}
+
+namespace
+{
+constexpr std::uint64_t window = 100'000;
+
+auto wall_ended_slice(fixture<> const& f) -> core::slice_result
+{
+  auto const slice = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = std::chrono::nanoseconds{1},
+       .stop_when        = [] { return false; }});
+  REQUIRE_FALSE(slice.stopped.has_value());
+  REQUIRE(slice.executed.value > 0);
+  REQUIRE(slice.executed.value < window / 2);
+  return slice;
+}
+
+void expect_fresh_window(fixture<> const& f)
+{
+  auto const slice = f.run(
+      {.max_instructions = icount{window},
+       .wall_budget      = std::chrono::seconds{60},
+       .stop_when        = [] { return true; }});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.executed.value >= window);
+  CHECK(slice.executed.value < window + 16);
+}
+}
+
+TEST_CASE("a wall-ended slice leaves no count for the next standalone run")
+{
+  auto f = alu(1'000'000);
+  wall_ended_slice(f);
+  expect_fresh_window(f);
+}
+
+TEST_CASE("a slice that throws leaves no count for the next run")
+{
+  auto f = alu(1'000'000);
+  wall_ended_slice(f);
+  CHECK_THROWS_AS(
+      std::ignore = f.run(
+          {.max_instructions = icount{window},
+           .wall_budget      = std::chrono::seconds{60},
+           .stop_when        = []() -> bool { throw test_failure{"stop_when"}; }}),
+      test_failure);
+  expect_fresh_window(f);
+}
+
+TEST_CASE("a restore leaves no count for the next run")
+{
+  auto       f     = alu(1'000'000);
+  auto const saved = f.target->snapshot();
+  wall_ended_slice(f);
+  f.target->restore(saved);
+  expect_fresh_window(f);
+}
+
+TEST_CASE("a slice that continues the count adds the earlier slice's instructions")
+{
+  auto       f     = alu(1'000'000);
+  auto const first = wall_ended_slice(f);
+  auto const slice = f.run(
+      {.max_instructions = icount{window},
+       .wall_budget      = std::chrono::seconds{60},
+       .stop_when        = [] { return true; },
+       .continues_count  = true});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(first.executed.value + slice.executed.value >= window);
+  CHECK(first.executed.value + slice.executed.value < window + 16);
+}
+
+TEST_CASE("a mail slice end asks no predicate")
+{
+  auto f = alu(1'000'000);
+  f.target->interrupt();
+  std::uint64_t asks  = 0;
+  auto const    slice = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = std::chrono::seconds{60},
+       .stop_when        = [&] {
+         ++asks;
+         return true;
+       }});
+  CHECK_FALSE(slice.stopped.has_value());
+  CHECK(asks == 0);
+}
+
+TEST_CASE("a slice end request ends the slice without asking the predicate")
+{
+  auto          f    = boot_with<stop_request_arch>(m33(), request_kind::end);
+  std::uint64_t asks = 0;
+  f.set("pc", sym("run", "ram_calls"));
+  f.set("r0", sym("run", "ram_fn") | 1);
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .stop_when = [&] {
+                              ++asks;
+                              return true;
+                            }});
+  CHECK_FALSE(slice.stopped.has_value());
+  CHECK(asks == 0);
 }
 
 TEST_CASE("the wall budget ends a slice whose engine runs stop at every first block")

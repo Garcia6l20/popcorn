@@ -176,8 +176,10 @@ struct slice_request
    * order with any lane event posted in between. For a bound a scheduler of several machines
    * sets, never for a stamp bound. */
   bool hold_from_until{};
-  /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
-   * per instruction. Stops with stop_reason::user when it returns true. */
+  /** @brief Stop predicate, evaluated after every dispatched event and at a slice end set by
+   * max_instructions, never per instruction and never at a slice end set by the wall budget, a
+   * host stop request or a mail post. A predicate over state no event marks is asked up to
+   * max_instructions instructions late. Stops with stop_reason::user when it returns true. */
   std::move_only_function<bool() const> stop_when{};
   /** @brief Stop with stop_reason::returned at this return. A slice that starts at it stops at
    * once, 0 instructions executed. */
@@ -201,9 +203,14 @@ struct slice_request
    * that stop is the caller's bookkeeping too: pc unlocated, no trace stop record. For a scheduler
    * of several machines that keeps a quiescent member where it fell asleep. */
   bool stop_quiescent{};
-  /** @brief Evaluate stop_when only after a dispatched event, never at the slice end, so a slice
-   * end set by max_instructions, the wall budget or a bound never decides the user stop. */
+  /** @brief Evaluate stop_when only after a dispatched event, never at a slice end, so a slice
+   * end set by max_instructions or a bound never decides the user stop. */
   bool stop_when_events_only{};
+  /** @brief Whether this slice continues the instruction count of the caller's previous slice,
+   * which ended at the wall budget, a host stop request or a mail post with stop_when set. The
+   * count window of max_instructions then runs from the first slice's start and not from the
+   * last stop_when ask. A slice that does not continue starts a fresh window. */
+  bool continues_count{};
   /** @brief Whether the core executes. With false, the clock, the events and the peripherals
    * advance as for a sleeping core, the core executes no instruction and enters no exception,
    * and an exception that becomes pending stays pending for the next slice that executes. The

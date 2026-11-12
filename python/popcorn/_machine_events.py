@@ -341,7 +341,8 @@ class Event(Protocol):
     """Something `Machine.wait_for` waits for.
 
     `ready` is sync and runs on the machine's thread, never per instruction: at slice ends
-    inside a free run, `start()` or `running()`, after every event and at slice ends otherwise.
+    inside a free run, `start()` or `running()`, after every event and at instruction-count
+    slice ends otherwise.
     It may read the machine, which is stopped at an instruction boundary there.
     """
 

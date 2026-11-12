@@ -817,7 +817,7 @@ void machine::run_state::remove_step_hook() noexcept
 auto machine::run_state::next_deadline(slice_request const& request) const -> icount
 {
   auto const now      = owner.clock_driver_.exact_now();
-  auto const progress = icount{executed.value + jumped.value};
+  auto const progress = count_progress();
   auto       bound    = add_sat(now, left(request.max_instructions, progress));
   if(request.budget_left)
   {
@@ -858,12 +858,12 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
     end_requested = false;
     if(not arch->idle())
     {
-      return slice_end{};
+      return slice_end{.wall_dependent = true};
     }
   }
   if(mail)
   {
-    return slice_end{};
+    return slice_end{.wall_dependent = true};
   }
   return std::nullopt;
 }
@@ -923,7 +923,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
       countdown = wall_check_blocks;
       if(wall_expired_now())
       {
-        return slice_end{};
+        return slice_end{.wall_dependent = true};
       }
     }
   }
@@ -974,8 +974,8 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
-  auto const now = owner.clock_driver_.exact_now();
-  auto target = add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value}));
+  auto const now    = owner.clock_driver_.exact_now();
+  auto       target = add_sat(now, left(request.max_instructions, count_progress()));
   if(next)
   {
     target = std::min(target, *next);
@@ -1071,7 +1071,7 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::returned, {}, std::nullopt)};
   }
-  if(icount{executed.value + jumped.value} >= request.max_instructions)
+  if(count_progress() >= request.max_instructions)
   {
     return slice_end{};
   }
@@ -1164,6 +1164,11 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
   return slice_end{make_stop(*result.reason(), {}, result.fault_detail())};
 }
 
+auto machine::run_state::count_progress() const noexcept -> icount
+{
+  return icount{since_ask.value + executed.value + jumped.value};
+}
+
 auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
   if(not end.stopped or end.stopped->reason == stop_reason::spin)
@@ -1183,6 +1188,7 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   if(not end.stopped
      and request.stop_when
      and not request.stop_when_events_only
+     and not end.wall_dependent
      and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
@@ -1207,6 +1213,12 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
         where.pc, true);
   }
   flush_sinks();
+  since_ask               = not end.stopped
+                                and end.wall_dependent
+                                and request.stop_when
+                                and not request.stop_when_events_only
+                              ? count_progress()
+                              : icount{};
   auto const thread_ready = end.thread_ready and not end.stopped;
   return slice_result{
       .stopped      = std::move(end.stopped),
@@ -1226,7 +1238,11 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     throw emulation_error("the machine was left invalid by a failed restore");
   }
   running_scope const scope{*this, *owner.hooks_};
-  executed       = {};
+  executed = {};
+  if(not request.continues_count)
+  {
+    since_ask = {};
+  }
   jumped         = {};
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
@@ -1365,7 +1381,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     }
     if(wall_expired)
     {
-      return finish(request, {});
+      return finish(request, {.wall_dependent = true});
     }
   }
 }

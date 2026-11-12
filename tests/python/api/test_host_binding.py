@@ -841,7 +841,7 @@ def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: M
     async def body() -> popcorn.Stop:
         VALUE.set("task")
         m.intercept("alu_mark", lambda call: handler_values.append(VALUE.get()) or call.proceed())
-        return await m.run(budget=1_000_000, stop_when=predicate)
+        return await m.run(budget=2_500_000, stop_when=predicate)
 
     assert asyncio.run(body()).reason is popcorn.StopReason.BUDGET
     assert predicate_values and set(predicate_values) == {"task"}

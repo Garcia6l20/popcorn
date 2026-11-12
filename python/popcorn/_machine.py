@@ -1987,8 +1987,11 @@ class Machine:
                 instruction times, from a core executing code. The time is checked at block
                 entry, where the whole block is charged. A store that changes the core clock
                 rate charges the rest of its block at the new rate.
-            stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
-                instruction, on the machine's thread. Stops with USER when it returns True. An
+            stop_when: Sync predicate evaluated after each dispatched event and at
+                instruction-count slice ends, never per instruction and never at a wall-budget
+                slice end, a host stop request or a mail slice end, on the machine's thread. A
+                predicate over state no event marks is asked up to `slice_instructions`
+                instructions late, 1e6 by default. Stops with USER when it returns True. An
                 exception it raises reaches the caller with its traceback.
 
         Cancelling the awaiting task halts the run at the next block boundary.
@@ -2075,15 +2078,16 @@ class Machine:
         `m.var`, `m.mem`, `m.time`. On the machine's thread it must not await or request
         anything of a machine: that raises RuntimeError.
 
-        Parked, it runs at event boundaries and slice ends, as `run(stop_when=)` does, and is
-        first called once on the calling thread, where requests are not refused: keep it to
-        sync reads. The current time is returned when it already holds there. Inside a free
-        run, `start()` or `running()`, it runs at slice ends only, from the end of the slice
-        after the one that registered the wait, as `wait_for` says: the time returned is up to
-        one slice after it became true, two when it held at the call. `for_` is counted from
-        the boundary that registered the wait, and inside a free run a `for_` that reaches past
-        the end of virtual time never ends the wait. Parked, it raises ConfigError. Cancelling it
-        while parked halts the run, inside a free run it drops the wait only.
+        Parked, it runs after each dispatched event and at instruction-count slice ends, as
+        `run(stop_when=)` does, and is first called once on the calling thread, where requests
+        are not refused: keep it to sync reads. The current time is returned when it already
+        holds there. Inside a free run, `start()` or `running()`, it runs at slice ends only,
+        from the end of the slice after the one that registered the wait, as `wait_for` says:
+        the time returned is up to one slice after it became true, two when it held at the
+        call. `for_` is counted from the boundary that registered the wait, and inside a free
+        run a `for_` that reaches past the end of virtual time never ends the wait. Parked, it
+        raises ConfigError. Cancelling it while parked halts the run, inside a free run it drops
+        the wait only.
 
         `deadline` stops waiting at that virtual time instead, exclusive with `for_`. Already
         past, it returns at once: parked after one check of `predicate`, inside a free run with
@@ -2119,25 +2123,27 @@ class Machine:
 
         A `Reached` event stops exactly before its target, an ADDRESS stop, and a target equal to
         the current pc continues as `run(until=)` does. Other events stop at the first event
-        boundary or slice end after they became ready. Inside a free run, `start()` or
-        `running()`, this waits on the free run instead of driving it, checking the event on the
-        machine's thread at slice ends only. A `Reached` event there is exact all the same: a
-        probe installed at the next block boundary, the call waiting for it, sees every
-        execution of the target, and the wait ends with a USER stop at the end of the slice that
-        executed it. Its target counts from that boundary, at its next execution, also when it
-        is the current pc: an execution while the call waits for the boundary is not seen. The
-        wait is registered at a slice boundary after the post and first checked at the end of
-        the slice after that one, never at the boundary that registered it: the stop is the end
-        of the first slice where the event held, up to one slice after it became ready, two
-        when it was ready at the post. With `for_`, posting ends the running slice at its next
-        block boundary, which registers the wait and starts `for_`, and the event is still
-        checked at the slice end where `for_` elapses: holding there, it returns USER. It
-        returns the stop that ended the free run, or raises the exception a handler of it
-        raised. Cancelling it then drops the wait only, the machine runs on.
+        boundary or instruction-count slice end after they became ready. Inside a free run,
+        `start()` or `running()`, this waits on the free run instead of driving it, checking
+        the event on the machine's thread at slice ends only. A `Reached` event there is
+        exact all the same: a probe installed at the next block boundary, the call waiting
+        for it, sees every execution of the target, and the wait ends with a USER stop at
+        the end of the slice that executed it. Its target counts from that boundary, at its
+        next execution, also when it is the current pc: an execution while the call waits
+        for the boundary is not seen. The wait is registered at a slice boundary after the
+        post and first checked at the end of the slice after that one, never at the boundary
+        that registered it: the stop is the end of the first slice where the event held, up
+        to one slice after it became ready, two when it was ready at the post. With `for_`,
+        posting ends the running slice at its next block boundary, which registers the wait
+        and starts `for_`, and the event is still checked at the slice end where `for_`
+        elapses: holding there, it returns USER. It returns the stop that ended the free
+        run, or raises the exception a handler of it raised. Cancelling it then drops the
+        wait only, the machine runs on.
 
         A `Condition`, `m.ref.var("x").ge(3)`, or a `Conditions` from `any_of` or `all_of`, is
-        evaluated natively inside a free run, no Python, after every event and at slice ends, so
-        it keeps the boundary a parked run sees. When `for_` elapses the wait returns a TIME
+        evaluated natively inside a free run, no Python, after every event and at every slice
+        end, wall-budget ends included, so the free-run stop lands up to one slice after a
+        parked run's. When `for_` elapses the wait returns a TIME
         stop without evaluating it there, as a parked run does, unlike a Python event. The
         returned stop's `fired` names the conditions that held at the boundary that ended the
         wait, empty for a stop that is not USER.

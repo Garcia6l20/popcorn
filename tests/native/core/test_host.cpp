@@ -1930,6 +1930,58 @@ TEST_CASE("plain memory is one mapped region, a condition elsewhere never holds"
   CHECK_FALSE(f.target->mem().is_plain_memory(0x200b'fffc, 8));
 }
 
+TEST_CASE("a goal's stop_when is asked at the same instruction count at any wall budget")
+{
+  auto const stopped_at = [](std::chrono::nanoseconds wall) {
+    hosted h{
+        alu(1'000'000), {.max_instructions = icount{10'000}, .wall_budget = wall}
+    };
+    std::uint64_t asks = 0;
+    auto const    got  = h.run({.budget = icount{200'000},
+                                .stop_when =
+                                    [&asks] {
+                                  ++asks;
+                                  return true;
+                                    }})
+                             .get();
+    CHECK(asks == 1);
+    REQUIRE(got.stopped.reason == stop_reason::user);
+    return got.stopped.instructions.value;
+  };
+  auto const exact = stopped_at(std::chrono::seconds{60});
+  CHECK(exact >= 10'000);
+  CHECK(exact < 10'016);
+  CHECK(stopped_at(std::chrono::nanoseconds{1}) == exact);
+}
+
+TEST_CASE("a goal's stop_when is asked at the same instants at any wall budget across idle jumps")
+{
+  auto const asked_at = [](std::chrono::nanoseconds wall) {
+    popcorn::testing::machine_fixture<> f{m33(), "idle", core::machine_options{}};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    f.set("pc", sym("idle", "idle_budget"));
+    auto const  clock = &f.target->virtual_clock();
+    auto const  end   = vtime{clock->time().ps + 500 * popcorn::ps_per_second / 1000};
+    auto const* mach  = f.target.get();
+    hosted      h{
+        std::move(f.target), {.max_instructions = icount{1'000'000}, .wall_budget = wall}
+    };
+    std::vector<std::uint64_t> instants;
+    auto const                 got = h.run({.until_time = end,
+                                            .stop_when =
+                                                [&instants, mach] {
+                                  instants.push_back(mach->virtual_clock().now().value);
+                                  return false;
+                                                }})
+                                         .get();
+    CHECK(got.stopped.reason == stop_reason::time);
+    return instants;
+  };
+  auto const exact = asked_at(std::chrono::seconds{60});
+  CHECK(exact.size() > 10);
+  CHECK(asked_at(std::chrono::nanoseconds{1}) == exact);
+}
+
 TEST_CASE("halt on a parked member returns at once and fails pending waiters")
 {
   hosted h{alu(10)};

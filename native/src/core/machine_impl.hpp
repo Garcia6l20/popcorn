@@ -833,6 +833,9 @@ struct slice_end
   bool asked = false;
   /** @brief Whether the slice ended for slice_request::until_thread. */
   bool thread_ready = false;
+  /** @brief Whether the slice ended at a point set by the wall clock or a host thread: the wall
+   * budget, a host stop request or a mail post. The stop_when predicate is not asked there. */
+  bool wall_dependent = false;
 };
 
 /** @brief Run state of a machine: slice bounds, deferred requests, hooks and exception slot. */
@@ -1346,6 +1349,10 @@ struct machine::run_state
   icount retired{};
   /** @brief Instructions the clock moved by idle jumps in the slice. */
   icount jumped{};
+  /** @brief Instructions of the earlier slices of one run that ended at a wall-dependent point
+   * with stop_when set, counted against max_instructions of a slice that continues them. The
+   * window runs from the first such slice's start, not from the last stop_when ask. */
+  icount since_ask{};
   /** @brief Blocks left before the next wall clock read. */
   std::uint32_t wall_countdown = wall_check_blocks;
   /** @brief Wall time at which the slice ends. */
@@ -2185,6 +2192,9 @@ struct machine::run_state
 
   /** @brief Reads the wall clock and restarts the countdown, off the block hook's hot path. */
   [[gnu::noinline]] auto wall_expired_now() noexcept -> bool;
+  /** @brief Instructions counted against slice_request::max_instructions: the carried since_ask,
+   * the executed and the jumped of this slice. */
+  [[nodiscard]] auto count_progress() const noexcept -> icount;
 
   /** @brief Asks the arch whether a pending interrupt is deliverable, under the guard, off the
    * block hook's hot path. */

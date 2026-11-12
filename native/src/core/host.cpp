@@ -144,6 +144,7 @@ struct goal_run
   std::optional<icount>     remaining;
   std::optional<icount>     left;
   icount                    executed{};
+  bool                      began = false;
 };
 
 struct stamped
@@ -1041,6 +1042,7 @@ struct host_core
         .until_return       = goal.goal.until_return,
         .leave_until        = once ? once->leave_until : goal.executed.value == 0,
         .until_thread       = goal.goal.until_thread,
+        .continues_count    = goal.began,
     };
     add_stamp(request, next_stamp(slot));
     slice_result result;
@@ -1060,6 +1062,7 @@ struct host_core
       return;
     }
     request.stop_when = {};
+    goal.began        = true;
     after_slice(slot, request, result);
     try
     {
