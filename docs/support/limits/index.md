@@ -19,7 +19,8 @@ STM32H543 and H553 descriptions need ST's DIE47C rzone file to build.
 - [Peripheral instances](unmodelled.md): the peripherals without a model and the instances a
   package drops.
 - [Memory map](memory.md): address 0, the flash alias and the ICACHE remap.
-- [Core](../generated/limits/core.md): the faults that stop the run and the reset requests.
+- [Core](../generated/limits/core.md): the reset vector read, unaligned device access, the stop
+  time of a time bound, the faults that stop the run and the reset requests.
 - [STM32L4](stm32l4.md): the core errata, the STM32L485 and the instances without a model.
 - [STM32L1](stm32l1.md): the patches of the shipped descriptions.
 

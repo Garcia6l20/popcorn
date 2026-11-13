@@ -109,6 +109,11 @@ are the device's clock, so there is no drift between the two sides. `speaker.dra
 until every sample left in a packet, `mic.clear()` drops the frames not read yet, and
 `speaker.stop()` closes the stream.
 
+The host has no feedback endpoint model and no clock besides the frame, so the isochronous rate
+is the host's frame rate: 1 ms per frame, 16 samples a frame at 16 kHz. Every frame carries
+exactly the rate's samples. A firmware feedback or adaptive clocking error, and the FIFO
+underruns or overruns a drifting clock causes, show only on hardware.
+
 The device loses the speaker's first packet after each start, as the example README explains.
 Write PCM after the first frames, as the snippet does.
 

@@ -12,6 +12,28 @@
 
 #include <unicorn/unicorn.h>
 
+/**
+ * @limits core
+ *
+ * @group all deviation "Reset vector read"
+ * A reset vector read the bus refuses, from unmapped memory or through a firewall, raises
+ * `emulation_error`, "cortex_m reset: no vector table at ...", when the `Machine` is built or
+ * reset. Silicon takes a lockup in HardFault with HFSR.VECTTBL set, IPSR 0 and the PC at
+ * 0xEFFFFFFE (DDI0553B B3.33.2 RBHVG).
+ *
+ * @group all deviation "Unaligned device access"
+ * An unaligned access to device memory reaches the model split into aligned accesses and raises
+ * no fault. An `ldr.w` at offset 0x59 reads 0x58 and 0x5c, and an `str.w` there writes four
+ * bytes from 0x59 to 0x5c, so it also touches the next register. Silicon raises an UNALIGNED
+ * UsageFault. The check needs a hook on every load and store and costs about 38 percent of the
+ * run time, so the core leaves it out. CMSIS register access is always aligned.
+ *
+ * @group all deviation "Stop time of a time bound"
+ * A run bounded in virtual time stops at the first instruction whose time is at or past the
+ * bound, since time advances in whole core instruction periods. The stop is up to one core period
+ * late, 250 ns at the 4 MHz MSI reset clock, also when an idle core in WFI sleeps to the bound.
+ */
+
 #include <algorithm>
 #include <charconv>
 #include <format>

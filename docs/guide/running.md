@@ -32,9 +32,10 @@ hit, as a debugger's continue does. Here the second call finds no new press and 
 ```
 
 `for_` bounds the run in virtual time and stops it with TIME. A core asleep in WFI with nothing
-due sleeps to the deadline, so a sleeping firmware reaches it at once. The stop lands on the
-first block boundary at or after the deadline, so `time` can pass it by less than one
-translated block.
+due sleeps to the deadline, so a sleeping firmware reaches it at once, on the first instruction
+edge at or after it: up to one core period late, 250 ns at the 4 MHz MSI reset clock. A core
+executing code stops on the first block boundary at or after the deadline, so `time` can pass
+it by less than one translated block.
 
 ## Step
 

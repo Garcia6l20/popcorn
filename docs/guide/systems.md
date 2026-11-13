@@ -79,6 +79,11 @@ quanta:
 - a member's `snapshot()` followed by `restore()`
 - the bytes a member's `snapshot()` saves
 
+A member holds the events due between its last dispatch and the pause goal when its block
+overshoots the goal. A parked `system.reset` at that pause drops them. A frame due at 197.75 us,
+with a `system.run` to 200 us and a reset after, reaches the stream and the device at a quantum
+of 20 us and is lost at 7, 5 and 1 us. Without the reset every quantum delivers it at 197.75 us.
+
 Two runs at one quantum repeat exactly, whatever the slicing and the thread timing.
 
 ### Latency and wall time
@@ -275,6 +280,9 @@ SCL holds the phases after it.
 - Every link and bus declares its latency. `system.quantum` is the smallest of them, and the
   results of every medium are the same at any quantum, slicing and thread timing, except for
   what a parked action does at a TIME pause, see above.
+- A `UartLink` carries bytes only: the RTS and CTS levels and a lookahead bounded by CTS stay
+  out of the link. A `UartDevice` on a member drives and reads RTS and CTS, see
+  [UART devices](uart_devices.md).
 - `system.tap(end, kind)` takes `UartTap`, `SpiTap` or `I2CTap`. The tap of any end of a bus is
   the same object.
 
