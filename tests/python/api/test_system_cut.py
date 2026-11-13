@@ -4,8 +4,9 @@ system time, scheduled, from the cut owner's callbacks, stopped, and the refusal
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import weakref
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import cast
 
 import popcorn
@@ -50,6 +51,18 @@ WINDOW = (at(500), at(950))
 
 Outcome = tuple[tuple[TapFrame, ...], tuple[int, ...]]
 Seen = list[tuple[VirtualTime, VirtualTime]]
+
+
+@contextlib.asynccontextmanager
+async def running_to_tx_end(system: System) -> AsyncGenerator[None]:
+    """`system.running()`. The free run goes on whenever the body yields, so a wall delay in
+    the body lets the link_tx member reach its end: that USER stop is accepted, from the body's
+    wait or at the exit."""
+    try:
+        async with system.running():
+            yield
+    except popcorn.EmulationError as stopped:
+        assert (stopped.reason, stopped.symbol) == (StopReason.USER, "link_tx"), stopped
 
 
 def finish(system: System, until: float = 3000) -> Outcome:
@@ -144,7 +157,7 @@ def owner_cut(system: System) -> tuple[Seen, Outcome]:
     a.intercept("wait_complete", at_complete)
 
     async def free() -> None:
-        async with system.running():
+        async with running_to_tx_end(system):
             await b.elapse(us(1500))
 
     asyncio.run(free())
@@ -177,7 +190,7 @@ def owner_paused_cut(system: System) -> tuple[Seen, Outcome]:
     a.intercept("USART1_IRQHandler", on_irq)
 
     async def free() -> None:
-        async with system.running():
+        async with running_to_tx_end(system):
             await a.elapse(us(425))
             await a.elapse(us(900))
 
@@ -369,15 +382,19 @@ def body_after_a_pause(system: System) -> None:
     a = system.members["a"]
     tap = system.tap("a.USART1")
 
+    checked: list[bool] = []
+
     async def free() -> None:
-        async with system.running():
+        async with running_to_tx_end(system):
             await a.elapse(us(300))
             with pytest.raises(RuntimeError, match="cut owner"):
                 tap.break_line()
             with pytest.raises(MachineRunning):
                 tap.owner = "b"
+            checked.append(True)
 
     asyncio.run(free())
+    assert checked
     with pytest.raises(ValueError, match="no cut is open"):
         tap.restore_line()
     assert tap.owner == "a"
