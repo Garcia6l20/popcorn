@@ -10,13 +10,13 @@ import textwrap
 import weakref
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import popcorn
 import pytest
-from popcorn import ConfigError, StopReason, _core
+from popcorn import ConfigError, ResetKind, StopReason, _core
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite, _native
-from popcorn.units import VirtualDuration, ms, ns, ps, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, ns, ps, us
 
 from .conftest import collected
 from .devices_example import Eeprom24
@@ -537,3 +537,68 @@ def test_a_bad_project_argument_is_refused_on_the_entry() -> None:
     with pytest.raises(ConfigError, match="size") as refused:
         project.machine()
     assert refused.value.key == "board.SPI1.devices[0]"
+
+
+RERUN_BUDGET = 200_000
+FAIL_MARK = 0xFA110000
+
+
+def reset_in_write_cycle(
+    u575: popcorn.PartDescription, device: Eeprom24 | Eeprom24xx, kind: ResetKind
+) -> popcorn.Machine:
+    m = machine(u575, I2C_ELF, "I2C1", device)
+    enter(m, "eeprom_rw")
+    into_write_cycle(u575, m)
+    enter(m, "eeprom_rw", kind)
+    return m
+
+
+def rerun(m: popcorn.Machine) -> popcorn.Stop:
+    return asyncio.run(m.run(budget=RERUN_BUDGET))
+
+
+@pytest.mark.parametrize("make", [lambda: Eeprom24(0x50, 4096), eeprom], ids=["python", "native"])
+def test_a_software_reset_in_a_write_cycle_lets_the_firmware_retry_its_page_write(
+    u575: popcorn.PartDescription, make: Callable[[], Eeprom24 | Eeprom24xx]
+) -> None:
+    device = make()
+    m = reset_in_write_cycle(u575, device, ResetKind.SOFTWARE)
+    assert rerun(m).reason is StopReason.USER
+    assert logged(m)[:1] == [20]
+    contents = device.contents() if isinstance(device, Eeprom24xx) else bytes(device.array)
+    assert contents[0x10:0x24] == PATTERN
+
+
+@pytest.mark.parametrize("make", [lambda: Eeprom24(0x50, 4096), eeprom], ids=["python", "native"])
+def test_a_power_on_reset_in_a_write_cycle_reruns_without_a_retry(
+    u575: popcorn.PartDescription, make: Callable[[], Eeprom24 | Eeprom24xx]
+) -> None:
+    m = reset_in_write_cycle(u575, make(), ResetKind.POWER_ON)
+    assert rerun(m).reason is StopReason.USER
+    assert logged(m)[:1] == [20]
+
+
+def test_a_page_write_nobody_acknowledges_ends_in_the_failure_exit(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = machine(u575, I2C_ELF, "I2C1")
+    enter(m, "eeprom_rw")
+    stop = asyncio.run(m.run(budget=BUDGET))
+    assert stop.reason is not StopReason.BUDGET
+    assert logged(m) == [FAIL_MARK | 1]
+
+
+class RefusesData(Eeprom24):
+    @override
+    def on_write(self, byte: int, at: VirtualTime) -> bool:
+        return False
+
+
+def test_a_page_write_the_device_keeps_refusing_ends_in_the_second_failure_exit(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = machine(u575, I2C_ELF, "I2C1", RefusesData(0x50, 4096))
+    enter(m, "eeprom_rw")
+    stop = asyncio.run(m.run(budget=RERUN_BUDGET))
+    assert stop.reason is not StopReason.BUDGET
+    assert logged(m) == [FAIL_MARK | 2]

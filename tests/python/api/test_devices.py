@@ -286,9 +286,11 @@ def test_a_raising_on_write_ends_the_transfer_on_the_bus_as_a_nack(
     enter(m, "eeprom_rw")
     with pytest.raises(RuntimeError, match="on_write broke"):
         asyncio.run(m.run(budget=BUDGET))
-    asyncio.run(m.run(for_=us(200)))
     isr = m.periph.I2C1.ISR
-    assert (isr.NACKF, isr.STOPF, isr.BUSY) == (1, 1, 0)
+    stop = asyncio.run(
+        m.run(for_=us(200), stop_when=lambda _: (isr.NACKF, isr.STOPF, isr.BUSY) == (1, 1, 0))
+    )
+    assert stop.reason is StopReason.USER
 
 
 class OnceJedec(JedecDevice):

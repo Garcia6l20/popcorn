@@ -5,12 +5,16 @@
 #include "stm32u5xx_ll_dma.h"
 #include "stm32u5xx_ll_i2c.h"
 
+#include <stdbool.h>
+
 #define EEPROM_ADDRESS    (0x50u << 1)
 #define TABLE_ADDRESS     (0x38u << 1)
 #define ABSENT_ADDRESS    (0x2Au << 1)
 #define FAULTY_ADDRESS    (0x33u << 1)
 #define ERROR_FLAGS       (I2C_ISR_BERR | I2C_ISR_ARLO | I2C_ISR_OVR)
 #define TIMING_400K_AT_4M 0x00100305u
+#define MAX_POLLS         1000u
+#define MAX_ATTEMPTS      4u
 
 static uint8_t           buffer[300];
 static volatile uint32_t nack_entries;
@@ -89,7 +93,7 @@ static void wait_stop(void)
   LL_I2C_ClearFlag_STOP(I2C1);
 }
 
-static void send(uint32_t address, uint8_t const* bytes, uint32_t count, uint32_t end)
+static bool send(uint32_t address, uint8_t const* bytes, uint32_t count, uint32_t end)
 {
   LL_I2C_HandleTransfer(
       I2C1, address, LL_I2C_ADDRSLAVE_7BIT, count, end, LL_I2C_GENERATE_START_WRITE);
@@ -97,6 +101,12 @@ static void send(uint32_t address, uint8_t const* bytes, uint32_t count, uint32_
   {
     while(!LL_I2C_IsActiveFlag_TXIS(I2C1))
     {
+      if(LL_I2C_IsActiveFlag_NACK(I2C1))
+      {
+        wait_stop();
+        LL_I2C_ClearFlag_NACK(I2C1);
+        return false;
+      }
     }
     LL_I2C_TransmitData8(I2C1, bytes[index]);
   }
@@ -110,6 +120,12 @@ static void send(uint32_t address, uint8_t const* bytes, uint32_t count, uint32_
     {
     }
   }
+  if(LL_I2C_IsActiveFlag_NACK(I2C1))
+  {
+    LL_I2C_ClearFlag_NACK(I2C1);
+    return false;
+  }
+  return true;
 }
 
 static void receive(uint32_t address, uint8_t* bytes, uint32_t count)
@@ -131,6 +147,10 @@ static uint32_t acknowledge_polls(void)
   uint32_t polls = 0;
   for(;;)
   {
+    if(polls >= MAX_POLLS)
+    {
+      FAIL(1);
+    }
     LL_I2C_HandleTransfer(
         I2C1, EEPROM_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, 0, LL_I2C_MODE_AUTOEND,
         LL_I2C_GENERATE_START_WRITE);
@@ -142,6 +162,22 @@ static uint32_t acknowledge_polls(void)
     LL_I2C_ClearFlag_NACK(I2C1);
     ++polls;
   }
+}
+
+static void send_page(uint32_t address, uint8_t const* bytes, uint32_t count)
+{
+  for(uint32_t attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
+  {
+    if(send(address, bytes, count, LL_I2C_MODE_AUTOEND))
+    {
+      return;
+    }
+    if(attempt + 1 < MAX_ATTEMPTS)
+    {
+      acknowledge_polls();
+    }
+  }
+  FAIL(2);
 }
 
 static uint32_t pattern(uint32_t index)
@@ -163,9 +199,9 @@ void eeprom_rw(void)
   {
     second[2 + index] = (uint8_t)pattern(16 + index);
   }
-  send(EEPROM_ADDRESS, first, sizeof first, LL_I2C_MODE_AUTOEND);
+  send_page(EEPROM_ADDRESS, first, sizeof first);
   uint32_t const first_polls = acknowledge_polls();
-  send(EEPROM_ADDRESS, second, sizeof second, LL_I2C_MODE_AUTOEND);
+  send_page(EEPROM_ADDRESS, second, sizeof second);
   uint32_t const second_polls = acknowledge_polls();
   send(EEPROM_ADDRESS, address, sizeof address, LL_I2C_MODE_SOFTEND);
   receive(EEPROM_ADDRESS, buffer, 20);

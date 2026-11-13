@@ -8069,18 +8069,31 @@ TEST_CASE("a target that throws from write ends the transfer on the wire as a NA
   for(auto const nth : {1u, 10u})
   {
     CAPTURE(nth);
-    rig r{"eeprom_rw"};
+    rig r{"idle"};
+    bus b{*r.f};
+    b.controller();
     r.memory->throw_on  = 'w';
     r.memory->throw_nth = nth;
-    CHECK_THROWS_AS(std::ignore = r.f->run_to_stop(), std::runtime_error);
-    auto const until = r.f->target->virtual_clock().time().ps + 200 * us;
-    CHECK(
-        r.f->run_to_stop({.max_instructions = icount{100'000'000}, .until_time = vtime{until}})
-            .reason
-        == stop_reason::time);
-    CHECK(r.f->field("I2C1", "ISR", "NACKF") == 1);
-    CHECK(r.f->field("I2C1", "ISR", "STOPF") == 1);
-    CHECK(r.f->field("I2C1", "ISR", "BUSY") == 0);
+    b.command(0x50, 20, false, true);
+    auto thrown = false;
+    for(std::uint32_t index = 0; index < 20 and not thrown; ++index)
+    {
+      b.send(static_cast<std::uint8_t>(index));
+      try
+      {
+        std::ignore = r.f->run_to_stop(
+            {.max_instructions = icount{1'000'000'000}, .until_time = vtime{b.now() + 100 * us}});
+      }
+      catch(std::runtime_error const&)
+      {
+        thrown = true;
+      }
+    }
+    REQUIRE(thrown);
+    b.run_until(b.now() + 200 * us);
+    CHECK(b.get("ISR", "NACKF") == 1);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    CHECK(b.get("ISR", "BUSY") == 0);
   }
 }
 
