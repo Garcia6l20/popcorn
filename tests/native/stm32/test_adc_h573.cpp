@@ -600,6 +600,32 @@ TEST_CASE(
   CHECK(r.dma_left() == 0);
 }
 
+TEST_CASE(
+    "H573 board: a TIM15 trigger after the one-shot DMA end starts no conversion, ADC_DR keeps the "
+    "last word")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'200'000);
+  r.write("ADC1", "ADC_CFGR", dmaen | ovrmod | (1u << 10) | (14u << 5));
+  r.dma(8);
+  auto const start = r.tim15_trgo();
+  static_cast<void>(r.start(3));
+  r.run_until(start + 2 * ms + 500 * us);
+  CHECK(r.dma_left() == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  auto const frozen = r.read("ADC1", "ADC_DR");
+  CHECK(frozen == code_at(1'200'000));
+  r.write("ADC1", "ADC_ISR", 0x7FF);
+  r.port().drive(3, 2'400'000);
+  r.run_until(start + 5 * ms + 500 * us);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  CHECK(r.isr("EOC") == 0);
+  CHECK(r.isr("EOS") == 0);
+  CHECK(r.isr("OVR") == 0);
+  CHECK(r.read("ADC1", "ADC_DR") == frozen);
+}
+
 TEST_CASE("ADCC.CKMODE clocks the conversion from HCLK / 1, 2 or 4 and ignores PRESC")
 {
   for(std::uint32_t mode = 0; mode < 4; ++mode)

@@ -295,7 +295,7 @@ struct u5_adc
   static constexpr std::size_t      result_depth        = 8;
   static constexpr bool             overrun_flush       = false;
   static constexpr bool             dma_end_stops       = false;
-  static constexpr bool             dma_end_freezes     = false;
+  static constexpr bool             dma_end_freezes     = true;
   static constexpr bool             trigger_waits_edge  = false;
   static constexpr ready_pair       ready_cycles        = std::nullopt;
   static constexpr std::uint32_t    result_mask         = 0xFFFF'FFFF;
@@ -417,7 +417,7 @@ struct h5_adc
   static constexpr bool overrun_flush = true;
   /** @brief The end of a one-shot DMA transfer clears ADSTART, measured on an STM32H573. */
   static constexpr bool dma_end_stops   = true;
-  static constexpr bool dma_end_freezes = false;
+  static constexpr bool dma_end_freezes = true;
   /** @brief A trigger at CKMODE 00 waits for the next ADC clock edge, measured on an STM32H573. */
   static constexpr bool trigger_waits_edge = true;
   /**
@@ -1116,10 +1116,12 @@ struct adc_clock
  *        request completes, the conversion in progress is dropped, the sequence resets to rank
  *        0, ADSTART stays set, and no request rises until an ADC_CR write takes ADSTART from 0
  *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. A hardware trigger
- *        then starts sequences without a request, and their results land in ADC_DR: the data
- *        register RM0456 33.4.26 calls frozen after the DMA end is not modelled. DMNGT 10, the MDF
- *        path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its ADC_IER
- *        enable.
+ *        then starts sequences without a request, and ADC_DR stays frozen, RM0456 33.4.26 "The
+ *        content of the ADC data register is frozen": a result after the DMA end leaves ADC_DR,
+ *        EOC, OVR and the FIFO as they are and sets EOS at the end of the sequence, as on the L4,
+ *        the EOC, OVR and EOS part inferred. ADSTART going from 0 to 1 ends the freeze. DMNGT 10,
+ *        the MDF path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its
+ *        ADC_IER enable.
  *
  *        A description with `channel_pins` holds a positive pad for every external channel, or
  *        construction throws config_error naming the channel. Every shipped description
@@ -1397,7 +1399,10 @@ struct adc_clock
  *   Measured on an STM32H573, the discard of a second result while the FIFO holds one is the
  *   reading consistent with that run.
  * - The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
- *   measured on an STM32H573 with CONT 1.
+ *   measured on an STM32H573 with CONT 1. ADSTART is 0 afterwards, so no conversion runs, a
+ *   hardware trigger starts none, and `ADC_DR`, EOC, OVR and the FIFO keep their values until
+ *   ADSTART goes 0 to 1, which RM0481 28.4.26 "The content of the ADC data register is frozen"
+ *   agrees with, inferred.
  * - At CKMODE 00 a trigger waits for the next ADC clock edge, and tLATR is 4.5 ADC clock cycles
  *   from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
  *   DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period

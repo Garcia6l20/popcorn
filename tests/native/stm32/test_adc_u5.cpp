@@ -1879,7 +1879,9 @@ TEST_CASE(
       popcorn::model_error);
 }
 
-TEST_CASE("after a DMNGT 01 end, a TIM15 trigger starts a sequence but issues no request")
+TEST_CASE(
+    "after a DMNGT 01 end, a TIM15 trigger starts a sequence that leaves ADC_DR frozen and issues "
+    "no request")
 {
   adc_fixture const f;
   downstream_scan(f, ovrmod | dmngt_oneshot | exten_rising | extsel(14));
@@ -1896,12 +1898,31 @@ TEST_CASE("after a DMNGT 01 end, a TIM15 trigger starts a sequence but issues no
   f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
   f.run_until(update + tim15_period + latency + scan_ps);
   CHECK(f.isr("EOS") == 1);
-  CHECK(f.read("ADC_DR") == scan_code(9));
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("OVR") == 0);
+  CHECK(f.read("ADC_DR") == scan_code(4));
   CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 20);
   CHECK(
       buffer_words(f, 6)
       == std::vector<std::uint32_t>{
           scan_code(0), scan_code(1), scan_code(2), scan_code(3), scan_code(4), 0});
+}
+
+TEST_CASE("an ADSTART 0 to 1 write after a DMNGT 01 end ends the freeze of ADC_DR")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(4));
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  f.run_until(f.now() + scan_ps);
+  CHECK(f.read("ADC_DR") == scan_code(4));
+  auto const again = start_scan(f);
+  f.run_until(again + scan_eoc(0) + us);
+  CHECK(f.read("ADC_DR") == scan_code(0));
 }
 
 TEST_CASE("a snapshot between two triggered scans resumes with the same scan in a fresh machine")
