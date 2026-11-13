@@ -159,6 +159,7 @@ def _counting(name: str, reads: dict[str, int]) -> Callable[..., Any]:
 def test_shared_lists_are_read_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    list_reads: dict[str, int],
     locals_: int,
     blocks: int,
     entries: int,
@@ -176,6 +177,7 @@ def test_shared_lists_are_read_once(
     assert len(first.location) == entries
     assert len(first.scopes) == (ranges if blocks else 0)
     assert reads == {"_location_list": 1, "_range_pairs": 1 if blocks else 0}
+    assert list_reads == {"location": 1, "range": 1 if blocks else 0}
 
 
 @pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
