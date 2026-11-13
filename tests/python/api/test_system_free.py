@@ -679,6 +679,8 @@ def test_two_eager_running_blocks_each_end_their_free_run(ping: Build) -> None:
 
 
 def test_a_halt_from_a_machine_callback_raises_runtime_error(ping: Build) -> None:
+    """Leaving `running()` may raise a member's firmware-end USER stop: the wall-dependent exit."""
+
     system = ping()
     a = system.members["a"]
     outcome: list[BaseException | None] = []
@@ -694,9 +696,12 @@ def test_a_halt_from_a_machine_callback_raises_runtime_error(ping: Build) -> Non
 
     async def body() -> None:
         a.intercept("send_byte", halt_inside, once=True)
-        async with system.running():
-            while not outcome:
-                await asyncio.sleep(0.001)
+        try:
+            async with system.running():
+                while not outcome:
+                    await asyncio.sleep(0.001)
+        except popcorn.EmulationError as stop:
+            assert stop.reason is popcorn.StopReason.USER, stop
 
     bounded(body())
     assert len(outcome) == 1
