@@ -768,6 +768,9 @@ struct run_counters
   /** @brief Code ranges written between engine runs, removed at once. Restores are not
    * counted. */
   std::uint64_t removes_direct{};
+  /** @brief Bytes of translated code removed by restore_memory, the changed pages of executable
+   * buffers. */
+  std::uint64_t restore_removed_bytes{};
   /** @brief `uc_ctl_remove_cache` calls of removes_in_engine. */
   std::uint64_t remove_calls_in_engine{};
   /** @brief `uc_ctl_remove_cache` calls of removes_direct. */

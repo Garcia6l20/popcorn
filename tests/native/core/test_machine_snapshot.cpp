@@ -1,3 +1,5 @@
+#include "../../../native/src/core/machine_impl.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
@@ -313,29 +315,31 @@ TEST_CASE("restore removes code at every mapping of an aliased buffer")
 
 TEST_CASE("a restore that changed only data keeps the translated code")
 {
-  auto       f     = booted();
-  auto const taken = f.target->snapshot();
-  auto const timed = [&](bool dirty_data) {
-    auto best = std::chrono::nanoseconds::max();
-    for(int round = 0; round < 5; ++round)
-    {
-      if(dirty_data)
-      {
-        std::vector<std::byte> junk(0x1'0000, std::byte{0x5a});
-        REQUIRE(f.target->mem().write_block(fn("scratch"), junk));
-      }
-      f.target->restore(taken);
-      auto const start = std::chrono::steady_clock::now();
-      std::ignore      = run_million(f);
-      best             = std::min(best, std::chrono::steady_clock::now() - start);
-    }
-    return best;
+  auto       f       = booted();
+  auto const taken   = f.target->snapshot();
+  auto const removed = [&] {
+    return core::machine_internals::counters(*f.target).restore_removed_bytes;
   };
-  auto const warm  = timed(false);
-  auto const dirty = timed(true);
-  CAPTURE(warm.count());
-  CAPTURE(dirty.count());
-  CHECK(dirty < 2 * warm + std::chrono::microseconds{500});
+  auto const live  = run_million(f);
+  auto const round = [&](bool dirty_data) {
+    if(dirty_data)
+    {
+      std::vector<std::byte> junk(0x1'0000, std::byte{0x5a});
+      REQUIRE(f.target->mem().write_block(fn("scratch"), junk));
+    }
+    auto const before = removed();
+    f.target->restore(taken);
+    auto const flushed = removed() - before;
+    CHECK(run_million(f) == live);
+    return flushed;
+  };
+  auto const warm  = round(false);
+  auto const dirty = round(true);
+  CAPTURE(warm);
+  CAPTURE(dirty);
+  CHECK(round(false) == warm);
+  CHECK(round(true) == dirty);
+  CHECK(dirty - warm == 0x1'0000);
 }
 
 TEST_CASE("write-once locks survive a reset and travel through bytes")

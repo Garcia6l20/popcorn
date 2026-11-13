@@ -454,6 +454,7 @@ void machine::run_state::restore_memory(
     auto const                 flush = [&](std::size_t end) {
       if(run_start)
       {
+        counters.restore_removed_bytes += end - *run_start;
         remove_translated(engine, buffer, region->offset + *run_start, region->offset + end);
         run_start.reset();
       }
