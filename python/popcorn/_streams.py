@@ -593,6 +593,20 @@ class UartStream:
         link = self._link
         return _frames(link.drain(link.available()))
 
+    def _tail(self, count: int) -> tuple[bytes, int, int]:
+        """The last `count` queued bytes, the queued count and the dropped count, taking none.
+
+        Two reads of the link: call it parked, where nothing is queued or dropped between them.
+
+        Raises:
+            RuntimeError: The UART is bridged to a pty.
+        """
+        self._check_unbridged()
+        link = self._link
+        queued = link.available()
+        start = max(0, queued - count)
+        return link.peek(start, queued - start), queued, self.dropped
+
     def _check_unbridged(self) -> None:
         bridge = self._bridges.get(self.name)
         if bridge is not None:

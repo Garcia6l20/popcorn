@@ -1168,3 +1168,46 @@ def test_a_reset_during_a_waiting_read_takes_the_frames_of_both_resets_to_reach_
     frames = asyncio.run(uart.read_frames(sent + 3, for_=ms(10)))
     asyncio.run(pending)
     assert bytes(f.data for f in frames) == b"hehel"
+
+
+async def echoed(m: popcorn.Machine, data: bytes) -> popcorn.board.UartStream:
+    uart = m.periph.USART1.port
+    await uart.write(data)
+    await m.run(for_=ms(20))
+    assert uart.available == len(data)
+    return uart
+
+
+def test_tail_returns_the_last_queued_bytes(board: popcorn.Machine) -> None:
+    uart = asyncio.run(echoed(board, b"0123456789"))
+    assert uart._tail(4) == (b"6789", 10, 0)  # pyright: ignore[reportPrivateUsage]
+    assert uart._tail(10) == (b"0123456789", 10, 0)  # pyright: ignore[reportPrivateUsage]
+    assert uart._tail(99) == (b"0123456789", 10, 0)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_tail_takes_nothing(board: popcorn.Machine) -> None:
+    uart = asyncio.run(echoed(board, b"0123456789"))
+    uart._tail(4)  # pyright: ignore[reportPrivateUsage]
+    assert uart.available == 10
+    assert uart.take() == b"0123456789"
+
+
+def test_tail_holds_only_the_unread_bytes(board: popcorn.Machine) -> None:
+    uart = asyncio.run(echoed(board, b"0123456789"))
+    assert asyncio.run(uart.read(5, for_=ms(1))) == b"01234"
+    assert uart._tail(99) == (b"56789", 5, 0)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_tail_refuses_a_bridged_uart(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    board.board.pty("USART1")
+    with pytest.raises(RuntimeError, match="USART1 is bridged to"):
+        uart._tail(4)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_tail_reads_a_break_as_a_zero_byte(u575: popcorn.PartDescription) -> None:
+    m = break_sender(u575)
+    stop = asyncio.run(m.run(budget=100_000_000))
+    assert stop.reason is popcorn.StopReason.USER, stop
+    uart = m.periph.USART1.port
+    assert uart._tail(9) == (b"a\x00b", 3, 0)  # pyright: ignore[reportPrivateUsage]
