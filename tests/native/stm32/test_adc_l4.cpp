@@ -2800,7 +2800,7 @@ TEST_CASE(
     "RM0351 18.4.30 Figure 114: with ROVSE, ROVSM 0 and JOVSE 0 an injection keeps the samples "
     "the dropped rank completed, the sample in progress converts again after JEOS")
 {
-  for(std::string_view const what : {"live", "injected", "driven", "ADSTP"})
+  for(std::string_view const what : {"live", "injected", "driven", "ADSTP", "SMPR"})
   {
     CAPTURE(what);
     rig const  r;
@@ -2818,6 +2818,12 @@ TEST_CASE(
     r.write("ADC1", "ADC_JSQR", jsqr({2}));
     auto const start = r.now();
     r.start(1);
+    if(what == "SMPR")
+    {
+      r.run_until(start + 653 * cycle_ps + 100 * cycle_ps);
+      r.write("ADC1", "ADC_SMPR1", 0);
+    }
+    auto const resumed = what == "SMPR" ? 15 : 653;
     r.run_until(start + 653 * cycle_ps + 642 * cycle_ps);
     r.port().drive(1, 750'000);
     if(what == "driven")
@@ -2848,12 +2854,12 @@ TEST_CASE(
     {
       copy();
     }
-    rig const& run = what == "live" ? r : fresh;
+    rig const& run = what == "live" or what == "SMPR" ? r : fresh;
     run.run_until(injected);
     CHECK(run.isr("JEOS") == 1);
-    run.run_until(injected + 653 * cycle_ps - cycle_ps);
+    run.run_until(injected + resumed * cycle_ps - cycle_ps);
     CHECK(run.isr("EOC") == 0);
-    run.run_until(injected + 653 * cycle_ps);
+    run.run_until(injected + resumed * cycle_ps);
     CHECK(run.isr("EOC") == 1);
     CHECK(run.cpu_read("ADC1", "ADC_DR") == 1536);
     CHECK(run.warnings().empty());
@@ -3608,4 +3614,122 @@ TEST_CASE(
   pins->drive_at(11, true, vtime{early});
   r.run_until(early + 20 * us);
   CHECK(r.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.26: an SMPR write during a conversion leaves the end of the running conversion")
+{
+  constexpr std::uint32_t ovrmod = 1u << 12;
+  rig const               r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | cont | ovrmod);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  auto const start = r.now();
+  r.start(1);
+  r.run_until(start + 20 * cycle_ps);
+  r.write("ADC1", "ADC_SMPR1", 1u << 31);
+  r.run_until(start + 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 15) * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 15) * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.26: a RES write during a conversion leaves the end of the running conversion")
+{
+  constexpr std::uint32_t ovrmod = 1u << 12;
+  rig const               r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | cont | ovrmod);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  auto const start = r.now();
+  r.start(1);
+  r.run_until(start + 20 * cycle_ps);
+  r.write("ADC1", "ADC_CFGR", 0x8000'0000u | cont | ovrmod | (1u << 3));
+  r.run_until(start + 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+  r.run_until(start + (653 + 651) * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 651) * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: a snapshot taken after an SMPR write during oversampling keeps the sample "
+    "times of the running conversion")
+{
+  rig const r;
+  rig const g;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | (2u << 2));
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  auto const start = r.now();
+  r.start(1);
+  r.run_until(start + 100 * cycle_ps);
+  r.write("ADC1", "ADC_SMPR1", 0);
+  g.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(r.f->target->snapshot().data()))});
+  g.run_until(start + (3 * 653 + 320) * cycle_ps);
+  g.port().drive(1, 750'000);
+  g.run_until(start + 8 * 653 * cycle_ps - cycle_ps);
+  CHECK(g.isr("EOC") == 0);
+  g.run_until(start + 8 * 653 * cycle_ps);
+  REQUIRE(g.isr("EOC") == 1);
+  CHECK(g.cpu_read("ADC1", "ADC_DR") == 3 * 2048 + 5 * 1024);
+}
+TEST_CASE(
+    "RM0351 18.4.19: an SMPR write during an injected conversion leaves the end of the running "
+    "rank, the next rank starts at it")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  r.write("ADC1", "ADC_JSQR", jsqr({1, 1}));
+  auto const at = r.now();
+  r.write("ADC1", "ADC_CR", enabled | jadstart);
+  r.run_until(at + 20 * cycle_ps);
+  r.write("ADC1", "ADC_SMPR1", 0);
+  r.run_until(at + 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("JEOC") == 0);
+  r.run_until(at + 653 * cycle_ps);
+  CHECK(r.isr("JEOC") == 1);
+  r.run_until(at + (653 + 15) * cycle_ps - cycle_ps);
+  CHECK(r.isr("JEOS") == 0);
+  r.run_until(at + (653 + 15) * cycle_ps);
+  CHECK(r.isr("JEOS") == 1);
+}
+
+TEST_CASE(
+    "RM0351 18.4.30: an OVSR write during oversampling leaves the sample count of the running "
+    "conversion")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(1, 1'500'000);
+  r.write("ADC1", "ADC_CFGR2", 1u | (2u << 2));
+  r.write("ADC1", "ADC_SMPR1", 7u << 3);
+  auto const start = r.now();
+  r.start(1);
+  r.run_until(start + 2 * 653 * cycle_ps);
+  r.write("ADC1", "ADC_CFGR2", 1u | (1u << 2));
+  r.run_until(start + (5 * 653 + 650) * cycle_ps);
+  r.port().drive(1, 750'000);
+  r.run_until(start + 8 * 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + 8 * 653 * cycle_ps);
+  REQUIRE(r.isr("EOC") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == 6 * 2048 + 2 * 1024);
 }

@@ -166,7 +166,7 @@ def test_each_model_with_a_limit_carries_a_limits_block(model: str) -> None:
     assert has_limits_page(model)
 
 
-INFERRED_TOTAL = 424
+INFERRED_TOTAL = 426
 
 
 @pytest.mark.timeout(60)

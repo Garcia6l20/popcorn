@@ -1310,6 +1310,11 @@ struct step06_adc_state
   std::array<step06_adc_edge, 2> edges{};
   std::uint32_t                  edge_generation{};
   std::uint64_t                  end_ps{};
+  std::uint64_t                  due_end_ps{};
+  std::uint32_t                  sampling_hs{};
+  std::uint32_t                  conversion_hs{};
+  std::uint32_t                  due_count{};
+  std::uint32_t                  ratio_count{};
 };
 
 auto live_state(adc_fixture const& f) -> step06_adc_state
@@ -2460,7 +2465,7 @@ TEST_CASE(
 TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the template")
 {
   constexpr auto expected_adc = std::to_array<unsigned char>(
-      {0xd4, 0x01, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+      {0x3c, 0x02, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
        0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x72, 0x65, 0x61, 0x64, 0x79,
        0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x73, 0x74, 0x61, 0x72, 0x74, 0x5f, 0x70, 0x73, 0x00,
@@ -2491,7 +2496,14 @@ TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the
        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x65, 0x64, 0x67, 0x65, 0x5f, 0x67, 0x65, 0x6e,
        0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x12, 0x65, 0x6e, 0x64, 0x5f, 0x70, 0x73, 0x00, 0x20, 0x0e, 0x7b, 0x10, 0x00, 0x00,
-       0x00, 0x00, 0x00});
+       0x00, 0x00, 0x12, 0x64, 0x75, 0x65, 0x5f, 0x65, 0x6e, 0x64, 0x5f, 0x70, 0x73, 0x00, 0x80,
+       0x4b, 0xf4, 0x12, 0x00, 0x00, 0x00, 0x00, 0x12, 0x73, 0x61, 0x6d, 0x70, 0x6c, 0x69, 0x6e,
+       0x67, 0x5f, 0x68, 0x73, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x63,
+       0x6f, 0x6e, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x5f, 0x68, 0x73, 0x00, 0xa6, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x75, 0x65, 0x5f, 0x63, 0x6f, 0x75, 0x6e,
+       0x74, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x72, 0x61, 0x74, 0x69,
+       0x6f, 0x5f, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00});
   constexpr auto    expected_common = std::to_array<unsigned char>({0x05, 0x00, 0x00, 0x00, 0x00});
   adc_fixture const f;
   downstream_scan(f, ovrmod);
@@ -2991,4 +3003,149 @@ TEST_CASE(
   REQUIRE(start + ms + latency + scan_ps < 5 * ms);
   f.run_until(start + ms + latency + scan_ps);
   CHECK(f.isr("EOS") == 1);
+}
+
+TEST_CASE("an SMPR write during a conversion leaves the end of the running conversion")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", cont | ovrmod);
+  f.write("ADC1", "ADC_SMPR1", 7u << 15);
+  auto const start = f.now();
+  f.start(5);
+  f.run_until(start + 20 * us);
+  f.write("ADC1", "ADC_SMPR1", 2u << 15);
+  f.run_until(start + 831 * adc_cycle_ps - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + 831 * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + (831 + 29) * adc_cycle_ps - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + (831 + 29) * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+}
+
+TEST_CASE("an SMPR write during oversampling leaves the sample times of the running conversion")
+{
+  adc_fixture const f;
+  auto const        start = slow_oversampling(f);
+  f.run_until(start + 2 * slow_sample);
+  f.write("ADC1", "ADC_SMPR1", 2u << 15);
+  f.run_until(start + 3 * slow_sample + slow_window + 50 * us);
+  f.port().drive(5, 2'000'000);
+  f.run_until(start + 8 * slow_sample - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + 8 * slow_sample);
+  REQUIRE(f.isr("EOC") == 1);
+  CHECK(f.read("ADC_DR") == 4 * one_volt + 4 * two_volts);
+}
+
+namespace
+{
+struct continuous_timing
+{
+  std::uint64_t first;
+  std::uint64_t period;
+};
+
+auto continuous_timing_of(std::uint32_t smpr, std::uint32_t cfgr) -> continuous_timing
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", cfgr);
+  f.write("ADC1", "ADC_SMPR1", smpr);
+  auto const start = f.now();
+  f.start(5);
+  auto const wait = [&] {
+    for(std::uint64_t at = f.now() + adc_cycle_ps / 2;; at += adc_cycle_ps / 2)
+    {
+      f.run_until(at);
+      if(f.isr("EOC") == 1)
+      {
+        return at;
+      }
+    }
+  };
+  auto const first = wait();
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  auto const second = wait();
+  return {first - start, second - first};
+}
+}
+
+TEST_CASE("a RES write during a conversion leaves the end of the running conversion")
+{
+  constexpr std::uint32_t res12 = 1u << 3;
+  auto const              old   = continuous_timing_of(7u << 15, cont | ovrmod);
+  auto const              fresh = continuous_timing_of(7u << 15, cont | ovrmod | res12);
+  REQUIRE(fresh.period < old.period);
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", cont | ovrmod);
+  f.write("ADC1", "ADC_SMPR1", 7u << 15);
+  auto const start = f.now();
+  f.start(5);
+  f.run_until(start + 20 * us);
+  f.write("ADC1", "ADC_CFGR1", cont | ovrmod | res12);
+  f.run_until(start + old.first - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + old.first);
+  REQUIRE(f.isr("EOC") == 1);
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  f.run_until(start + old.first + fresh.period - adc_cycle_ps);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + old.first + fresh.period);
+  CHECK(f.isr("EOC") == 1);
+}
+
+TEST_CASE(
+    "a snapshot taken after an SMPR write during a conversion keeps its end and its next start")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", cont | ovrmod);
+  f.write("ADC1", "ADC_SMPR1", 7u << 15);
+  auto const start = f.now();
+  f.start(5);
+  f.run_until(start + 20 * us);
+  f.write("ADC1", "ADC_SMPR1", 2u << 15);
+  auto const        saved = f.target->snapshot();
+  adc_fixture const g;
+  g.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(live_state(g).due_end_ps == start + 831 * adc_cycle_ps);
+  CHECK(live_state(g).conversion_hs == live_state(f).conversion_hs);
+  CHECK(live_state(g).sampling_hs == live_state(f).sampling_hs);
+  CHECK(live_state(g).sampling_hs != 0);
+  CHECK(live_state(g).due_count == 1);
+  CHECK(live_state(g).ratio_count == 1);
+  g.run_until(start + 831 * adc_cycle_ps - us);
+  CHECK(g.isr("EOC") == 0);
+  g.run_until(start + 831 * adc_cycle_ps);
+  REQUIRE(g.isr("EOC") == 1);
+  static_cast<void>(g.cpu_read("ADC_DR"));
+  g.run_until(start + (831 + 29) * adc_cycle_ps - us);
+  CHECK(g.isr("EOC") == 0);
+  g.run_until(start + (831 + 29) * adc_cycle_ps);
+  CHECK(g.isr("EOC") == 1);
+}
+
+TEST_CASE("an OVSR write during oversampling leaves the sample count of the running conversion")
+{
+  adc_fixture const f;
+  auto const        start = slow_oversampling(f);
+  f.run_until(start + 2 * slow_sample);
+  f.write("ADC1", "ADC_CFGR2", (3u << 16) | 1u);
+  f.run_until(start + 5 * slow_sample + slow_window + 50 * us);
+  f.port().drive(5, 2'000'000);
+  f.run_until(start + 8 * slow_sample - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(start + 8 * slow_sample);
+  REQUIRE(f.isr("EOC") == 1);
+  CHECK(f.read("ADC_DR") == 6 * one_volt + 2 * two_volts);
 }

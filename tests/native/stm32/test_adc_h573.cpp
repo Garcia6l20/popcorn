@@ -1367,3 +1367,46 @@ TEST_CASE(
   CHECK(r.cpu_read("ADC1", "ADC_DR") == code_at(1'000'000));
   CHECK(r.convert(3, "ADC2") == code_at(2'000'000));
 }
+
+TEST_CASE("an SMPR write during a conversion leaves the end of the running conversion")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'000'000);
+  r.write("ADC1", "ADC_CFGR", cont | ovrmod);
+  r.write("ADC1", "ADC_SMPR1", 7u << 9);
+  auto const start = r.start(3);
+  r.run_until(start + 20 * cycle_ps);
+  r.write("ADC1", "ADC_SMPR1", 0);
+  r.run_until(start + 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 15) * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 15) * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+}
+
+TEST_CASE("a RES write during a conversion leaves the end of the running conversion")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'000'000);
+  r.write("ADC1", "ADC_CFGR", cont | ovrmod);
+  r.write("ADC1", "ADC_SMPR1", 7u << 9);
+  auto const start = r.start(3);
+  r.run_until(start + 20 * cycle_ps);
+  r.write("ADC1", "ADC_CFGR", cont | ovrmod | res(1));
+  r.run_until(start + 653 * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + 653 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+  r.run_until(start + (653 + 651) * cycle_ps - cycle_ps);
+  CHECK(r.isr("EOC") == 0);
+  r.run_until(start + (653 + 651) * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+}

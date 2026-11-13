@@ -736,6 +736,11 @@ struct adc_state
   std::array<adc_edge, 2>    edges{};
   std::uint32_t              edge_generation{};
   std::uint64_t              end_ps{};
+  std::uint64_t              due_end_ps{};
+  std::uint32_t              sampling_hs{};
+  std::uint32_t              conversion_hs{};
+  std::uint32_t              due_count{};
+  std::uint32_t              ratio_count{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
@@ -759,6 +764,11 @@ struct l4_adc_state
   std::array<adc_edge, 2>      edges{};
   std::uint32_t                edge_generation{};
   std::uint64_t                end_ps{};
+  std::uint64_t                due_end_ps{};
+  std::uint32_t                sampling_hs{};
+  std::uint32_t                conversion_hs{};
+  std::uint32_t                due_count{};
+  std::uint32_t                ratio_count{};
   std::uint64_t                injected_end_ps{};
   std::uint32_t                calibration_generation{};
   bool                         calibration_waiting{};
@@ -1358,7 +1368,11 @@ struct adc_clock
  *
  * @group u5,h5,l4 rule "On the STM32U5, STM32H5 and STM32L4"
  * - Writes to `ADC_CFGR`, `ADC_CFGR2`, `ADC_SMPRx`, `ADC_SQRx`, `ADC_OFRy`, `ADC_TRx` and
- *   `ADC_AWDxCR` with ADSTART or JADSTART set apply at once.
+ *   `ADC_AWDxCR` with ADSTART or JADSTART set are stored at once. RM0456 and RM0351 allow the
+ *   SMPRx, RES, ROVSE and OVSR writes only with ADSTART 0, so a running conversion keeps its
+ *   sampling length, SAR length, sample count, end time and sample times from its start and the
+ *   write takes effect from the next conversion, inferred. The result code, its alignment and
+ *   the watchdog compares read the stored RES of the moment they are computed, inferred.
  *
  * @group h5 rule "On the STM32H5, RM0481 section 28"
  * - The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
@@ -2167,9 +2181,9 @@ auto adc_model<Traits>::after(std::uint64_t half_cycles) const -> std::uint64_t
 
 template <typename Traits> void adc_model<Traits>::hold_until(std::uint64_t ps)
 {
-  auto const samples = ratio();
+  auto const samples = state_.ratio_count;
   while(state_.held < samples
-        and after(std::uint64_t{state_.held} * conversion() + sampling()) <= ps)
+        and after(std::uint64_t{state_.held} * state_.conversion_hs + state_.sampling_hs) <= ps)
   {
     auto const sampled = code();
     if constexpr(injected_group)
@@ -3090,11 +3104,13 @@ template <typename Traits> void adc_model<Traits>::schedule(std::uint64_t start_
       kept = state_.kept_held;
     }
   }
-  auto const clock = source();
-  state_.clock_hz  = clock.hz;
-  state_.divider   = clock.divider;
-  state_.start_ps  = start_ps;
-  state_.start_ps -= after(std::uint64_t{kept} * conversion()) - start_ps;
+  auto const clock     = source();
+  state_.clock_hz      = clock.hz;
+  state_.divider       = clock.divider;
+  state_.start_ps      = start_ps;
+  state_.sampling_hs   = sampling();
+  state_.conversion_hs = conversion();
+  state_.start_ps -= after(std::uint64_t{kept} * state_.conversion_hs) - start_ps;
   state_.held = kept;
   state_.sum  = 0;
   if constexpr(injected_group)
@@ -3107,9 +3123,10 @@ template <typename Traits> void adc_model<Traits>::schedule(std::uint64_t start_
   state_.waiting_clock = false;
   state_.converting    = true;
   ++state_.generation;
-  ctx_.events.schedule_at(
-      vtime{after(std::uint64_t{due_samples()} * conversion())}, conversion_end, state_.generation,
-      ctx_.clock);
+  state_.due_count   = due_samples();
+  state_.ratio_count = ratio();
+  state_.due_end_ps  = after(std::uint64_t{state_.due_count} * state_.conversion_hs);
+  ctx_.events.schedule_at(vtime{state_.due_end_ps}, conversion_end, state_.generation, ctx_.clock);
   if(get(regs_, end_of_sampling_) == 0 and not injecting())
   {
     schedule_sampling_end(start_ps);
@@ -3119,9 +3136,9 @@ template <typename Traits> void adc_model<Traits>::schedule(std::uint64_t start_
 template <typename Traits>
 void adc_model<Traits>::schedule_sampling_end(std::uint64_t not_before_ps)
 {
-  for(std::uint32_t k = 0, samples = ratio(); k < samples; ++k)
+  for(std::uint32_t k = 0, samples = state_.ratio_count; k < samples; ++k)
   {
-    auto const at = after(std::uint64_t{k} * conversion() + sampling());
+    auto const at = after(std::uint64_t{k} * state_.conversion_hs + state_.sampling_hs);
     if(at > not_before_ps)
     {
       ctx_.events.schedule_at(vtime{at}, sampling_end, state_.generation, ctx_.clock);
@@ -3140,8 +3157,8 @@ template <typename Traits> void adc_model<Traits>::finish()
       return;
     }
   }
-  auto const due    = due_samples();
-  auto const end    = after(std::uint64_t{due} * conversion());
+  auto const due    = state_.due_count;
+  auto const end    = state_.due_end_ps;
   state_.converting = false;
   state_.end_ps     = end;
   for(; state_.held < due; ++state_.held)
@@ -3150,7 +3167,7 @@ template <typename Traits> void adc_model<Traits>::finish()
   }
   if constexpr(Traits::triggered_ovs)
   {
-    if(triggered() and state_.held < ratio())
+    if(triggered() and state_.held < state_.ratio_count)
     {
       state_.kept_held = state_.held;
       state_.kept_sum  = state_.sum;
@@ -3875,9 +3892,9 @@ template <typename Traits> void adc_model<Traits>::finish_injected()
 {
   if constexpr(injected_group)
   {
-    auto const end    = after(std::uint64_t{ratio()} * conversion());
+    auto const end    = state_.due_end_ps;
     state_.converting = false;
-    for(auto const samples = ratio(); state_.held < samples; ++state_.held)
+    for(auto const samples = state_.ratio_count; state_.held < samples; ++state_.held)
     {
       state_.sum += code();
     }
@@ -4083,7 +4100,8 @@ template <typename Traits> void adc_model<Traits>::keep_samples(std::uint64_t at
     }
     hold_until(at_ps);
     auto completed = std::uint32_t{};
-    while(completed < state_.held and after(std::uint64_t{completed + 1u} * conversion()) <= at_ps)
+    while(completed < state_.held
+          and after(std::uint64_t{completed + 1u} * state_.conversion_hs) <= at_ps)
     {
       ++completed;
     }
