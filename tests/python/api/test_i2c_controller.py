@@ -4,7 +4,6 @@ mode, on the U575, the H573 and the L152RE."""
 from __future__ import annotations
 
 import asyncio
-import gc
 import struct
 import weakref
 from collections.abc import Callable
@@ -20,7 +19,7 @@ from popcorn.board import I2CAnswer, I2CController, I2CPhase, I2CTarget
 from popcorn.pytest._cache import devices_digest
 from popcorn.units import VirtualDuration, VirtualTime, ms, ps, us
 
-from .conftest import run_bounded, stall, stalled
+from .conftest import collected, run_bounded, stall, stalled
 from .test_host_binding import COLLECTED
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
@@ -285,8 +284,7 @@ def test_a_transaction_keeps_neither_the_machine_nor_the_controller_alive(
         assert len(device.answers) == 1
     watched = weakref.ref(m), weakref.ref(device)
     del m, device
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 CALLS: dict[str, Callable[[I2CController], object]] = {
@@ -409,8 +407,7 @@ def test_a_controller_on_an_spi_serving_no_machine_or_another_is_refused(part: P
     asyncio.run(device.start(OWN))
     watched = weakref.ref(m)
     del m
-    gc.collect()
-    assert watched() is None
+    assert collected(watched)
     with pytest.raises(ConfigError, match="serves no live machine"):
         device.stop()
     second = part.machine(device)
@@ -500,8 +497,7 @@ def test_an_on_answer_exception_stops_the_run_and_keeps_nothing_alive(part: Part
     assert raised.traceback[-1].name == "on_answer"
     watched = weakref.ref(m), weakref.ref(device)
     del m, device, raised
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 class BrokenOnce(I2CController):

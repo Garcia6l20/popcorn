@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -14,7 +13,7 @@ import pytest
 from popcorn.model import Model, on_read, on_write
 from popcorn.units import us
 
-from .conftest import run_bounded
+from .conftest import collected, run_bounded
 
 RNG_ELF = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "rng_ll.elf"
 RNGRST = 1 << 18
@@ -213,6 +212,5 @@ def test_a_reset_model_is_collected_with_its_machine(u575: popcorn.PartDescripti
     model = weakref.ref(rng_of(m))
     machine = weakref.ref(m)
     del m
-    gc.collect()
-    assert model() is None
-    assert machine() is None
+    assert collected(model)
+    assert collected(machine)

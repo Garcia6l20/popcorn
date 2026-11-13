@@ -41,8 +41,11 @@ from .conftest import (
     REQUESTS_INSIDE,
     VIEWS_ELF,
     Machines,
+    collected,
+    quiet_host_threads,
     requests_inside,
     run_bounded,
+    settled,
     stalled_until_posted,
 )
 from .models_example import Timer
@@ -272,13 +275,11 @@ def test_halt_is_refused_from_a_handler_and_during_a_run(machines: Machines) -> 
 
 
 def test_a_started_machine_dropped_without_halt_joins_its_thread(machines: Machines) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     m = machines()
     m.start()
     del m
-    gc.collect()
-    assert _core.host_threads() == before
+    assert settled(lambda: _core.host_threads() == before)
 
 
 def started_and_ended_by_a_handler(
@@ -311,16 +312,15 @@ def test_a_machine_whose_free_run_a_handler_ended_is_collected(
     def report(raised: sys.UnraisableHookArgs) -> None:
         reported.append(repr(raised.exc_value))
 
+    before = quiet_host_threads()
     monkeypatch.setattr(sys, "unraisablehook", report)
-    gc.collect()
-    before = _core.host_threads()
     probe = started_and_ended_by_a_handler(machines, surfaced)
-    gc.collect()
-    assert probe() is None
-    assert _core.host_threads() == before
+    assert collected(probe)
+    assert settled(lambda: _core.host_threads() == before)
     if surfaced:
         assert reported == []
     else:
+        assert settled(lambda: len(reported) == 1), reported
         [unclaimed] = reported
         assert unclaimed.startswith("EmulationError(") and "collected" in unclaimed
         assert "ValueError: a handler of" in unclaimed
@@ -453,8 +453,7 @@ def test_a_command_error_on_the_machine_thread_drops_its_frame_locals_and_its_ma
     machines: Machines,
 ) -> None:
     probe = failed_command(machines)
-    gc.collect()
-    assert probe() is None
+    assert collected(probe)
 
 
 def test_a_machine_with_a_python_model_runs_under_a_loop_that_yields_for_real() -> None:
@@ -548,8 +547,7 @@ def test_a_halted_handler_error_keeps_no_frame_alive_in_a_kept_machine(
     m = machines(slice_instructions=1_000)
     m.on_return("alu_mark", boom)
     probe = caught_and_halted(m)
-    gc.collect()
-    assert probe() is None
+    assert collected(probe)
     assert not m.busy
 
 
@@ -606,8 +604,7 @@ def test_a_wait_ended_by_a_handler_holds_no_machine_once_it_completes(
     probe = ended_while_stalled(machines, stall)
     try:
         assert stall.stalled.is_set()
-        gc.collect()
-        assert probe() is None
+        assert collected(probe)
     finally:
         stall.release.set()
     assert reported == []
@@ -1541,8 +1538,7 @@ def sampled_past_the_halt(machines: Machines) -> weakref.ref[popcorn.Machine]:
 
 def test_a_sample_stamped_past_a_free_run_keeps_no_machine_alive(machines: Machines) -> None:
     gone = sampled_past_the_halt(machines)
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 def test_a_running_sample_takes_the_gil_once_and_keeps_no_handler(machines: Machines) -> None:

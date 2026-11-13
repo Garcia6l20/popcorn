@@ -34,7 +34,17 @@ from popcorn.stm32.description import cached_description
 from popcorn.trace import TraceKind
 from popcorn.units import VirtualTime, s, us
 
-from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
+from .conftest import (
+    BOARD_ELF,
+    DRIVER_ELF,
+    M33_JSON,
+    Machines,
+    collected,
+    load_each_unforwarded,
+    quiet_host_threads,
+    settled,
+    stalled,
+)
 from .devices_example import Eeprom24
 from .linked import USART_LL
 from .projects import MODEL_ELF
@@ -340,11 +350,10 @@ def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
             assert failing.failed
             probe = weakref.ref(m)
             del m
-            gc.collect()
-            assert probe() is None
+            assert collected(probe)
     finally:
         logger.removeFilter(failing)
-    assert reported == ["RuntimeError('filter failed')"]
+    assert settled(lambda: reported == ["RuntimeError('filter failed')"]), reported
 
 
 def latency_warnings(m: popcorn.Machine) -> popcorn.RegisterView:
@@ -569,19 +578,16 @@ def test_cancelling_the_awaiting_task_halts_the_goal(machines: Machines) -> None
 
 
 def test_a_collected_machine_joins_its_thread(machines: Machines) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     m = machines()
     asyncio.run(m.step(1))
     assert _core.host_threads() == before + 1
     del m
-    gc.collect()
-    assert _core.host_threads() == before
+    assert settled(lambda: _core.host_threads() == before)
 
 
 def test_a_machine_never_run_starts_no_thread(machines: Machines) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     m = machines()
     assert m.mem.u32[m.sym("alu_rounds")] == 0
     assert _core.host_threads() == before
@@ -661,8 +667,7 @@ def test_an_interpreter_exits_with_a_live_machine_thread() -> None:
 
 
 def test_a_collection_inside_a_handler_destroys_another_machine(machines: Machines) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     first = machines()
     second = machines()
     asyncio.run(second.step(1))
@@ -708,8 +713,7 @@ class Cycle:
 def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_machine(
     machines: Machines,
 ) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     enabled = gc.isenabled()
     relays: list[weakref.ref[Relay]] = []
     hooks: list[_core.Hook] = []
@@ -761,8 +765,7 @@ def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_
 def test_a_trace_of_a_machine_collected_on_another_host_thread_is_closed_as_its_thread_stops(
     machines: Machines, tmp_path: pathlib.Path
 ) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     removals = _core.exit_removals_run()
     enabled = gc.isenabled()
     path = tmp_path / "t.pctr"
@@ -1024,8 +1027,7 @@ CURRENT: contextvars.ContextVar[object] = contextvars.ContextVar("host_binding_c
 def test_a_context_holding_the_machine_does_not_keep_it_alive(
     m33: popcorn.PartDescription, driver: popcorn.Image
 ) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     cell: list[object] = []
 
     def build() -> weakref.ref[popcorn.Machine]:
@@ -1046,9 +1048,8 @@ def test_a_context_holding_the_machine_does_not_keep_it_alive(
 
     probe = contextvars.copy_context().run(build)
     cell.clear()
-    gc.collect()
-    assert probe() is None
-    assert _core.host_threads() == before
+    assert collected(probe)
+    assert settled(lambda: _core.host_threads() == before)
 
 
 DROPPED_HOOKS = """
@@ -1390,8 +1391,7 @@ def test_a_context_holding_the_machine_does_not_keep_its_models_alive(
     build: Callable[[], popcorn.Machine], u575: popcorn.PartDescription
 ) -> None:
     del u575
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
 
     def made() -> weakref.ref[popcorn.Machine]:
         cell: list[object] = []
@@ -1402,9 +1402,8 @@ def test_a_context_holding_the_machine_does_not_keep_its_models_alive(
         return weakref.ref(m)
 
     probe = contextvars.copy_context().run(made)
-    gc.collect()
-    assert probe() is None
-    assert _core.host_threads() == before
+    assert collected(probe)
+    assert settled(lambda: _core.host_threads() == before)
 
 
 READS: list[str] = []
@@ -1467,8 +1466,7 @@ def test_a_parked_machine_held_by_its_model_is_collected(
     u575: popcorn.PartDescription,
 ) -> None:
     del u575
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
 
     def made() -> weakref.ref[popcorn.Machine]:
         m, held = build()
@@ -1477,9 +1475,8 @@ def test_a_parked_machine_held_by_its_model_is_collected(
         return weakref.ref(m)
 
     probe = made()
-    gc.collect()
-    assert probe() is None
-    assert _core.host_threads() == before
+    assert collected(probe)
+    assert settled(lambda: _core.host_threads() == before)
 
 
 def test_a_machine_handle_reports_its_python_models_to_the_collector() -> None:
@@ -1735,8 +1732,7 @@ def test_a_free_running_machine_held_by_its_model_is_collected(shape: str) -> No
 def test_a_collection_inside_a_handler_collects_a_free_running_cycle(
     machines: Machines,
 ) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     first = machines()
 
     def other() -> weakref.ref[popcorn.Machine]:
@@ -1750,7 +1746,13 @@ def test_a_collection_inside_a_handler_collects_a_free_running_cycle(
     collected: list[int] = []
 
     def handler(call: popcorn.Call) -> popcorn.Return:
-        collected.append(gc.collect())
+        count = gc.collect()
+        for _ in range(100):
+            if count or probe() is None:
+                break
+            time.sleep(0.01)
+            count = gc.collect()
+        collected.append(count or int(probe() is None))
         return call.proceed()
 
     first.intercept("alu_mark", handler)
@@ -2273,8 +2275,7 @@ def test_a_hook_dropped_while_its_host_is_held_goes_at_the_next_parked_access(
     gc.collect()
     assert gone() is not None
     assert a.mem.u32[0x2000_8000] is not None
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 FORKED = """

@@ -18,7 +18,7 @@ from popcorn._host import awaited
 from popcorn._stop import stop_of
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import Machines, run_bounded
+from .conftest import Machines, collected, run_bounded
 
 HANG = 10.0
 
@@ -285,8 +285,7 @@ def test_probes_added_and_removed_a_thousand_times_leave_nothing(machines: Machi
             pass
     assert len(m._installed) <= 2  # pyright: ignore[reportPrivateUsage]
     assert m.remove_hooks() == 1
-    gc.collect()
-    assert kept() is None
+    assert collected(kept)
 
 
 def test_a_machine_with_a_probe_is_collected(machines: Machines) -> None:
@@ -296,9 +295,8 @@ def test_a_machine_with_a_probe_is_collected(machines: Machines) -> None:
     gone = weakref.ref(m)
     held = weakref.ref(probe)
     del m, probe
-    gc.collect()
-    assert gone() is None
-    assert held() is None
+    assert collected(gone)
+    assert collected(held)
 
 
 def test_a_probe_counts_an_arrival_once_after_the_intercept_that_stopped_there_goes(

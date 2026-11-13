@@ -18,6 +18,7 @@ from popcorn import ConfigError, StopReason, _core
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite, _native
 from popcorn.units import VirtualDuration, ms, ns, ps, us
 
+from .conftest import collected
 from .devices_example import Eeprom24
 from .projects import NATIVE_DEVICES
 from .test_devices import BUDGET, I2C_ELF, SPI_ELF, enter, finish, pattern
@@ -349,8 +350,7 @@ def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.PartDescriptio
     assert held() is not None
     assert run(m, "eeprom_rw")[0] == 20
     del m
-    gc.collect()
-    assert held() is None
+    assert collected(held)
 
 
 def collected_with_its_device(m: popcorn.Machine, bus: str) -> None:
@@ -359,9 +359,8 @@ def collected_with_its_device(m: popcorn.Machine, bus: str) -> None:
     vars(attached)["owner"] = m
     machine, held = weakref.ref(m), weakref.ref(attached)
     del m, attached
-    gc.collect()
-    assert machine() is None
-    assert held() is None
+    assert collected(machine)
+    assert collected(held)
 
 
 def test_an_at25sf_that_reaches_its_machine_is_collected(u575: popcorn.PartDescription) -> None:

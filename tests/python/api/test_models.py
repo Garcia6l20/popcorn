@@ -21,7 +21,7 @@ from derived_data import model_json
 from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import run_bounded
+from .conftest import collected, run_bounded
 from .models_example import Eeprom, Timer
 from .projects import MODEL_ELF, Plain, model_project
 from .projects import Eeprom as FakeEeprom
@@ -287,8 +287,7 @@ def test_dropping_the_machine_frees_the_model() -> None:
     call(m, "start_timer", 10)
     ref = weakref.ref(timer_of(m))
     del m
-    gc.collect()
-    assert ref() is None
+    assert collected(ref)
 
 
 def test_a_model_kept_past_its_machine_refuses_machine_access() -> None:

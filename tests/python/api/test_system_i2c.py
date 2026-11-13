@@ -27,6 +27,7 @@ from popcorn import (
 from popcorn.board import I2CController, I2CPhase, I2CTarget
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import collected
 from .linked import VARIANT_VALUES, VARIANTS, in_flight, to
 from .test_system_state import encoded
 
@@ -662,9 +663,8 @@ def test_a_closed_system_s_tap_stays_readable_and_the_system_is_collected(
     held = weakref.ref(system)
     machines = [weakref.ref(a), weakref.ref(b)]
     del system, a, b, tap
-    gc.collect()
-    assert held() is None
-    assert all(machine() is None for machine in machines)
+    assert collected(held)
+    assert all(collected(machine) for machine in machines)
 
 
 def test_a_system_collected_unclosed_leaves_no_machine_alive(
@@ -676,12 +676,10 @@ def test_a_system_collected_unclosed_leaves_no_machine_alive(
     asyncio.run(to(system, VirtualTime(us(150).ps)))
     held = weakref.ref(system)
     del system
-    gc.collect()
-    assert held() is None
+    assert collected(held)
     machines = [weakref.ref(a), weakref.ref(b)]
     del a, b
-    gc.collect()
-    assert all(machine() is None for machine in machines)
+    assert all(collected(machine) for machine in machines)
 
 
 def test_a_closed_system_gives_the_i2cs_back_to_a_new_system(

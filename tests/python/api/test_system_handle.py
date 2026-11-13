@@ -21,6 +21,7 @@ from popcorn import _core
 from popcorn._host import awaited
 from popcorn.units import ms, us
 
+from .conftest import collected, quiet_host_threads, settled
 from .linked import LINK_BYTE, PING_BYTES, USART_LL, logged, member
 
 LATENCY = us(20).ps
@@ -416,20 +417,17 @@ def test_a_stop_when_goal_takes_the_gil_only_for_its_calls(
 
 
 def test_the_handle_holds_its_members_until_closed(u575: popcorn.PartDescription) -> None:
-    gc.collect()
-    threads = _core.host_threads()
+    threads = quiet_host_threads()
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     handle = link(a, b).handle
     machine = weakref.ref(a)
     del a, b
-    gc.collect()
-    assert machine() is None
-    assert _core.host_threads() == threads + 2
+    assert collected(machine)
+    assert settled(lambda: _core.host_threads() == threads + 2)
     handle.close()
     del handle
-    gc.collect()
-    assert _core.host_threads() == threads
+    assert settled(lambda: _core.host_threads() == threads)
 
 
 def test_an_async_resume_completes_through_the_loop(
@@ -556,8 +554,7 @@ def test_closing_from_another_thread_while_calls_run(u575: popcorn.PartDescripti
 def test_a_system_collected_on_a_machine_thread_closes_off_that_thread(
     u575: popcorn.PartDescription,
 ) -> None:
-    gc.collect()
-    before = _core.host_threads()
+    before = quiet_host_threads()
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     other = member(u575, "link_tx_count", "c")

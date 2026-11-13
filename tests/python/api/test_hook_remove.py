@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gc
 import threading
 import weakref
 
 import popcorn
 import pytest
 
-from .conftest import HOOKS_ELF
+from .conftest import HOOKS_ELF, collected
 
 SLICES = [1, 50, 1_000_000]
 
@@ -197,8 +196,7 @@ def test_a_handler_removed_from_itself_is_freed_when_the_slice_ends(
     del intercept, returned, watch
     call(m, "write_three")
     holder.clear()
-    gc.collect()
-    assert ref() is None
+    assert collected(ref)
 
 
 def test_a_handler_that_removes_itself_and_raises_still_ends_the_hook(
@@ -276,9 +274,8 @@ def test_a_handler_removed_from_itself_is_freed_with_its_machine(
     assert not holder[0].active
     holder.clear()
     del m
-    gc.collect()
-    assert ref() is None
-    assert machine_ref() is None
+    assert collected(ref)
+    assert collected(machine_ref)
 
 
 @pytest.mark.parametrize("slice_instructions", SLICES)

@@ -4,7 +4,6 @@ system time, scheduled, from the cut owner's callbacks, stopped, and the refusal
 from __future__ import annotations
 
 import asyncio
-import gc
 import weakref
 from collections.abc import Callable
 from typing import cast
@@ -23,6 +22,7 @@ from popcorn import (
 )
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import collected
 from .linked import (
     FIRMWARE_BAUD,
     LINK_BYTE,
@@ -816,8 +816,7 @@ def test_a_closed_system_and_its_tap_are_collected_after_cuts(
     system.close()
     held = weakref.ref(system), weakref.ref(tap)
     del system, tap
-    gc.collect()
-    assert held[0]() is None and held[1]() is None
+    assert all(collected(w) for w in held)
 
 
 def test_a_free_run_does_not_sleep_through_a_break_cut_ahead(pair: Build) -> None:

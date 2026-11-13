@@ -9,13 +9,13 @@ import os
 import struct
 import threading
 import time
-import weakref
 from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn import _core
 from popcorn._refs import Pending
 from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms
@@ -56,7 +56,7 @@ def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) 
     return asyncio.run(bounded())
 
 
-def collected[T](watch: weakref.ref[T], rounds: int = 100) -> bool:
+def collected(watch: Callable[[], object], rounds: int = 100) -> bool:
     """Whether the object of `watch` is gone after full collections, at most `rounds` of them.
 
     `gc.collect()` returns 0 at once while a collection runs on another thread, such as an
@@ -70,6 +70,67 @@ def collected[T](watch: weakref.ref[T], rounds: int = 100) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def settled(reached: Callable[[], bool], rounds: int = 100) -> bool:
+    """Whether `reached()` holds after full collections, at most `rounds` of them.
+
+    Same loop as `collected()` for a count or a list that a collection on another thread has not
+    finished moving, such as `_core.host_threads()` or reports raised by a finalizer: the weakref
+    of a machine is clear before its handle joins the host thread. Unlike `settles` of the
+    system-handle tests, each round also collects. A baseline comes from `quiet_host_threads()`.
+    """
+    for _ in range(rounds):
+        wait_for_collections()
+        gc.collect()
+        if reached():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+_gc_open = 0
+_gc_idle = threading.Condition()
+
+
+def _count_open_collections(phase: str, info: dict[str, int]) -> None:
+    global _gc_open
+    with _gc_idle:
+        if phase == "start":
+            _gc_open += 1
+        else:
+            _gc_open = max(0, _gc_open - 1)
+            _gc_idle.notify_all()
+
+
+gc.callbacks.append(_count_open_collections)
+
+
+def wait_for_collections(timeout: float = 5) -> None:
+    """Block until no collection is open on any thread.
+
+    CPython runs the `stop` callback after the finalizers and the deletion of the garbage, so a
+    machine handle finalized by a foreign collection has joined its host thread by then. The
+    counting hook is process-wide and permanent. Do not call this, `settled()` or
+    `quiet_host_threads()` from a finalizer, a handler or a thread that is itself inside a
+    collection: it would wait for its own collection and fail after `timeout`.
+    """
+    with _gc_idle:
+        if not _gc_idle.wait_for(lambda: _gc_open == 0, timeout):
+            pytest.fail(f"{_gc_open} collection(s) on another thread never ended in {timeout} s")
+
+
+def quiet_host_threads() -> int:
+    """The host thread count once no collection is open on any thread.
+
+    A baseline read while a collection on another thread still finalizes an earlier machine
+    includes a thread that then ends, which breaks every exact `before + 1` and `== before`
+    assertion later in the test. A collection that starts after the read is not covered.
+    """
+    wait_for_collections()
+    gc.collect()
+    wait_for_collections()
+    return _core.host_threads()
 
 
 def holds_pty(path: str) -> bool:

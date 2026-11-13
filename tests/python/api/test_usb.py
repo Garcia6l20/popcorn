@@ -45,7 +45,7 @@ from popcorn.board import (
 )
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import BOARD_ELF, late_drained_read, run_bounded, stalled
+from .conftest import BOARD_ELF, collected, late_drained_read, run_bounded, stalled
 from .projects import Silent
 
 HANG = 10.0
@@ -703,8 +703,7 @@ def test_a_report_command_left_by_a_cancel_reports_its_later_failure(
 
     asyncio.run(cancelled(writing))
     del writing
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
     assert reported == []
     m.reset()
     assert len(reported) == 1
@@ -1876,8 +1875,9 @@ def orphans(u575: popcorn.PartDescription) -> Orphans:
     audio_host = audio_m.periph.OTG_FS.host
     asyncio.run(audio_host.wait_configured(for_=s(2)))
     uac = usb_link_of(audio_host).audio(0)
+    watched = weakref.ref(m), weakref.ref(audio_m)
     del m, host, audio_m, audio_host
-    gc.collect()
+    assert all(collected(w) for w in watched)
     return Orphans(cdc, hid, usb, uac, ticket)
 
 
@@ -1916,8 +1916,7 @@ def test_a_dropped_stamped_report_write_leaves_its_machine_collectable(
     del writing
     gone = weakref.ref(m)
     del m, host, hid
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 def test_a_dropped_report_write_on_a_running_machine_takes_no_gil(

@@ -4,7 +4,6 @@ frames, and the streams of linked UARTs."""
 from __future__ import annotations
 
 import asyncio
-import gc
 import threading
 import weakref
 from collections.abc import Callable
@@ -16,7 +15,7 @@ from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _co
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import stalled_until_posted
+from .conftest import collected, stalled_until_posted
 from .linked import (
     FIRMWARE_BAUD,
     LINK_BYTE,
@@ -284,8 +283,7 @@ def test_a_closed_system_s_tap_holds_every_frame_ended_by_its_last_pause(
         tap.drop(63, towards="b.USART1")
     held = weakref.ref(system)
     del system, tap, frames
-    gc.collect()
-    assert held() is None
+    assert collected(held)
     assert a.time.ps >= us(1001).ps
 
 
@@ -366,8 +364,7 @@ def test_a_system_collected_unclosed_gives_its_uarts_back(
         a.periph.USART1.port.write(b"x")
     held = weakref.ref(system)
     del system
-    gc.collect()
-    assert held() is None
+    assert collected(held)
 
     async def write() -> VirtualTime:
         return await a.periph.USART1.port.write(b"x")

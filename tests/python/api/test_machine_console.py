@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import gc
 import weakref
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +14,8 @@ from popcorn import _machine_description
 from popcorn._rng import RngOptions
 from popcorn.board import UartDevice
 from popcorn.pytest._session import Key
+
+from .conftest import collected
 
 PLAIN_DIGEST = "c1fef57e3020d0713b9ead07c1fab2394e8855dce16a87439f02662500bcd068"
 BOOT_AND_RNG_DIGEST = "ac342e38bf906641d4d60cdbc60f898dca9cc04bb6f2e8984255591fc224a6dc"
@@ -126,8 +127,7 @@ def test_a_console_on_no_uart_is_refused_and_the_machine_is_freed_with_the_error
     assert caught.value.key == "console.uart"
     assert len(built) == 1
     del caught
-    gc.collect()
-    assert built[0]() is None
+    assert collected(built[0])
 
 
 def test_an_alias_of_a_uart_with_a_device_is_refused(u575: popcorn.PartDescription) -> None:

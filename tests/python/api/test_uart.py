@@ -22,7 +22,7 @@ from popcorn.model import Model
 from popcorn.trace import TraceKind, read
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import BOARD_ELF, holds_pty, late_drained_read, run_bounded, stalled
+from .conftest import BOARD_ELF, collected, holds_pty, late_drained_read, run_bounded, stalled
 
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
@@ -134,8 +134,7 @@ def test_a_stream_keeps_its_machine_and_both_are_freed_together(
     gc.collect()
     assert machine() is not None and uart.queued == 0
     del uart
-    gc.collect()
-    assert machine() is None
+    assert collected(machine)
     assert not holds_pty(path)
 
 
@@ -869,9 +868,8 @@ def test_a_finished_read_until_keeps_neither_machine_nor_pattern(
 ) -> None:
     machine, pattern = reading_board(u575, cancel)
     re.purge()
-    gc.collect()
-    assert machine() is None
-    assert pattern() is None
+    assert collected(machine)
+    assert collected(pattern)
 
 
 def test_read_until_misses_without_taking(board: popcorn.Machine) -> None:

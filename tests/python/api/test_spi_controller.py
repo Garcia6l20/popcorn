@@ -18,7 +18,7 @@ from popcorn.board import SpiController, SpiTarget
 from popcorn.pytest._cache import devices_digest
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import run_bounded, stall, stalled
+from .conftest import collected, run_bounded, stall, stalled
 from .test_host_binding import COLLECTED
 
 SPI_ELF = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "spi_ll.elf"
@@ -154,8 +154,7 @@ def test_a_transfer_keeps_neither_the_machine_nor_the_controller_alive(
         assert device.received == [0xFF, 0xFF]
     watched = weakref.ref(m), weakref.ref(device)
     del m, device
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 @pytest.mark.parametrize(
@@ -280,8 +279,7 @@ def test_a_controller_on_an_i2c_or_serving_no_machine_is_refused(
     asyncio.run(device.transfer([1]))
     watched = weakref.ref(m)
     del m
-    gc.collect()
-    assert watched() is None
+    assert collected(watched)
     with pytest.raises(ConfigError, match="serves no live machine"):
         device.transfer([1])
 
@@ -413,8 +411,7 @@ def test_a_controller_holding_its_machine_is_reported_and_the_cycle_collected(
     assert device.received == [0xFF, 0xFF]
     watched = weakref.ref(m), weakref.ref(device)
     del m, device, handle
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 class Broken(SpiController):
@@ -447,8 +444,7 @@ def test_an_on_frame_exception_keeps_neither_the_machine_nor_the_controller_aliv
         asyncio.run(m.run(budget=BUDGET))
     watched = weakref.ref(m), weakref.ref(device)
     del m, device, raised
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 def finish_idle(m: popcorn.Machine) -> list[int]:

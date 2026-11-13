@@ -29,6 +29,7 @@ from .conftest import (
     REQUESTS_INSIDE,
     VIEWS_ELF,
     Machines,
+    collected,
     requests_inside,
     run_bounded,
 )
@@ -128,8 +129,7 @@ def test_a_failing_parked_batch_leaves_its_machine_collectable(machines: Machine
         asyncio.run(m.read(m.ref.mem.u32[UNMAPPED]))
     probe = weakref.ref(m)
     del m
-    gc.collect()
-    assert probe() is None
+    assert collected(probe)
 
 
 def test_done_follows_the_command_not_the_await(machines: Machines) -> None:
@@ -1040,8 +1040,7 @@ def stamped_and_dropped(machines: Machines) -> weakref.ref[popcorn.Machine]:
 
 def test_a_stamped_sample_left_queued_keeps_no_machine_alive(machines: Machines) -> None:
     gone = stamped_and_dropped(machines)
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 def failed_in_a_parked_sample(machines: Machines) -> weakref.ref[popcorn.Machine]:
@@ -1061,8 +1060,7 @@ def failed_in_a_parked_sample(machines: Machines) -> weakref.ref[popcorn.Machine
 
 def test_a_failed_parked_sample_keeps_no_machine_alive(machines: Machines) -> None:
     gone = failed_in_a_parked_sample(machines)
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 class Captured:
@@ -1097,6 +1095,6 @@ def test_withdrawn_samples_keep_a_bounded_number_of_handlers(machines: Machines)
     table = m._callback_table  # pyright: ignore[reportPrivateUsage]
     handlers = len(table)
     gone = withdrawn_samples(m, 1000)
+    assert collected(gone)
     gc.collect()
     assert len(table) - handlers < 16
-    assert gone() is None

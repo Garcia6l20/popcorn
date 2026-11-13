@@ -17,7 +17,7 @@ from popcorn.coverage import Coverage, ImageKind
 from popcorn.trace import ALL, Block, Mmio, Stop, TraceKind, read
 from popcorn.units import ms
 
-from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, load_each, run_bounded
+from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, collected, load_each, run_bounded
 from .models_example import Timer
 
 BRANCHES_ELF = CORE_FIRMWARE / "branches.elf"
@@ -478,8 +478,7 @@ def test_a_renamed_machine_is_collected() -> None:
     m._rename("new")  # pyright: ignore[reportPrivateUsage]
     probe = weakref.ref(m)
     del m
-    gc.collect()
-    assert probe() is None
+    assert collected(probe)
 
 
 def test_concurrent_machines_keep_their_records_apart(caplog: pytest.LogCaptureFixture) -> None:
@@ -572,5 +571,4 @@ def test_a_machine_with_its_log_sink_is_freed() -> None:
     asyncio.run(m.call("touch_unmodelled"))
     ref = weakref.ref(m)
     del m
-    gc.collect()
-    assert ref() is None
+    assert collected(ref)

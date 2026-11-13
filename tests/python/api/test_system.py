@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import itertools
 import logging
 import threading
@@ -16,7 +15,7 @@ import pytest
 from popcorn import StopReason, System, SystemStop, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import run_bounded
+from .conftest import collected, run_bounded
 from .linked import PING_BYTES, Ticker, logged, member, received, ticker
 
 L = us(20)
@@ -346,8 +345,7 @@ def test_a_closed_system_and_its_members_are_freed(u575: popcorn.PartDescription
     held = weakref.ref(system), weakref.ref(a), weakref.ref(b)
     system.close()
     del system, a, b
-    gc.collect()
-    assert [one() for one in held] == [None, None, None]
+    assert all(collected(one) for one in held)
 
 
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)

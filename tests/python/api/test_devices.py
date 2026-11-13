@@ -541,8 +541,7 @@ def test_a_machine_keeps_its_devices_and_frees_them_with_it(
     gc.collect()
     assert watch() is not None
     del m
-    gc.collect()
-    assert watch() is None
+    assert collected(watch)
 
 
 def test_a_device_serves_one_live_machine(u575: popcorn.PartDescription) -> None:
@@ -551,8 +550,9 @@ def test_a_device_serves_one_live_machine(u575: popcorn.PartDescription) -> None
     with pytest.raises(ConfigError) as refused:
         popcorn.Machine(u575, devices={"I2C1": [device]})
     assert refused.value.key == "devices.I2C1"
+    watched = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(watched)
     again = popcorn.Machine(u575, devices={"I2C1": [device]})
     assert again.board.devices("I2C1") == (device,)
 
@@ -1596,8 +1596,7 @@ def test_a_hold_of_a_target_serving_no_machine_is_a_config_error(
     asyncio.run(target.hold_bus(for_=ms(1)))
     machine = weakref.ref(m)
     del m
-    gc.collect()
-    assert machine() is None
+    assert collected(machine)
     with pytest.raises(ConfigError, match="serves no live machine"):
         target.hold_bus(for_=ms(1))
 
@@ -1610,8 +1609,7 @@ def test_a_hold_keeps_neither_the_machine_nor_the_target_alive(
     asyncio.run(target.hold_bus(at=m.time + ms(1), for_=ms(1)))
     watched = weakref.ref(m), weakref.ref(target)
     del m, target
-    gc.collect()
-    assert [w() for w in watched] == [None, None]
+    assert all(collected(w) for w in watched)
 
 
 @pytest.mark.parametrize(

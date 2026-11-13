@@ -16,6 +16,7 @@ from popcorn import Stop, StopReason, System, UartLink
 from popcorn._errors import MachineBusy
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import collected
 from .linked import Ticker, member, ticker
 
 L = us(20)
@@ -488,8 +489,7 @@ def free_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[obje
 @pytest.mark.parametrize("path", ["plain", "raised", "stopped", "closed", "failed"])
 def test_a_free_run_frees_what_it_held(u575: popcorn.PartDescription, path: str) -> None:
     refs = free_path(u575, path)
-    gc.collect()
-    assert [one() for one in refs] == [None, None, None]
+    assert all(collected(one) for one in refs)
 
 
 def echoes(system: System) -> int:

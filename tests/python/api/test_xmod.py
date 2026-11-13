@@ -8,7 +8,6 @@ linking its own core or built in another nanobind domain into an ImportError, th
 
 from __future__ import annotations
 
-import gc
 import subprocess
 import sys
 import sysconfig
@@ -21,6 +20,7 @@ import pytest
 from popcorn import ConfigError, _core
 from popcorn.devices import chip_select
 
+from .conftest import collected
 from .test_devices import SPI_ELF, enter, finish
 
 if TYPE_CHECKING:
@@ -101,9 +101,8 @@ def test_the_machine_and_the_device_are_collected(u575: popcorn.PartDescription)
     machine_ref = weakref.ref(m)
     device_ref = weakref.ref(device)
     del m, device
-    gc.collect()
-    assert machine_ref() is None
-    assert device_ref() is None
+    assert collected(machine_ref)
+    assert collected(device_ref)
 
 
 def test_the_stub_names_the_core_base() -> None:

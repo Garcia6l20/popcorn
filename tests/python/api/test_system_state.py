@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import gc
 import weakref
 from collections.abc import Callable, Iterator
 from typing import Any, cast
@@ -23,6 +22,7 @@ from popcorn import (
 )
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import collected
 from .linked import logged, member, received
 from .snapshot_doc import bson
 
@@ -388,8 +388,7 @@ def test_a_system_snapshot_holds_no_system(u575: popcorn.PartDescription) -> Non
     dead = weakref.ref(system)
     system.close()
     del system
-    gc.collect()
-    assert dead() is None
+    assert collected(dead)
     assert set(taken.members) == {"a", "b"}
 
 

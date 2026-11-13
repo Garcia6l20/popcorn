@@ -18,6 +18,7 @@ import pytest
 from popcorn import Stop, StopReason, System, UartLink, _core
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
+from .conftest import collected
 from .linked import Ticker, logged, member, received, ticker
 
 L = us(20)
@@ -465,8 +466,7 @@ def test_a_goal_s_predicate_and_members_are_freed_on_every_path(
     u575: popcorn.PartDescription, path: str
 ) -> None:
     refs = goal_path(u575, path)
-    gc.collect()
-    assert [one() for one in refs] == [None, None, None]
+    assert all(collected(one) for one in refs)
 
 
 def test_many_withdrawn_goals_leave_no_entry(ping: Build) -> None:
@@ -604,8 +604,7 @@ def running_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[o
 @pytest.mark.parametrize("path", ["plain", "raised", "stopped", "closed", "failed"])
 def test_a_member_running_body_frees_what_it_held(u575: popcorn.PartDescription, path: str) -> None:
     refs = running_path(u575, path)
-    gc.collect()
-    assert [one() for one in refs] == [None, None, None]
+    assert all(collected(one) for one in refs)
 
 
 async def waits_in_running(m: popcorn.Machine) -> tuple[object, ...]:

@@ -8,7 +8,6 @@ ns. The CCK starts at the CKGDEN write, the anchor, and half edge h falls at
 from __future__ import annotations
 
 import asyncio
-import gc
 import json
 import math
 import threading
@@ -23,7 +22,7 @@ from popcorn import ResetKind, System, UartLink, _core
 from popcorn.board import FilterSample, FilterTap, PdmMic
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import run_bounded
+from .conftest import collected, run_bounded
 from .mdf_reference import ChainConfig, modulate, run_chain
 
 ROOT = Path(__file__).parents[3]
@@ -591,8 +590,7 @@ def dropped_with_a_cancelled_read(u575: popcorn.PartDescription) -> weakref.ref[
 
 def test_a_cancelled_read_keeps_no_machine_alive(u575: popcorn.PartDescription) -> None:
     gone = dropped_with_a_cancelled_read(u575)
-    gc.collect()
-    assert gone() is None
+    assert collected(gone)
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])

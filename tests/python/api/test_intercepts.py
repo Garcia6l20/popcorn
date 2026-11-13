@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import traceback
 import weakref
 
@@ -11,7 +10,7 @@ import popcorn
 import pytest
 from popcorn.units import VirtualTime, ms
 
-from .conftest import BOARD_ELF, CALLEE_ELF, ISR_ELF, run_bounded
+from .conftest import BOARD_ELF, CALLEE_ELF, ISR_ELF, collected, run_bounded
 
 
 def call(m: popcorn.Machine, fn: str, *args: int) -> popcorn.CallResult:
@@ -152,8 +151,7 @@ def test_install_and_remove_leaves_no_handler_behind(hooked: popcorn.Machine) ->
     installed = hooked.intercept("note", handler)
     del handler
     installed.remove()
-    gc.collect()
-    assert probe() is None
+    assert collected(probe)
 
 
 def test_a_call_kept_past_its_handler_is_refused(hooked: popcorn.Machine) -> None:
