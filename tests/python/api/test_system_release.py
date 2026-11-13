@@ -337,12 +337,16 @@ def test_a_member_a_halted_free_run_left_at_its_stop_runs_in_the_next_system_run
     handle = ping._handle  # pyright: ignore[reportPrivateUsage]
 
     async def body() -> SystemStop:
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
         ping.start()
         opens = ping._opens  # pyright: ignore[reportPrivateUsage]
         first = opens[1]
         waiting = asyncio.create_task(b.elapse(us(30)))
         while opens.get(1) is first or not opens[1].done():
+            if waiting.done():
+                pytest.fail("the wait ended before the goal serving it was posted")
             await asyncio.sleep(0)
+        assert not waiting.done(), "the wait ended before the halt"
         assert handle.undecided() == [1]
         ping.halt()
         assert handle.undecided() == []
