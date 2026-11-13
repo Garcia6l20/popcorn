@@ -637,6 +637,7 @@ def test_drop_without_source_is_an_error(tmp_path: Path) -> None:
         load_patches([path], part="TOY1", svd_name="synthetic.svd")
 
 
+@pytest.mark.timeout(30)
 def test_u575_alias_rule_sets_98_peripherals(
     u575_sources: Sources, st_svd_u575: Path, st_cubemx_db: Path
 ) -> None:

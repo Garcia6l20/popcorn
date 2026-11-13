@@ -11,6 +11,7 @@ import pytest
 from .helpers import ROOT, write_conftest
 
 pytest_plugins = ["pytester"]
+pytestmark = pytest.mark.timeout(30)
 
 BASE = ("-p", "no:asyncio")
 USART_LL = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "usart_ll.elf"

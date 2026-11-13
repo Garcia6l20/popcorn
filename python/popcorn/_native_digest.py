@@ -59,9 +59,9 @@ def native_digest(directory: Path | None = None) -> str:
 def process_native_digest() -> str:
     """`native_digest()` read once, at first use, for the rest of the process.
 
-    A relink on disk afterwards changes no code the process runs: the loader refuses a plugin whose
-    ABI tag differs from the host's (`check_tag` in `plugin/loader.cpp`), so a key made from this
-    value never admits an incompatible library. A relink before the first call is hashed as it
-    stands, the same laziness as the boot cache.
+    A relink on disk afterwards changes no code the process runs. The key made from this value
+    names the libraries as they stood at first use, and a plugin built against others is refused at
+    load by the loader's ABI tag check (`check_tag` in `plugin/loader.cpp`), whatever the key says.
+    A relink before the first call is hashed as it stands, the same laziness as the boot cache.
     """
     return native_digest()

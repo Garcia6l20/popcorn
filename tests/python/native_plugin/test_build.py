@@ -149,6 +149,7 @@ def test_the_key_follows_the_native_digest_of_the_process(
     assert keys[0] != keys[1]
 
 
+@pytest.mark.timeout(30)
 def test_an_edit_in_the_same_process_asks_for_a_restart(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     plugin = Plugin.dev(source)
@@ -209,6 +210,7 @@ def test_the_build_reads_a_copy_taken_before_it(tmp_path: Path, cache: Path) -> 
     assert entry.name == f"echo-{_build_cache.key_of(pristine)}"
 
 
+@pytest.mark.timeout(30)
 def test_an_include_outside_the_plugin_directory_fails_naming_it(
     tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

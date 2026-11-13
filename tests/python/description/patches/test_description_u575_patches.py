@@ -15,6 +15,8 @@ from popcorn.stm32.description._svd import expand_svd
 
 from ..conftest import target_from_svd, target_peripheral
 
+pytestmark = pytest.mark.timeout(30)
+
 type _TargetAndReport = tuple[PatchTarget, PatchReport]
 
 STM32U5_TOML = (

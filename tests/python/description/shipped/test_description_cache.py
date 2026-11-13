@@ -13,6 +13,7 @@ from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 
 
+@pytest.mark.timeout(30)
 def test_cache_miss_then_hit(
     u575_sources: Sources, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

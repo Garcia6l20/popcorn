@@ -42,6 +42,8 @@ from popcorn.units import us
 
 from .support import FIXTURES, copied, run_python
 
+pytestmark = pytest.mark.timeout(45)
+
 ROOT = Path(__file__).resolve().parents[3]
 BOARD_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "board.elf"
 PART = "STM32U575QGIx"

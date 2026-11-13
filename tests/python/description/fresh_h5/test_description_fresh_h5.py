@@ -34,6 +34,7 @@ def test_ship_check_passes_on_the_shipped_layers(
     assert cli.main(["ship", name, "--pin-data", str(root), "--check"]) == 0, capsys.readouterr()
 
 
+@pytest.mark.timeout(45)
 def test_ship_check_builds_the_fresh_texts_in_a_pool_of_jobs_processes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -132,6 +132,7 @@ CASES = {
 }
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("test", CASES)
 def test_the_option_replaces_the_part_of_the_machines_a_test_builds(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, test: str
@@ -172,6 +173,7 @@ def test_the_boot_key_follows_the_part(
     assert set(before).isdisjoint(after)
 
 
+@pytest.mark.timeout(30)
 def test_a_run_with_overrides_under_xdist_exits_0_and_counts_them(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -185,6 +187,7 @@ def test_a_run_with_overrides_under_xdist_exits_0_and_counts_them(
     result.stdout.fnmatch_lines([f"popcorn: 5 of 5 tests ran on {PART}"])
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("workers", ["0", "2"])
 def test_a_test_that_builds_no_machine_exits_1(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, workers: str
@@ -278,6 +281,7 @@ def absent():
 """
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("workers", ["0", "2"])
 def test_skipped_tests_do_not_count_as_run_on_the_part(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, workers: str

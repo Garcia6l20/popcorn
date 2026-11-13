@@ -102,6 +102,7 @@ def test_changes_invalidate_the_entry(pytester: pytest.Pytester) -> None:
     assert boots("--cache-clear") == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     "imported",
     [
