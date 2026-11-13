@@ -156,11 +156,15 @@ def owner_cut(system: System) -> tuple[Seen, Outcome]:
 
     a.intercept("wait_complete", at_complete)
 
+    waited: list[bool] = []
+
     async def free() -> None:
         async with running_to_tx_end(system):
             await b.elapse(us(1500))
+            waited.append(True)
 
     asyncio.run(free())
+    assert waited, "the end of link_tx stopped the free run before b's wait returned"
     return seen, finish(system)
 
 
@@ -189,12 +193,16 @@ def owner_paused_cut(system: System) -> tuple[Seen, Outcome]:
 
     a.intercept("USART1_IRQHandler", on_irq)
 
+    paused: list[bool] = []
+
     async def free() -> None:
         async with running_to_tx_end(system):
             await a.elapse(us(425))
+            paused.append(True)
             await a.elapse(us(900))
 
     asyncio.run(free())
+    assert paused, "the end of link_tx stopped the free run before a's 425 us wait returned"
     return seen, receiver_outcome(system)
 
 
@@ -394,7 +402,7 @@ def body_after_a_pause(system: System) -> None:
             checked.append(True)
 
     asyncio.run(free())
-    assert checked
+    assert checked, "the end of link_tx stopped the free run before the body's checks"
     with pytest.raises(ValueError, match="no cut is open"):
         tap.restore_line()
     assert tap.owner == "a"
