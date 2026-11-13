@@ -1057,6 +1057,10 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       master_high_ = field(name("CR2"), "MMS_1");
     }
   }
+  if(slave_ and not select_)
+  {
+    select_ = field(name("SMCR"), "TS");
+  }
   if(select_)
   {
     expect_field(name("SMCR"), "TS_1", variant.select_high);

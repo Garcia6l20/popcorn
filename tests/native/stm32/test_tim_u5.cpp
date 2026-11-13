@@ -4141,6 +4141,27 @@ TEST_CASE("a U575 timer without its renamed SMS_1, TS_1 or 4-bit MMS_1 throws at
   }
 }
 
+TEST_CASE("a U575 slave-mode timer without its SMCR TS field throws at construction")
+{
+  for(std::string_view const unit : {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8", "TIM15"})
+  {
+    CAPTURE(unit);
+    auto desc = u575();
+    drop_field(timer_register(desc, unit, "SMCR"), "TS");
+    try
+    {
+      stm32_fixture{std::move(desc), "tim_ll"};
+      FAIL("no config_error");
+    }
+    catch(popcorn::config_error const& error)
+    {
+      CHECK(
+          std::string_view{error.what()}.contains(
+              std::format("peripherals.{}.registers.SMCR.TS", unit)));
+    }
+  }
+}
+
 TEST_CASE("a U575 timer whose MMS has 3 bits or none throws when the description says otherwise")
 {
   SUBCASE("TIM15 given an MMS_1")
