@@ -124,6 +124,7 @@ def _description(part: str) -> popcorn.PartDescription:
     return popcorn.parse_description(_built(part), part)
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("tzen", [False, True])
 @pytest.mark.parametrize(
     ("part", "firmware", "registers"),
