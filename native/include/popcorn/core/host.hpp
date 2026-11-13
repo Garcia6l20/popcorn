@@ -1041,6 +1041,7 @@ public:
    * @brief Wakes member @p who from host_state::idle_wait, or makes its next wait return at once,
    *        with no command. Any thread holding no other host mutex, takes this host's mutex
    *        briefly.
+   * @throws machine_forked in a process forked from the one that built the host.
    */
   void wake(member_id who) pre(who < members());
 

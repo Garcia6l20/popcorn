@@ -1329,6 +1329,11 @@ system::system(
 
 system::~system()
 {
+  if(impl_->slots.front().ref.on->forked())
+  {
+    std::ignore = std::make_unique<std::indirect<impl>>(std::move(impl_)).release();
+    return;
+  }
   close();
   if(impl_->future.valid())
   {

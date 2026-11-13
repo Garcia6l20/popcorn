@@ -2339,6 +2339,7 @@ auto host::owns_engine() const noexcept -> bool
 
 void host::wake(member_id who)
 {
+  refuse_forked();
   std::scoped_lock const lock{core_->mutex};
   core_->wake_locked(*core_->members[who]);
 }

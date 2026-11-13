@@ -2824,6 +2824,61 @@ TEST_CASE("the system destructor fails its contract on a host thread or under a 
   CHECK_FALSE(under_lock.said.contains(host_thread));
 }
 
+namespace
+{
+void forked_child_with_a_held_host_mutex(bool closes)
+{
+  rig r{.members = sleeper_and_runner()};
+  r.build(variants()[0]);
+  {
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held, core::sys_time{ms_ps});
+    }
+    REQUIRE(pending.wait_for(std::chrono::seconds{10}));
+    CHECK(bounded_get(pending).reason == core::pause_reason::system_time);
+  }
+  std::latch   locked{1};
+  std::latch   forked{1};
+  std::jthread holder{[&] {
+    auto const held = r.members[0].on->lock();
+    locked.count_down();
+    forked.wait();
+  }};
+  locked.wait();
+  auto const child = fork();
+  REQUIRE(child >= 0);
+  if(child == 0)
+  {
+    alarm(5);
+    if(closes)
+    {
+      r.sys->close();
+    }
+    r.sys.reset();
+    _exit(0);
+  }
+  forked.count_down();
+  holder.join();
+  int status = 0;
+  REQUIRE(waitpid(child, &status, 0) == child);
+  CHECK_FALSE(WIFSIGNALED(status));
+  CHECK(WIFEXITED(status));
+  CHECK(WEXITSTATUS(status) == 0);
+}
+}
+
+TEST_CASE("a system destroyed in a forked child leaves the mutexes a parent thread held")
+{
+  forked_child_with_a_held_host_mutex(false);
+}
+
+TEST_CASE("a system closed in a forked child leaves the mutexes a parent thread held")
+{
+  forked_child_with_a_held_host_mutex(true);
+}
+
 TEST_CASE("a halted member whose next event lies past the barrier runs no slice per window")
 {
   rig r{

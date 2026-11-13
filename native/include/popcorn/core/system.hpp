@@ -189,7 +189,9 @@ public:
       pre(not links.empty());
 
   /** @brief Closes, waits for every member to park and for the last pause's callbacks to
-   *         return, then unlinks the hosts. Not on a host thread, holding no host mutex. */
+   *         return, then unlinks the hosts. Not on a host thread, holding no host mutex. In a
+   *         process forked from the one that built the members' hosts it leaks its state
+   *         instead: the threads that held its mutexes and the hosts' mutexes are gone. */
   ~system() pre(not detail::on_host_thread) pre(detail::host_locks_held == 0);
   /** @brief Not copyable. */
   system(system const&) = delete;
