@@ -11,6 +11,7 @@ import pytest
 
 from popcorn import (
     Machine,
+    MachineConsole,
     MachineDescription,
     MissingInput,
     PopcornError,
@@ -62,20 +63,31 @@ class _Factory:
         if ends:
             raise ends[0]
 
-    def _ready(self, key: Key, machine: Machine, snapshot: Snapshot, label: str) -> Machine:
-        self._keep(machine, key, label)
+    def _ready(
+        self,
+        key: Key,
+        machine: Machine,
+        snapshot: Snapshot,
+        label: str,
+        console: MachineConsole | None,
+    ) -> Machine:
+        self._keep(machine, key, label, console)
         machine.restore(snapshot)
         machine.default_budget = self._budget
         return machine
 
-    def _track_failed(self, key: Key, label: str) -> None:
+    def _track_failed(self, key: Key, label: str, console: MachineConsole | None) -> None:
         failed = self._session.failed_machine(key)
         if failed is not None:
-            track(self._item, label, failed, key)
+            track(self._item, label, failed, key, console)
 
-    def _keep(self, machine: Machine, key: Key, label: str) -> Machine:
+    def _keep(
+        self, machine: Machine, key: Key, label: str, console: MachineConsole | None
+    ) -> Machine:
         self._machines.append((label, machine))
-        track(self._item, label, machine, key)
+        if console is not None:
+            console._check(machine)  # pyright: ignore[reportPrivateUsage]
+        track(self._item, label, machine, key, console)
         return machine
 
 
@@ -147,22 +159,25 @@ class MachineFactory(_Factory):
                 live machine, or `MachineDescription.machine` refuses `devices`.
         """
         key = self._key(description, config, strict, name)
+        console = description.config(config).console
         with _skipping_missing(self._session.project(key)):
             if not booted:
-                return self._keep(self._session.build(key, devices, name), key, self._label())
+                return self._keep(
+                    self._session.build(key, devices, name), key, self._label(), console
+                )
             if devices is not None:
                 key = self._session.device_key(key, devices)
             try:
                 if devices is None:
                     snapshot = self._session.booted(key).decoded()
                     return self._ready(
-                        key, self._session.build(key, name=name), snapshot, self._label()
+                        key, self._session.build(key, name=name), snapshot, self._label(), console
                     )
                 return self._ready(
-                    key, *self._session.booted_with(key, devices, name), self._label()
+                    key, *self._session.booted_with(key, devices, name), self._label(), console
                 )
             except PopcornError:
-                self._track_failed(key, f"machine_factory boot of {key}")
+                self._track_failed(key, f"machine_factory boot of {key}", console)
                 raise
 
     async def booted(
@@ -177,6 +192,7 @@ class MachineFactory(_Factory):
         """A new booted machine as `factory(description)` gives, booting the key on the running
         loop."""
         key = self._key(description, config, strict, name)
+        console = description.config(config).console
         with _skipping_missing(self._session.project(key)):
             if devices is not None:
                 key = self._session.device_key(key, devices)
@@ -184,13 +200,16 @@ class MachineFactory(_Factory):
                 if devices is None:
                     snapshot = (await self._session.booted_async(key)).decoded()
                     return self._ready(
-                        key, self._session.build(key, name=name), snapshot, self._label()
+                        key, self._session.build(key, name=name), snapshot, self._label(), console
                     )
                 return self._ready(
-                    key, *await self._session.booted_with_async(key, devices, name), self._label()
+                    key,
+                    *await self._session.booted_with_async(key, devices, name),
+                    self._label(),
+                    console,
                 )
             except PopcornError:
-                self._track_failed(key, f"machine_factory boot of {key}")
+                self._track_failed(key, f"machine_factory boot of {key}", console)
                 raise
 
     def _key(
@@ -239,9 +258,11 @@ class SystemFactory(_Factory):
         with _skipping_missing(self._session.project(key)):
             try:
                 snapshot = (await self._session.booted_async(key)).decoded()
-                return self._ready(key, self._session.build(key, name=name), snapshot, label)
+                return self._ready(
+                    key, self._session.build(key, name=name), snapshot, label, project.console
+                )
             except PopcornError:
-                self._track_failed(key, f"{label} boot")
+                self._track_failed(key, f"{label} boot", project.console)
                 raise
 
 
@@ -285,25 +306,39 @@ def _popcorn_session(request: pytest.FixtureRequest) -> PopcornSession:
 
 
 @contextlib.contextmanager
-def booting(item: pytest.Item, session: PopcornSession, key: Key, label: str) -> Generator[None]:
+def booting(
+    item: pytest.Item,
+    session: PopcornSession,
+    key: Key,
+    label: str,
+    console: MachineConsole | None,
+) -> Generator[None]:
     """Skip `item` on missing input of a machine description with `missing="skip"`, and report
-    the machine of a failed boot of `key` under `label`."""
+    the machine of a failed boot of `key` under `label`, with `console`."""
     with _skipping_missing(session.project(key)):
         try:
             yield
         except PopcornError:
             failed = session.failed_machine(key)
             if failed is not None:
-                track(item, label, failed, key)
+                track(item, label, failed, key, console)
             raise
 
 
 @contextlib.contextmanager
 def lending(
-    request: pytest.FixtureRequest, session: PopcornSession, test: ItemSettings, key: Key, name: str
+    request: pytest.FixtureRequest,
+    session: PopcornSession,
+    test: ItemSettings,
+    key: Key,
+    name: str,
+    console: MachineConsole | None,
 ) -> Generator[Machine]:
     """The machine of the declared machine fixture `name` for `key`, restored for the test of
-    `request`, reported and traced under `name`.
+    `request`, reported with `console` and traced under `name`.
+
+    A `console` naming a UART the booted machine of `key` does not connect raises `ConfigError`
+    before the machine is restored.
 
     The machine gets the test's budget and, with `--popcorn-trace-on-fail`, a trace. At exit it
     is parked, its trace kept or deleted, and it is replaced when spoiled, else its loop is
@@ -312,15 +347,18 @@ def lending(
     `finally` raised as the loop was emptied.
 
     Raises:
+        ConfigError: `console` names no UART of the booted machine, at entry.
         BaseException: What ended the first such free run, at exit.
         ModelError: A `finally` raised as the loop was emptied, at exit.
     """
     item = item_of(request)
     lent = _Lent(session, key, name)
-    with booting(item, session, key, name):
+    with booting(item, session, key, name, console):
+        if console is not None:
+            console._check(session.booted(key).machine)  # pyright: ignore[reportPrivateUsage]
         m = lent.restored()
     watches = m._pin_watch_keys()  # pyright: ignore[reportPrivateUsage]
-    track(item, name, m, key)
+    track(item, name, m, key, console)
     m.default_budget = test.budget
     settings = session.settings
     trace = None

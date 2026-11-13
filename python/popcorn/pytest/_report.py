@@ -13,10 +13,11 @@ from typing import cast
 
 import pytest
 
-from popcorn import Machine, MachineRunning, ModelError, Stop, System
+from popcorn import Machine, MachineConsole, MachineRunning, ModelError, Stop, StopReason, System
 from popcorn._obs import FormatError
+from popcorn.pytest._console import console_lines
 from popcorn.pytest._options import SETTINGS
-from popcorn.report import call_stack, exception_stop, stop_report
+from popcorn.report import call_stack, exception_stop, exception_stops, stop_report
 from popcorn.trace import ALL
 
 _REGISTERS = (
@@ -37,11 +38,14 @@ class Tracked:
             `machine_factory #<n>` or `<system fixture> member <name>`.
         machine: The machine.
         key: Its machine description, config and strictness, as text.
+        console: The console of the machine description that asked for the machine, None for
+            none.
     """
 
     label: str
     machine: Machine
     key: str
+    console: MachineConsole | None
 
 
 MACHINES = pytest.StashKey[list[Tracked]]()
@@ -138,9 +142,18 @@ def file_name(item: pytest.Item) -> str:
     return name
 
 
-def track(item: pytest.Item, label: str, machine: Machine, key: object) -> None:
-    """Report `machine` under `label` if `item` fails."""
-    item.stash.setdefault(MACHINES, list[Tracked]()).append(Tracked(label, machine, str(key)))
+def track(
+    item: pytest.Item,
+    label: str,
+    machine: Machine,
+    key: object,
+    console: MachineConsole | None,
+) -> None:
+    """Report `machine` under `label` if `item` fails, with the unread output of the UARTs of
+    `console`."""
+    item.stash.setdefault(MACHINES, list[Tracked]()).append(
+        Tracked(label, machine, str(key), console)
+    )
 
 
 def track_system(item: pytest.Item, system: System) -> None:
@@ -202,6 +215,13 @@ MMIO_PC_NOTE = (
     " and the first frame of a machine that raised it can be later than the accessing instruction"
 )
 PARK_TRIES = 3
+CULPRIT_REASONS = frozenset({StopReason.FAULT, StopReason.CONTRACT})
+
+
+def names_culprit(stop: Stop) -> bool:
+    """Whether `stop` is a failure of its machine, a fault or a broken contract, and not a wait
+    or a deliberate stop."""
+    return stop.reason in CULPRIT_REASONS
 
 
 def section_text(
@@ -212,13 +232,17 @@ def section_text(
 
     A machine whose last stop is the stop the failing error carries is marked "(raised)". A stop
     of the error that is no machine's last stop is printed first. Each machine is read in one
-    parked section. A machine found running again, a goal another thread started after the
-    park, is parked again up to `PARK_TRIES` times, an end that park returns kept for `item`'s
-    teardown, then reported as kept running.
+    parked section. The unread output of the UARTs of a machine's console follows its block, of
+    the machines whose last stop is a fault or a contract stop of the error when there are any,
+    else of every machine with a console. A machine found running again, a goal another thread
+    started after the park, is parked again up to `PARK_TRIES` times, an end that park returns
+    kept for `item`'s teardown, then reported as kept running.
     """
     stop = exception_stop(error)
-    reads = [_parked_read(item, entry.machine, ring) for entry in tracked]
+    culprits = [one for one in exception_stops(error) if names_culprit(one)]
+    reads = [_parked_read(item, entry.machine, ring, entry.console) for entry in tracked]
     last = [read[0] for read in reads if read is not None]
+    raised = {index for index, read in enumerate(reads) if read is not None and read[0] in culprits}
     lines: list[str] = []
     if stop is not None and stop not in last:
         lines += [f"exception stop: {stop}", ""]
@@ -228,29 +252,34 @@ def section_text(
         if model_error.peripheral:
             lines += [MMIO_PC_NOTE]
         lines += [""]
-    for entry, read in zip(tracked, reads, strict=True):
+    for index, (entry, read) in enumerate(zip(tracked, reads, strict=True)):
         if read is None:
             lines += [f"{entry.label} ({entry.key}):", KEPT_RUNNING, ""]
             continue
-        own, text = read
-        raised = " (raised)" if stop is not None and own == stop else ""
-        lines += [f"{entry.label} ({entry.key}){raised}:", text, ""]
+        own, text, console = read
+        marker = " (raised)" if stop is not None and own == stop else ""
+        lines += [f"{entry.label} ({entry.key}){marker}:", text]
+        if console and (not raised or index in raised):
+            lines += [console]
+        lines += [""]
     return "\n".join(lines).rstrip()
 
 
-def _parked_read(item: pytest.Item, machine: Machine, ring: int) -> tuple[Stop | None, str] | None:
+def _parked_read(
+    item: pytest.Item, machine: Machine, ring: int, console: MachineConsole | None
+) -> tuple[Stop | None, str, str] | None:
     entered = False
 
-    def read() -> tuple[Stop | None, str]:
+    def read() -> tuple[Stop | None, str, str]:
         nonlocal entered
         entered = True
         own = machine.last_stop
-        return own, _machine_text(machine, own, ring)
+        return own, _machine_text(machine, own, ring), _console_text(machine, console)
 
     for attempt in range(PARK_TRIES + 1):
         try:
             return cast(
-                tuple[Stop | None, str],
+                tuple[Stop | None, str, str],
                 machine._handle.parked(read),  # pyright: ignore[reportPrivateUsage]
             )
         except MachineRunning:
@@ -264,6 +293,20 @@ def _parked_read(item: pytest.Item, machine: Machine, ring: int) -> tuple[Stop |
             if held.get(id(machine)) is None:
                 held[id(machine)] = ended
     return None
+
+
+def _console_text(machine: Machine, console: MachineConsole | None) -> str:
+    if console is None:
+        return ""
+    lines: list[str] = []
+    for name in cast(tuple[str, ...], console.uart):
+
+        def tail(name: str = name) -> tuple[bytes, int, int]:
+            stream = machine.periph[name].port
+            return stream._tail(console.tail)  # pyright: ignore[reportPrivateUsage]
+
+        lines += console_lines(name, tail, console.tail)
+    return _indent("\n".join(lines))
 
 
 def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:

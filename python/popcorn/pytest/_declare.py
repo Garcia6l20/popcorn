@@ -87,9 +87,10 @@ def machine(
                 key = session.key(
                     description, config, test.strict, item_of(request), f"fixture {name!r}"
                 )
-                with booting(item_of(request), session, key, name):
+                console = description.config(config).console
+                with booting(item_of(request), session, key, name, console):
                     await session.booted_async(key)
-                with lending(request, session, test, key, name) as m:
+                with lending(request, session, test, key, name, console) as m:
                     yield m
 
             return _fixture(fn, booted, params, ids)
@@ -101,7 +102,8 @@ def machine(
             key = session.key(
                 description, config, test.strict, item_of(request), f"fixture {name!r}"
             )
-            with lending(request, session, test, key, name) as m:
+            console = description.config(config).console
+            with lending(request, session, test, key, name, console) as m:
                 yield m
 
         return _fixture(fn, restored, params, ids)
