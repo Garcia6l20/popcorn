@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,8 +61,7 @@ public:
   void attach(std::shared_ptr<usb::host_side> host) override
   {
     host_ = std::move(host);
-    model().link(true);
-    model().refresh();
+    relink(true);
   }
 
   [[nodiscard]] auto board_host() -> usb::host* override
@@ -84,17 +84,19 @@ public:
     auto const was_up = link.pulled_up and host_ == board_host_;
     link.cable        = attached;
     select_host();
-    model().link(true);
-    if(attached)
-    {
-      model().cancel(Model::idle_suspend_event);
-    }
-    else if(was_up)
-    {
-      board_host_->pull_up_changed(false, model().now());
-      model().schedule(Model::idle_suspend_event, model().now().ps + usb_idle_ps);
-    }
-    model().refresh();
+    guarded([&] {
+      model().link(true);
+      if(attached)
+      {
+        model().cancel(Model::idle_suspend_event);
+      }
+      else if(was_up)
+      {
+        tell_host(*board_host_, false);
+        model().schedule(Model::idle_suspend_event, model().now().ps + usb_idle_ps);
+      }
+      model().refresh();
+    });
   }
 
   void wake_at(vtime at) override
@@ -121,6 +123,12 @@ protected:
     if(not wired->host.warn)
     {
       wired->host.warn = [this](std::string const& message) { model().warn("host", message); };
+    }
+    if(not wired->host.strict_refuse)
+    {
+      wired->host.strict_refuse = [this](std::string const&) {
+        model().refuse_if_strict("host", 0);
+      };
     }
     board_host_                = std::make_shared<usb::host>(*this, std::move(wired->host));
     plugged_at_power_on_       = wired->attached;
@@ -152,8 +160,51 @@ protected:
       link.pulled_up = up;
       if(host_)
       {
-        host_->pull_up_changed(up, model().now());
+        tell_host(*host_, up);
       }
+    }
+  }
+
+  /**
+   * @brief Recomputes the pull-up and refreshes the model, then throws what the host raised at
+   *        a pull-up change, the strict error of a dropped write. A failure of either step
+   *        drops the host's error and propagates instead.
+   * @param report The argument of the model's link().
+   */
+  void relink(bool report)
+  {
+    guarded([&] {
+      model().link(report);
+      model().refresh();
+    });
+  }
+
+  /**
+   * @brief Runs @p body, then throws what the host raised at a pull-up change. A throw out of
+   *        @p body discards the host's error and propagates.
+   */
+  template <typename Body> void guarded(Body&& body)
+  {
+    try
+    {
+      std::forward<Body>(body)();
+    }
+    catch(...)
+    {
+      deferred_ = nullptr;
+      throw;
+    }
+    raise_deferred();
+  }
+
+  /**
+   * @brief Throws what the host raised at a pull-up change, once the model's handling is done.
+   */
+  void raise_deferred()
+  {
+    if(deferred_)
+    {
+      std::rethrow_exception(std::exchange(deferred_, nullptr));
     }
   }
 
@@ -207,7 +258,7 @@ protected:
   void loaded()
   {
     load_host();
-    model().link(false);
+    guarded([&] { model().link(false); });
   }
 
   /** @brief Gives the host its bytes back after a load, then empties them in the state. */
@@ -254,6 +305,22 @@ private:
     return static_cast<Model const&>(*this);
   }
 
+  void tell_host(usb::host_side& target, bool up)
+  {
+    try
+    {
+      target.pull_up_changed(up, model().now());
+    }
+    catch(...)
+    {
+      if(not deferred_)
+      {
+        deferred_ = std::current_exception();
+      }
+    }
+  }
+
+  std::exception_ptr              deferred_;
   std::shared_ptr<usb::host_side> host_;
   std::shared_ptr<usb::host>      board_host_;
   bool                            plugged_at_power_on_{};

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -145,6 +146,30 @@ public:
       channel_->results[id] = {.status = transfer_status::cancelled, .data = {}};
     }
     channel_->awaited.clear();
+  }
+
+  void detached(host_context& ctx) override
+  {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
+    if(channel_ == nullptr
+       or channel_->in_flight == 0
+       or channel_->awaited_writes.contains(channel_->in_flight))
+    {
+      return;
+    }
+    auto const report  = in_flight_report_ ? *in_flight_report_ : std::uint8_t{};
+    auto const message = std::format(
+        "USB HID function {}: {} was in flight at a detach and nobody awaited it, so it is "
+        "dropped without a status",
+        s_.function,
+        in_flight_report_ and report != 0 ? std::format("the output report with ID {}", report)
+                                          : std::string{"an output report"});
+    if(not std::exchange(channel_->dropped_warned, true))
+    {
+      ctx.warn(message);
+    }
+    ctx.refuse_strict(message);
   }
 
   void configured(host_context& ctx) override
@@ -320,7 +345,8 @@ private:
 
   void written(host_context& ctx, transfer_status status)
   {
-    auto const id       = std::exchange(s_.in_flight, 0);
+    auto const id = std::exchange(s_.in_flight, 0);
+    in_flight_report_.reset();
     channel_->in_flight = 0;
     if(channel_->awaited_writes.erase(id) != 0)
     {
@@ -347,7 +373,8 @@ private:
     out.pop_front();
     s_.in_flight = channel_->in_flight = write.id;
     auto const report_id               = write.data.empty() ? std::uint8_t{} : write.data.front();
-    auto       data                    = std::move(write.data);
+    in_flight_report_                  = report_id;
+    auto data                          = std::move(write.data);
     if(report_id == 0 and not data.empty())
     {
       data.erase(data.begin());
@@ -377,9 +404,10 @@ private:
         std::move(data));
   }
 
-  std::shared_ptr<hid_hub> hub_;
-  driver_state             s_{};
-  hid_channel*             channel_{};
+  std::shared_ptr<hid_hub>    hub_;
+  driver_state                s_{};
+  std::optional<std::uint8_t> in_flight_report_{};
+  hid_channel*                channel_{};
 };
 
 struct unbound_channel

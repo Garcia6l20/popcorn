@@ -95,6 +95,10 @@ pty keep the line state the host set.
 `host.hid(n)` is the n-th HID interface. The host probes it as usbhid does, then polls its
 interrupt IN endpoint. `read_reports(n, for_=)` returns the input reports with their times.
 `write_report`, `get_feature` and `set_feature` take reports as hidraw does, the report ID first.
+An output report in flight at a detach that nobody awaits is dropped. The unplug or the bus reset
+logs one warning for it per machine, and under `strict_peripherals` raises `ModelError` for every
+such drop, after the controller finished handling the unplug. The error names the controller and
+`host`, the warning names the report.
 
 ## Audio class
 

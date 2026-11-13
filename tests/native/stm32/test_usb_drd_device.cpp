@@ -74,6 +74,43 @@ TEST_CASE(
   CHECK(r.port().setup(0, get_device, r.now()) == usb::handshake::none);
 }
 
+TEST_CASE("an error of the host at a pull-up change comes out of the register write, once")
+{
+  struct refusing_host final : usb::host_side
+  {
+    bool              refuse{};
+    std::vector<bool> changes;
+    void              pull_up_changed(bool on, popcorn::vtime) override
+    {
+      changes.push_back(on);
+      if(refuse)
+      {
+        throw std::runtime_error{"refused"};
+      }
+    }
+    void on_time(popcorn::vtime) override
+    {}
+    void save(std::vector<std::byte>&) const override
+    {}
+    void load(std::span<std::byte const>) override
+    {}
+  };
+  rig const r;
+  r.power_up();
+  auto const host = std::make_shared<refusing_host>();
+  r.port().attach(host);
+  r.write("BCDR", r.mask("BCDR", "DPPU_DPD"));
+  REQUIRE(host->changes == std::vector<bool>{true});
+  host->refuse = true;
+  CHECK_THROWS_AS(r.write_unchecked("BCDR", 0), std::runtime_error);
+  CHECK((r.read("BCDR") & r.mask("BCDR", "DPPU_DPD")) == 0);
+  CHECK(host->changes == std::vector<bool>{true, false});
+  host->refuse = false;
+  CHECK_NOTHROW(r.write("BCDR", 0));
+  CHECK_NOTHROW(r.write("BCDR", r.mask("BCDR", "DPPU_DPD")));
+  CHECK(host->changes == std::vector<bool>{true, false, true});
+}
+
 TEST_CASE("a SETUP is taken with STATRX NAK or STALL, and ignored with STATRX DISABLED")
 {
   rig const r;

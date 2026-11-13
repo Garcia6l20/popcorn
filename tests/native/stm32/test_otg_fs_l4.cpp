@@ -291,6 +291,48 @@ TEST_CASE(
   CHECK(usv_warnings() == 1);
 }
 
+TEST_CASE("an error of the host at a machine reset of a connected device comes out after the reset")
+{
+  struct refusing_host final : popcorn::periph::usb::host_side
+  {
+    bool              refuse{};
+    std::vector<bool> changes;
+
+    void pull_up_changed(bool on, popcorn::vtime) override
+    {
+      changes.push_back(on);
+      if(refuse)
+      {
+        throw std::runtime_error{"refused"};
+      }
+    }
+
+    void on_time(popcorn::vtime) override
+    {}
+
+    void save(std::vector<std::byte>&) const override
+    {}
+
+    void load(std::span<std::byte const>) override
+    {}
+  };
+  otg_rig const r{true};
+  auto const    host = std::make_shared<refusing_host>();
+  r.supply(true);
+  r.write(gccfg, pwrdwn);
+  r.write(gotgctl, bvaloen | bvaloval);
+  r.port().attach(host);
+  r.write(dctl, r.read(dctl) & ~sdis);
+  REQUIRE(r.port().pulled_up());
+  host->refuse = true;
+  CHECK_THROWS_AS(r.f.target->reset(), std::runtime_error);
+  CHECK(host->changes == std::vector<bool>{true, false});
+  CHECK_FALSE(r.port().pulled_up());
+  host->refuse = false;
+  CHECK_NOTHROW(r.f.target->reset());
+  CHECK(host->changes == std::vector<bool>{true, false});
+}
+
 namespace
 {
 void set_rcc(otg_rig const& r, std::string_view reg, std::string_view field, std::uint32_t value)

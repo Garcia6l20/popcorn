@@ -212,8 +212,9 @@ class HidStream:
         reports written before, and until the device is configured and its report descriptor
         read. When the await raises EmulationError or is cancelled, or the result is dropped
         unawaited, the report stays queued and is sent later, as the machine runs: a failure is
-        then logged as a popcorn warning, except a report in progress when the device detaches,
-        which is dropped silently.
+        then logged as a popcorn warning. A report in progress when the device detaches that
+        nobody awaits is dropped, and the unplug or bus reset logs one popcorn warning for it
+        per machine and raises `ModelError` for every such drop under `strict_peripherals`.
 
         Args:
             data: The report as hidraw takes it: the report ID first, 0 when the device does not

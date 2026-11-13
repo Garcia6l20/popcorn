@@ -694,8 +694,7 @@ void usb_drd::restore_reset_values(std::optional<reset_kind> kind)
   }
   keep_link(kept, kind);
   tell_wake_line(woken);
-  link(false);
-  refresh();
+  relink(false);
 }
 
 auto usb_drd::now() const -> vtime
@@ -721,8 +720,7 @@ auto usb_drd::pulled_up() const -> bool
 
 void usb_drd::usb_pull_up_changed()
 {
-  link(true);
-  refresh();
+  relink(true);
 }
 
 auto usb_drd::on_bus(std::uint8_t address) const -> bool
@@ -1125,8 +1123,7 @@ void usb_drd::charging_written(std::uint32_t, std::uint32_t now)
         "BCDR", access_offset_, "battery charging detection, BCDR.BCDEN, is not modelled",
         battery_charging);
   }
-  link(true);
-  refresh();
+  relink(true);
 }
 
 void usb_drd::on_event(std::uint32_t kind, std::uint64_t payload)

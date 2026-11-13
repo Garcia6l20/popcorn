@@ -24,6 +24,9 @@ host_side::~host_side()       = default;
 device_port::~device_port()   = default;
 class_driver::~class_driver() = default;
 
+void class_driver::detached(host_context&)
+{}
+
 namespace
 {
 constexpr std::uint64_t ps_per_ns           = 1000;
@@ -419,6 +422,14 @@ struct host::impl
     }
   }
 
+  void refuse_strict(std::string const& message) const
+  {
+    if(options.strict_refuse and not deferred_warnings::hold(options.strict_refuse, message))
+    {
+      options.strict_refuse(message);
+    }
+  }
+
   [[nodiscard]] auto frame_number() const -> std::uint16_t
   {
     return static_cast<std::uint16_t>(s.frame_index & frame_mask);
@@ -541,6 +552,18 @@ struct host::impl
     results.push_back(std::move(result));
   }
 
+  void notify_detached()
+  {
+    for(std::size_t index = 0; index < drivers.size(); ++index)
+    {
+      if(drivers[index].driver)
+      {
+        host_context ctx{self, index};
+        drivers[index].driver->detached(ctx);
+      }
+    }
+  }
+
   void detach(std::uint64_t at)
   {
     for(auto const& pipe : s.pipes)
@@ -582,6 +605,8 @@ struct host::impl
 
   void start_reset(std::uint64_t at)
   {
+    deferred_warnings const deferred;
+    notify_detached();
     s.next_frame.reset();
     s.next_slot.reset();
     s.recovery_end.reset();
@@ -1603,6 +1628,11 @@ void host_context::warn(std::string const& message) const
   host_->impl_->warn(message);
 }
 
+void host_context::refuse_strict(std::string const& message) const
+{
+  host_->impl_->refuse_strict(message);
+}
+
 host::host(device_port& port, host_options options)
     : impl_{std::in_place, *this, port, std::move(options)}
 {}
@@ -1615,12 +1645,14 @@ void host::pull_up_changed(bool on, vtime at)
   {
     return;
   }
+  deferred_warnings const deferred;
   if(on)
   {
     impl_->attach(at.ps);
   }
   else
   {
+    impl_->notify_detached();
     impl_->detach(at.ps);
   }
   impl_->schedule();
@@ -1628,6 +1660,7 @@ void host::pull_up_changed(bool on, vtime at)
 
 void host::on_time(vtime at)
 {
+  deferred_warnings const deferred;
   impl_->on_time(at.ps);
 }
 

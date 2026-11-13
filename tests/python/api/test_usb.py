@@ -24,7 +24,7 @@ import tty
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 import popcorn
 import pytest
@@ -43,6 +43,7 @@ from popcorn.board import (
     UsbHostOptions,
     UsbState,
 )
+from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import BOARD_ELF, collected, late_drained_read, run_bounded, stalled
@@ -69,11 +70,15 @@ def usb_machine(
     u575: popcorn.PartDescription,
     options: UsbHostOptions | None = None,
     elf: Path = USB_ELF,
+    strict: bool = False,
+    models: Mapping[str, type[Model]] | None = None,
 ) -> popcorn.Machine:
     m = popcorn.Machine(
         u575,
         image=popcorn.Image.elf(elf),
         usb={"OTG_FS": options or UsbHostOptions()},
+        strict_peripherals=strict,
+        models=models,
     )
     m.reset()
     return m
@@ -1972,6 +1977,116 @@ def test_a_report_write_left_by_a_cancel_warns_of_its_failure_and_keeps_no_resul
     assert "timed_out" in ended[0]
     link = usb_link_of(hid)
     assert [link.take_written(write) for write in range(1, 4)] == [None, None, None]
+
+
+def queue_unawaited_write(m: popcorn.Machine, host: UsbHost) -> None:
+    hid = ready_hid(m, host)
+    m.periph.OTG_FS.GAHBCFG.GINTMSK = 0
+    writing = hid.write_report(b"\x02\x55", at=m.time + ms(1))
+
+    async def cancelled() -> None:
+        task = asyncio.create_task(writing)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancelled())
+    asyncio.run(m.run(for_=ms(5)))
+
+
+def unawaited_write_in_flight(strict: bool, u575: popcorn.PartDescription) -> popcorn.Machine:
+    m = usb_machine(u575, UsbHostOptions(timeout=ms(20)), strict=strict)
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    queue_unawaited_write(m, host)
+    return m
+
+
+def test_an_unplug_with_an_unawaited_report_write_in_flight_warns_once(
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    m = unawaited_write_in_flight(False, u575)
+    host = m.periph.OTG_FS.host
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        asyncio.run(host.detach())
+    dropped = [
+        record.getMessage()
+        for record in caplog.records
+        if "was in flight at a detach" in record.getMessage()
+    ]
+    assert len(dropped) == 1
+    assert "ID 2" in dropped[0]
+
+
+def test_an_unplug_with_an_unawaited_report_write_in_flight_raises_under_strict(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = unawaited_write_in_flight(True, u575)
+    host = m.periph.OTG_FS.host
+    with pytest.raises(popcorn.ModelError) as caught:
+        asyncio.run(host.detach())
+    assert (caught.value.peripheral, caught.value.register) == ("OTG_FS", "host")
+    assert not host.attached
+
+
+class ResetSpy(Model):
+    resets: ClassVar[list[popcorn.ResetKind]] = []
+
+    @override
+    def reset(self, kind: popcorn.ResetKind) -> None:
+        self.resets.append(kind)
+
+
+def test_a_strict_machine_reset_raises_after_every_peripheral_was_reset(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(timeout=ms(20)), strict=True, models={"DCMI": ResetSpy})
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    queue_unawaited_write(m, host)
+    ResetSpy.resets.clear()
+    with pytest.raises(popcorn.ModelError):
+        m.reset()
+    assert ResetSpy.resets == [popcorn.ResetKind.POWER_ON]
+
+
+def test_a_strict_unplug_leaves_the_controller_as_a_non_strict_one_does(
+    u575: popcorn.PartDescription,
+) -> None:
+    states: list[tuple[int, int]] = []
+    for strict in (False, True):
+        m = unawaited_write_in_flight(strict, u575)
+        host = m.periph.OTG_FS.host
+        with contextlib.suppress(popcorn.ModelError):
+            asyncio.run(host.detach())
+        m.periph.OTG_FS.GAHBCFG.GINTMSK = 1
+        asyncio.run(m.run(for_=ms(20)))
+        states.append((m.periph.OTG_FS.DSTS.read(), m.periph.OTG_FS.GINTSTS.read()))
+    assert states[0] == states[1]
+
+
+def test_a_strict_unplug_raises_for_every_dropped_write_and_leaves_the_machine_usable(
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    m = unawaited_write_in_flight(True, u575)
+    host = m.periph.OTG_FS.host
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        for _ in range(2):
+            with pytest.raises(popcorn.ModelError):
+                asyncio.run(host.detach())
+            assert not host.attached
+            m.periph.OTG_FS.GAHBCFG.GINTMSK = 1
+            asyncio.run(m.run(for_=ms(20)))
+            asyncio.run(host.attach())
+            asyncio.run(host.wait_configured(for_=s(2)))
+            queue_unawaited_write(m, host)
+    dropped = [
+        record.getMessage()
+        for record in caplog.records
+        if "was in flight at a detach" in record.getMessage()
+    ]
+    assert len(dropped) == 1
 
 
 def test_a_report_write_collected_on_the_machine_thread_warns_off_it(

@@ -88,6 +88,10 @@ struct POPCORN_API hid_channel
   std::set<std::uint64_t> awaited_writes{};
   /** @brief Results of awaited output reports not collected yet. */
   std::map<std::uint64_t, transfer_status> written{};
+  /** @brief Whether the drop of an unawaited output report in flight at a detach was warned
+   * about. Once per machine: the channel lives with the machine's hub, `discard()` keeps it and
+   * a snapshot does not save it. */
+  bool dropped_warned{};
   /** @brief The report descriptor the bound driver read, emptied when a driver binds, kept
    * after an unplug. Saved with the factory while no driver is bound. */
   std::vector<std::uint8_t> report_descriptor{};

@@ -302,6 +302,20 @@ protected:
   }
 
   /**
+   * @brief Throws model_error under strict_peripherals.
+   * @param reg Register named in the error.
+   * @param offset Offset named in the error.
+   * @throws model_error under strict_peripherals.
+   */
+  void refuse_if_strict(std::string_view reg, std::uint32_t offset) const
+  {
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error(desc_.name, std::string{reg}, offset);
+    }
+  }
+
+  /**
    * @brief Logs a model warning through the machine services. The model records no pc: the
    *        services fill in the current one.
    * @param reg Register the warning is about, as the description spells it.

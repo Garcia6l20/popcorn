@@ -761,8 +761,7 @@ void otg_fs::restore_reset_values(std::optional<reset_kind> kind)
     ++count;
   }
   keep_link(kept, kind);
-  link(false);
-  refresh();
+  relink(false);
 }
 
 auto otg_fs::now() const -> vtime
@@ -800,8 +799,7 @@ auto otg_fs::pulled_up() const -> bool
 
 void otg_fs::usb_supply_changed()
 {
-  link(false);
-  refresh();
+  relink(false);
 }
 
 auto otg_fs::on_bus(std::uint8_t address) const -> bool
@@ -1142,8 +1140,7 @@ void otg_fs::link_written(std::uint32_t, std::uint32_t)
     unmodelled(
         "GCCFG", "battery charging detection, GCCFG.BCDEN, is not modelled", battery_charging);
   }
-  link(true);
-  refresh();
+  relink(true);
 }
 
 void otg_fs::gccfg_written(std::uint32_t old, std::uint32_t now)
@@ -1249,8 +1246,7 @@ void otg_fs::device_control_written(std::uint32_t, std::uint32_t now)
   {
     unmodelled("DCTL", "test modes, DCTL.TCTL, are not modelled", test_mode);
   }
-  link(true);
-  refresh();
+  relink(true);
 }
 
 void otg_fs::in_control_written(std::uint32_t old, std::uint32_t now)

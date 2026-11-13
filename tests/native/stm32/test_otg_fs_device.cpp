@@ -178,6 +178,14 @@ struct rig
     return reg("DFIFO0").offset + 0x1000u * static_cast<std::uint32_t>(n);
   }
 
+  void write_unchecked(std::string_view name, std::uint32_t value) const
+  {
+    auto&      regs   = f->target->peripheral("OTG_FS");
+    auto const offset = reg(name).offset;
+    std::ignore       = f->target->model("OTG_FS")->on_write(
+        regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
+  }
+
   void set(std::string_view name, std::string_view field, std::uint32_t value) const
   {
     auto const& found = bit(name, field);
@@ -388,6 +396,68 @@ TEST_CASE("clearing SDIS with VBUS sensed tells the host once")
   r.set("DCTL", "SDIS", 1);
   REQUIRE(r.host->changes.size() == 2);
   CHECK_FALSE(r.host->changes[1].first);
+}
+
+namespace
+{
+struct refusing_host final : usb::host_side
+{
+  bool              refuse{};
+  std::vector<bool> changes;
+  void              pull_up_changed(bool on, vtime) override
+  {
+    changes.push_back(on);
+    if(refuse)
+    {
+      throw std::runtime_error{"refused"};
+    }
+  }
+  void on_time(vtime) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+}
+
+TEST_CASE("an error of the host at a pull-up change comes out of the register write, once")
+{
+  rig const r;
+  r.power_up(false);
+  auto const host = std::make_shared<refusing_host>();
+  r.port().attach(host);
+  r.set("DCTL", "SDIS", 0);
+  REQUIRE(host->changes == std::vector<bool>{true});
+  host->refuse = true;
+  CHECK_THROWS_AS(
+      r.write_unchecked("DCTL", r.read("DCTL") | (1u << r.bit("DCTL", "SDIS").lsb)),
+      std::runtime_error);
+  CHECK(r.get("DCTL", "SDIS") == 1);
+  CHECK(host->changes == std::vector<bool>{true, false});
+  host->refuse = false;
+  CHECK_NOTHROW(r.set("DCTL", "SDIS", 1));
+  CHECK_NOTHROW(r.set("DCTL", "SDIS", 0));
+  CHECK(host->changes == std::vector<bool>{true, false, true});
+}
+
+TEST_CASE("an error of the host at the pull-up retold by a load comes out of the load")
+{
+  rig const r;
+  r.power_up(false);
+  auto const host = std::make_shared<refusing_host>();
+  r.port().attach(host);
+  r.set("DCTL", "SDIS", 0);
+  std::vector<std::byte> saved;
+  auto&                  model = *r.f->target->model("OTG_FS");
+  model.save(saved);
+  r.set("DCTL", "SDIS", 1);
+  host->changes.clear();
+  host->refuse = true;
+  CHECK_THROWS_AS(model.load(saved), std::runtime_error);
+  CHECK(host->changes == std::vector<bool>{false});
+  host->refuse = false;
+  CHECK_NOTHROW(model.load(saved));
 }
 
 TEST_CASE("without VBUS clearing SDIS never attaches")

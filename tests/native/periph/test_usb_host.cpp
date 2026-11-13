@@ -72,6 +72,7 @@ struct device_script
   bool                                                           stalled{};
   usb::data_pid                                                  toggle{};
   std::uint32_t                                                  data_naks{};
+  std::uint32_t                                                  out_naks{};
   std::uint32_t                                                  data_nones{};
   std::uint32_t                                                  setup_nones{};
   bool                                                           silent{};
@@ -354,6 +355,11 @@ private:
       {
         return usb::handshake::stall;
       }
+      if(s.out_naks != 0)
+      {
+        --s.out_naks;
+        return usb::handshake::nak;
+      }
       s.class_out.insert(s.class_out.end(), data.begin(), data.end());
       return usb::handshake::ack;
     }
@@ -542,12 +548,19 @@ struct rig
 {
   fake_device                dev;
   std::vector<std::string>   warnings;
+  bool                       strict{};
   std::shared_ptr<usb::host> host;
 
   explicit rig(usb::host_options options = {})
   {
-    options.warn = [this](std::string const& message) { warnings.push_back(message); };
-    host         = std::make_shared<usb::host>(dev, std::move(options));
+    options.warn          = [this](std::string const& message) { warnings.push_back(message); };
+    options.strict_refuse = [this](std::string const& message) {
+      if(strict)
+      {
+        throw std::runtime_error{message};
+      }
+    };
+    host = std::make_shared<usb::host>(dev, std::move(options));
   }
 
   rig(rig const&)                    = delete;
@@ -2646,10 +2659,228 @@ TEST_CASE("an unplug cancels the awaited output report in flight and keeps the q
   CHECK_FALSE(channel.interface.has_value());
   CHECK(channel.written.at(awaited) == usb::transfer_status::cancelled);
   CHECK(channel.queued() == 1);
+  CHECK_FALSE(channel.dropped_warned);
   r.dev.s.class_out.clear();
   r.plug(end + 10 * ms);
   r.run_until(t0 + 3 * second);
   CHECK(r.dev.s.class_out == std::vector<std::uint8_t>{2, 'r'});
+  CHECK(r.warnings.empty());
+}
+
+namespace
+{
+auto in_flight_at_unplug(rig& r, usb::hid_hub& hub, std::uint64_t from) -> std::uint64_t
+{
+  auto&      channel = hub.channel(hub.lock(), 0);
+  auto const id      = channel.write({2, 'q'});
+  auto       end     = from;
+  while(channel.in_flight == 0)
+  {
+    end += 20 * us;
+    r.run_until(end);
+  }
+  CHECK(channel.in_flight == id);
+  r.host->pull_up_changed(false, vtime{end});
+  return end;
+}
+}
+
+TEST_CASE("an unplug with an output report in flight that nobody awaited warns once at the unplug")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto&      channel = hub->channel(hub->lock(), 0);
+  auto const end     = in_flight_at_unplug(r, *hub, t0 + second);
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(r.warnings.front().contains("was in flight at a detach"));
+  CHECK(r.warnings.front().contains("ID 2"));
+  CHECK(channel.dropped_warned);
+  r.plug(end + 10 * ms);
+  r.run_until(t0 + 3 * second);
+  CHECK(r.warnings.size() == 1);
+
+  auto const second_end = in_flight_at_unplug(r, *hub, t0 + 3 * second);
+  r.plug(second_end + 10 * ms);
+  r.run_until(t0 + 5 * second);
+  CHECK(r.warnings.size() == 1);
+}
+
+TEST_CASE("the warning of a dropped output report raises under strict at the unplug itself")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto&      channel = hub->channel(hub->lock(), 0);
+  auto const id      = channel.write({2, 'q'});
+  auto       end     = t0 + second;
+  while(channel.in_flight == 0)
+  {
+    end += 20 * us;
+    r.run_until(end);
+  }
+  REQUIRE(channel.in_flight == id);
+  r.strict = true;
+  CHECK_THROWS_AS(r.host->pull_up_changed(false, vtime{end}), std::runtime_error);
+  CHECK(r.warnings.size() == 1);
+  CHECK(r.host->drivers().empty());
+  CHECK_FALSE(channel.interface.has_value());
+  r.strict = false;
+  r.plug(end + 10 * ms);
+  r.run_until(t0 + 3 * second);
+  CHECK(r.host->drivers().size() == 1);
+  CHECK(r.warnings.size() == 1);
+}
+
+namespace
+{
+auto hid_options_with_late_reset(std::shared_ptr<usb::hid_hub> const& hub) -> usb::host_options
+{
+  auto options = hid_options_with(hub);
+  options.enumeration.push_back({usb::enumeration_action::wait, std::chrono::milliseconds{300}});
+  options.enumeration.push_back({usb::enumeration_action::bus_reset});
+  return options;
+}
+
+void hold_write_until_reset(rig& r, usb::hid_hub& hub)
+{
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + 200 * ms);
+  auto& channel = hub.channel(hub.lock(), 0);
+  channel.write({2, 'q'});
+  r.dev.s.out_naks = 1'000'000;
+  r.run_until(t0 + 300 * ms);
+  REQUIRE(channel.in_flight != 0);
+  REQUIRE(r.warnings.empty());
+}
+}
+
+TEST_CASE("a bus reset with an output report in flight that nobody awaited warns once")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with_late_reset(hub)};
+  hold_write_until_reset(r, *hub);
+  r.run_until(t0 + second);
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(r.warnings.front().contains("ID 2"));
+}
+
+TEST_CASE("the strict raise of a bus reset detach comes after on_time scheduled its next wake-up")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with_late_reset(hub)};
+  hold_write_until_reset(r, *hub);
+  r.strict = true;
+  CHECK_THROWS_AS(r.run_until(t0 + second), std::runtime_error);
+  CHECK(r.warnings.size() == 1);
+  CHECK(r.dev.s.wake.has_value());
+  CHECK(r.host->drivers().empty());
+}
+
+TEST_CASE("a write in flight across a restore is named without a report ID at the detach")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        a{hid_options_with(hub)};
+  a.dev.s.report_descriptor = report_descriptor(25);
+  a.plug();
+  a.run_until(t0 + second);
+  auto& channel = hub->channel(hub->lock(), 0);
+  channel.write({2, 'q'});
+  a.dev.s.out_naks = 1'000'000;
+  auto end         = t0 + second;
+  while(channel.in_flight == 0)
+  {
+    end += 20 * us;
+    a.run_until(end);
+  }
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+  auto const device_at_save = a.dev.s;
+
+  auto const fresh = std::make_shared<usb::hid_hub>();
+  rig        b{hid_options_with(fresh)};
+  b.dev.s = device_at_save;
+  b.host->load(saved);
+  REQUIRE(fresh->channel(fresh->lock(), 0).in_flight != 0);
+  b.host->pull_up_changed(false, vtime{end});
+  REQUIRE(b.warnings.size() == 1);
+  CHECK(b.warnings.front().contains("an output report was in flight at a detach"));
+  CHECK_FALSE(b.warnings.front().contains("with ID"));
+}
+
+TEST_CASE("under strict every unplug that drops an unawaited write raises, the log has one warning")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(hub->lock(), 0);
+  auto  at      = t0 + second;
+  for(auto round = 0; round < 2; ++round)
+  {
+    channel.write({2, 'q'});
+    r.dev.s.out_naks = 1'000'000;
+    while(channel.in_flight == 0)
+    {
+      at += 20 * us;
+      r.run_until(at);
+    }
+    r.strict = true;
+    CHECK_THROWS_AS(r.host->pull_up_changed(false, vtime{at}), std::runtime_error);
+    r.strict         = false;
+    r.dev.s.out_naks = 0;
+    r.plug(at + 10 * ms);
+    at += second;
+    r.run_until(at);
+  }
+  CHECK(r.warnings.size() == 1);
+}
+
+TEST_CASE("a report without an ID is named without one")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(hub->lock(), 0);
+  channel.write({0, 'q'});
+  r.dev.s.out_naks = 1'000'000;
+  auto at          = t0 + second;
+  while(channel.in_flight == 0)
+  {
+    at += 20 * us;
+    r.run_until(at);
+  }
+  r.host->pull_up_changed(false, vtime{at});
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(r.warnings.front().contains("an output report was in flight"));
+}
+
+TEST_CASE("an empty snapshot load drops a write in flight without a warning")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(hub->lock(), 0);
+  channel.write({2, 'q'});
+  r.dev.s.out_naks = 1'000'000;
+  auto at          = t0 + second;
+  while(channel.in_flight == 0)
+  {
+    at += 20 * us;
+    r.run_until(at);
+  }
+  r.host->load({});
+  CHECK(r.warnings.empty());
 }
 
 TEST_CASE("the CDC ACM and HID drivers bind together, each to its own interfaces")

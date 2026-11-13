@@ -334,6 +334,16 @@ public:
   virtual void configured(host_context& ctx) = 0;
 
   /**
+   * @brief The host is about to destroy the driver, at an unplug or a bus reset. Called with the
+   *        driver's state as it was, before the bus state is dropped. A warning raised here
+   *        reaches the sink once the host finished the detach, so a sink that throws leaves the
+   *        host consistent. Not called when a snapshot load replaces the drivers, an empty
+   *        one included.
+   * @param ctx The driver's access to the host.
+   */
+  virtual void detached(host_context& ctx);
+
+  /**
    * @brief A control transfer the driver submitted ended, a STALL included.
    * @param ctx The driver's access to the host.
    * @param result The transfer.
@@ -465,6 +475,10 @@ struct host_options
   std::vector<driver_factory> drivers{};
   /** @brief Receives the host's warnings: a request timed out, a malformed descriptor. */
   std::copyable_function<void(std::string const&) const> warn{};
+  /** @brief Called by host_context::refuse_strict with the message. A machine under strict
+   * peripherals throws from it, so the error lands after the host finished what it was doing.
+   * Empty: refuse_strict does nothing. */
+  std::copyable_function<void(std::string const&) const> strict_refuse{};
 };
 
 /** @brief A class driver bound by the host. */
@@ -556,6 +570,10 @@ public:
 
   /** @brief Passes a warning to host_options::warn. */
   void warn(std::string const& message) const;
+  /** @brief Passes @p message to host_options::strict_refuse, which throws under strict
+   * peripherals and logs nothing. Held back as warn() is, so a throwing sink runs after the
+   * driver's lock. */
+  void refuse_strict(std::string const& message) const;
 
 private:
   host*       host_;
