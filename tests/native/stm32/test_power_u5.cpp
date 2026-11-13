@@ -203,18 +203,75 @@ TEST_CASE("a snapshot between the two FLASH keys restores the half-done sequence
   CHECK(f.field("FLASH", "FLASH_NSCR", "LOCK") == 0);
 }
 
-TEST_CASE("the first PWR_CR1 write logs its LPMS mode, Stop 0 included")
+namespace
+{
+
+auto u5_mode_write(stm32_fixture& f, std::uint32_t lpms) -> bool
+{
+  auto&      regs = f.target->peripheral("PWR");
+  auto const cr1  = popcorn::find_register(regs.description(), std::string_view{"PWR_CR1"});
+  auto const old  = regs.peek(cr1->offset);
+  auto const now  = (old & ~7u) | lpms;
+  return f.target->model("PWR")
+      ->on_write(regs, cr1->offset, 4, old, now, {.pc = 0, .now = icount{0}})
+      .has_value();
+}
+
+}
+
+TEST_CASE("the first PWR_CR1 LPMS change logs its mode once, a write that keeps LPMS logs nothing")
 {
   stm32_fixture                 f{u575(), "flash_ll"};
   std::vector<core::log_record> logged;
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
-  auto&      regs = f.target->peripheral("PWR");
-  auto const cr1  = popcorn::find_register(regs.description(), std::string_view{"PWR_CR1"});
-  REQUIRE(
-      f.target->model("PWR")->on_write(regs, cr1->offset, 4, 0, 0, {.pc = 0, .now = icount{0}}));
+  REQUIRE(u5_mode_write(f, 0));
+  CHECK(logged.empty());
+  REQUIRE(u5_mode_write(f, 2));
   REQUIRE(logged.size() == 1);
-  CHECK(logged.front().message.contains("stop0"));
+  CHECK(logged.front().message.contains("stop2"));
+  REQUIRE(u5_mode_write(f, 0));
+  REQUIRE(u5_mode_write(f, 3));
+  CHECK(logged.size() == 1);
+}
+
+TEST_CASE("RM0456 10.10.2: under strict mode an LPMS change raises and LPMS keeps its value")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  stm32_fixture f{u575(), "pwr_ll", std::move(options)};
+  for(auto const lpms : {1u, 2u, 3u, 4u, 7u})
+  {
+    CAPTURE(lpms);
+    auto&      regs = f.target->peripheral("PWR");
+    auto const cr1  = popcorn::find_register(regs.description(), std::string_view{"PWR_CR1"});
+    auto const old  = regs.peek(cr1->offset);
+    auto const now  = (old & ~7u) | lpms;
+    CHECK_THROWS_AS(
+        static_cast<void>(f.target->model("PWR")->on_write(
+            regs, cr1->offset, 4, old, now, {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(f.field("PWR", "PWR_CR1", "LPMS") == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 10.10.2: under strict mode a write that keeps LPMS and a debugger write do not raise")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  stm32_fixture f{u575(), "pwr_ll", std::move(options)};
+  auto&         regs = f.target->peripheral("PWR");
+  auto const    cr1  = popcorn::find_register(regs.description(), std::string_view{"PWR_CR1"});
+  auto const    old  = regs.peek(cr1->offset);
+  CHECK_NOTHROW(
+      static_cast<void>(f.target->model("PWR")->on_write(
+          regs, cr1->offset, 4, old, old, {.pc = 0, .now = icount{0}})));
+  CHECK_NOTHROW(
+      static_cast<void>(f.target->model("PWR")->on_write(
+          regs, cr1->offset, 4, old, old | 2u,
+          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::debugger})));
+  CHECK(f.field("PWR", "PWR_CR1", "LPMS") == 2);
 }
 
 TEST_CASE("RM0456 10.10.4: active_level() maps every ACTVOS code to a level, range 1 is level 0")

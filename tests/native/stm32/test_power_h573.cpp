@@ -496,16 +496,48 @@ TEST_CASE("RM0481 10.11.1: the first PWR_PMCR write logs its LPMS mode, 1 is sta
   CHECK(logged[0].message.contains("standby"));
 }
 
-TEST_CASE("RM0481 10.11.1: LPMS 0 is stop0 and SVOS is storage")
+TEST_CASE("RM0481 10.11.1: a PWR_PMCR write that keeps LPMS logs nothing and SVOS is storage")
 {
   rig                           r;
   std::vector<core::log_record> logged;
   auto const                    sink =
       r.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   r.write("PWR_PMCR", 3u << 2);
-  REQUIRE(logged.size() == 1);
-  CHECK(logged[0].message.contains("stop0"));
+  CHECK(logged.empty());
   CHECK(r.get("PMCR", "SVOS") == 3);
+}
+
+TEST_CASE("RM0481 10.11.1: under strict mode an LPMS change raises, LPMS keeps its value")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  rig        r{"h573_pwr_ll", std::move(options)};
+  auto&      regs = r.f.target->peripheral("PWR");
+  auto const pmcr = popcorn::find_register(regs.description(), std::string_view{"PWR_PMCR"});
+  auto const old  = regs.peek(pmcr->offset);
+  CHECK_NOTHROW(
+      static_cast<void>(r.f.target->model("PWR")->on_write(
+          regs, pmcr->offset, 4, old, old | (3u << 2), {.pc = 0, .now = icount{0}})));
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f.target->model("PWR")->on_write(
+          regs, pmcr->offset, 4, old, old | 1u, {.pc = 0, .now = icount{0}})),
+      popcorn::model_error);
+  CHECK(r.get("PMCR", "LPMS") == 0);
+}
+
+TEST_CASE("RM0481 10.11.1: under strict mode a debugger LPMS change does not raise and is stored")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  rig        r{"h573_pwr_ll", std::move(options)};
+  auto&      regs = r.f.target->peripheral("PWR");
+  auto const pmcr = popcorn::find_register(regs.description(), std::string_view{"PWR_PMCR"});
+  auto const old  = regs.peek(pmcr->offset);
+  CHECK_NOTHROW(
+      static_cast<void>(r.f.target->model("PWR")->on_write(
+          regs, pmcr->offset, 4, old, old | 1u,
+          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::debugger})));
+  CHECK(r.get("PMCR", "LPMS") == 1);
 }
 
 TEST_CASE("the H5 has no EPOD booster: a PMCR.BOOSTE write is stored and starts no delay")

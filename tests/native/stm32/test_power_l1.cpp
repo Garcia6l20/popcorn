@@ -156,6 +156,37 @@ TEST_CASE("RM0038 5.4.1: the first PDDS change names the low-power mode, once")
   CHECK(logged[0].message.contains("PDDS selects standby"));
 }
 
+TEST_CASE("RM0038 5.4.1: under strict mode a PDDS change raises, PDDS keeps its value")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  auto       strict          = parked(std::move(options));
+  auto&      regs            = strict.target->peripheral("PWR");
+  auto const old             = regs.peek(0);
+  CHECK_NOTHROW(
+      static_cast<void>(strict.target->model("PWR")->on_write(
+          regs, 0, 4, old, old, {.pc = 0, .now = icount{0}})));
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.target->model("PWR")->on_write(
+          regs, 0, 4, old, old | 2u, {.pc = 0, .now = icount{0}})),
+      popcorn::model_error);
+  CHECK(strict.field("PWR", "CR", "PDDS") == 0);
+}
+
+TEST_CASE("RM0038 5.4.1: under strict mode a debugger PDDS change does not raise and is stored")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  auto       strict          = parked(std::move(options));
+  auto&      regs            = strict.target->peripheral("PWR");
+  auto const old             = regs.peek(0);
+  CHECK_NOTHROW(
+      static_cast<void>(strict.target->model("PWR")->on_write(
+          regs, 0, 4, old, old | 2u,
+          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::debugger})));
+  CHECK(strict.field("PWR", "CR", "PDDS") == 1);
+}
+
 TEST_CASE("RM0038 5.4.1: a debugger write of VOS 00 keeps the range with no log record")
 {
   auto                          f = parked();

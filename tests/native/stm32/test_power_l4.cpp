@@ -234,6 +234,38 @@ TEST_CASE("RM0351 5.4.1: LPMS names Stop 1, Standby and Shutdown at its first ch
   }
 }
 
+TEST_CASE("RM0351 5.4.1: under strict mode an LPMS change raises, LPMS keeps its value")
+{
+  for(auto const lpms : {1u, 2u, 3u, 4u, 7u})
+  {
+    CAPTURE(lpms);
+    auto       strict = parked(strict_options());
+    auto&      regs   = strict.target->peripheral("PWR");
+    auto const old    = regs.peek(0);
+    CHECK_NOTHROW(
+        static_cast<void>(strict.target->model("PWR")->on_write(
+            regs, 0, 4, old, old, {.pc = 0, .now = icount{0}})));
+    auto const now = (old & ~7u) | lpms;
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.target->model("PWR")->on_write(
+            regs, 0, 4, old, now, {.pc = 0, .now = icount{0}})),
+        popcorn::model_error);
+    CHECK(strict.field("PWR", "CR1", "LPMS") == 0);
+  }
+}
+
+TEST_CASE("RM0351 5.4.1: under strict mode a debugger LPMS change does not raise and is stored")
+{
+  auto       strict = parked(strict_options());
+  auto&      regs   = strict.target->peripheral("PWR");
+  auto const old    = regs.peek(0);
+  CHECK_NOTHROW(
+      static_cast<void>(strict.target->model("PWR")->on_write(
+          regs, 0, 4, old, (old & ~7u) | 2u,
+          {.pc = 0, .now = icount{0}, .by = popcorn::initiator::debugger})));
+  CHECK(strict.field("PWR", "CR1", "LPMS") == 2);
+}
+
 TEST_CASE("RM0351 5.4: a function enable the model does not run warns once per field")
 {
   for(auto const& [reg, name] : functions)

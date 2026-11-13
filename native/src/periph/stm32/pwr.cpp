@@ -228,11 +228,11 @@ struct pwr_variant
  *        latency check. The H5 reads them in PWR_VOSSR and writes VOS in PWR_VOSCR, and steps
  *        ACTVOS one level at the write and one more every 10.4 us, with VOSRDY and ACTVOSRDY set
  *        15.2 us after the last step: VOS3 to VOS0 is ready 36 us after the write, as measured on
- *        an STM32H573. The voltage range FLASH checks against is the one at the last ready, so
- *        the steps change it only when the ready bits set.
- *        Low-power modes are not modelled: the first write to the mode register, PWR_CR1 on the
- *        U5 and PWR_PMCR on the H5, logs one warning per machine life naming the LPMS mode, and
- *        a deep-sleep WFI idles as a plain WFI.
+ *        an STM32H573. The voltage range FLASH checks against is the one at the last ready, so the
+ *        steps change it only when the ready bits set. Low-power modes are not modelled: the first
+ *        change of the LPMS field, in PWR_CR1 on the U5 and PWR_PMCR on the H5, logs one warning
+ *        per machine life naming the mode and raises model_error under strict_peripherals, LPMS
+ *        keeping its value before the write. A deep-sleep WFI idles as a plain WFI.
  *
  *        Regulator selection, RM0456 10.5 and 10.10.3: on a U5 package with the SMPS, the part
  *        names ending in Q, PWR_SVMSR.REGS takes the value of PWR_CR3.REGSEL after the DS13737
@@ -266,12 +266,13 @@ struct pwr_variant
  *        SEC bit `PWR_UCPDR` RAZ/WI. SCMSEC is the `PWR_SECCFGR` bit the register descriptions
  *        of RM0481 10.11.11 and 10.11.12 name.
  *
- *        The STM32L1 follows RM0038 5.4.1 and 5.4.2: a VOS write to another range sets
- *        PWR_CSR.VOSF until the board's ready delay ends, then the FLASH model is told. VOS 00 is
- *        forbidden: a firmware write of it keeps the range, logs one warning per machine life and
- *        raises model_error under strict_peripherals. The first PDDS change logs the low-power
- *        mode warning. DBP, LPSDSR, LPRUN, ULP, FWU, PVD and the wakeup flags are storage. A
- *        peripheral reset through RCC PWRRST keeps FWU and ULP.
+ *        The STM32L1 follows RM0038 5.4.1 and 5.4.2: a VOS write to another range sets PWR_CSR.VOSF
+ *        until the board's ready delay ends, then the FLASH model is told. VOS 00 is forbidden: a
+ *        firmware write of it keeps the range, logs one warning per machine life and raises
+ *        model_error under strict_peripherals. The first PDDS change logs the low-power mode
+ *        warning and raises model_error under strict_peripherals, PDDS keeping its value. DBP,
+ *        LPSDSR, LPRUN, ULP, FWU, PVD and the wakeup flags are storage. A peripheral reset through
+ *        RCC PWRRST keeps FWU and ULP.
  *
  *        The STM32L47x/L48x follows RM0351 5.1.8 and 5.4: a VOS write to the other range sets
  *        PWR_SR2.VOSF until the board's ready delay ends, then the FLASH model is told. VOSF sets
@@ -279,20 +280,21 @@ struct pwr_variant
  *        Range 2 to Range 1 and from Range 1 to Range 2. VOS 00 and 11 cannot be written: a
  *        firmware write of either keeps the range, logs one warning per machine life and raises
  *        model_error under strict_peripherals. The first LPMS change logs the low-power mode
- *        warning, LPMS 000 to 011 Stop 0, Stop 1, Stop 2 and Standby, 1xx Shutdown. A firmware
- *        write that sets LPR, PVDE, a PVMEx, an EWUPx or APC from 0 logs one warning per field
- *        per machine life, and under strict_peripherals raises model_error with the register
- *        kept at its value before the write. IOSV is storage the GPIO model reads through
- *        io_supply_source, USV the OTG_FS model reads through usb_supply_source and is told of
- *        through usb_supply_listener. DBP, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and
- *        PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the wakeup and
- *        Standby flags stay 0.
+ *        warning and raises model_error under strict_peripherals, LPMS keeping its value, LPMS 000
+ *        to 011 Stop 0, Stop 1, Stop 2 and Standby, 1xx Shutdown. A firmware write that sets LPR,
+ *        PVDE, a PVMEx, an EWUPx or APC from 0 logs one warning per field per machine life, and
+ *        under strict_peripherals raises model_error with the register kept at its value before the
+ *        write. IOSV is storage the GPIO model reads through io_supply_source, USV the OTG_FS model
+ *        reads through usb_supply_source and is told of through usb_supply_listener. DBP, PLS, RRS,
+ *        EIWUL, PWR_CR4, PWR_SCR, PWR_PUCRx and PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the
+ *        PVMOx flags and the wakeup and Standby flags stay 0.
  *
  * @limits pwr PWR
  *
  * @group u5,h5 unmodelled
  * - The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
- *   modelled. A deep-sleep WFI idles as a plain WFI.
+ *   modelled. The first LPMS change logs one warning and is a `model_error` under
+ *   `strict_peripherals`, LPMS keeping its value. A deep-sleep WFI idles as a plain WFI.
  * - The backup domain monitoring that `MONEN` enables is not modelled, in `PWR_BDCR1` on the U5
  *   and `PWR_BDCR` on the H5: its flags and tamper detection are not modelled. A firmware write
  *   that sets `MONEN` from 0 logs one warning per machine life and stores the bit. Under
@@ -357,9 +359,10 @@ struct pwr_variant
  *   firmware write of it also logs one warning per machine life and is a `model_error` under
  *   `strict_peripherals`.
  * - STM32L1: the low-power modes `PWR_CR.PDDS` selects are not modelled, the first PDDS change logs
- *   one warning. `DBP` does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR,
- *   LPRUN, ULP, FWU, the PVD and the wakeup flags are storage. A peripheral reset through
- *   `RCC_APB1RSTR.PWRRST` keeps FWU and ULP, RM0038 5.4.1.
+ *   one warning and is a `model_error` under `strict_peripherals`, PDDS keeping its value. `DBP`
+ *   does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR, LPRUN, ULP, FWU,
+ *   the PVD and the wakeup flags are storage. A peripheral reset through `RCC_APB1RSTR.PWRRST`
+ *   keeps FWU and ULP, RM0038 5.4.1.
  *
  * @group l4 rule
  * - STM32L47x/L48x: a VOS write to the other range sets `PWR_SR2.VOSF` for the board's
@@ -369,7 +372,8 @@ struct pwr_variant
  *   firmware write of either also logs one warning per machine life and is a `model_error` under
  *   `strict_peripherals`.
  * - STM32L47x/L48x: the low-power modes `PWR_CR1.LPMS` selects are not modelled, the first LPMS
- *   change logs one warning naming the mode, and a deep-sleep WFI idles as a plain WFI. A firmware
+ *   change logs one warning naming the mode and is a `model_error` under `strict_peripherals`,
+ *   LPMS keeping its value, and a deep-sleep WFI idles as a plain WFI. A firmware
  *   write that sets `LPR`, `PVDE`, `PVME1` to `PVME4`, `EWUP1` to `EWUP5` or `APC` from 0 logs one
  *   warning per field per machine life and stores the bit. Under `strict_peripherals` it is a
  *   `model_error` and the register keeps its value before the write. `REGLPS`, `REGLPF`, `PVDO`,
@@ -1200,18 +1204,33 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void pwr::cr1_written(std::uint32_t, std::uint32_t now)
+void pwr::cr1_written(std::uint32_t old, std::uint32_t now)
 {
-  if(std::exchange(low_power_logged_, true))
+  auto const mode = names_[pwr_role::mode];
+  if(mode.of(now) == mode.of(old))
   {
     return;
   }
-  warn(
-      variant_.fields[std::to_underlying(pwr_role::mode)].name.reg,
-      std::format(
-          "{} selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
-          variant_.fields[std::to_underlying(pwr_role::mode)].name.field,
-          reflex::enum_value_name(variant_.modes[names_[pwr_role::mode].of(now)])));
+  auto const& name = variant_.fields[std::to_underlying(pwr_role::mode)].name;
+  if(ctx_.strict_peripherals and writer_ != initiator::debugger)
+  {
+    regs_.poke(mode.offset, mode.with(regs_.peek(mode.offset), mode.of(old)));
+  }
+  auto const text = [&] {
+    return std::format(
+        "{} selects {}, not modelled: a deep-sleep WFI idles as a plain WFI", name.field,
+        reflex::enum_value_name(variant_.modes[mode.of(now)]));
+  };
+  if(writer_ == initiator::debugger)
+  {
+    if(not std::exchange(low_power_logged_, true))
+    {
+      warn(name.reg, text());
+    }
+    return;
+  }
+  warn_once_or_refuse(
+      low_power_logged_, name.reg, mode.offset, std::function_ref<std::string()>{text});
 }
 
 void pwr::functions_written(std::uint32_t old, std::uint32_t now)
@@ -1240,10 +1259,7 @@ void pwr::control_written(std::uint32_t old, std::uint32_t now)
 {
   functions_written(old, now);
   vosr_written(old, now);
-  if(names_[pwr_role::mode].of(now) != names_[pwr_role::mode].of(old))
-  {
-    cr1_written(old, now);
-  }
+  cr1_written(old, now);
 }
 
 void pwr::cr3_written(std::uint32_t old, std::uint32_t now)
