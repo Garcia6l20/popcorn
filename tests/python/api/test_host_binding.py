@@ -55,6 +55,7 @@ HOLDER: contextvars.ContextVar[list[object]] = contextvars.ContextVar("host_bind
 CHILD_TIMEOUT = 12
 EXIT_WAIT_UNSET = {"POPCORN_TEST_EXIT_WAIT_MS": ""}
 SHORT_EXIT_WAIT = {"POPCORN_TEST_EXIT_WAIT_MS": "1000"}
+LONG_EXIT_WAIT = {"POPCORN_TEST_EXIT_WAIT_MS": "600000"}
 COLLECTED = "a model or device of a collected Machine was called"
 
 
@@ -621,6 +622,15 @@ def run_child(
             f"stdout:\n{_text(expired.stdout)}\nstderr:\n{_text(expired.stderr)}",
             pytrace=False,
         )
+
+
+def exit_took(child: subprocess.CompletedProcess[str]) -> float:
+    """Seconds from the `leaving <time.monotonic()>` line `child` printed last to now, after
+    its exit. The child's start-up is left out."""
+    now = time.monotonic()
+    word, stamp = child.stdout.split()
+    assert word == "leaving", child.stdout
+    return now - float(stamp)
 
 
 def test_a_child_started_under_an_ignored_sigint_still_takes_keyboard_interrupt() -> None:
@@ -1923,6 +1933,7 @@ def test_ctrl_c_on_a_blocked_handler_abandons_its_machine(mode: str) -> None:
 
 
 BLOCKED_AT_EXIT = """
+import atexit
 import os
 import signal
 import threading
@@ -1946,14 +1957,20 @@ m.start()
 assert entered.wait(10)
 
 
-def interrupt_later():
-    time.sleep(1.0)
-    os.kill(os.getpid(), signal.SIGINT)
+exiting = threading.Event()
+
+
+def interrupt_while_exiting():
+    exiting.wait()
+    while True:
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.2)
 
 
 if __SIGNAL__:
-    threading.Thread(target=interrupt_later, daemon=True).start()
-print("leaving", flush=True)
+    threading.Thread(target=interrupt_while_exiting, daemon=True).start()
+    atexit.register(exiting.set)
+print("leaving", time.monotonic(), flush=True)
 """
 
 
@@ -2853,6 +2870,7 @@ def drop():
 atexit.register(drop)
 
 import threading
+import time
 
 import popcorn
 
@@ -2873,7 +2891,7 @@ assert entered.wait(10)
 kept["machine"] = m
 kept["cycle"] = kept
 del m
-print("leaving", flush=True)
+print("leaving", time.monotonic(), flush=True)
 """
 
 
@@ -2882,10 +2900,8 @@ def test_a_machine_halted_and_dropped_after_the_exit_abandon_does_not_hang() -> 
     script = DROPPED_AFTER_EXIT.replace("__JSON__", repr(str(M33_JSON))).replace(
         "__ELF__", repr(str(DRIVER_ELF))
     )
-    began = time.monotonic()
     child = run_child(script, timeout=30, env=SHORT_EXIT_WAIT)
-    took = time.monotonic() - began
-    assert child.stdout.strip() == "leaving"
+    took = exit_took(child)
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
     assert took < 5
 
@@ -2898,14 +2914,10 @@ def test_an_exit_with_a_blocked_handler_abandons_its_machine(interrupted: bool) 
         .replace("__JSON__", repr(str(M33_JSON)))
         .replace("__ELF__", repr(str(DRIVER_ELF)))
     )
-    began = time.monotonic()
-    child = run_child(script, timeout=30)
-    took = time.monotonic() - began
-    assert child.stdout.strip() == "leaving"
+    child = run_child(script, timeout=30, env=LONG_EXIT_WAIT if interrupted else None)
+    took = exit_took(child)
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
-    if interrupted:
-        assert took < 5
-    else:
+    if not interrupted:
         assert 9 <= took < 15
 
 
