@@ -7,7 +7,6 @@ import asyncio
 import contextlib
 import enum
 import fcntl
-import functools
 import hashlib
 import importlib.util
 import inspect
@@ -39,16 +38,11 @@ from popcorn import (
 from popcorn._machine import AttachedDevice
 from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes, registry_generation, unregistered
-from popcorn._native_digest import native_digest
+from popcorn._native_digest import process_native_digest
 from popcorn.board import I2CController, I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
 
 FORMAT = "popcorn-boot-cache 2"
-
-
-@functools.cache
-def _extension_digest() -> str:
-    return native_digest()
 
 
 def _file_digest(path: Path) -> str:
@@ -61,7 +55,7 @@ def recorded_inputs(project: MachineDescription) -> dict[str, object]:
     current values from any working directory."""
     return {
         "version": popcorn.version(),
-        "native": _extension_digest(),
+        "native": process_native_digest(),
         "images": [
             [str(Path(image.path).absolute()), _file_digest(Path(image.path))]
             for image in project.images
@@ -320,7 +314,7 @@ def cache_key(
     lines = [
         FORMAT,
         popcorn.version(),
-        _extension_digest(),
+        process_native_digest(),
         description_digest(description),
         *(image.load().digest for image in project.images),
         project.digest,
@@ -590,7 +584,7 @@ def sweep(directory: Path, max_age_days: int, now: float | None = None) -> int:
     moment = time.time() if now is None else now
     digests: dict[str, str | None] = {}
     version = popcorn.version()
-    native = _extension_digest()
+    native = process_native_digest()
     removed = 0
     for info in sorted(directory.glob("*.json")):
         entry = Entry.of(directory, info.stem)

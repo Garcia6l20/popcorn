@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from elftools.elf.elffile import ELFFile
-from popcorn import ConfigError, _core
+from popcorn import ConfigError, _core, _native_digest
 from popcorn.plugin import Plugin, _build_cache
 from popcorn.plugin._records import constructed
 from popcorn.plugin._sdk import sdk
@@ -47,6 +47,24 @@ def test_a_fresh_cache_builds_a_library_with_the_host_tag(tmp_path: Path, cache:
     assert library.is_file()
     assert library.is_relative_to(cache)
     assert abi_tag(library) == _core._host_abi_tag()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.timeout(60)
+def test_a_native_relink_between_two_builds_leaves_the_key_alone(
+    tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = tmp_path / "libpopcorn_loaded.so"
+    library.write_bytes(b"loaded")
+    monkeypatch.setattr(_native_digest, "native_digest", lambda: library.read_bytes().hex())
+    _native_digest.process_native_digest.cache_clear()
+    try:
+        plugin = Plugin.dev(copied("echo", tmp_path))
+        built = plugin.built()
+        library.write_bytes(b"relinked")
+        monkeypatch.setattr(_build_cache, "run_build", no_build)
+        assert plugin.built() == built
+    finally:
+        _native_digest.process_native_digest.cache_clear()
 
 
 @pytest.mark.timeout(30)
@@ -113,6 +131,22 @@ def test_the_key_covers_the_sdk_headers(tmp_path: Path, monkeypatch: pytest.Monk
     assert _build_cache.key_of(source) == before
     monkeypatch.setattr(_build_cache, "sdk_include", lambda: edited)
     assert _build_cache.key_of(source) != before
+
+
+@pytest.mark.timeout(60)
+def test_the_key_follows_the_native_digest_of_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = copied("echo", tmp_path)
+    keys: list[str] = []
+    try:
+        for digest in ("a", "b"):
+            monkeypatch.setattr(_native_digest, "native_digest", lambda digest=digest: digest)
+            _native_digest.process_native_digest.cache_clear()
+            keys.append(_build_cache.key_of(copy))
+    finally:
+        _native_digest.process_native_digest.cache_clear()
+    assert keys[0] != keys[1]
 
 
 def test_an_edit_in_the_same_process_asks_for_a_restart(tmp_path: Path, cache: Path) -> None:

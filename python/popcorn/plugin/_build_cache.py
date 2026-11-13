@@ -30,7 +30,7 @@ from pathlib import Path
 
 from popcorn import _core
 from popcorn._errors import ConfigError
-from popcorn._native_digest import native_digest
+from popcorn._native_digest import process_native_digest
 from popcorn.plugin._sdk import MANIFEST, Sdk, package_directory, sdk
 
 CACHE_VARIABLE = "POPCORN_PLUGIN_CACHE"
@@ -130,7 +130,7 @@ def key_of(copy: Path) -> str:
     abi_tag = _core._host_abi_tag()  # pyright: ignore[reportPrivateUsage]
     parts = (
         abi_tag,
-        native_digest(),
+        process_native_digest(),
         _include_digest(sdk_include()),
         _helpers_digest(),
         tree_digest(copy),

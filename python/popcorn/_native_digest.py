@@ -6,6 +6,7 @@ Kept free of pytest: the boot cache uses it, and so does code that runs without 
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from pathlib import Path
 
@@ -52,3 +53,15 @@ def native_digest(directory: Path | None = None) -> str:
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+@functools.cache
+def process_native_digest() -> str:
+    """`native_digest()` read once, at first use, for the rest of the process.
+
+    A relink on disk afterwards changes no code the process runs: the loader refuses a plugin whose
+    ABI tag differs from the host's (`check_tag` in `plugin/loader.cpp`), so a key made from this
+    value never admits an incompatible library. A relink before the first call is hashed as it
+    stands, the same laziness as the boot cache.
+    """
+    return native_digest()
