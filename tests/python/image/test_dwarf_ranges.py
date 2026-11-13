@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -35,14 +34,14 @@ def _assemble(tmp_path: Path, source: str, symbols: dict[str, int]) -> Path:
 @pytest.mark.parametrize(
     ("units", "functions"), [(400, 1), (1, 3000)], ids=["across units", "within a unit"]
 )
-def test_shared_range_list_is_read_once(tmp_path: Path, units: int, functions: int) -> None:
+def test_shared_range_list_is_read_once(
+    tmp_path: Path, list_reads: dict[str, int], units: int, functions: int
+) -> None:
     symbols = {"UNITS": units, "FUNCTIONS": functions, "ENTRIES": 3000}
     elf = _assemble(tmp_path, "shared_ranges_units.s", symbols)
-    started = time.perf_counter()
     info = load_debug_info(elf)
-    elapsed = time.perf_counter() - started
     assert info.functions["f"].address == 0x08000040
-    assert elapsed < 1.0
+    assert list_reads == {"location": 0, "range": 1}
 
 
 def test_relative_list_shared_by_units_with_different_bases(tmp_path: Path) -> None:

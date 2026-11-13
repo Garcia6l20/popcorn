@@ -15,7 +15,6 @@ import pickle
 import shutil
 import subprocess
 import threading
-import time
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -141,7 +140,6 @@ def test_location_valid_at_no_pc_is_none(types: DebugInfo) -> None:
     assert inlined.scopes == ((0x08000058, 0x0800005C),)
 
 
-@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
 def _counting(name: str, reads: dict[str, int]) -> Callable[..., Any]:
     original = getattr(popcorn.image.dwarf, name)
 
@@ -152,6 +150,7 @@ def _counting(name: str, reads: dict[str, int]) -> Callable[..., Any]:
     return counted
 
 
+@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
 @pytest.mark.parametrize(
     ("locals_", "blocks", "entries", "ranges"),
     [(3000, 0, 3000, 1), (0, 3000, 1, 3000)],
@@ -180,14 +179,14 @@ def test_shared_lists_are_read_once(
 
 
 @pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
-def test_frame_base_location_lists_are_not_parsed(tmp_path: Path) -> None:
+def test_frame_base_location_lists_are_not_parsed(
+    tmp_path: Path, list_reads: dict[str, int]
+) -> None:
     elf = _assemble(tmp_path, "frame_base_units.s", {"UNITS": 400, "ENTRIES": 3000})
-    started = time.perf_counter()
     info = load_debug_info(elf)
-    elapsed = time.perf_counter() - started
     assert len(info.units) == 400
     assert info.functions["f"].frame_base is None
-    assert elapsed < 1.0
+    assert list_reads == {"location": 0, "range": 0}
 
 
 @pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
