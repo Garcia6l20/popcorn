@@ -402,26 +402,34 @@ def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
         def stall() -> None:
             seen.append(m.time)
             stalled.set()
-            resume.wait()
+            resume.wait(5)
 
         def cut() -> None:
             m.reset(ResetKind.SOFTWARE)
             cut_done.set()
 
         async def free() -> tuple[int, list[FilterSample]]:
-            async with m.running():
-                held = m.sample(stall)
-                assert stalled.wait(20)
-                first, stop, end = bounds(seen[0])
-                reader = asyncio.ensure_future(tap.read(100, deadline=stop))
-                await asyncio.sleep(0)
-                reset = m.sample(cut, at=end)
-                resume.set()
-                assert cut_done.wait(20)
-                got = await reader
-                await held
-                await reset
-                return first, got
+            first, got = 0, []
+            held = m.sample(stall, at=m.time + us(300))
+            try:
+                async with m.running():
+                    try:
+                        assert stalled.wait(5), "the stall sample never ran"
+                        first, stop, end = bounds(seen[0])
+                        reader = asyncio.ensure_future(tap.read(100, deadline=stop))
+                        await asyncio.sleep(0)
+                        reset = m.sample(cut, at=end)
+                        resume.set()
+                        assert cut_done.wait(5), "the cut sample never ran"
+                    finally:
+                        resume.set()
+                    got = await reader
+                    await held
+                    await reset
+            except popcorn.EmulationError as stopped:
+                assert stopped.reason is popcorn.StopReason.USER, stopped
+            assert cut_done.is_set(), "the run ended before the cut sample ran"
+            return first, got
 
         first, got = run_bounded(free(), 20)
     else:
@@ -429,8 +437,12 @@ def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
         got = asyncio.run(tap.read(100, deadline=stop))
         asyncio.run(m.run(for_=end - m.time))
         m.reset(ResetKind.SOFTWARE)
-    assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first + 4)]
-    assert [s.at for s in tap.take()] == [sample_at(anchor, k) for k in range(first + 4, first + 7)]
+    state = f"running={running} first={first} got={len(got)}"
+    assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first + 4)], state
+    queued = tap.take()
+    assert [s.at for s in queued] == [
+        sample_at(anchor, k) for k in range(first + 4, first + 7)
+    ], f"{state} queued={len(queued)}"
 
 
 class Racing:
@@ -482,7 +494,7 @@ def test_a_reset_after_a_no_wait_reads_count_leaves_the_samples_past_its_deadlin
         def stall() -> None:
             seen.append(m.time)
             stalled.set()
-            resume.wait()
+            resume.wait(5)
 
         def cut() -> None:
             m.reset(ResetKind.SOFTWARE)
@@ -490,20 +502,25 @@ def test_a_reset_after_a_no_wait_reads_count_leaves_the_samples_past_its_deadlin
 
         def between() -> None:
             resume.set()
-            assert cut_done.wait(20)
+            assert cut_done.wait(5), "the cut sample never ran"
 
         racing = Racing(real, between)
         monkeypatch.setattr(tap, "_link", racing)
 
         async def free() -> list[FilterSample]:
-            async with m.running():
-                held = m.sample(stall)
-                assert stalled.wait(20)
-                reset = m.sample(cut, at=seen[0] + us(5))
-                got = await tap.read(first, deadline=deadline)
-                await held
-                await reset
-                return got
+            got: list[FilterSample] = []
+            held = m.sample(stall, at=m.time + us(300))
+            try:
+                async with m.running():
+                    assert stalled.wait(5), "the stall sample never ran"
+                    reset = m.sample(cut, at=seen[0] + us(5))
+                    got = await tap.read(first, deadline=deadline)
+                    await held
+                    await reset
+            except popcorn.EmulationError as stopped:
+                assert stopped.reason is popcorn.StopReason.USER, stopped
+            assert cut_done.is_set(), "the run ended before the cut sample ran"
+            return got
 
         got = run_bounded(free(), 20)
         assert cut_done.is_set()
