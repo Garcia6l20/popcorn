@@ -1,0 +1,9 @@
+format = 1
+source = "DS14102 Rev 5 3.47 (STM32U5Gxxx) On-the-fly decryption engine (OTFDEC), OTFDEC2 and OCTOSPI2 memory interface row of the block diagram table: the STM32U5G7 carries OTFDEC2, its CMSIS header lists OTFDEC2_IRQn 109, and its SVD declares no OTFDEC2 peripheral and no interrupt 109. The IRQ has no owning peripheral in the description"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U5G7.svd"]
+
+[irqs]
+add = [{ number = 109, name = "OTFDEC2" }]

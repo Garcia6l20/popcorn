@@ -1,0 +1,12 @@
+format = 1
+source = "RM0456 Rev 7, 11.8.31 RCC_AHB2ENR2: the STM32U5Fx and U5Gx reset with SRAM5EN and SRAM6EN set"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U5F*.svd", "STM32U5G*.svd"]
+
+[[resets]]
+peripheral = "RCC"
+register = "RCC_AHB2ENR2"
+reset = 0xC0000000
+source = "RM0456 Rev 7, 11.8.31 RCC_AHB2ENR2: reset value 0xC000 0000 for STM32U5Fx/5Gx, bits 31 SRAM5EN and 30 SRAM6EN. ST's SVDs of the STM32U5F7 and STM32U5G7 give 0x80000000"

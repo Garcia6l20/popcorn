@@ -1,0 +1,14 @@
+format = 1
+source = "RM0456 Rev 7, 74.2: the STM32U59x, U5Ax, U5Fx and U5Gx carry UCPD1, the STM32U535 and STM32U545 do not. Their SVDs name the UCPD registers without the UCPD_ prefix"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U59*.svd", "STM32U5A*.svd", "STM32U5F*.svd", "STM32U5G*.svd"]
+
+[[cross]]
+instances = ["UCPD1"]
+reg = "ICR"
+target_reg = "SR"
+effect = "clear"
+pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
+source = "RM0456 Rev 7, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR), the registers the SVD names SR and ICR"

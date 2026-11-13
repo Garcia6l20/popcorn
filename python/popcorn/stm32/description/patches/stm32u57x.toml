@@ -104,21 +104,36 @@ register = "GPIO_MODER"
 reset = 0x0000FFFF
 source = "RM0456 Rev 7, 13.4.1 GPIOx_MODER reset value 0x0000 FFFF for port I on STM32U575/585, which has 8 pins, and silicon read-back on a NUCLEO-U575ZI-Q (STM32U575) where 0xFFFFFFFF written reads back 0x0000FFFF. ST's STM32U575 SVD gives 0xFFFFFFFF"
 
-[[resets]]
-peripheral = "RCC"
-register = "RCC_AHB1ENR"
-reset = 0xD0000100
-source = "RM0456 Rev 7, 11.8.29 RCC_AHB1ENR: reset value 0xD000 0100 for STM32U535/545/575/585, 0xD020 0100 only for STM32U59x/5Ax/5Fx/5Gx, where DCACHE2EN resets to 1. The STM32U575 and STM32U585 have no DCACHE2. ST's STM32U575 and STM32U585 SVDs give 0xD0200100"
-
-[[resets]]
-peripheral = "RCC"
-register = "RCC_AHB2ENR2"
-reset = 0x00000000
-source = "RM0456 Rev 7, 11.8.31 RCC_AHB2ENR2: reset value 0x0000 0000 for STM32U535/545/575/585, 0x8000 0000 for STM32U59x/5Ax, where SRAM5EN resets to 1. ST's STM32U575 and STM32U585 SVDs give 0x80000000"
-
 [[fields]]
 instances = ["LPGPIO1"]
 registers = ["LPGPIO_BRR"]
 fields = ["BRy15", "BRy14", "BRy13", "BRy12", "BRy11", "BRy10", "BRy9", "BRy8", "BRy7", "BRy6", "BRy5", "BRy4", "BRy3", "BRy2", "BRy1", "BRy0"]
 acc = "write_only"
 source = "RM0456 Rev 7, 14.4.5: LPGPIO_BRR bits BRy are write-only and a read returns zero. The STM32U575 and STM32U585 SVDs declare them read-only, the other STM32U5 SVDs declare them write-only"
+
+[irqs]
+add = [{ number = 27, name = "IWDG", peripheral = "IWDG" }]
+
+[[cross]]
+ip = "SPI"
+reg = "SPI_IFCR"
+target_reg = "SPI_SR"
+effect = "clear"
+pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
+source = "RM0456 Rev 7, 68.8.7 SPI interrupt/status flags clear register (SPI_IFCR). The STM32U575 and STM32U585 SVDs name the SPI registers with the SPI_ prefix"
+
+[[cross]]
+ip = "LPUART"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE" }
+source = "RM0456 Rev 7, 67.7.8 LPUART interrupt and status register (LPUART_ISR) / 67.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced 8-field set versus USART_ICR (LPUART has a FIFO, but no LIN, smartcard, SPI-slave or receiver-timeout support). The STM32U575 and STM32U585 SVDs give LPUART1 a single ISR, no enabled/disabled alternate split"
+
+[[cross]]
+instances = ["UCPD1"]
+reg = "UCPD_ICR"
+target_reg = "UCPD_SR"
+effect = "clear"
+pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
+source = "RM0456 Rev 7, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR). The STM32U575 and STM32U585 SVDs name the UCPD registers with the UCPD_ prefix"

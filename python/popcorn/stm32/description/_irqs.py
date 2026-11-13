@@ -78,10 +78,11 @@ def build_irq_table(
     add covers. A dropped number loses its SVD owner, only an add gives it one. `by_peripheral`
     keys an SVD peripheral's numbers by its name in @p owners, the map of `peripheral_owners`,
     or by its SVD name when @p owners lacks it, and leaves out a peripheral @p owners maps to
-    None. An add keys its number by the peripheral it names, and a share keys the number of the
-    IRQ it names by its peripheral too, so two peripherals raise one line. A number of a
-    peripheral @p owners maps to None that no kept peripheral or add owns raises
-    DescriptionError keyed `peripherals.drop.<svd name>`: the patch drops it by `[irqs] drop`."""
+    None. An add keys its number by the peripheral it names, an add with no peripheral
+    leaves its number unowned, and a share keys the number of the IRQ it names by its peripheral
+    too, so two peripherals raise one line. A number of a peripheral @p owners maps to None that no
+    kept peripheral or add owns raises DescriptionError keyed `peripherals.drop.<svd name>`: the
+    patch drops it by `[irqs] drop`."""
     numbers: dict[int, str] = {}
     for peripheral in svd.peripherals:
         for number, name in peripheral.interrupts:
@@ -145,7 +146,8 @@ def build_irq_table(
                 held.append(number)
     for patch in patches:
         for add in patch.add or []:
-            by_peripheral.setdefault(add.peripheral, []).append(add.number)
+            if add.peripheral is not None:
+                by_peripheral.setdefault(add.peripheral, []).append(add.number)
     for patch in patches:
         for share in patch.share or []:
             shared = [number for number, name in numbers.items() if name == share.name]

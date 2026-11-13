@@ -1,0 +1,17 @@
+format = 1
+source = "RM0456 Rev 7, 11.8.29 RCC_AHB1ENR and 11.8.31 RCC_AHB2ENR2: the reset values of the STM32U535, U545, U575 and U585 differ from the STM32U59x, U5Ax, U5Fx and U5Gx"
+
+[match]
+parts = ["STM32U535*", "STM32U545*", "STM32U575*", "STM32U585*"]
+
+[[resets]]
+peripheral = "RCC"
+register = "RCC_AHB1ENR"
+reset = 0xD0000100
+source = "RM0456 Rev 7, 11.8.29 RCC_AHB1ENR: reset value 0xD000 0100 for STM32U535/545/575/585, 0xD020 0100 only for STM32U59x/5Ax/5Fx/5Gx, where DCACHE2EN resets to 1. The STM32U535, U545, U575 and U585 have no DCACHE2. ST's SVDs of these four give 0xD0200100"
+
+[[resets]]
+peripheral = "RCC"
+register = "RCC_AHB2ENR2"
+reset = 0x00000000
+source = "RM0456 Rev 7, 11.8.31 RCC_AHB2ENR2: reset value 0x0000 0000 for STM32U535/545/575/585, 0x8000 0000 for STM32U59x/5Ax, where SRAM5EN resets to 1. ST's SVDs of the STM32U535, U545, U575 and U585 give 0x80000000"

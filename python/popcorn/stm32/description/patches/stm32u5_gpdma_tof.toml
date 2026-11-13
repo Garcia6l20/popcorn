@@ -1,0 +1,13 @@
+format = 1
+source = "RM0456 Rev 7, 17.8.8 GPDMA channel x status register (GPDMA_CxSR): bit 14 is TOF, the trigger overrun flag, as in 17.8.7 GPDMA_CxFCR. The SVDs of the STM32U599, U5A5 and U5A9 omit TOF from every GPDMA_CxSR and keep it in GPDMA_CxFCR"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U599.svd", "STM32U5A5.svd", "STM32U5A9.svd"]
+
+[[fields]]
+ip = "GPDMA"
+registers = ["GPDMA_C{n}SR"]
+each = { n = [0, 15] }
+add = { name = "TOF", lsb = 14, width = 1, acc = "read_only", reset = 0 }
+source = "RM0456 Rev 7, 17.8.8 GPDMA channel x status register (GPDMA_CxSR): TOF, bit 14, read-only, reset 0. The SVD of this line omits it from every channel while GPDMA_CxFCR carries it"

@@ -1,0 +1,9 @@
+format = 1
+source = "DS13633 Rev 3 3.30 (STM32U59xxx), DS13543 Rev 3 3.30 (STM32U5Axxx), DS14395 Rev 4 3.32 (STM32U5Fxxx) and DS14102 Rev 5 3.32 (STM32U5Gxxx) Hexadeca-SPI interface (HSPI) and the HSPI1 row of each peripheral table: the line carries HSPI1, its CMSIS header lists HSPI1_IRQn 131, and the line's SVD declares no HSPI1 peripheral and no interrupt 131. The IRQ has no owning peripheral in the description"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U595.svd", "STM32U5A5.svd", "STM32U5F7.svd", "STM32U5G7.svd"]
+
+[irqs]
+add = [{ number = 131, name = "HSPI1" }]

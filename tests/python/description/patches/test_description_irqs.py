@@ -9,24 +9,8 @@ from popcorn.stm32.description._svd import SvdCpu, SvdDevice, SvdPeripheral, exp
 
 DATA_DIR = Path(__file__).parents[4] / "tests" / "data" / "stm32"
 CMSIS_HEADER = DATA_DIR / "cmsis" / "synthetic_irqs.h"
-STM32U5_TOML = (
-    Path(__file__).parents[4]
-    / "python"
-    / "popcorn"
-    / "stm32"
-    / "description"
-    / "patches"
-    / "stm32u5.toml"
-)
-STM32U575_TOML = (
-    Path(__file__).parents[4]
-    / "python"
-    / "popcorn"
-    / "stm32"
-    / "description"
-    / "patches"
-    / "stm32u575.toml"
-)
+PATCH_DIR = Path(__file__).parents[4] / "python" / "popcorn" / "stm32" / "description" / "patches"
+U5_PATCHES = [PATCH_DIR / name for name in ("stm32u5.toml", "stm32u57x.toml", "stm32u575.toml")]
 
 
 def _peripheral(name: str, interrupts: list[tuple[int, str]]) -> SvdPeripheral:
@@ -258,7 +242,7 @@ def test_num_irqs_is_max_plus_one() -> None:
 
 
 def _u575_patches(part: str, svd_name: str) -> list[PatchIrqs]:
-    loaded = load_patches([STM32U5_TOML, STM32U575_TOML], part=part, svd_name=svd_name)
+    loaded = load_patches(U5_PATCHES, part=part, svd_name=svd_name)
     return [p.patch.irqs for p in loaded if p.patch.irqs is not None]
 
 

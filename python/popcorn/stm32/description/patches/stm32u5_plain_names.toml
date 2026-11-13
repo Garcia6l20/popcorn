@@ -1,0 +1,22 @@
+format = 1
+source = "ST's SVDs of the STM32U535, U545, U59x, U5Ax, U5Fx and U5Gx name the SPI registers without the SPI_ prefix and give LPUART1 an ISR_enabled and ISR_disabled alternate pair, as USART has. The STM32U575 and STM32U585 SVDs keep the SPI_ prefix and a single LPUART ISR"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U535.svd", "STM32U545.svd", "STM32U59*.svd", "STM32U5A*.svd", "STM32U5F*.svd", "STM32U5G*.svd"]
+
+[[cross]]
+ip = "SPI"
+reg = "IFCR"
+target_reg = "SR"
+effect = "clear"
+pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
+source = "RM0456 Rev 7, 68.8.7 SPI interrupt/status flags clear register (SPI_IFCR), the register the SVD names IFCR"
+
+[[cross]]
+ip = "LPUART"
+reg = "ICR"
+target_reg = "ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE" }
+source = "RM0456 Rev 7, 67.7.8 LPUART interrupt and status register (LPUART_ISR) / 67.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced 8-field set versus USART_ICR. ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at, as in the USART rule"

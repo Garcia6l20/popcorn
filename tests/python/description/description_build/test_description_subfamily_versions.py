@@ -14,6 +14,11 @@ GPIO = "stm32u57x.toml"
 SHA2 = "stm32h5_hash_sha2.toml"
 U5_NAMES = (
     "STM32U535CBTx",
+    "STM32U545CETx",
+    "STM32U595AIHx",
+    "STM32U5A5AJHx",
+    "STM32U5F7VJTx",
+    "STM32U5G7VJTx",
     "STM32U575QGIx",
     "STM32U575QGIxQ",
     "STM32U585CITx",

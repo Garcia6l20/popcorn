@@ -146,7 +146,7 @@ class PatchSignature:
 class IrqAdd:
     number: int
     name: str
-    peripheral: str
+    peripheral: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1215,14 +1215,16 @@ def _apply_irqs(
     for add in rule.add or []:
         if any(irq.number == add.number for irq in irqs):
             raise DescriptionError(file, 0, f"irqs.add.{add.name}", "an unused IRQ number")
-        peripheral = peripherals.get(add.peripheral)
-        if peripheral is None:
-            raise DescriptionError(
-                file, 0, f"irqs.add.{add.name}", f"a peripheral named {add.peripheral}"
-            )
+        owner = None
+        if add.peripheral is not None:
+            owner = peripherals.get(add.peripheral)
+            if owner is None:
+                raise DescriptionError(
+                    file, 0, f"irqs.add.{add.name}", f"a peripheral named {add.peripheral}"
+                )
         irqs.append(IrqDesc(number=add.number, name=add.name))
-        if add.number not in peripheral.irqs:
-            peripheral.irqs = [*peripheral.irqs, add.number]
+        if owner is not None and add.number not in owner.irqs:
+            owner.irqs = [*owner.irqs, add.number]
         report.irqs_added += 1
 
 

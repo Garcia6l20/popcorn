@@ -1,0 +1,9 @@
+format = 1
+source = "DS14395 Rev 4 3.29 (STM32U5Fxxx) and DS14102 Rev 5 3.29 (STM32U5Gxxx) Octo-SPI interface (OCTOSPI), OCTOSPI2 memory interface row of the block diagram table, and RM0456 Rev 7 vector table, position 120 OCTOSPI2 global interrupt: the STM32U5F7 and STM32U5G7 carry OCTOSPI2, their CMSIS headers list OCTOSPI2_IRQn 120, and their SVDs declare no OCTOSPI2 peripheral and no interrupt 120. The IRQ has no owning peripheral in the description"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U5F7.svd", "STM32U5G7.svd"]
+
+[irqs]
+add = [{ number = 120, name = "OCTOSPI2" }]

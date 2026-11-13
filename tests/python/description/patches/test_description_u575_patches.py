@@ -19,15 +19,11 @@ pytestmark = pytest.mark.timeout(30)
 
 type _TargetAndReport = tuple[PatchTarget, PatchReport]
 
-STM32U5_TOML = (
-    Path(__file__).parents[4]
-    / "python"
-    / "popcorn"
-    / "stm32"
-    / "description"
-    / "patches"
-    / "stm32u5.toml"
-)
+PATCH_DIR = Path(__file__).parents[4] / "python" / "popcorn" / "stm32" / "description" / "patches"
+U5_PATCHES = [
+    PATCH_DIR / name
+    for name in ("stm32u5.toml", "stm32u57x.toml", "stm32u57x_otg.toml", "stm32u5_enr_resets.toml")
+]
 
 _IN_PLACE_REGISTERS = [
     ("ADC1", "ADC_ISR"),
@@ -75,7 +71,7 @@ def u575_target_and_report(
     ).regions
     target.db_part = part
 
-    patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
+    patches = load_patches(U5_PATCHES, part="STM32U575QGIx", svd_name="STM32U575.svd")
     report = apply_patches(patches, target)
     return target, report
 
@@ -230,7 +226,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     _, report = u575_target_and_report
     assert report.ip_renamed == 26
     assert report.aliased == 98
-    assert report.fields_touched == 444
+    assert report.fields_touched == 476
     assert report.cross_rules_added == 584
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1

@@ -101,8 +101,10 @@ merged peripherals in `peripherals_merged`. A merge belongs in a patch whose `[m
 the parts that carry the block: a part that drops the split peripherals refuses a merge naming
 them.
 
-An `[irqs]` rule drops an interrupt by SVD name, then adds one by number to a peripheral. A dropped
-number loses its SVD owner, so a number dropped and added back belongs to the added peripheral only.
+An `[irqs]` rule drops an interrupt by SVD name, then adds one by number to a peripheral. An add
+with no `peripheral` gives a number and a name that no peripheral owns, for a peripheral the SVD
+omits. A dropped number loses its SVD owner, so a number dropped and added back belongs to the added
+peripheral only.
 `share` names an IRQ by SVD name and a second peripheral that raises it, such as the STM32L4
 TIM15 on the `TIM1_BRK_TIM15` line its SVD lists under TIM1 only. Both peripherals then carry
 the number, and the core ORs their levels on the line.
