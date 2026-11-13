@@ -16,6 +16,7 @@ from typing import Any, override
 import popcorn
 import pytest
 from popcorn import Stop, StopReason, System, UartLink, _core
+from popcorn._system.goals import Goal
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import collected
@@ -811,14 +812,25 @@ def tx_pair(
     return a, System({"a": a, "b": b}, links, slice_instructions=slice_instructions)
 
 
+async def to_the_end(m: popcorn.Machine) -> Stop:
+    """The breakpoint stop at the end of `m`'s firmware, through a wait it never satisfies."""
+    return await m.wait_for(m.ref.var("tx_next").ge(1_000_000))
+
+
 async def reached_beside_elapse(m: popcorn.Machine, after: VirtualDuration) -> tuple[object, ...]:
-    """A `Reached(IRQ)` wait and an `elapse(after)` started together inside `m.running()`."""
+    """A `Reached(IRQ)` wait and an `elapse(after)` started together inside `m.running()`, then
+    the run to the firmware's end, whose stop leaving raises."""
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
-    async with m.running():
-        reaching = asyncio.create_task(m.wait_for(popcorn.Reached(IRQ)))
-        elapsed = await m.elapse(after)
-        reached = await asyncio.wait_for(reaching, 10)
-    return elapsed, point(reached)
+    got: list[object] = []
+    with pytest.raises(popcorn.EmulationError, match="USER") as leaving:
+        async with m.running():
+            reaching = asyncio.create_task(m.wait_for(popcorn.Reached(IRQ)))
+            got.append(await m.elapse(after))
+            got.append(point(await asyncio.wait_for(reaching, 10)))
+            got.append(point(await to_the_end(m)))
+    assert leaving.value.stop is not None
+    assert got[-1] == point(leaving.value.stop)
+    return tuple(got)
 
 
 def test_a_reached_wait_stands_at_its_address_when_another_wait_stops_there(
@@ -828,7 +840,9 @@ def test_a_reached_wait_stands_at_its_address_when_another_wait_stops_there(
     start = lone.time
     stop = asyncio.run(lone.run(until=IRQ))
     assert stop.reason is StopReason.ADDRESS and stop.instructions > 0
-    want = (stop.time, point(stop))
+    end = asyncio.run(lone.run())
+    assert end.reason is StopReason.USER
+    want = (stop.time, point(stop), point(end))
     for slice_instructions, third in VARIANTS:
         a, system = tx_pair(u575, slice_instructions, third)
         with system:
@@ -837,14 +851,19 @@ def test_a_reached_wait_stands_at_its_address_when_another_wait_stops_there(
 
 async def reached_two(m: popcorn.Machine) -> tuple[object, ...]:
     """`Reached` waits for two addresses started together inside `m.running()`, the later
-    address first."""
+    address first, then the run to the firmware's end, whose stop leaving raises."""
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
-    async with m.running():
-        late = asyncio.create_task(m.wait_for(popcorn.Reached(IRQ)))
-        early = asyncio.create_task(m.wait_for(popcorn.Reached("enable")))
-        first = await asyncio.wait_for(early, 10)
-        second = await asyncio.wait_for(late, 10)
-    return point(first), point(second)
+    got: list[object] = []
+    with pytest.raises(popcorn.EmulationError, match="USER") as leaving:
+        async with m.running():
+            late = asyncio.create_task(m.wait_for(popcorn.Reached(IRQ)))
+            early = asyncio.create_task(m.wait_for(popcorn.Reached("enable")))
+            got.append(point(await asyncio.wait_for(early, 10)))
+            got.append(point(await asyncio.wait_for(late, 10)))
+            got.append(point(await to_the_end(m)))
+    assert leaving.value.stop is not None
+    assert got[-1] == point(leaving.value.stop)
+    return tuple(got)
 
 
 def test_reached_waits_for_two_addresses_each_stop_at_their_own(
@@ -852,13 +871,108 @@ def test_reached_waits_for_two_addresses_each_stop_at_their_own(
 ) -> None:
     early = asyncio.run(member(u575, "tx_irq", "a").run(until="enable"))
     late = asyncio.run(member(u575, "tx_irq", "a").run(until=IRQ))
+    end = asyncio.run(member(u575, "tx_irq", "a").run())
     assert early.reason is late.reason is StopReason.ADDRESS
     assert early.instructions < late.instructions
-    want = (point(early), point(late))
+    assert end.reason is StopReason.USER
+    want = (point(early), point(late), point(end))
     for slice_instructions, third in VARIANTS:
         a, system = tx_pair(u575, slice_instructions, third)
         with system:
             assert asyncio.run(reached_two(a)) == want
+
+
+async def run_after_a_turn(m: popcorn.Machine, duration: VirtualDuration) -> Stop:
+    """`m.run(for_=duration)` posted after one loop turn."""
+    await asyncio.sleep(0)
+    return await m.run(for_=duration)
+
+
+async def stopped_after_the_waits(
+    system: System, m: popcorn.Machine, where: str
+) -> tuple[object, ...]:
+    """A `Reached(IRQ)` wait inside `m.running()`, then the body leaves once the run's open goal
+    reached the firmware's end: after the flight noted it, `landed`, before, `delivered`, the
+    same with a sibling task's goal posted on `m` while `_close_open` waits for the flight,
+    `posted`, or with a wait still pending, `waiting`, or while `_close_open` withdraws it,
+    `withdrawing`. The stop leaving raises, the member is released, then a peer goal runs."""
+    asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+    index = system._index[m.name]  # pyright: ignore[reportPrivateUsage]
+    pending: asyncio.Task[Stop] | None = None
+    sibling: asyncio.Task[Stop] | None = None
+    with pytest.raises(popcorn.EmulationError, match="USER") as leaving:
+        async with m.running():
+            if where == "waiting":
+                pending = asyncio.create_task(m.wait_for(m.ref.var("tx_next").ge(1_000_000)))
+            await asyncio.wait_for(m.wait_for(popcorn.Reached(IRQ)), 10)
+            await asyncio.sleep(0)
+            assert system._flight is not None  # pyright: ignore[reportPrivateUsage]
+            goal = system._opens[index]  # pyright: ignore[reportPrivateUsage]
+            assert len(goal.waits) == (1 if where == "waiting" else 0)
+            if where == "landed":
+                await asyncio.to_thread(goal.future.result, 10)
+                await system._landed()  # pyright: ignore[reportPrivateUsage]
+            elif where in ("delivered", "posted", "waiting"):
+                if where == "posted":
+                    sibling = asyncio.create_task(run_after_a_turn(m, us(1)))
+                goal.future.result(10)
+            del goal
+    assert leaving.value.stop is not None
+    if pending is not None:
+        with pytest.raises(popcorn.EmulationError, match="the run this wait was in ended"):
+            await pending
+    after = None
+    if sibling is not None:
+        after = point(await asyncio.wait_for(sibling, 10))
+        await asyncio.sleep(0)
+    assert system._handle.undecided() == []  # pyright: ignore[reportPrivateUsage]
+    peer = await asyncio.wait_for(system.members["b"].elapse(us(10)), 10)
+    return point(leaving.value.stop), after, peer
+
+
+@pytest.mark.parametrize("where", ["landed", "delivered", "posted", "waiting", "withdrawing"])
+def test_a_member_stop_after_the_waits_of_its_running_is_raised_and_releases_it(
+    u575: popcorn.PartDescription, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    lone = member(u575, "tx_irq", "a")
+    end = asyncio.run(lone.run())
+    again = asyncio.run(lone.run())
+    assert end.reason is again.reason is StopReason.USER
+    assert again.pc == end.pc and again.instructions > end.instructions
+    withdrawn: list[bool] = []
+    go = threading.Event()
+    if where == "withdrawing":
+        withdraw = System._withdraw  # pyright: ignore[reportPrivateUsage]
+
+        def late(system: System, index: int, goal: Goal) -> None:
+            if not withdrawn:
+                withdrawn.append(goal.done())
+                go.set()
+                goal.future.result(10)
+            withdraw(system, index, goal)
+
+        monkeypatch.setattr(System, "_withdraw", late)
+    held: list[bool] = []
+
+    def hold(_: popcorn.WatchHit) -> None:
+        held.append(go.wait(10))
+
+    want: tuple[object, ...] = (
+        (point(end), point(again), again.time + us(10))
+        if where == "posted"
+        else (point(end), None, end.time + us(10))
+    )
+    for slice_instructions, third in VARIANTS:
+        a, system = tx_pair(u575, slice_instructions, third)
+        withdrawn.clear()
+        held.clear()
+        go.clear()
+        if where == "withdrawing":
+            a.watch("log_len", 4, popcorn.WatchKind.WRITE, hold)
+        with system:
+            assert asyncio.run(stopped_after_the_waits(system, a, where)) == want
+        assert withdrawn == ([False] if where == "withdrawing" else [])
+        assert held == ([True] if where == "withdrawing" else [])
 
 
 def test_a_run_inside_a_member_s_running_raises_machine_busy(

@@ -1615,6 +1615,7 @@ class System:
         returned, the member released at it."""
         index = self._index[machine.name]
         goal = self._opens.pop(index)
+        goal.withdrawn = True
         self._fail_waits(index)
         ended = self._run_ends.pop(index, None)
         if ended is not None:
@@ -1623,7 +1624,10 @@ class System:
             self._withdraw(index, goal)
         future, waits = goal.future, goal.waits
         if self._goals.get(index) is goal and goal.done():
-            del self._goals[index]
+            if self._flight is None:
+                del self._goals[index]
+            else:
+                self._withdrawals.add(index)
         del goal
         try:
             raw = await awaited(future, lambda raw: raw, cancel=False)
