@@ -1,0 +1,12 @@
+format = 1
+source = "STM32U535 SVD spelling of the TIM15 trigger select"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U535.svd"]
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["SMCR"]
+rename = { TS_2_0 = "TS" }
+source = "RM0456 rev 7, 56.7.3 TIM15 slave mode control register (TIM15_SMCR): TS[2:0] in bits 6:4. ST's STM32U535 SVD spells the field TS_2_0, every other STM32U5 SVD spells it TS, and the TIM model reads TS"
