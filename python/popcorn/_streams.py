@@ -658,6 +658,7 @@ class UartPorts:
     __slots__ = (
         "__weakref__",
         "_aliases",
+        "_builtin",
         "_connect",
         "_dropped_base",
         "_links",
@@ -690,6 +691,7 @@ class UartPorts:
         self._post = post
         self._open_pty = open_pty
         self._links: dict[str, _core.UartQueue] = {name: connect(name) for name in uarts}
+        self._builtin = tuple(self._links)
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
         self.linked: set[str] = set()
@@ -697,6 +699,13 @@ class UartPorts:
     def serving(self, name: str) -> str:
         """The peripheral that serves `name`, `name` itself unless it is an alias."""
         return self._aliases.get(name, name)
+
+    def names(self) -> tuple[str, ...]:
+        """The UARTs connected at machine build and the aliases serving them, in that order."""
+        return (
+            *self._builtin,
+            *(alias for alias, target in self._aliases.items() if target in self._builtin),
+        )
 
     def link(self, name: str) -> _core.UartQueue:
         """The native link of UART `name` or of the UART its alias names, connected at machine

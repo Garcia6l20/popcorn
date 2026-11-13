@@ -6,6 +6,8 @@ Machine descriptions as data, and the functions that load part descriptions.
 
 ::: popcorn.Boot
 
+::: popcorn.MachineConsole
+
 ::: popcorn.Device
 
 ::: popcorn.Periph

@@ -37,6 +37,7 @@ from popcorn._machine import (
     AttachedDevice,
     Machine,
     check_machine_name,
+    connected_uarts,
     error_prefix,
 )
 from popcorn._option_bytes import OptionBytes
@@ -381,6 +382,56 @@ class Boot:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MachineConsole:
+    """Which UARTs a failure report shows the output of, and how much.
+
+    Attributes:
+        uart: Names of the UARTs, a peripheral name or an alias of one, such as "USART1". A bare
+            str is one name. Held as a tuple. Empty for no console.
+        tail: Bytes of each UART's queued, unread output a report shows at most, the latest ones.
+    """
+
+    uart: str | Sequence[str] | None = None
+    tail: int = 4096
+
+    def __post_init__(self) -> None:
+        uart = cast(object, self.uart)
+        listed: tuple[object, ...]
+        if uart is None:
+            listed = ()
+        elif isinstance(uart, str):
+            listed = (uart,)
+        elif isinstance(uart, Sequence):
+            listed = tuple(cast(Sequence[object], uart))
+        else:
+            raise _plain_error(
+                "console.uart", f"a UART name or names, not {type(uart).__qualname__}"
+            )
+        names: list[str] = []
+        for name in listed:
+            if not isinstance(name, str) or not name or any(c.isspace() for c in name):
+                raise _plain_error("console.uart", f"names without whitespace, not {name!r}")
+            names.append(name)
+        if len(set(names)) != len(names):
+            raise _plain_error("console.uart", f"names that differ, not {tuple(names)}")
+        object.__setattr__(self, "uart", tuple(names))
+        tail = cast(object, self.tail)
+        if isinstance(tail, bool) or not isinstance(tail, int) or tail <= 0:
+            raise _plain_error("console.tail", f"a count of bytes above 0, not {tail!r}")
+
+    def _check(self, machine: Machine) -> None:
+        """Raise `ConfigError` unless every name is a UART `machine` connects."""
+        known = connected_uarts(machine)
+        for name in cast(tuple[str, ...], self.uart):
+            if name not in known:
+                raise _plain_error(
+                    "console.uart",
+                    f"a UART of {machine.description.part} without a device, one of"
+                    f" {', '.join(known) or 'none'}, not {name}",
+                )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class MachineDescription:
     """What a machine is built from and how it boots.
 
@@ -427,6 +478,8 @@ class MachineDescription:
             `digest`.
         configs: Named variants of this machine description, as `config` selects them. Not in
             `digest`.
+        console: The UARTs a failure report shows the output of, None for none. Not in `digest`.
+            `tail` counts the bytes still queued and unread. A config carries its own.
     """
 
     part: str
@@ -450,6 +503,7 @@ class MachineDescription:
     configs: Mapping[str, MachineDescription] = field(
         default_factory=_FrozenMap[str, "MachineDescription"]
     )
+    console: MachineConsole | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "images", tuple(self.images))
@@ -474,6 +528,11 @@ class MachineDescription:
         rng = cast(object, self.rng)
         if rng is not None and not isinstance(rng, RngOptions):
             raise _plain_error("rng", f"an RngOptions or None, not {type(rng).__qualname__}")
+        console = cast(object, self.console)
+        if console is not None and not isinstance(console, MachineConsole):
+            raise _plain_error(
+                "console", f"a MachineConsole or None, not {type(console).__qualname__}"
+            )
         for name, periph in self.board.items():
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
@@ -616,9 +675,9 @@ class MachineDescription:
 
     @property
     def digest(self) -> str:
-        """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        without `plugins` when it is empty, without `option_bytes` and `rng` when they are None,
-        without `faults` when it is "stop" and without `rcc.lsi_hz` when it is None.
+        """SHA-256 of the canonical content, without `name`, `strict`, `missing`, `configs` and
+        `console`, without `plugins` when it is empty, without `option_bytes` and `rng` when they
+        are None, without `faults` when it is "stop" and without `rcc.lsi_hz` when it is None.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -688,7 +747,8 @@ class MachineDescription:
                 that is not an SAI with the built-in model, `host` on one that is not a USB
                 device controller with the built-in model, `connect` is not "pty" or is on a
                 peripheral with a Python board model. `Machine(option_bytes=)` refuses
-                `option_bytes`, `Machine(rng=)` refuses `rng`.
+                `option_bytes`, `Machine(rng=)` refuses `rng`, `console` names a peripheral
+                that is not a UART of the machine without a device, as `console.uart`.
             MissingInput: An image, `svd` or `description` file, a plugin's source directory
                 or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
@@ -773,6 +833,8 @@ class MachineDescription:
             rng=self.rng,
             name=name,
         )
+        if self.console is not None:
+            self.console._check(m)  # pyright: ignore[reportPrivateUsage]
         for periph_name, periph in self.board.items():
             if periph.connect is not None:
                 m.board.pty(periph_name)
@@ -1172,7 +1234,7 @@ def _canonical(value: object) -> object:
     if isinstance(value, type):
         return {"class": _reference(value)}
     if isinstance(value, MachineDescription):
-        skipped = {"name", "strict", "missing", "configs"}
+        skipped = {"name", "strict", "missing", "configs", "console"}
         if not value.plugins:
             skipped.add("plugins")
         if value.option_bytes is None:

@@ -2576,3 +2576,9 @@ class Machine:
         if self._name == part:
             return f"Machine({part}, images={len(self._images)})"
         return f"Machine({self._name}, {part}, images={len(self._images)})"
+
+
+def connected_uarts(machine: Machine) -> tuple[str, ...]:
+    """The names `Machine.periph.<name>.port` reads a UART by, in build order: the UARTs without a
+    `UartDevice`, then the aliases serving them."""
+    return machine._ports.names()  # pyright: ignore[reportPrivateUsage]
