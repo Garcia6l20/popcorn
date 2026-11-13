@@ -96,6 +96,13 @@ it, a one-line hint names the option. The ring holds MMIO, IRQ, call and stop re
 showing how execution reached the stop. The ring keeps 4096 records, so blocks push out older
 MMIO records sooner.
 
+A machine description with a `console`, a `popcorn.MachineConsole`, adds the unread output of its
+UARTs to the block of its machine, read with the queue left as it is and escaped to printable
+text, at most `tail` bytes each. When the failing exception carries a stop with the reason FAULT
+or CONTRACT, only the machines whose last stop it is show their console. Every machine with one
+shows it when the exception carries no such stop or the stop is no machine's last stop. A console
+naming no UART of the machine fails the test setup with a `ConfigError`.
+
 With `--popcorn-trace-on-fail=DIR`, every machine fixture and system member is traced for
 every test with `popcorn.trace.ALL`. A test whose call failed keeps
 `DIR/<node id>.<fixture>.pctr` per machine fixture and `DIR/<node id>.<fixture>.<member>.pctr`

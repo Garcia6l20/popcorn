@@ -112,6 +112,41 @@ fault registers and the call stack.
 - `--popcorn-trace-on-fail=DIR` traces every machine fixture and keeps the trace of each failed
   test in `DIR`.
 
+### The firmware's console
+
+A machine description names the UARTs whose output a failing test's report shows:
+
+```python
+--8<-- "guide/test_testing.py:console"
+```
+
+Each UART gets a block after its machine's report, headed `console USART1 (unread, last N of M
+bytes):` when the queue held more than `tail`, else `console USART1 (unread):`.
+
+- The block holds the bytes the firmware sent since the test started that the test has not read.
+  The report leaves the queue as it is, so a teardown or a later read still gets them.
+- `tail` counts bytes, 4096 by default. A bridged UART, or a read that fails, gives a one-line
+  notice in place of the block.
+- The console is a field of each machine description: every member of a system has its own, and
+  a config variant carries its own. The report of a machine takes the console of the description
+  that asked for it, so two fixtures of one boot report their own.
+- A machine of a fixture, of `machine_factory(description)` or of `machine_factory.booted`
+  starts from the boot snapshot, so its boot output stays out of the block. A machine of `machine_factory(..., booted=False)` and a
+  machine whose boot failed show theirs.
+- Bytes that are not UTF-8 and control characters show as `\xNN`, a break as `\x00`. An escaped
+  byte takes four characters, so the text is about four times `tail`, more for output of short
+  lines.
+- A name that is no UART the machine connects fails the test setup with a `ConfigError` that
+  lists the UARTs.
+
+The failing exception can carry stops, and a stop with the reason FAULT or CONTRACT names a
+culprit. The consoles shown are those of the machines whose last stop is a culprit stop of the
+exception. Every other stop reason, such as BUDGET, TIME, IDLE, SPIN, ADDRESS or USER, names no
+culprit. When the exception carries no culprit stop, or its culprit stops are no machine's last
+stop, every console shows. A group of two machines' faults shows both consoles and marks the
+machine of its first stop "(raised)". The "(raised)" marker marks the machine of the exception's
+first stop of any reason, a BUDGET stop included, whichever consoles show.
+
 ## Firmware coverage
 
 `--popcorn-cov` counts the firmware lines, functions and branches that every machine of the session

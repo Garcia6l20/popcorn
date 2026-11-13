@@ -26,6 +26,8 @@ flowchart LR
   or SPI bus, a UART bridge.
 - Clocks and options: `rcc`, `supply`, `option_bytes`, `rng`, `core_hz`.
 - Policies: `faults` and `strict`. See [Faults and errors](faults.md).
+- `console`, the UARTs whose unread output a failing test's report shows, as
+  `popcorn.MachineConsole(uart="USART1")`. It is not part of the `digest`.
 - Also: `name`, `core`, `cpi`, `missing`, `plugins` for native plugins and `configs` for named
   variants of one description that pytest fixtures select.
 

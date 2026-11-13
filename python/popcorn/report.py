@@ -9,6 +9,10 @@ that fails, the rest comes from a scan of the stack for return addresses that fo
 frames marked heuristic. Unwinding reads the description's memory regions only, never a
 peripheral window, so taking a report changes no peripheral state.
 
+`exception_stop(error)` is the first stop an exception tree carries, None without one.
+`exception_stops(error)` lists every stop of the tree in walk order, for an error that
+carries several, such as an `ExceptionGroup` of two machines' faults.
+
 Limits:
 
 - The report reads the machine as it is: take it right after the stop, before anything else

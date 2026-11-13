@@ -66,6 +66,16 @@ async def test_two_machines_of_one_description(machine_factory: MachineFactory) 
 # --8<-- [end:factory]
 
 
+# --8<-- [start:console]
+LOGGED = BUTTON.replace(console=popcorn.MachineConsole(uart=("USART1", "LPUART1"), tail=1024))
+# --8<-- [end:console]
+
+
+def test_a_console_names_uarts_of_the_machine() -> None:
+    assert LOGGED.machine().periph.USART1.port.available == 0
+    assert LOGGED.digest == BUTTON.digest
+
+
 async def test_the_sync_factory_and_a_powered_off_machine(machine_factory: MachineFactory) -> None:
     # --8<-- [start:sync]
     await machine_factory.booted(BUTTON)
