@@ -1727,9 +1727,13 @@ TEST_CASE("a stop an event requests as it trips the per-instant event limit ends
   f.set("r0", 0);
   f.module->burst = 65'536;
   f.module->arm();
-  auto const ended =
-      f.target->run_slice({.max_instructions = icount{1'000'000}, .wall_budget = long_wall});
-  REQUIRE(ended.stopped.has_value());
+  core::slice_result ended;
+  for(std::uint64_t slices = 0; not ended.stopped; ++slices)
+  {
+    REQUIRE(slices <= f.module->burst);
+    ended = f.target->run_slice({.max_instructions = icount{1'000'000}, .wall_budget = long_wall});
+    REQUIRE(ended.executed == icount{0});
+  }
   CHECK(ended.stopped->reason == stop_reason::user);
   CHECK(ended.stopped->detail == "last of the burst");
   auto const next =
