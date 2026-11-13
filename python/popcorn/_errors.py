@@ -177,8 +177,9 @@ class BudgetExceeded(EmulationError):
     """An instruction budget ran out.
 
     Attributes:
-        budget: From a run, the `Stop.instructions` it reached when its budget ran out,
-            instructions since reset, sleep included. From a boot, the `Boot.budget` given.
+        budget: The budget the run or the boot was given, 0 for none.
+        instructions: The `Stop.instructions` the run reached when its budget ran out,
+            instructions since reset, sleep included.
     """
 
     def __init__(
@@ -186,12 +187,14 @@ class BudgetExceeded(EmulationError):
         message: str,
         *,
         budget: int = 0,
+        instructions: int = 0,
         pc: int | None = None,
         symbol: str = "",
         stop: Stop | None = None,
     ) -> None:
         super().__init__(message, reason=StopReason.BUDGET, pc=pc, symbol=symbol, stop=stop)
         self.budget = budget
+        self.instructions = instructions
 
 
 class UsbError(EmulationError):

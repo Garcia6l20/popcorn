@@ -235,8 +235,11 @@ def test_step_return_raises_for_another_stop(callee: popcorn.Machine) -> None:
     with pytest.raises(popcorn.EmulationError, match="forever: cannot find where"):
         asyncio.run(callee.step_return())
     into_negated(callee, "forever")
-    with pytest.raises(popcorn.BudgetExceeded, match="the step out of forever"):
+    with pytest.raises(popcorn.BudgetExceeded, match="the step out of forever") as caught:
         asyncio.run(callee.step_return(budget=1000))
+    assert caught.value.budget == 1000
+    assert caught.value.stop is not None
+    assert caught.value.instructions == caught.value.stop.instructions >= 1000
     into_negated(callee, "fault")
     with pytest.raises(popcorn.FaultError, match="the step out of fault"):
         asyncio.run(callee.step_return())

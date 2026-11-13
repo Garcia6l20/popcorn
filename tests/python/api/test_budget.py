@@ -32,9 +32,10 @@ def test_every_budget_docstring_says_that_sleep_is_not_counted(entity: object) -
     assert SLEEP_RULE in text
 
 
-def test_the_budget_exceeded_budget_names_the_stop_count_sleep_included() -> None:
+def test_the_budget_exceeded_instructions_name_the_stop_count_sleep_included() -> None:
     text = " ".join((inspect.getdoc(popcorn.BudgetExceeded) or "").split())
     assert "since reset, sleep included" in text
+    assert "instructions: The `Stop.instructions`" in text
 
 
 def test_budget_counts_executed_instructions_not_sleep(machines: Machines) -> None:

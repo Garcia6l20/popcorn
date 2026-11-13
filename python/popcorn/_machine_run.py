@@ -85,7 +85,12 @@ async def step_return(machine: Machine, *, budget: int | None = None) -> int | f
     if target is None:
         raise EmulationError(f"{error_prefix(machine)}the step out resolved no return point")
     if stop.reason is not StopReason.RETURNED:
-        raise stop_error(stop, f"the step out of {target.name}", error_prefix(machine))
+        raise stop_error(
+            stop,
+            f"the step out of {target.name}",
+            error_prefix(machine),
+            machine._default_budget if budget is None else budget,
+        )
     if target.exception:
         return None
     signature = _machine_call.call_signature(machine, target.name, target.start)
@@ -121,7 +126,9 @@ async def wait_until(
         return stop.time
     if stop.reason in (StopReason.TIME, StopReason.IDLE):
         return None
-    raise stop_error(stop, "the run waiting for the predicate", error_prefix(machine))
+    raise stop_error(
+        stop, "the run waiting for the predicate", error_prefix(machine), machine._default_budget
+    )
 
 
 async def wait_for(
@@ -162,7 +169,9 @@ async def elapse(machine: Machine, duration: VirtualDuration) -> VirtualTime:
             exact=None,
         )
     if stop.reason is not StopReason.TIME:
-        raise stop_error(stop, "the run letting time pass", error_prefix(machine))
+        raise stop_error(
+            stop, "the run letting time pass", error_prefix(machine), machine._default_budget
+        )
     return stop.time
 
 
@@ -220,7 +229,12 @@ async def wait_ready(
         return Waited(stop.time, stop.resets)
     stop = await machine.wait_for(Native(ready), for_=for_, deadline=deadline)
     if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-        raise stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(machine))
+        raise stop_error(
+            stop,
+            f"the run waiting for {ready.what()}",
+            error_prefix(machine),
+            machine._default_budget,
+        )
     return Waited(stop.time, stop.resets)
 
 
@@ -356,7 +370,12 @@ async def wait_gated(
             stop, "the free run, while waiting for a Python predicate", error_prefix(machine)
         )
     if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-        raise stop_error(stop, "the run waiting for a Python predicate", error_prefix(machine))
+        raise stop_error(
+            stop,
+            "the run waiting for a Python predicate",
+            error_prefix(machine),
+            machine._default_budget,
+        )
     return Waited(stop.time, stop.resets)
 
 

@@ -152,7 +152,7 @@ popcorn raises these exceptions, all exported from `popcorn`:
 | `SymbolError` | A symbol or variable name is not in the loaded images. |
 | `EmulationError` | A run, call or host access cannot complete. |
 | `FaultError` | A processor fault stopped a step that expected to finish, such as `boot_machine`. |
-| `BudgetExceeded` | An instruction budget ran out where a stop was expected, such as in `boot_machine`. |
+| `BudgetExceeded` | An instruction budget ran out where a stop was expected, such as in `boot_machine`. `budget` is the budget given, `instructions` the count the run reached. |
 | `ModelError` | A model failed, or an unmodelled access ran under `strict`. |
 | `UnmodelledConfig` | The firmware configured a feature a model does not cover. |
 | `BusAccessError` | The bus refused a host access through `m.mem`. |

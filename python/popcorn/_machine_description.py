@@ -890,7 +890,14 @@ class MachineDescription:
                 stop=stop,
             )
         if stop.reason is StopReason.BUDGET:
-            raise BudgetExceeded(message, budget=boot.budget or 0, pc=pc, symbol=symbol, stop=stop)
+            raise BudgetExceeded(
+                message,
+                budget=boot.budget or 0,
+                instructions=stop.instructions,
+                pc=pc,
+                symbol=symbol,
+                stop=stop,
+            )
         raise EmulationError(message, reason=stop.reason, pc=pc, symbol=symbol, stop=stop)
 
     def _loaded_plugins(self) -> dict[str, _records.Loaded]:

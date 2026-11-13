@@ -89,6 +89,8 @@ def test_fault_and_budget_errors_are_emulation_errors() -> None:
     assert isinstance(fault, popcorn.EmulationError)
     assert fault.reason is popcorn.StopReason.FAULT
     assert budget.reason is popcorn.StopReason.BUDGET
+    assert (budget.budget, budget.instructions) == (10, 0)
+    assert (popcorn.BudgetExceeded("b").budget, popcorn.BudgetExceeded("b").instructions) == (0, 0)
 
 
 def test_reset_with_no_vector_table_is_an_emulation_error(

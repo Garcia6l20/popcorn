@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import traceback
 from collections.abc import Awaitable, Callable
 
@@ -252,8 +253,11 @@ def test_elapse_parked_raises_a_fault_before_the_duration(machines: Machines) ->
 def test_elapse_parked_raises_on_its_budget(machines: Machines) -> None:
     m = machines()
     m.default_budget = 10
-    with pytest.raises(popcorn.BudgetExceeded):
+    with pytest.raises(popcorn.BudgetExceeded) as caught:
         asyncio.run(m.elapse(ms(5)))
+    assert caught.value.budget == 10
+    assert caught.value.stop is not None
+    assert caught.value.instructions == caught.value.stop.instructions >= 10
 
 
 def test_cancelling_a_parked_elapse_halts_the_run(machines: Machines) -> None:
@@ -436,3 +440,32 @@ def test_an_even_pc_written_with_an_irq_pending_returns_to_it_in_thumb_state(
     assert stop.reason is popcorn.StopReason.ADDRESS
     assert int(m.var("first_entries").value) == 1
     assert int(m.var("tail_entries").value) == 1
+
+
+def test_a_wait_budget_error_names_the_given_budget(machines: Machines) -> None:
+    waits: list[Callable[[popcorn.Machine], Awaitable[object]]] = [
+        lambda m: m.wait_until(lambda _: False, for_=ms(100)),
+        lambda m: m.probe("idle_main").hit(within=ms(1)),
+    ]
+    for wait in waits:
+        m = machines()
+        m.default_budget = 10
+        with pytest.raises(popcorn.BudgetExceeded) as caught:
+            asyncio.run(wait(m))
+        assert caught.value.budget == 10
+        assert caught.value.stop is not None
+        assert caught.value.instructions == caught.value.stop.instructions >= 10
+
+
+def test_a_stream_wait_budget_error_names_the_given_budget(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    board.default_budget = 10
+    streams: list[Callable[[], Awaitable[object]]] = [
+        lambda: uart.read(5, for_=ms(5)),
+        lambda: uart.read_until(re.compile(rb"x"), for_=ms(5)),
+    ]
+    for wait_stream in streams:
+        with pytest.raises(popcorn.BudgetExceeded) as caught:
+            asyncio.run(wait_stream())
+        assert caught.value.budget == 10
+        assert caught.value.instructions >= 10

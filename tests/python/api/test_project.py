@@ -100,6 +100,7 @@ def test_boot_raises_budget_exceeded_before_its_symbol() -> None:
         asyncio.run(project.boot_machine(project.machine()))
     assert caught.value.budget == 100
     assert caught.value.stop is not None
+    assert caught.value.instructions == caught.value.stop.instructions >= 100
 
 
 def test_a_named_machine_names_itself_in_a_boot_error() -> None:

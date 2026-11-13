@@ -304,7 +304,10 @@ class Resolver:
 
 
 def stop_error(
-    stopped: Stop, during: str = "the background run", prefix: str = ""
+    stopped: Stop,
+    during: str = "the background run",
+    prefix: str = "",
+    budget: int | None = None,
 ) -> EmulationError:
     message = f"{prefix}{during} stopped with {stopped.reason.name}: {stopped}"
     if stopped.reason is StopReason.FAULT and stopped.fault is not None:
@@ -322,7 +325,8 @@ def stop_error(
     if stopped.reason is StopReason.BUDGET:
         return BudgetExceeded(
             message,
-            budget=stopped.instructions,
+            budget=budget or 0,
+            instructions=stopped.instructions,
             pc=stopped.pc,
             symbol=stopped.location.symbol,
             stop=stopped,

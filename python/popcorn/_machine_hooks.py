@@ -186,5 +186,7 @@ async def probe_hit(machine: Machine, hook: _core.ProbeHook, within: VirtualDura
     first = hook.first_ps()
     missed = stop.reason is StopReason.USER and first is None
     if missed or stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-        raise stop_error(stop, "the run waiting for a probe hit", error_prefix(machine))
+        raise stop_error(
+            stop, "the run waiting for a probe hit", error_prefix(machine), machine._default_budget
+        )
     return first is not None and first < start.ps + within.ps

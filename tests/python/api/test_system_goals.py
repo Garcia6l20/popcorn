@@ -1269,3 +1269,18 @@ def test_a_member_reset_moves_its_base_to_the_reset_s_system_time(ping: Build) -
         return at, point(stop), system.time_of("b")
 
     across(ping, body)
+
+
+def test_a_member_budget_error_in_a_linked_system_names_the_given_budget(ping: Build) -> None:
+    async def body(system: System) -> object:
+        a = system.members["a"]
+        a.default_budget = 10
+        with pytest.raises(popcorn.BudgetExceeded) as caught:
+            await a.elapse(ms(5))
+        error = caught.value
+        assert error.budget == 10
+        assert error.stop is not None
+        assert error.instructions == error.stop.instructions >= 10
+        return error.budget, error.instructions
+
+    across(ping, body)
