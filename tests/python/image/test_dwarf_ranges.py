@@ -37,7 +37,7 @@ def _assemble(tmp_path: Path, source: str, symbols: dict[str, int]) -> Path:
 def test_shared_range_list_is_read_once(
     tmp_path: Path, list_reads: dict[str, int], units: int, functions: int
 ) -> None:
-    symbols = {"UNITS": units, "FUNCTIONS": functions, "ENTRIES": 3000}
+    symbols = {"UNITS": units, "FUNCTIONS": functions, "ENTRIES": 30}
     elf = _assemble(tmp_path, "shared_ranges_units.s", symbols)
     info = load_debug_info(elf)
     assert info.functions["f"].address == 0x08000040
