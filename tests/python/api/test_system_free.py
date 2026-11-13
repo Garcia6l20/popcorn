@@ -336,11 +336,14 @@ def test_a_wait_pending_when_the_free_run_halts_raises(ping: Build) -> None:
     b = system.members["b"]
 
     async def body() -> None:
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
         system.start()
         opens = system._opens  # pyright: ignore[reportPrivateUsage]
         first = opens[1]
         waiting = asyncio.create_task(b.wait_for(b.ref.var("received_count").eq(7)))
         while opens.get(1) is first:
+            if waiting.done():
+                pytest.fail("the wait ended before the goal serving it was posted")
             await asyncio.sleep(0)
         system.halt()
         with pytest.raises(popcorn.EmulationError):
@@ -355,11 +358,14 @@ def test_a_halt_releases_a_member_its_delivered_wait_left_parked(ping: Build) ->
     b = system.members["b"]
 
     async def body() -> None:
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
         system.start()
         opens = system._opens  # pyright: ignore[reportPrivateUsage]
         first = opens[1]
         waiting = asyncio.create_task(b.elapse(us(30)))
         while opens.get(1) is first or not opens[1].done():
+            if waiting.done():
+                pytest.fail("the wait ended before the goal serving it was posted")
             await asyncio.sleep(0)
         assert system._handle.undecided() == [1]  # pyright: ignore[reportPrivateUsage]
         system.halt()
