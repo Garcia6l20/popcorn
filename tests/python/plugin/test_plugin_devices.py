@@ -94,6 +94,37 @@ def test_device_sets_with_one_class_and_state_share_a_boot(
     assert summary(second) == "popcorn: 2 key(s), 0 boot(s), 2 from cache"
 
 
+TIMED = """
+from api.devices_example import Eeprom24
+from popcorn.units import ms
+
+
+class Timed(Eeprom24):
+    def __init__(self):
+        super().__init__(0x50, 4096)
+        self.delay = ms(3)
+        self.delays = [ms(1)]
+        self.by_name = {"write": ms(5)}
+
+
+def test_boot(machine_factory, description):
+    m = machine_factory(description, devices={"I2C1": [Timed()]})
+    assert m.pc == m.sym("main")
+"""
+
+
+def test_a_device_holding_a_duration_is_a_cache_hit(
+    pytester: pytest.Pytester, u575_project: Path
+) -> None:
+    pytester.makepyfile(TIMED)
+    first = pytester.runpytest(*BASE)
+    first.assert_outcomes(passed=1)
+    assert summary(first) == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
+    second = pytester.runpytest(*BASE)
+    second.assert_outcomes(passed=1)
+    assert summary(second) == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
+
+
 UNKEYED = """
 import pytest
 from api.devices_example import Eeprom24
@@ -230,6 +261,7 @@ def test_a_bad_name_is_refused_before_the_boot_cache_is_read(
 
 
 DIGEST = """
+from dataclasses import dataclass
 from pathlib import Path
 
 import popcorn
@@ -238,6 +270,7 @@ from popcorn import ResetKind
 from popcorn.board import I2CTarget
 from popcorn.devices import TableTarget
 from popcorn.pytest._cache import devices_digest
+from popcorn.units import Frequency, VirtualDuration, VirtualTime
 
 M33_JSON = "{m33}"
 
@@ -250,6 +283,16 @@ class Plain(I2CTarget):
         self.level = 0
         self.extra = extra
         self.answer = self.on_read
+
+
+@dataclass(frozen=True)
+class Tagged(VirtualDuration):
+    tag: str = ""
+
+
+@dataclass(frozen=True)
+class Pitched(Frequency):
+    tag: str = ""
 
 
 @pytest.fixture(scope="module")
@@ -272,6 +315,11 @@ def m33_project():
         {3, 4},
         frozenset({5}),
         {"k": [True]},
+        VirtualDuration(3_000_000_000),
+        VirtualTime(7),
+        Frequency(8_000_000),
+        [VirtualDuration(1)],
+        {"k": VirtualTime(2)},
     ],
 )
 def test_plain_attributes_key_a_device(
@@ -283,9 +331,39 @@ def test_plain_attributes_key_a_device(
     assert digest != devices_digest(m33_project, {"TESTDEV": [Plain("other")]})
 
 
+def test_a_duration_a_time_a_frequency_and_an_int_key_apart(
+    m33_project: popcorn.MachineDescription,
+) -> None:
+    def key(extra: object) -> str | None:
+        return devices_digest(m33_project, {"TESTDEV": [Plain(extra)]})
+
+    keys = [
+        key(VirtualDuration(5)),
+        key(VirtualDuration(6)),
+        key(VirtualTime(5)),
+        key(Frequency(5)),
+        key(5),
+    ]
+    assert None not in keys
+    assert len(set(keys)) == len(keys)
+    assert key(VirtualDuration(5)) == keys[0]
+    assert key([VirtualDuration(5)]) != key([VirtualDuration(6)])
+    assert key({"k": VirtualTime(5)}) != key({"k": VirtualDuration(5)})
+
+
 @pytest.mark.parametrize(
     "extra",
-    [print, object(), [object()], {"k": object()}, {object(): 1}, Plain().on_read],
+    [
+        print,
+        object(),
+        Tagged(5, "a"),
+        Pitched(5, "a"),
+        [Tagged(5)],
+        [object()],
+        {"k": object()},
+        {object(): 1},
+        Plain().on_read,
+    ],
 )
 def test_other_attributes_leave_a_device_unkeyed(
     m33_project: popcorn.MachineDescription, extra: object
@@ -331,4 +409,4 @@ def test_a_native_device_leaves_the_set_unkeyed(m33_project: popcorn.MachineDesc
 
 def test_the_device_digest(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(DIGEST.replace("{m33}", str(M33_JSON)))
-    pytester.runpytest(*BASE).assert_outcomes(passed=19)
+    pytester.runpytest(*BASE).assert_outcomes(passed=28)

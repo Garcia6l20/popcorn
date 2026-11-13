@@ -40,7 +40,7 @@ from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes, registry_generation, unregistered
 from popcorn._native_digest import process_native_digest
 from popcorn.board import I2CController, I2CTarget, SpiController, SpiTarget
-from popcorn.units import VirtualTime
+from popcorn.units import Frequency, VirtualDuration, VirtualTime
 
 FORMAT = "popcorn-boot-cache 2"
 
@@ -156,6 +156,13 @@ def _plain(value: object, owner: object) -> str | None:
         return repr(value)
     if isinstance(value, enum.Enum):
         return f"{type(value).__qualname__}.{value.name}"
+    if isinstance(value, VirtualDuration | VirtualTime) and type(value) in (
+        VirtualDuration,
+        VirtualTime,
+    ):
+        return f"{type(value).__qualname__}({value.ps})"
+    if type(value) is Frequency:
+        return f"Frequency({value.hz})"
     if isinstance(value, types.MethodType) and value.__self__ is owner:
         return f"method {value.__func__.__qualname__}"
     if isinstance(value, list | tuple | set | frozenset):
@@ -205,7 +212,8 @@ def devices_digest(
     A device is keyed by its class and the class's source file, its `snapshot()` and its
     instance attributes. It can be keyed when it is a `popcorn.board.I2CTarget` or `SpiTarget`
     whose attributes hold only None, bool, int, float, str, bytes, bytearray, enum members,
-    methods of the device itself, and lists, tuples, sets and dicts of these. A
+    `VirtualDuration`, `VirtualTime` and `Frequency` values, methods of the device itself,
+    and lists, tuples, sets and dicts of these. A
     `popcorn.board.SpiController` or `I2CController` is keyed by its class and source only: it
     acts only through calls that need the booted machine, `transfer` or its phase methods, so
     it cannot act before `boot.until`. A
