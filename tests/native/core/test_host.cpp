@@ -3589,3 +3589,21 @@ TEST_CASE("a throw from plan, the slice or ran goes to failed and the driver goa
     CHECK(h.run({.budget = icount{10}}).get().stopped.reason == stop_reason::budget);
   }
 }
+
+TEST_CASE("a future is the sole owner of its state once the producer and every copy are gone")
+{
+  auto producer = std::make_unique<core::detail::host_promise<int>>();
+  auto future   = producer->future();
+  CHECK_FALSE(future.sole_owner());
+  producer->set(3);
+  CHECK_FALSE(future.sole_owner());
+  {
+    auto const copy = future;
+    producer.reset();
+    CHECK_FALSE(future.sole_owner());
+    CHECK_FALSE(copy.sole_owner());
+  }
+  CHECK(future.sole_owner());
+  CHECK(future.get() == 3);
+  CHECK_FALSE(core::host_future<int>{}.sole_owner());
+}

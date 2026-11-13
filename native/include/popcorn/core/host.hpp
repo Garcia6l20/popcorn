@@ -491,6 +491,17 @@ public:
   }
 
   /**
+   * @brief Whether this future is the only holder of its shared state, the producer gone.
+   *        A holder can only be copied from another holder, so a true answer stays true while
+   *        the caller keeps this future to itself. It says nothing about holders of what the
+   *        state's outcome contains, such as an exception_ptr copied out of it.
+   */
+  [[nodiscard]] auto sole_owner() const noexcept -> bool
+  {
+    return state_ != nullptr and state_.use_count() == 1;
+  }
+
+  /**
    * @brief Waits up to @p limit for the outcome.
    * @return Whether the future is done.
    */

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import weakref
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
@@ -15,6 +16,7 @@ import pytest
 from popcorn import Stop, StopReason, System, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import collected
 from .linked import Ticker, logged, member, ticker
 
 L = us(20)
@@ -147,6 +149,31 @@ def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Bui
     message, notes = across(pair, body, a_models={"TIM6": Ticker})
     assert message == "TIM6 tick 50"
     assert notes == ["raised by member a at system time t=100500000 ps"]
+
+
+def test_a_member_error_leaves_the_machines_of_a_closed_system_collectable(
+    u575: popcorn.PartDescription,
+) -> None:
+    def failed() -> tuple[weakref.ref[popcorn.Machine], weakref.ref[popcorn.Machine]]:
+        a = member(u575, "link_ping", "a", 1_000_000, models={"TIM6": Ticker})
+        b = member(u575, "link_echo", "b", 1_000_000)
+        links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+        system = System({"a": a, "b": b}, links, slice_instructions=1_000_000)
+        ticker(a).raise_at = 50
+
+        async def body() -> None:
+            results = await asyncio.gather(
+                a.run(for_=ms(2)), b.run(for_=ms(1)), return_exceptions=True
+            )
+            assert isinstance(results[0], RuntimeError)
+            assert results[0] is results[1]
+
+        asyncio.run(body())
+        system.close()
+        return weakref.ref(a), weakref.ref(b)
+
+    refs = failed()
+    assert all(collected(ref) for ref in refs)
 
 
 def test_a_goal_resolved_before_a_member_s_error_keeps_its_stop(pair: Build) -> None:

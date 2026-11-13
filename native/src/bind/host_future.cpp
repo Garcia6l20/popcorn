@@ -346,6 +346,7 @@ void host_future_handle::report_late_failure(
   {
     return;
   }
+  error_shared_ = true;
   if(request_->done())
   {
     auto [error, note] = request_->failure();

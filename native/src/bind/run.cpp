@@ -225,11 +225,10 @@ void report_cancelled_finish(core::host_future<core::goal_result> const& watched
   {}
 }
 
-auto cancel_reporting_finish(
-    std::move_only_function<bool()>      cancel,
-    core::host_future<core::goal_result> watched) -> std::move_only_function<bool()>
+auto cancel_reporting_finish(std::move_only_function<bool()> cancel)
+    -> std::move_only_function<bool(core::host_future<core::goal_result> const&)>
 {
-  return [cancel = std::move(cancel), watched = std::move(watched)] mutable {
+  return [cancel = std::move(cancel)](core::host_future<core::goal_result> const& watched) mutable {
     auto const cancelled = cancel();
     report_cancelled_finish(watched);
     return cancelled;
@@ -415,7 +414,7 @@ auto machine_handle::call_goal(
     }
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
-  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()), future);
+  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()));
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
@@ -437,7 +436,7 @@ auto machine_handle::failing_finish_goal(std::uint64_t budget) -> host_future_ha
     auto const held = lock_for_request();
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
-  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()), future);
+  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()));
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future), [](core::goal_result const&) { return nb::none(); },
@@ -852,7 +851,7 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
     auto const held = lock_releasing();
     return host_->post(held, core::member_id{}, std::move(command), at);
   }();
-  auto withdraw = [host = std::weak_ptr{host_}, future] {
+  auto withdraw = [host = std::weak_ptr{host_}](core::host_future<vtime> const& future) {
     auto const on = host.lock();
     if(on == nullptr)
     {
@@ -915,7 +914,7 @@ auto machine_handle::submit_ops(
     auto const held = lock_releasing();
     return host_->post(held, core::member_id{}, std::move(command), at);
   }();
-  auto withdraw = [host = std::weak_ptr{host_}, future] {
+  auto withdraw = [host = std::weak_ptr{host_}](core::host_future<vtime> const& future) {
     auto const on = host.lock();
     if(on == nullptr)
     {

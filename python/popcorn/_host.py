@@ -114,9 +114,8 @@ async def awaited[T](
     The machine's thread wakes the loop through the loop's eventfd, without the GIL, so a loop
     that never blocks, spinning on `asyncio.sleep(0)`, still sees it. A loop without
     `add_reader` is woken by `call_soon_threadsafe` from the machine's thread, which needs the
-    GIL. The frame drops its reference to `future` before the result or error leaves it: the
-    error is also held natively by the future, out of the cycle collector's sight, so a
-    traceback frame holding the future would keep both alive.
+    GIL. The frame drops its reference to `future` before the result or error leaves it, so
+    the traceback of the error does not hold the future.
     """
     for watcher in list(_WATCHERS):
         watcher._before_await(future)  # pyright: ignore[reportPrivateUsage]

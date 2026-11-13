@@ -22,13 +22,14 @@ import traceback
 import types
 import weakref
 from collections.abc import Callable, Coroutine
-from typing import NoReturn, cast, override
+from typing import ClassVar, NoReturn, cast, override
 
 import popcorn
 import pytest
 from derived_data import model_json
 from popcorn import _core
 from popcorn._host import awaited
+from popcorn.model import Model, on_write
 from popcorn.trace import TraceKind
 from popcorn.trace import read as read_trace
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
@@ -447,6 +448,293 @@ def failed_command(machines: Machines) -> weakref.ref[popcorn.Machine]:
         run_bounded(scenario(), HANG)
     assert dict(raised_by(raised.value, "failing_body").f_locals) == {}
     return weakref.ref(m)
+
+
+def failed_command_keeping_its_future(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """As `failed_command`, but a local of the frame the error passes through holds the future."""
+    m = machines(slice_instructions=1_000)
+
+    def failing_body() -> None:
+        raise ValueError("boom")
+
+    async def scenario() -> None:
+        async with m.running():
+            handle = m._handle  # pyright: ignore[reportPrivateUsage]
+            future = handle.submit(failing_body, None)
+            await awaited(future, lambda raw: raw)
+
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_a_future_kept_in_the_frame_its_error_passes_through_leaves_its_machine_collectable(
+    machines: Machines,
+) -> None:
+    probe = failed_command_keeping_its_future(machines)
+    assert collected(probe)
+
+
+def failed_ops_keeping_their_future(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """A batch of ops failing on unmapped memory, its future held by the frame its error passes."""
+    m = machines(slice_instructions=1_000)
+    unmapped = m.ref.mem.u32[0xF000_0000].read_op()
+
+    async def scenario() -> None:
+        async with m.running():
+            handle = m._handle  # pyright: ignore[reportPrivateUsage]
+            future = handle.submit_ops([unmapped], [""], None)
+            await awaited(future, lambda raw: raw)
+
+    with pytest.raises(popcorn.BusAccessError):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_an_op_batch_kept_in_the_frame_its_error_passes_through_leaves_its_machine_collectable(
+    machines: Machines,
+) -> None:
+    probe = failed_ops_keeping_their_future(machines)
+    assert collected(probe)
+
+
+def ended_wait_keeping_its_future(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+
+    async def scenario() -> None:
+        m.start()
+        future = m._handle.wait(None, None, None)  # pyright: ignore[reportPrivateUsage]
+        await awaited(future, lambda raw: raw)
+
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_a_wait_ended_by_a_handler_kept_in_the_frame_its_error_passes_through_is_collected(
+    machines: Machines,
+) -> None:
+    assert collected(ended_wait_keeping_its_future(machines))
+
+
+class WriteRaises(Model):
+    carried: ClassVar[list[object]] = []
+    failed: ClassVar[threading.Event] = threading.Event()
+
+    @on_write("CR")
+    def _control(self, old: int, new: int) -> None:
+        error = ValueError("boom", list(self.carried))
+        self.failed.set()
+        raise error
+
+
+def failed_python_ops_keeping_their_future() -> weakref.ref[popcorn.Machine]:
+    m = popcorn.Machine(
+        popcorn.load_description(model_json()),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": WriteRaises},
+    )
+    m.reset()
+    write = m.ref.periph.TIMER.CR.write_op(1)
+
+    async def scenario() -> None:
+        async with m.running():
+            handle = m._handle  # pyright: ignore[reportPrivateUsage]
+            future = handle.submit_ops([write], [""], None)
+            await awaited(future, lambda raw: raw)
+
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_an_op_batch_raising_a_python_error_kept_in_the_frame_of_its_error_is_collected() -> None:
+    assert collected(failed_python_ops_keeping_their_future())
+
+
+def failed_python_ops_awaited_inline() -> weakref.ref[popcorn.Machine]:
+    m = popcorn.Machine(
+        popcorn.load_description(model_json()),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": WriteRaises},
+    )
+    m.reset()
+    write = m.ref.periph.TIMER.CR.write_op(1)
+
+    async def scenario() -> None:
+        async with m.running():
+            handle = m._handle  # pyright: ignore[reportPrivateUsage]
+            await awaited(handle.submit_ops([write], [""], None), lambda raw: raw)
+
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_an_op_batch_raising_a_python_error_and_awaited_inline_is_collected() -> None:
+    assert collected(failed_python_ops_awaited_inline())
+
+
+def failed_goal_keeping_its_future(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    m = machines(slice_instructions=1_000)
+
+    def raising() -> bool:
+        raise ValueError("boom")
+
+    async def scenario() -> None:
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        future = handle.run_goal(None, 1_000_000, None, None, None, raising, None)
+        await awaited(future, lambda raw: raw)
+
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_a_goal_failing_with_a_python_error_kept_in_the_frame_of_its_error_is_collected(
+    machines: Machines,
+) -> None:
+    assert collected(failed_goal_keeping_its_future(machines))
+
+
+def late_failure_of_a_future_held_by_its_error(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> list[BaseException]:
+    reported: list[BaseException] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        if raised.exc_value is not None:
+            reported.append(raised.exc_value)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = machines(slice_instructions=1_000)
+    box: list[object] = []
+    failed = threading.Event()
+
+    def failing_body() -> None:
+        error = ValueError("boom", list(box))
+        failed.set()
+        raise error
+
+    async def scenario() -> None:
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        future = handle.submit(failing_body, (m.time + us(50)).ps)
+        box.append(future)
+        future.report_late_failure("late", False, False)
+        del future
+        async with m.running():
+            assert failed.wait(HANG)
+            box.clear()
+            time.sleep(0.1)
+            for _ in range(3):
+                gc.collect()
+
+    run_bounded(scenario(), HANG)
+    return reported
+
+
+def late_failure_of_an_op_batch_held_by_its_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[BaseException]:
+    reported: list[BaseException] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        if raised.exc_value is not None:
+            reported.append(raised.exc_value)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = popcorn.Machine(
+        popcorn.load_description(model_json()),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": WriteRaises},
+    )
+    m.reset()
+    write = m.ref.periph.TIMER.CR.write_op(1)
+    WriteRaises.failed.clear()
+
+    async def scenario() -> None:
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        future = handle.submit_ops([write], [""], (m.time + us(50)).ps)
+        WriteRaises.carried.append(future)
+        future.report_late_failure("late", False, False)
+        del future
+        async with m.running():
+            assert WriteRaises.failed.wait(HANG)
+            WriteRaises.carried.clear()
+            time.sleep(0.1)
+            for _ in range(3):
+                gc.collect()
+
+    try:
+        run_bounded(scenario(), HANG)
+    finally:
+        WriteRaises.carried.clear()
+    return reported
+
+
+def test_a_late_failure_of_an_op_batch_keeps_its_error_through_a_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    [late] = late_failure_of_an_op_batch_held_by_its_error(monkeypatch)
+    assert isinstance(late, ValueError)
+    assert late.__traceback__ is not None
+    assert len(late.args) == 2
+    late.args[1].clear()
+
+
+def test_a_late_failure_queued_for_the_flush_keeps_its_traceback_through_a_collection(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    [late] = late_failure_of_a_future_held_by_its_error(machines, monkeypatch)
+    assert isinstance(late, ValueError)
+    assert late.__traceback__ is not None
+    assert len(late.args) == 2
+    late.args[1].clear()
+
+
+def test_a_failed_future_kept_across_a_collection_still_raises_its_error_with_its_traceback(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing_body() -> None:
+        raise ValueError("boom")
+
+    async def scenario() -> tuple[BaseException, BaseException]:
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        future = handle.submit(failing_body, None)
+        async with m.running():
+            while not future.done():
+                await asyncio.sleep(0.001)
+            gc.collect()
+            with pytest.raises(ValueError, match="boom") as first:
+                future.result(HANG)
+            gc.collect()
+            with pytest.raises(ValueError, match="boom") as second:
+                future.result(HANG)
+        return first.value, second.value
+
+    first, second = run_bounded(scenario(), HANG)
+    assert first is second
+    assert first.__traceback__ is not None
+
+
+class Marker:
+    pass
+
+
+def pending_future_with_a_callback_holding_it(machines: Machines) -> weakref.ref[Marker]:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    marker = Marker()
+    future = handle.submit(lambda: None, (m.time + s(100)).ps)
+    future.add_done_callback(lambda: (future, marker))
+    return weakref.ref(marker)
+
+
+def test_a_done_callback_that_holds_its_future_is_collected(machines: Machines) -> None:
+    assert collected(pending_future_with_a_callback_holding_it(machines))
 
 
 def test_a_command_error_on_the_machine_thread_drops_its_frame_locals_and_its_machine(

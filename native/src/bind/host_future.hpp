@@ -66,6 +66,23 @@ public:
   {
     return std::nullopt;
   }
+  /**
+   * @brief Whether the request's shared state has no other holder, the machine thread's side
+   *        included, so what it keeps is reached through this request alone.
+   */
+  [[nodiscard]] virtual auto holds_state_alone() const noexcept -> bool
+  {
+    return false;
+  }
+  /**
+   * @brief The Python exception the request completed with and stored, a null handle for none
+   *        or a failure that is not a Python error. Called when holds_state_alone() is true,
+   *        with the GIL held, inside the cycle collector.
+   */
+  [[nodiscard]] virtual auto stored_error() const noexcept -> reflex::py::nb::handle
+  {
+    return {};
+  }
 };
 
 /**
@@ -88,6 +105,31 @@ public:
       core::host_future<T>                                            future,
       std::move_only_function<reflex::py::nb::object(T const&) const> convert,
       std::move_only_function<bool()>                                 cancel,
+      std::move_only_function<void(std::exception_ptr const&) const>  failed = {})
+      : future_{std::move(future)}, convert_{std::move(convert)}, failed_{std::move(failed)}
+  {
+    if(cancel)
+    {
+      cancel_ = [cancel = std::move(cancel)](core::host_future<T> const&) mutable {
+        return cancel();
+      };
+    }
+  }
+
+  /**
+   * @brief Wraps @p future, with a @p cancel that takes the request's own future, so it holds no
+   *        copy of the shared state of its own.
+   * @param future The request's future.
+   * @param convert Builds the Python result from the value, called with the GIL held.
+   * @param cancel Cancels the request while it is not done, called with the GIL held and the
+   *        request's future, and returns what cancel() returns.
+   * @param failed Sees the exception the request failed with when value() raises it, empty for
+   *        none, called with the GIL held.
+   */
+  future_request(
+      core::host_future<T>                                            future,
+      std::move_only_function<reflex::py::nb::object(T const&) const> convert,
+      std::move_only_function<bool(core::host_future<T> const&)>      cancel,
       std::move_only_function<void(std::exception_ptr const&) const>  failed = {})
       : future_{std::move(future)}, convert_{std::move(convert)}, cancel_{std::move(cancel)},
         failed_{std::move(failed)}
@@ -128,7 +170,7 @@ public:
 
   auto cancel() -> bool override
   {
-    return not future_.done() and cancel_ and cancel_();
+    return not future_.done() and cancel_ and cancel_(future_);
   }
 
   [[nodiscard]] auto failure() const -> std::pair<std::exception_ptr, std::string> override
@@ -146,6 +188,48 @@ public:
       return {std::current_exception(), {}};
     }
     return value_error_ ? value_error_() : std::pair<std::exception_ptr, std::string>{};
+  }
+
+  [[nodiscard]] auto holds_state_alone() const noexcept -> bool override
+  {
+    return future_.sole_owner();
+  }
+
+  [[nodiscard]] auto stored_error() const noexcept -> reflex::py::nb::handle override
+  {
+    if(not future_.done())
+    {
+      return {};
+    }
+    try
+    {
+      std::ignore = future_.get();
+    }
+    catch(reflex::py::nb::python_error const& raised)
+    {
+      return raised.value();
+    }
+    catch(...)
+    {
+      return {};
+    }
+    try
+    {
+      if(value_error_)
+      {
+        if(auto const carried = value_error_().first)
+        {
+          std::rethrow_exception(carried);
+        }
+      }
+    }
+    catch(reflex::py::nb::python_error const& raised)
+    {
+      return raised.value();
+    }
+    catch(...)
+    {}
+    return {};
   }
 
   [[nodiscard]] auto ran_at() const -> std::optional<vtime> override
@@ -194,7 +278,7 @@ private:
 
   core::host_future<T>                                                        future_;
   std::move_only_function<reflex::py::nb::object(T const&) const>             convert_;
-  std::move_only_function<bool()>                                             cancel_;
+  std::move_only_function<bool(core::host_future<T> const&)>                  cancel_;
   std::move_only_function<void(std::exception_ptr const&) const>              failed_;
   std::move_only_function<std::pair<std::exception_ptr, std::string>() const> value_error_;
 };
@@ -379,7 +463,27 @@ public:
       owner() const noexcept -> std::uint64_t;
 
 private:
+  /**
+   * @brief Reports what the request holds that only it reaches: the stored Python exception,
+   *        when this handle is the sole holder of the request and its state.
+   *        A request another holder shares is not reported, nor is one whose error left this
+   *        handle in a late failure report: a cycle through it stays uncollected, which leaks,
+   *        where a wrong report would let the collector clear a live object.
+   */
+  [[= py::traverse]] void report_python(reflex::py::gc_visitor& visit) const noexcept
+  {
+    if(error_shared_
+       or request_ == nullptr
+       or request_.use_count() != 1
+       or not request_->holds_state_alone())
+    {
+      return;
+    }
+    visit(request_->stored_error());
+  }
+
   std::shared_ptr<detail::pending_request> request_;
+  bool                                     error_shared_{false};
   void                                     refuse_inherited() const;
 
   std::shared_ptr<detail::log_forwarding> logs_;
