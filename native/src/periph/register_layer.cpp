@@ -428,15 +428,7 @@ void layer_write(
     }
   }
   regs.poke(word * 4, stored);
-  if((rules.write_once & lane) != 0)
-  {
-    auto const words = (layout.words() + 31) / 32;
-    if(state.write_locked.size() < words)
-    {
-      state.write_locked.resize(words);
-    }
-    state.write_locked[word / 32] |= std::uint32_t{1} << (word % 32);
-  }
+  lock_write_once(layout, rules, state, offset, size);
   for(auto const& cross : layout.crosses(word))
   {
     if((written & cross.source_mask) == 0)
@@ -454,6 +446,43 @@ void layer_write(
         break;
     }
   }
+}
+
+auto hold_locked_write_once(
+    word_rules const&  rules,
+    layer_state const& state,
+    std::uint32_t      offset,
+    std::uint8_t       size,
+    std::uint32_t      old,
+    std::uint32_t      value) noexcept -> std::uint32_t
+{
+  if(not locked(state, offset / 4))
+  {
+    return value;
+  }
+  auto const held = (rules.write_once >> (8 * (offset % 4))) & low_bits(8 * size);
+  return (value & ~held) | (old & held);
+}
+
+void lock_write_once(
+    register_layout const& layout,
+    word_rules const&      rules,
+    layer_state&           state,
+    std::uint32_t          offset,
+    std::uint8_t           size,
+    std::uint32_t          ignored)
+{
+  if((rules.write_once & ~ignored & lane_mask(offset, size)) == 0)
+  {
+    return;
+  }
+  auto const word  = offset / 4;
+  auto const words = (layout.words() + 31) / 32;
+  if(state.write_locked.size() < words)
+  {
+    state.write_locked.resize(words);
+  }
+  state.write_locked[word / 32] |= std::uint32_t{1} << (word % 32);
 }
 
 void layer_reset(

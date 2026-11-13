@@ -186,6 +186,16 @@ for _, target in core_firmware.values():
     if target is not None:
         test_clock_gate.depends(target)
 
+test_claimed_write_once = add_doctest(
+    "core-claimed-write-once",
+    [here / "test_claimed_write_once.cpp"],
+    [test_support_static, core_static],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_claimed_write_once.depends(target)
+
 test_spin = add_doctest(
     "core-spin", [here / "test_spin.cpp"], [test_support_static, core_static], env=m33_env
 )

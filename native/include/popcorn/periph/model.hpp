@@ -233,6 +233,19 @@ public:
   virtual void on_event(std::uint32_t kind, std::uint64_t payload) = 0;
 
   /**
+   * @brief Bits of the word the last on_write() left alone because the transaction could not
+   *        reach them, such as a Non-secure write to a Secure register. The machine asks after
+   *        a write to a claimed word that has write-once bits, and locks the word only when a
+   *        write-once bit was reachable. A model that does not report it, a Python model
+   *        included, locks the word on any write that reaches a write-once lane.
+   * @return 0 by default, every bit reachable.
+   */
+  [[nodiscard]] virtual auto write_ignored_bits() const -> std::uint32_t
+  {
+    return 0;
+  }
+
+  /**
    * @brief Appends the model state to a snapshot.
    * @param out Snapshot bytes, appended to.
    */

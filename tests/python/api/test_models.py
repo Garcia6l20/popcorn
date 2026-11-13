@@ -848,3 +848,22 @@ def test_a_raising_model_reset_still_resets_the_other_models(u575: popcorn.PartD
     assert m.periph.TIM3.ARR.value != 5
     assert m.periph.USART1.BRR.value == 0
     assert m.time.ps == 0
+
+
+def test_a_python_claimed_write_once_word_locks_on_its_first_write_and_holds() -> None:
+    class Once(Model):
+        def __init__(self) -> None:
+            super().__init__()
+            self.written: list[tuple[int, int]] = []
+
+        @on_write("WONCE")
+        def _set(self, old: int, new: int) -> None:
+            self.written.append((old, new))
+
+    m = machine({"TESTDEV": Once})
+    model = m.model("TESTDEV")
+    assert isinstance(model, Once)
+    m.mem.u32[0x4001_000C] = 0x11
+    m.mem.u32[0x4001_000C] = 0x22
+    assert m.periph.TESTDEV.WONCE.read() == 0x11
+    assert model.written == [(0, 0x11), (0x11, 0x11)]

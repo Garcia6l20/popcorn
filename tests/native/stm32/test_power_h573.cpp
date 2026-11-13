@@ -472,11 +472,30 @@ TEST_CASE("RM0481 10.11.11: PWR_SCCR keeps BYPASS and its write-once lock over a
     REQUIRE(r.get("PWR_SCCR", "BYPASS") == 1);
     r.f.target->reset(one.kind);
     CHECK(r.get("PWR_SCCR", "BYPASS") == (one.kept ? 1u : 0u));
-    if(tzen)
-    {
-      continue;
-    }
     r.write("PWR_SCCR", one.kept ? 0 : 1);
+    CHECK(r.get("PWR_SCCR", "BYPASS") == 1);
+  }
+}
+
+TEST_CASE(
+    "RM0481 10.11.11: PWR_SCCR.BYPASS is write-once with TrustZone too, a snapshot keeps the lock")
+{
+  for(auto const tzen : {false, true})
+  {
+    CAPTURE(tzen);
+    rig r{
+        "h573_pwr_ll", tzen ? popcorn::testing::h573_secure_rig::options({.tzen = true})
+                            : popcorn::testing::stm32_options()};
+    r.write("PWR_SCCR", 1);
+    r.write("PWR_SCCR", 0);
+    CHECK(r.get("PWR_SCCR", "BYPASS") == 1);
+    auto const saved = r.f.target->snapshot();
+    r.f.target->reset(popcorn::reset_kind::power_on);
+    r.write("PWR_SCCR", 1);
+    r.write("PWR_SCCR", 0);
+    CHECK(r.get("PWR_SCCR", "BYPASS") == 1);
+    r.f.target->restore(saved);
+    r.write("PWR_SCCR", 0);
     CHECK(r.get("PWR_SCCR", "BYPASS") == 1);
   }
 }

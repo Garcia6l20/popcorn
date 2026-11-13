@@ -9,9 +9,9 @@ namespace popcorn::periph
 {
 /**
  * @brief Optional capability of a model, found by `dynamic_cast` over the machine's models: the
- *        model leaves some words no model claims as they are over some resets, their bits and
- *        their write-once lock, instead of bringing them to their reset value and unlocking
- *        them.
+ *        model leaves some words as they are over some resets, instead of bringing them to their
+ *        reset value and unlocking them. A word no model claims keeps its bits and its write-once
+ *        lock, a claimed word its write-once lock.
  */
 class POPCORN_API layer_keeper
 {
@@ -29,8 +29,9 @@ public:
 
   /**
    * @brief Whether a reset of @p kind leaves the register word at @p offset as it is. Asked of
-   *        every unclaimed word of the peripheral at each reset, before the register layer
-   *        resets the words.
+   *        every unclaimed word of the peripheral and every claimed word with a write-once bit
+   *        at each reset, before the register layer resets the words. For a claimed word the
+   *        answer decides its write-once lock only, the model resets its bits.
    * @param offset Byte offset of the word in the peripheral, a multiple of 4.
    * @param kind Cause of the reset, as for `model::reset`.
    */

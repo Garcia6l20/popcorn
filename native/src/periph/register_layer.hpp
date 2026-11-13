@@ -220,6 +220,41 @@ void layer_write(
     pre(offset / 4 < layout.words());
 
 /**
+ * @brief The value a model that claims a write-once word receives: the bits the lock holds are
+ *        replaced by their stored value, as layer_write() drops them.
+ * @param rules Rules of the accessed word.
+ * @param state Write-once locks.
+ * @param offset Byte offset of the access, aligned to @p size.
+ * @param size Access size in bytes, 1, 2 or 4.
+ * @param old Stored lanes of the access, right-aligned to @p size.
+ * @param value Value right-aligned to @p size.
+ */
+[[nodiscard]] auto hold_locked_write_once(
+    word_rules const&  rules,
+    layer_state const& state,
+    std::uint32_t      offset,
+    std::uint8_t       size,
+    std::uint32_t      old,
+    std::uint32_t      value) noexcept -> std::uint32_t;
+
+/**
+ * @brief Locks the word of an access that reached one of its write-once bits.
+ * @param layout Compiled semantics.
+ * @param rules Rules of the accessed word.
+ * @param state Write-once locks.
+ * @param offset Byte offset of the access, aligned to @p size.
+ * @param size Access size in bytes, 1, 2 or 4.
+ * @param ignored Bits of the word the write did not reach, locking none of their write-once bits.
+ */
+void lock_write_once(
+    register_layout const& layout,
+    word_rules const&      rules,
+    layer_state&           state,
+    std::uint32_t          offset,
+    std::uint8_t           size,
+    std::uint32_t          ignored = 0);
+
+/**
  * @brief Brings the storage of every word no model claims to its reset value and unlocks every
  *        write-once word.
  * @param layout Compiled semantics.

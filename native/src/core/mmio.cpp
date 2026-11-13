@@ -798,19 +798,28 @@ auto machine::run_state::dispatch_write(
   }
   if(slot.claimed[word] != 0)
   {
-    auto const old = (slot.regs.peek(word * 4) >> (8 * (offset % 4))) & size_mask(size);
-    auto const hz  = owner.clock_.instruction_hz();
+    auto const old  = (slot.regs.peek(word * 4) >> (8 * (offset % 4))) & size_mask(size);
+    auto const hz   = owner.clock_.instruction_hz();
+    auto const held = rules != nullptr
+                        ? periph::hold_locked_write_once(
+                              *rules, slot.layer, offset, size, old, value & size_mask(size))
+                        : value & size_mask(size);
     std::expected<void, bus_error> done{};
+    std::uint32_t                  ignored = 0;
     {
       handler_scope const scope{in_handler};
       flag_scope const exact{exact_write, by == initiator::cpu and slot.model->drives_core_clock()};
       done = slot.model->on_write(
-          slot.regs, offset, size, old, value & size_mask(size),
-          context_of(attrs, window.secure_alias));
+          slot.regs, offset, size, old, held, context_of(attrs, window.secure_alias));
+      ignored = slot.model->write_ignored_bits();
     }
     after_model(hz);
     if(done)
     {
+      if(rules != nullptr and rules->write_once != 0)
+      {
+        periph::lock_write_once(slot.layout, *rules, slot.layer, offset, size, ignored);
+      }
       trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
       note_watched(window.base + offset, size, value, true, by);
     }

@@ -258,7 +258,9 @@ struct machine::peripheral_slot
     {
       for(std::uint32_t word = 0; word < layout.words(); ++word)
       {
-        if(claimed[word] == 0 and keeper->keeps_over_reset(word * 4, kind))
+        auto const* const rules = layout.find(word);
+        if((claimed[word] == 0 or (rules != nullptr and rules->write_once != 0))
+           and keeper->keeps_over_reset(word * 4, kind))
         {
           kept.resize(layout.words(), 0);
           kept[word] = 1;

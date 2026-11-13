@@ -634,6 +634,11 @@ public:
     return read_lanes(regs.peek(word) & mask, offset, size);
   }
 
+  [[nodiscard]] auto write_ignored_bits() const -> std::uint32_t override
+  {
+    return ignored_;
+  }
+
   auto on_write(
       register_file& regs,
       std::uint32_t  offset,
@@ -653,6 +658,7 @@ public:
       if constexpr(guarded_model<Derived>)
       {
         auto const wi = static_cast<Derived&>(*this).guard(word, ctx, true).wi & writable;
+        ignored_      = wi;
         writable &= ~wi;
         kept = (old & ~(wi & found->actions)) | (wi & found->actions & found->idle);
       }
@@ -869,5 +875,6 @@ private:
   };
 
   std::vector<bound> bound_;
+  std::uint32_t      ignored_{};
 };
 }

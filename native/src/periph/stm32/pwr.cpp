@@ -329,9 +329,8 @@ struct pwr_variant
  *   read-only. The supply the model runs is the board's.
  * - STM32H5: a pin, software, watchdog, window watchdog, low-power or option-load reset keeps
  *   `PWR_SCCR.BYPASS`, RM0481 10.11.11, and without TrustZone the write-once lock of the
- *   register stays closed. A power-on or brown-out reset clears BYPASS and opens the lock. With
- *   TrustZone BYPASS stays writable after its first write, a deviation from RM0481 10.11.11, the
- *   model claims the register and a claimed register has no write-once lock.
+ *   register stays closed. A power-on or brown-out reset clears BYPASS and opens the lock. The
+ *   lock holds with TrustZone too, where the model claims the register.
  * - STM32H5: every reset but a power-on one keeps the fields of `PWR_BDCR`, RM0481 10.11.7. A
  *   `RCC_BDCR.VSWRST` reset clears them.
  *
