@@ -132,3 +132,10 @@ reset = 0x00000000
 acc = "read_write"
 fields = []
 source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["GRSTCTL"]
+fields = ["CSRST"]
+acc = "read_write"
+source = "RM0456 Rev 7, 72.15.5 OTG_GRSTCTL: CSRST, bit 0, is rs, software sets it to start the core soft reset and the core clears it. ST's STM32U575 and STM32U585 SVDs give read-only, which drops a guest write before the OTG model sees it"

@@ -19,7 +19,6 @@ using popcorn::icount;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::u575;
 
-constexpr std::uint32_t csrst      = 1u << 0;
 constexpr std::uint32_t psrst      = 1u << 1;
 constexpr std::uint32_t fcrst      = 1u << 2;
 constexpr std::uint32_t rxfflsh    = 1u << 4;
@@ -83,13 +82,6 @@ TEST_CASE("TXFFLSH reads 0 right after it is written, TXFNUM keeps the FIFO numb
   CHECK(f.read() == (reset_word | all_fifos));
   f.write(f.read() | rxfflsh | txfflsh);
   CHECK(f.read() == (reset_word | all_fifos));
-}
-
-TEST_CASE("a core soft reset reads done at once, AHBIDL stays set")
-{
-  otg_fixture const f;
-  f.write(f.read() | csrst);
-  CHECK(f.read() == reset_word);
 }
 
 TEST_CASE("a partial soft reset and a frame counter reset read done at once")

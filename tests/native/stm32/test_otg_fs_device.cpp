@@ -628,6 +628,26 @@ TEST_CASE("TXFFLSH with TXFNUM 0x10 empties every TX FIFO, RXFFLSH the receive F
   CHECK(r.get("GINTSTS", "RXFLVL") == 0);
 }
 
+TEST_CASE("a CSRST write empties every FIFO and reads 0 again")
+{
+  rig const r;
+  r.enumerate();
+  std::array<std::uint8_t, 8> bytes{};
+  for(auto const* fifo : {"DFIFO0", "DFIFO1", "DFIFO3", "DFIFO5"})
+  {
+    r.push(fifo, bytes);
+  }
+  CHECK(r.get("DTXFSTS3", "INEPTFSAV") == r.get("DIEPTXF3", "INEPTXFD") - 2);
+  REQUIRE(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
+  REQUIRE(r.get("GINTSTS", "RXFLVL") == 1);
+  r.write("GRSTCTL", r.mask("GRSTCTL", "CSRST"));
+  CHECK(r.get("GRSTCTL", "CSRST") == 0);
+  CHECK(r.get("GINTSTS", "RXFLVL") == 0);
+  CHECK(r.get("DTXFSTS0", "INEPTFSAV") == r.get("HNPTXFSIZ", "NPTXFD"));
+  CHECK(r.get("DTXFSTS3", "INEPTFSAV") == r.get("DIEPTXF3", "INEPTXFD"));
+  CHECK(r.get("DTXFSTS5", "INEPTFSAV") == r.get("DIEPTXF5", "INEPTXFD"));
+}
+
 TEST_CASE("the device takes its new address after the SET_ADDRESS status stage")
 {
   rig const r;
