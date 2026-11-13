@@ -101,6 +101,42 @@ private:
   std::shared_ptr<periph::i2c_target> inner_;
 };
 
+class page_refuser final : public periph::i2c_target
+{
+public:
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return 0x50;
+  }
+
+  auto start(bool, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = true};
+  }
+
+  auto write(std::uint8_t, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = false};
+  }
+
+  auto read(vtime) -> periph::i2c_read_reply override
+  {
+    return {};
+  }
+
+  void stop(vtime) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  void reset(popcorn::reset_kind) override
+  {}
+};
+
 class quiet_sink final : public periph::i2c_controller_sink
 {
 public:
@@ -112,16 +148,24 @@ public:
 
 struct rig
 {
-  std::shared_ptr<tap>        memory = std::make_shared<tap>(std::make_shared<devices::eeprom_24xx>(
-      devices::eeprom_24xx_options{.size = 4096, .page_size = 16}));
-  std::shared_ptr<quiet_sink> sink   = std::make_shared<quiet_sink>();
+  std::shared_ptr<tap>           memory;
+  std::shared_ptr<quiet_sink>    sink = std::make_shared<quiet_sink>();
   std::unique_ptr<stm32_fixture> f;
 
   explicit rig(
-      std::string_view        entry,
-      std::string_view        elf      = ll,
-      bool                    targeted = false,
-      part_description const& desc     = l476rc())
+      std::string_view                    entry,
+      std::string_view                    elf         = ll,
+      bool                                targeted    = false,
+      part_description const&             desc        = l476rc(),
+      std::uint8_t                        device      = 0x50,
+      std::shared_ptr<periph::i2c_target> replacement = nullptr)
+      : memory{std::make_shared<tap>(
+            replacement != nullptr
+                ? std::move(replacement)
+                : std::make_shared<devices::eeprom_24xx>(devices::eeprom_24xx_options{
+                      .address   = device,
+                      .size      = 4096,
+                      .page_size = 16}))}
   {
     stm32::board board{};
     if(targeted)
@@ -230,6 +274,40 @@ TEST_CASE("RM0351 6.4.28: I2C1 on HSI16 through CCIPR.I2C1SEL runs the same page
   rig r{"hsi16_100k"};
   CHECK(r.finish() == std::vector<std::uint32_t>{8, 1, 0x0030'3D5Bu});
   byte_spaced(r.memory->writes, bit_ps(0x0030'3D5Bu, 16'000'000));
+}
+
+TEST_CASE("a software reset in a write cycle lets the firmware retry its page write")
+{
+  rig        r{"main"};
+  auto const bit = bit_ps(0x0010'0305u, 4'000'000);
+  for(auto step = 0; r.memory->writes.size() < 10; ++step)
+  {
+    REQUIRE(step < 10'000);
+    r.run_until(r.now_ps() + bit);
+  }
+  r.run_until(r.now_ps() + 20 * bit);
+  r.f->target->reset(popcorn::reset_kind::software);
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{2'000'000}});
+  CAPTURE(stopped.detail);
+  CHECK(stopped.reason == stop_reason::user);
+  CHECK(r.f->log() == std::vector<std::uint32_t>{8, 1, 0x0010'0305u});
+  CHECK(r.memory->writes.size() == 22);
+}
+
+TEST_CASE("a device that refuses the page data ends the firmware in its second failure exit")
+{
+  rig        r{"main", ll, false, l476rc(), 0x50, std::make_shared<page_refuser>()};
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{20'000'000}});
+  CHECK(stopped.reason == stop_reason::user);
+  CHECK(r.f->log() == std::vector<std::uint32_t>{0xfa11'0002u});
+}
+
+TEST_CASE("a bus nobody acknowledges ends the firmware in its first failure exit")
+{
+  rig        r{"main", ll, false, l476rc(), 0x51};
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{20'000'000}});
+  CHECK(stopped.reason == stop_reason::user);
+  CHECK(r.f->log() == std::vector<std::uint32_t>{0xfa11'0001u});
 }
 
 TEST_CASE("HAL_I2C_IsDeviceReady, Mem_Write and Mem_Read reach the 24xx on I2C1")

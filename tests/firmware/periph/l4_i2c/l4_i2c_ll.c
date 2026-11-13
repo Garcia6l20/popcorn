@@ -5,9 +5,13 @@
 #include "stm32l4xx_ll_i2c.h"
 #include "stm32l4xx_ll_rcc.h"
 
+#include <stdbool.h>
+
 #define EEPROM_ADDRESS     (0x50u << 1)
 #define TIMING_400K_AT_4M  0x00100305u
 #define TIMING_100K_AT_16M 0x00303D5Bu
+#define MAX_POLLS          1000u
+#define MAX_ATTEMPTS       4u
 
 static uint8_t buffer[16];
 
@@ -51,7 +55,7 @@ static void wait_stop(void)
   LL_I2C_ClearFlag_STOP(I2C1);
 }
 
-static void send(uint8_t const* bytes, uint32_t count, uint32_t end)
+static bool send(uint8_t const* bytes, uint32_t count, uint32_t end)
 {
   LL_I2C_HandleTransfer(
       I2C1, EEPROM_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, count, end, LL_I2C_GENERATE_START_WRITE);
@@ -59,6 +63,12 @@ static void send(uint8_t const* bytes, uint32_t count, uint32_t end)
   {
     while(!LL_I2C_IsActiveFlag_TXIS(I2C1))
     {
+      if(LL_I2C_IsActiveFlag_NACK(I2C1))
+      {
+        wait_stop();
+        LL_I2C_ClearFlag_NACK(I2C1);
+        return false;
+      }
     }
     LL_I2C_TransmitData8(I2C1, bytes[index]);
   }
@@ -72,6 +82,12 @@ static void send(uint8_t const* bytes, uint32_t count, uint32_t end)
     {
     }
   }
+  if(LL_I2C_IsActiveFlag_NACK(I2C1))
+  {
+    LL_I2C_ClearFlag_NACK(I2C1);
+    return false;
+  }
+  return true;
 }
 
 static uint32_t polls(void)
@@ -79,6 +95,10 @@ static uint32_t polls(void)
   uint32_t count = 0;
   for(;;)
   {
+    if(count >= MAX_POLLS)
+    {
+      FAIL(1);
+    }
     LL_I2C_HandleTransfer(
         I2C1, EEPROM_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, 0, LL_I2C_MODE_AUTOEND,
         LL_I2C_GENERATE_START_WRITE);
@@ -92,6 +112,22 @@ static uint32_t polls(void)
   }
 }
 
+static void send_page(uint8_t const* bytes, uint32_t count)
+{
+  for(uint32_t attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
+  {
+    if(send(bytes, count, LL_I2C_MODE_AUTOEND))
+    {
+      return;
+    }
+    if(attempt + 1 < MAX_ATTEMPTS)
+    {
+      polls();
+    }
+  }
+  FAIL(2);
+}
+
 static void eeprom_rw(uint32_t timing)
 {
   configure(timing);
@@ -101,7 +137,7 @@ static void eeprom_rw(uint32_t timing)
   {
     page[2 + index] = (uint8_t)(0x30u + index);
   }
-  send(page, sizeof page, LL_I2C_MODE_AUTOEND);
+  send_page(page, sizeof page);
   uint32_t const waited = polls();
   send(address, sizeof address, LL_I2C_MODE_SOFTEND);
   LL_I2C_HandleTransfer(
