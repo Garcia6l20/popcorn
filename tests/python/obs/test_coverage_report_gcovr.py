@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, override
 
 import jsonschema
 import pytest
 from popcorn.coverage.report import (
     GCOVR_FORMAT_VERSION,
+    LcovReport,
     display_name,
     parse_lcov,
     render_cobertura,
@@ -215,18 +216,78 @@ def test_open_span_skips_a_function_on_its_own_start_line() -> None:
     assert names_of(text) == {10: "b", 13: "a"}
 
 
+class Line(int):
+    """A line number that counts in `uses` every hash and comparison made of it."""
+
+    uses: ClassVar[int] = 0
+
+    @override
+    def __hash__(self) -> int:
+        Line.uses += 1
+        return int.__hash__(self)
+
+    @override
+    def __eq__(self, other: object, /) -> bool:
+        Line.uses += 1
+        return int.__eq__(self, other)
+
+    @override
+    def __lt__(self, other: int, /) -> bool:
+        Line.uses += 1
+        return int.__lt__(self, other)
+
+    @override
+    def __le__(self, other: int, /) -> bool:
+        Line.uses += 1
+        return int.__le__(self, other)
+
+    @override
+    def __gt__(self, other: int, /) -> bool:
+        Line.uses += 1
+        return int.__gt__(self, other)
+
+    @override
+    def __ge__(self, other: int, /) -> bool:
+        Line.uses += 1
+        return int.__ge__(self, other)
+
+
+def counted_lines(text: str) -> LcovReport:
+    """`text` parsed, with every `DA` line and `FN` start and end a `Line`."""
+    report = parse_lcov(text)
+    files = tuple(
+        replace(
+            file,
+            lines={Line(number): hits for number, hits in file.lines.items()},
+            functions=tuple(
+                replace(
+                    function,
+                    start=Line(function.start),
+                    end=None if function.end is None else Line(function.end),
+                )
+                for function in file.functions
+            ),
+        )
+        for file in report.files
+    )
+    return replace(report, files=files)
+
+
+def line_uses(text: str) -> tuple[int, dict[str, Any]]:
+    """The line number uses of rendering `text`, and the rendered document."""
+    report = counted_lines(text)
+    Line.uses = 0
+    rendered: dict[str, Any] = json.loads(render_gcovr_json(report, root=ROOT))
+    return Line.uses, rendered
+
+
 def test_naming_lines_costs_no_more_than_the_lines_themselves() -> None:
-    functions = "".join(f"FN:{i * 20 + 1},f{i}\n" for i in range(3000))
-    das = "".join(f"DA:{n},1\n" for n in range(1, 60001))
-    plain = f"SF:a.c\n{das}end_of_record\n"
-    named = f"SF:a.c\n{functions}{das}end_of_record\n"
-    begin = time.perf_counter()
-    document(plain)
-    baseline = time.perf_counter() - begin
-    begin = time.perf_counter()
-    entry = document(named)["files"][0]
-    assert time.perf_counter() - begin < 5 * baseline
-    assert lines(entry)[60000]["function_name"] == "f2999"
+    functions = "".join(f"FN:{i * 20 + 1},f{i}\n" for i in range(600))
+    das = "".join(f"DA:{n},1\n" for n in range(1, 12001))
+    plain, _ = line_uses(f"SF:a.c\n{das}end_of_record\n")
+    named, rendered = line_uses(f"SF:a.c\n{functions}{das}end_of_record\n")
+    assert named < 2 * plain, (named, plain)
+    assert lines(rendered["files"][0])[12000]["function_name"] == "f599"
 
 
 def test_closed_function_leaves_outside_lines_unnamed() -> None:
