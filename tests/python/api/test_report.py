@@ -28,7 +28,8 @@ from popcorn._unwind import (
     unwind,
 )
 from popcorn.model import on_read
-from popcorn.report import Report, fault_bits, stop_report
+from popcorn.report import Report, exception_stop, exception_stops, fault_bits, stop_report
+from popcorn.units import VirtualTime
 
 from .conftest import M33_JSON, ROOT
 from .models_example import Timer
@@ -617,3 +618,93 @@ def test_a_null_pc_with_exc_return_in_lr_walks_the_exception_frame() -> None:
     foreign = unwind(memory, functions, 0, 0xFFFF_FFB9, sp, 0)
     assert [f.via for f in foreign][:1] == [Via.PC]
     assert all(f.via is Via.SCAN for f in foreign[1:])
+
+
+def stopped(pc: int) -> popcorn.EmulationError:
+    stop = popcorn.Stop(popcorn.StopReason.FAULT, pc, popcorn.Location(pc), 1, VirtualTime(pc))
+    return popcorn.EmulationError("stopped", stop=stop)
+
+
+def chained[E: Exception](
+    error: E, cause: BaseException | None, context: BaseException | None
+) -> E:
+    error.__cause__ = cause
+    error.__context__ = context
+    return error
+
+
+def test_no_error_has_no_exception_stop() -> None:
+    assert exception_stop(None) is None
+    assert exception_stops(None) == ()
+
+
+def test_an_emulation_error_carries_its_stop() -> None:
+    carrying = stopped(0x10)
+    assert exception_stop(carrying) is carrying.stop
+    assert exception_stops(carrying) == (carrying.stop,)
+    assert exception_stop(popcorn.EmulationError("none")) is None
+    assert exception_stop(ValueError("other")) is None
+
+
+def test_a_stop_is_found_through_the_cause_or_the_context() -> None:
+    carrying = stopped(0x10)
+    assert exception_stop(chained(ValueError(), carrying, None)) is carrying.stop
+    assert exception_stop(chained(ValueError(), None, carrying)) is carrying.stop
+
+
+def test_the_context_is_followed_only_when_there_is_no_cause() -> None:
+    with_stop = stopped(0x10)
+    other = stopped(0x20)
+    assert exception_stop(chained(ValueError(), ValueError(), with_stop)) is None
+    assert exception_stop(chained(ValueError(), other, with_stop)) is other.stop
+
+
+def test_a_suppressed_context_is_still_followed() -> None:
+    carrying = stopped(0x10)
+    try:
+        try:
+            raise carrying
+        except popcorn.EmulationError:
+            raise ValueError("later") from None
+    except ValueError as error:
+        assert error.__suppress_context__
+        assert exception_stop(error) is carrying.stop
+
+
+def test_a_group_lists_its_members_stops_in_order() -> None:
+    first, second = stopped(0x10), stopped(0x20)
+    group = ExceptionGroup("both", [first, second])
+    assert exception_stop(group) is first.stop
+    assert exception_stops(group) == (first.stop, second.stop)
+
+
+def test_groups_nest_and_are_reached_through_a_context() -> None:
+    inner = stopped(0x30)
+    nested_group = ExceptionGroup("outer", [ValueError(), ExceptionGroup("inner", [inner])])
+    assert exception_stops(nested_group) == (inner.stop,)
+    assert exception_stops(chained(ValueError(), None, nested_group)) == (inner.stop,)
+
+
+def test_the_stops_come_in_walk_order() -> None:
+    first, second, third = stopped(0x10), stopped(0x20), stopped(0x30)
+    member = chained(first, second, None)
+    group = chained(ExceptionGroup("g", [member, third]), stopped(0x40), None)
+    assert [stop.pc for stop in exception_stops(group)] == [0x10, 0x20, 0x30, 0x40]
+
+
+def test_a_cycle_without_a_stop_ends() -> None:
+    a, b = ValueError("a"), ValueError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+    assert exception_stop(a) is None
+    assert exception_stops(a) == ()
+
+
+def test_an_exception_reached_twice_gives_its_stop_once() -> None:
+    carrying = stopped(0x10)
+    group = ExceptionGroup("twice", [carrying, chained(ValueError(), carrying, None)])
+    assert exception_stops(group) == (carrying.stop,)
+
+
+def test_both_functions_are_public() -> None:
+    assert {"exception_stop", "exception_stops"} <= set(popcorn.report.__all__)

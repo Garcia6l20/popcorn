@@ -13,10 +13,10 @@ from typing import cast
 
 import pytest
 
-from popcorn import EmulationError, Machine, MachineRunning, ModelError, Stop, System
+from popcorn import Machine, MachineRunning, ModelError, Stop, System
 from popcorn._obs import FormatError
 from popcorn.pytest._options import SETTINGS
-from popcorn.report import call_stack, stop_report
+from popcorn.report import call_stack, exception_stop, stop_report
 from popcorn.trace import ALL
 
 _REGISTERS = (
@@ -194,25 +194,6 @@ def unclaimed(owner: str, ended: BaseException) -> None:
             ),
             stacklevel=1,
         )
-
-
-def exception_stop(error: BaseException | None) -> Stop | None:
-    """The stop of the first error carrying one, depth first through exception groups, then
-    through causes and contexts."""
-    seen: set[int] = set()
-    pending: list[BaseException | None] = [error]
-    while pending:
-        current = pending.pop()
-        if current is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, EmulationError) and current.stop is not None:
-            return current.stop
-        pending.append(current.__cause__ or current.__context__)
-        if isinstance(current, BaseExceptionGroup):
-            group = cast(BaseExceptionGroup[BaseException], current)
-            pending.extend(reversed(group.exceptions))
-    return None
 
 
 KEPT_RUNNING = "  machine kept running, state not read"

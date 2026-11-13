@@ -32,10 +32,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import override
+from typing import cast, override
 
 from popcorn import _core
 from popcorn._enums import FaultKind
+from popcorn._errors import EmulationError
 from popcorn._image import Location
 from popcorn._machine import Machine, stack_access
 from popcorn._stop import Stop
@@ -276,4 +277,45 @@ def _frame(machine: Machine, read32: Read32, raw: RawFrame) -> StackFrame:
     return StackFrame(raw.pc, machine.locate(source_address(read32, raw)), raw.via)
 
 
-__all__ = ["Report", "StackFrame", "Via", "fault_bits", "stop_report"]
+def exception_stops(error: BaseException | None) -> tuple[Stop, ...]:
+    """Every stop an exception tree carries, in walk order.
+
+    An `EmulationError` whose `stop` is not None carries one. The walk is depth first. An error's
+    own stop comes before its members and its chain. The members of an `ExceptionGroup` come
+    first, in `exceptions` order, then the exception's own chain: its
+    `__cause__` when set, else its `__context__`, one of the two. With both set the context is
+    not visited, and `raise X from None` still follows `__context__`. An exception is visited
+    once, so a cycle ends. No error, or no stop in the tree, gives the empty tuple.
+    """
+    found: list[Stop] = []
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, EmulationError) and current.stop is not None:
+            found.append(current.stop)
+        pending.append(current.__cause__ or current.__context__)
+        if isinstance(current, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], current)
+            pending.extend(reversed(group.exceptions))
+    return tuple(found)
+
+
+def exception_stop(error: BaseException | None) -> Stop | None:
+    """The first stop of `exception_stops`, None when the tree carries none."""
+    stops = exception_stops(error)
+    return stops[0] if stops else None
+
+
+__all__ = [
+    "Report",
+    "StackFrame",
+    "Via",
+    "exception_stop",
+    "exception_stops",
+    "fault_bits",
+    "stop_report",
+]
