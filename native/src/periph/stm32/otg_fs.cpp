@@ -223,11 +223,13 @@ struct out_fields
  * STALL off EP0, NAKs EP0 both ways, decrements STUPCNT and sets both EP0 toggles to DATA1. An OUT
  * packet on an enabled endpoint that is not NAKed is pushed as PKTSTS 2, then PKTSTS 3 when the
  * transfer completes, on PKTCNT reaching 0 or a short packet: the endpoint then disables and
- * NAKs. A packet that does not fit is NAKed. Reading GRXSTSP pops the status, reading any DFIFO
- * window pops the data words. Popping PKTSTS 4 sets DOEPINT.STUP, PKTSTS 3 DOEPINT.XFRC. Debugger
- * reads pop nothing.
+ * NAKs. A packet that does not fit is NAKed. Reading GRXSTSP pops the status, reading any word of
+ * any DFIFO window pops the data words. Popping PKTSTS 4 sets DOEPINT.STUP, PKTSTS 3 DOEPINT.XFRC.
+ * Debugger reads pop nothing and return the register storage of the word, as for any register.
+ * The six device-mode windows, endpoints 0 to 5 at 0x1000 to 0x6FFC, serve the FIFO port.
  *
- * Transmit FIFOs: DFIFOn pushes to the FIFO of IN endpoint n, sized by DIEPTXF0 or DIEPTXFn.
+ * Transmit FIFOs: any word of window n, DFIFOn at its first word, pushes to the FIFO of IN endpoint
+ * n, sized by DIEPTXF0 or DIEPTXFn.
  * DTXFSTS shows the free words, DIEPINT.TXFE the empty level GAHBCFG.TXFELVL selects. Once the
  * FIFO holds the words of a packet, the smaller of the maximum packet size and XFRSIZ, the packet
  * is recorded and XFRSIZ decrements. An IN token on an enabled endpoint that is not NAKed sends
@@ -361,6 +363,8 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
+  [[nodiscard]] auto served_ranges() const
+      -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override;
   void               usb_supply_changed() override;
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
@@ -419,6 +423,7 @@ private:
   void               packetize(std::size_t n);
   [[nodiscard]] auto is_control(std::uint32_t word) const -> bool;
   [[nodiscard]] auto is_fifo(std::uint32_t word) const -> bool;
+  void               push_word(std::size_t n);
   void               link(bool report_session_end);
   void               refresh();
   void               flush_rx();
@@ -881,9 +886,14 @@ auto otg_fs::is_control(std::uint32_t word) const -> bool
 auto otg_fs::is_fifo(std::uint32_t word) const -> bool
 {
   auto const base = fifo_window_.offset;
-  return word >= base
-     and word < base + endpoints * window_stride
-     and (word - base) % window_stride == 0;
+  return word >= base and word < base + endpoints * window_stride;
+}
+
+auto otg_fs::served_ranges() const -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
+{
+  return {
+      {fifo_window_.offset, fifo_window_.offset + endpoints * window_stride}
+  };
 }
 
 void otg_fs::link(bool report_session_end)
@@ -1090,6 +1100,12 @@ auto otg_fs::on_write(
   if(storage_only(access_offset_))
   {
     notes_.written(ctx_, desc_, "OTG_FS ADP", access_offset_, ctx, {});
+  }
+  if(is_fifo(access_offset_) and (access_offset_ - fifo_window_.offset) % window_stride != 0)
+  {
+    push_word((access_offset_ - fifo_window_.offset) / window_stride);
+    refresh();
+    return {};
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
@@ -1356,8 +1372,14 @@ void otg_fs::out_interrupt_written(std::uint32_t old, std::uint32_t)
 
 void otg_fs::fifo_written(std::uint32_t, std::uint32_t)
 {
-  auto const n    = (access_offset_ - fifo_window_.offset) / window_stride;
-  auto&      fifo = state_.tx_fifo[n];
+  push_word((access_offset_ - fifo_window_.offset) / window_stride);
+  regs_.poke(access_offset_, 0);
+  refresh();
+}
+
+void otg_fs::push_word(std::size_t n)
+{
+  auto& fifo = state_.tx_fifo[n];
   if(fifo.size() < tx_depth(n))
   {
     fifo.push_back(written_);
@@ -1369,8 +1391,6 @@ void otg_fs::fifo_written(std::uint32_t, std::uint32_t)
         std::format("DFIFO{}", n),
         std::format("push to the full TX FIFO {}: the word is dropped", n), tx_overflow);
   }
-  regs_.poke(access_offset_, 0);
-  refresh();
 }
 
 void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)

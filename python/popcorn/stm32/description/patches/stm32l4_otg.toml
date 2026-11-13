@@ -96,7 +96,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -106,7 +106,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -116,7 +116,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -126,7 +126,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -136,7 +136,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -146,7 +146,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"

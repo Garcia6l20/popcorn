@@ -152,6 +152,32 @@ struct rig
                 .has_value());
   }
 
+  [[nodiscard]] auto read_at(
+      std::uint32_t      offset,
+      popcorn::initiator by   = popcorn::initiator::cpu,
+      std::uint8_t       size = 4) const -> std::uint32_t
+  {
+    auto&      regs  = f->target->peripheral("OTG_FS");
+    auto const value = f->target->model("OTG_FS")->on_read(
+        regs, offset, size, {.pc = 0, .now = icount{0}, .by = by});
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
+  void write_at(std::uint32_t offset, std::uint32_t value, std::uint8_t size = 4) const
+  {
+    auto& regs = f->target->peripheral("OTG_FS");
+    REQUIRE(f->target->model("OTG_FS")
+                ->on_write(
+                    regs, offset, size, regs.peek(offset & ~3u), value, {.pc = 0, .now = icount{0}})
+                .has_value());
+  }
+
+  [[nodiscard]] auto window(std::size_t n) const -> std::uint32_t
+  {
+    return reg("DFIFO0").offset + 0x1000u * static_cast<std::uint32_t>(n);
+  }
+
   void set(std::string_view name, std::string_view field, std::uint32_t value) const
   {
     auto const& found = bit(name, field);
@@ -646,6 +672,96 @@ TEST_CASE("a CSRST write empties every FIFO and reads 0 again")
   CHECK(r.get("DTXFSTS0", "INEPTFSAV") == r.get("HNPTXFSIZ", "NPTXFD"));
   CHECK(r.get("DTXFSTS3", "INEPTFSAV") == r.get("DIEPTXF3", "INEPTXFD"));
   CHECK(r.get("DTXFSTS5", "INEPTFSAV") == r.get("DIEPTXF5", "INEPTXFD"));
+}
+
+TEST_CASE("every word of a window pops the receive FIFO like the first word")
+{
+  rig const                  first;
+  rig const                  second;
+  std::vector<std::uint32_t> expected;
+  std::vector<std::uint32_t> got;
+  for(auto const* r : {&first, &second})
+  {
+    r->enumerate();
+    REQUIRE(r->port().setup(0, get_device_descriptor, r->now()) == usb::handshake::ack);
+    REQUIRE(r->get("GINTSTS", "RXFLVL") == 1);
+    REQUIRE(r->pop().pktsts == 6);
+  }
+  expected = first.pop_words(2);
+  got.push_back(second.read_at(second.window(0) + 4));
+  got.push_back(second.read_at(second.window(5) + 0xFFC));
+  CHECK(got == expected);
+  CHECK(second.get("GINTSTS", "RXFLVL") == 1);
+  CHECK(second.pop().pktsts == 4);
+}
+
+TEST_CASE("a debugger read inside a window pops nothing")
+{
+  rig const r;
+  r.enumerate();
+  REQUIRE(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
+  REQUIRE(r.pop().pktsts == 6);
+  auto const peeked = r.read_at(r.window(2) + 8, popcorn::initiator::debugger);
+  CHECK(peeked == 0);
+  auto const first = r.pop_words(2);
+  CHECK(first[0] != 0);
+}
+
+TEST_CASE("a write to any word of window n pushes to TX FIFO n")
+{
+  rig const r;
+  r.enumerate();
+  auto const free_words = [&](std::string_view status) { return r.get(status, "INEPTFSAV"); };
+  auto const at_start1  = free_words("DTXFSTS1");
+  auto const at_start5  = free_words("DTXFSTS5");
+  r.write_at(r.window(1) + 4, 0x1111'1111);
+  r.write_at(r.window(1) + 0x7FC, 0x2222'2222);
+  r.write_at(r.window(5) + 0xFFC, 0x3333'3333);
+  CHECK(free_words("DTXFSTS1") == at_start1 - 2);
+  CHECK(free_words("DTXFSTS5") == at_start5 - 1);
+  CHECK(free_words("DTXFSTS2") == r.get("DIEPTXF2", "INEPTXFD"));
+}
+
+TEST_CASE("the words written across a window leave in order as the IN packet")
+{
+  rig const r;
+  r.enumerate();
+  REQUIRE(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
+  r.start_in0(16);
+  r.write_at(r.window(0), 0x0403'0201);
+  r.write_at(r.window(0) + 4, 0x0807'0605);
+  r.write_at(r.window(0) + 0x7FC, 0x0C0B'0A09);
+  r.write_at(r.window(0) + 0xFFC, 0x100F'0E0D);
+  auto const packet = r.port().in(0, 0, r.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  std::vector<std::uint8_t> expected(16);
+  for(std::size_t index = 0; index < expected.size(); ++index)
+  {
+    expected[index] = static_cast<std::uint8_t>(index + 1);
+  }
+  CHECK(packet.data == expected);
+}
+
+TEST_CASE("a byte read and a halfword write on a non-first window word use the lanes of the word")
+{
+  rig const a;
+  rig const b;
+  for(auto const* r : {&a, &b})
+  {
+    r->enumerate();
+    REQUIRE(r->port().setup(0, get_device_descriptor, r->now()) == usb::handshake::ack);
+    REQUIRE(r->pop().pktsts == 6);
+  }
+  auto const word = a.read_at(a.window(0) + 4);
+  CHECK(b.read_at(b.window(3) + 5, popcorn::initiator::cpu, 1) == ((word >> 8) & 0xffu));
+  rig const c;
+  c.enumerate();
+  REQUIRE(c.port().setup(0, get_device_descriptor, c.now()) == usb::handshake::ack);
+  c.start_in0(4);
+  c.write_at(c.window(0) + 6, 0xBEEF, 2);
+  auto const packet = c.port().in(0, 0, c.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  CHECK(packet.data == std::vector<std::uint8_t>{0x00, 0x00, 0xEF, 0xBE});
 }
 
 TEST_CASE("the device takes its new address after the SET_ADDRESS status stage")

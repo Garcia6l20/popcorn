@@ -81,7 +81,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -91,7 +91,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -101,7 +101,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -111,7 +111,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -121,7 +121,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -131,7 +131,7 @@ width = 32
 reset = 0x00000000
 acc = "read_write"
 fields = []
-source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. The description names word 0 of each window, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access, and the model serves every word of the window as the FIFO port"
 
 [[fields]]
 instances = ["OTG_FS"]

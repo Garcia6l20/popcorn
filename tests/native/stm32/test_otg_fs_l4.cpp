@@ -368,6 +368,34 @@ TEST_CASE("under strict_peripherals a GCCFG PWRDWN write with no 48 MHz clock ra
   CHECK_THROWS_AS(static_cast<void>(r.cpu_store(gccfg, pwrdwn)), popcorn::model_error);
 }
 
+TEST_CASE("under strict_peripherals a store to any word of the six FIFO windows is served")
+{
+  otg_rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  for(std::uint32_t const window : {0x1000u, 0x3000u, 0x6000u})
+  {
+    for(std::uint32_t const word : {0u, 4u, 0x7fcu, 0xffcu})
+    {
+      CAPTURE(window);
+      CAPTURE(word);
+      CHECK_NOTHROW(static_cast<void>(r.cpu_store(window + word, 0x1234'5678)));
+    }
+  }
+}
+
+TEST_CASE("under strict_peripherals a store past the sixth FIFO window still raises")
+{
+  otg_rig const r{true};
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"AHB2ENR", "OTGFSEN"}
+  });
+  CHECK_THROWS_AS(static_cast<void>(r.cpu_store(0x7000, 0)), popcorn::model_error);
+}
+
 TEST_CASE("a debugger GCCFG PWRDWN write with no 48 MHz clock is served on a strict machine")
 {
   otg_rig const r{true};
