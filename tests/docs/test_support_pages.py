@@ -124,7 +124,7 @@ def test_the_general_limits_pages_link_to_existing_pages(generated: Path) -> Non
                 assert anchor in heading_slugs(resolved.read_text()), (page.name, target, anchor)
             checked += 1
     assert checked > 20
-    assert (generated / "limits/core.md").read_text().count("\n## ") == 6
+    assert (generated / "limits/core.md").read_text().count("\n## ") == 7
 
 
 @pytest.mark.timeout(60)

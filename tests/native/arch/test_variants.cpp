@@ -333,6 +333,53 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "a handler setting FAULTMASK keeps it past a HardFault return on v8-M and loses it on v7-M, "
+    "and every core loses it past a configurable fault return, DDI0553B DeActivate")
+{
+  struct row
+  {
+    bool             v8;
+    std::string_view entry;
+    std::uint32_t    faultmask;
+  };
+  core::machine_options enter;
+  enter.faults = arch::fault_policy::enter_handler;
+  for(auto const& one : {
+          row{false, "udf_forced", 0},
+          row{false, "udf",        0},
+          row{true,  "udf_forced", 1},
+          row{true,  "udf",        0},
+  })
+  {
+    CAPTURE(one.v8);
+    CAPTURE(one.entry);
+    auto const   suffix = one.v8 ? std::string_view{} : cm4.suffix;
+    auto const   name   = std::string{"faults"} + std::string{suffix};
+    arch_fixture f{one.v8 ? m33() : description(cm4), name, enter};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    REQUIRE(run_to(f, sym(name, "faults_setup")).reason == stop_reason::user);
+    REQUIRE(run_to(f, sym(name, one.entry)).reason == stop_reason::user);
+    auto const             stacked_pc = sym(name, std::string{one.entry} + "_at") & ~address{1};
+    auto const             sp         = f.reg("sp");
+    std::optional<address> slot;
+    for(address at = sp; at < sp + 80 and not slot; at += 4)
+    {
+      auto const word = f.target->mem().read(at, 4);
+      if(word and *word == stacked_pc)
+      {
+        slot = at;
+      }
+    }
+    REQUIRE(slot.has_value());
+    REQUIRE(f.target->mem().write(*slot, 4, sym(name, "faults_setup") | 1u));
+    f.set("faultmask", 1);
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    CHECK((f.reg("xpsr") & 0x1ff) == 0);
+    CHECK(f.reg("faultmask") == one.faultmask);
+  }
+}
+
+TEST_CASE(
     "M4 takes a precise BusFault on an unprivileged PPB access and lets an unprivileged ITM_TER "
     "read through, DDI0403E B3.1.1 and C1.7")
 {

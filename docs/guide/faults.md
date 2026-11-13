@@ -66,6 +66,10 @@ The BusFault here escalates to HardFault, because the firmware did not enable Bu
 SHCSR: IPSR reads 3 and HFSR has FORCED set. Some faults stop the run under both policies, such as a lockup.
 [Limits](../support/generated/limits/core.md#core-faults) lists them.
 
+A handler that sets FAULTMASK and returns from HardFault keeps it set on an ARMv8-M core, and
+loses it on an ARMv7-M core. Any other return, NMI's aside, clears it on both.
+[Limits](../support/generated/limits/core.md#faultmask-on-exception-return) has the rule.
+
 ## Host accesses
 
 A host read or write through `m.mem` that the bus refuses raises `popcorn.BusAccessError`, a

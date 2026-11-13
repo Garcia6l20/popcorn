@@ -251,11 +251,12 @@ private:
   auto                           engine_fault(std::uint32_t intno) -> trap_result;
   template <bool extension> auto enter_as(std::uint32_t number, security state) -> trap_result;
   void                           deactivate(std::uint32_t number, security domain);
-  auto                           exception_return() -> trap_result;
-  auto                           banked_return() -> trap_result;
-  void                           repend_level(std::uint32_t number) noexcept;
-  void                           trace_exit(core::machine_services& services, std::uint32_t number);
-  auto                           returned(
+  [[nodiscard]] auto keeps_faultmask_on_return(std::uint32_t number) const noexcept -> bool;
+  auto               exception_return() -> trap_result;
+  auto               banked_return() -> trap_result;
+  void               repend_level(std::uint32_t number) noexcept;
+  void               trace_exit(core::machine_services& services, std::uint32_t number);
+  auto               returned(
       std::uint32_t number,
       std::uint32_t stacked_ipsr,
       address       resume_at,

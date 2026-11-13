@@ -35,6 +35,12 @@
  *
  * [Faults and errors](../../../guide/faults.md) shows both policies.
  *
+ * @group all rule "FAULTMASK on exception return"
+ * An exception return clears FAULTMASK of the returning exception's security state when the raw
+ * execution priority, the priority before FAULTMASK and other boosts, is 0 or above. A return
+ * from HardFault or NMI, whose raw priority is negative, keeps FAULTMASK on an ARMv8-M core, as
+ * DDI0553B DeActivate says. An ARMv7-M core clears it on every return except NMI's.
+ *
  * @group all rule "Unprivileged system space access"
  * - An unprivileged access to the system space, 0xE0000000 to 0xE000EFFF, takes a precise
  *   BusFault, with BFAR set to the address, and changes nothing. A debugger or host access is
@@ -952,6 +958,15 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
   return trustzone() ? (exc_return & 0xff00'0000u) == 0xff00'0000u : valid_exc_return(exc_return);
 }
 
+auto cortex_m::keeps_faultmask_on_return(std::uint32_t number) const noexcept -> bool
+{
+  if(v7())
+  {
+    return number == exc_nmi;
+  }
+  return raw_execution_priority(state_.exceptions, priority_config()) < 0;
+}
+
 [[gnu::noinline]] void cortex_m::deactivate(std::uint32_t number, security domain)
 {
   auto&      exceptions   = state_.exceptions;
@@ -1103,10 +1118,11 @@ auto cortex_m::exception_return() -> trap_result
          .status        = state_.scs.cfsr,
          .detail        = state_.scs.hfsr});
   }
+  auto const keeps_faultmask = keeps_faultmask_on_return(number);
   deactivate(
       number, trustzone() and not decode_exc_security(value).secure_exception ? security::nonsecure
                                                                               : security::secure);
-  if(number != exc_nmi)
+  if(not keeps_faultmask)
   {
     special.faultmask = 0;
   }
@@ -1279,9 +1295,10 @@ auto cortex_m::exception_return() -> trap_result
          .reported  = value,
          .origin    = security::secure});
   }
+  auto const keeps_faultmask = keeps_faultmask_on_return(number);
   deactivate(number, exception);
   auto const& exception_ids = ids_of(exception);
-  if(number != exc_nmi)
+  if(not keeps_faultmask)
   {
     write(exception_ids.faultmask, 0);
   }
@@ -1420,8 +1437,9 @@ auto cortex_m::return_fault(
   auto const  control          = read(ids.control);
   auto const  faultmask        = read(ids.faultmask);
   auto const  current          = read_security(engine);
+  auto const  keeps_faultmask  = keeps_faultmask_on_return(number);
   deactivate(number, exception);
-  if(number != exc_nmi)
+  if(not keeps_faultmask)
   {
     write(ids.faultmask, 0);
   }

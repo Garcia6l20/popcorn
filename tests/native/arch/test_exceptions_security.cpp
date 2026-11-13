@@ -575,6 +575,122 @@ TEST_CASE("FAULTMASK_S and an active HardFault_S hold the execution priority at 
   CHECK(f.module->would_preempt(armv8m::exc_nmi));
 }
 
+namespace
+{
+constexpr std::uint16_t movs_r0_1        = 0x2001;
+constexpr std::uint16_t msr_faultmask_hi = 0xf380;
+constexpr std::uint16_t msr_faultmask_lo = 0x8813;
+constexpr std::uint16_t ldr_r0_sp_24     = 0x9806;
+constexpr std::uint16_t adds_r0_2        = 0x3002;
+constexpr std::uint16_t str_r0_sp_24     = 0x9006;
+
+void faultmask_handler(
+    arch_fixture const& f,
+    std::uint32_t       number,
+    bool                skip  = true,
+    bool                pause = false)
+{
+  poke(f, secure_table + 4 * number, secure_handler | 1u);
+  address at = secure_handler;
+  if(pause)
+  {
+    put(f, at, {bkpt});
+    at += 2;
+  }
+  if(skip)
+  {
+    put(f, at,
+        {movs_r0_1, msr_faultmask_hi, msr_faultmask_lo, ldr_r0_sp_24, adds_r0_2, str_r0_sp_24,
+         bx_lr});
+  }
+  else
+  {
+    put(f, at, {movs_r0_1, msr_faultmask_hi, msr_faultmask_lo, bx_lr});
+  }
+}
+}
+
+TEST_CASE("a Secure HardFault return keeps FAULTMASK_S, DDI0553B DeActivate, with either BFHFNMINS")
+{
+  for(auto const aircr_value : {std::uint32_t{0x05FA'0000}, bfhfnmins})
+  {
+    CAPTURE(aircr_value);
+    auto f = booted();
+    poke(f, aircr, aircr_value);
+    tables(f, armv8m::exc_hardfault);
+    faultmask_handler(f, armv8m::exc_hardfault);
+    put(f, secure_code, {udf, bkpt});
+    engine_write(f, UC_ARM_REG_FAULTMASK_NS, 1);
+    REQUIRE(run_secure(f, secure_code, 20).reason == stop_reason::user);
+    CHECK(ipsr(f) == 0);
+    CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 1);
+    CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_NS) == 1);
+  }
+}
+
+TEST_CASE("a Secure UsageFault return clears FAULTMASK_S, DDI0553B DeActivate for rawPri >= 0")
+{
+  auto f = booted();
+  poke(f, shcsr, usagefault_ena);
+  tables(f, armv8m::exc_usagefault);
+  faultmask_handler(f, armv8m::exc_usagefault, true, true);
+  put(f, secure_code, {udf, bkpt});
+  REQUIRE(run_secure(f, secure_code, 40).reason == stop_reason::user);
+  REQUIRE(ipsr(f) == armv8m::exc_usagefault);
+  engine_write(f, UC_ARM_REG_FAULTMASK_NS, 1);
+  REQUIRE(resume(f, 40).reason == stop_reason::user);
+  CHECK(ipsr(f) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_NS) == 1);
+}
+
+TEST_CASE("a Non-secure UsageFault return clears FAULTMASK_NS and leaves FAULTMASK_S")
+{
+  auto f = booted();
+  open_nonsecure_region(f);
+  poke(f, shcsr + scs_ns, usagefault_ena);
+  tables(f, armv8m::exc_usagefault);
+  poke(f, vtor, ns_table);
+  put(f, ns_handler,
+      {bkpt, movs_r0_1, msr_faultmask_hi, msr_faultmask_lo, ldr_r0_sp_24, adds_r0_2, str_r0_sp_24,
+       bx_lr});
+  put(f, ns_code, {udf, bkpt});
+  REQUIRE(run_nonsecure(f, ns_code, 8).reason == stop_reason::user);
+  REQUIRE(ipsr(f) == armv8m::exc_usagefault);
+  engine_write(f, UC_ARM_REG_FAULTMASK_S, 1);
+  REQUIRE(resume(f, 40).reason == stop_reason::user);
+  CHECK(ipsr(f) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_NS) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 1);
+}
+
+TEST_CASE(
+    "a HardFault return that faults on unstacking keeps FAULTMASK_S, DeActivate before PopStack")
+{
+  auto f = booted();
+  tables(f, armv8m::exc_hardfault);
+  poke(f, secure_table + 4 * armv8m::exc_hardfault, secure_handler | 1u);
+  put(f, secure_handler,
+      {movs_r0_1, msr_faultmask_hi, msr_faultmask_lo, 0xf240, 0x0000, 0xf2c6, 0x0000, 0xf380,
+       0x8808, bx_lr});
+  put(f, secure_code, {udf, bkpt});
+  auto const stopped = run_secure(f, secure_code, 60);
+  REQUIRE(stopped.reason == stop_reason::fault);
+  CHECK((f.word(cfsr) & bfsr_unstkerr) != 0);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 1);
+}
+
+TEST_CASE("an NMI return keeps FAULTMASK_S")
+{
+  auto f = booted();
+  tables(f, armv8m::exc_nmi);
+  faultmask_handler(f, armv8m::exc_nmi, false);
+  poke(f, icsr, 1u << 31);
+  put(f, secure_code, {nop, nop, nop, bkpt});
+  REQUIRE(run_secure(f, secure_code, 40).reason == stop_reason::user);
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 1);
+}
+
 TEST_CASE("a Secure UsageFault escalates to HardFault_S with BFHFNMINS=1, B3.11 RDXYK")
 {
   auto f = booted();
