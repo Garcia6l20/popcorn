@@ -373,6 +373,7 @@ if VARIANT not in ("asan", "tsan"):
     for staged in staged_sdk:
         staged.build_tier = "default"
     project.Alias("stage-sdk", sdk_json, *staged_sdk)
+    project.Alias("stage-python", sdk_json, *staged_sdk)
     if build_tests:
         xmod_ext = add_extension(
             "popcorn_testing", "_xmod", ["tests/native/support/xmod_module.cpp"]
