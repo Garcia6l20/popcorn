@@ -260,14 +260,14 @@ auto later(std::uint64_t now_ps, std::uint64_t delay_ps) -> vtime
 auto machine_handle::lock_for_request() const -> core::held_lock
 {
   detail::raise_kept_log_error(*slot_->logs);
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     throw core::machine_closed("the host was abandoned");
   }
-  refuse_inside(*host_);
+  refuse_inside(*host());
   detail::require_host_start();
   auto held = lock_releasing();
-  if(host_->busy(held, core::member_id{}))
+  if(host()->busy(held, core::member_id{}))
   {
     throw popcorn::machine_busy("a run, step, wait or running() is already active on this machine");
   }
@@ -281,23 +281,23 @@ auto detail::stop_info(stop const& stopped) -> stop_record
 
 auto machine_handle::lock_releasing() const -> core::held_lock
 {
-  return detail::lock_releasing_gil(*host_);
+  return detail::lock_releasing_gil(*host());
 }
 
 void machine_handle::apply_reset_request(core::held_lock const& held)
 {
-  if(not host_->parked(held, core::member_id{}) or slot_->refused.load(std::memory_order_acquire))
+  if(not host()->parked(held, core::member_id{}) or slot_->refused.load(std::memory_order_acquire))
   {
     return;
   }
-  core::owner_scope const owning{*host_, held};
-  auto&                   target = host_->member(held, core::member_id{});
+  core::owner_scope const owning{*host(), held};
+  auto&                   target = host()->member(held, core::member_id{});
   if(not target.reset_pending() or target.in_call())
   {
     return;
   }
   detail::run_retired(*slot_);
-  detail::superseding const ending{*host_, held};
+  detail::superseding const ending{*host(), held};
   std::ignore = target.apply_reset_request();
 }
 
@@ -331,16 +331,16 @@ auto machine_handle::run_goal(
     apply_reset_request(held);
     if(for_ps or deadline_ps)
     {
-      auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
+      auto const now  = host()->member(held, core::member_id{}).virtual_clock().time();
       goal.until_time = for_ps ? later(now.ps, *for_ps) : std::max(vtime{*deadline_ps}, now);
     }
-    return host_->run(held, core::member_id{}, std::move(goal));
+    return host()->run(held, core::member_id{}, std::move(goal));
   }();
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
           [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
-          cancel_goal(host_, abandoner())),
+          cancel_goal(host(), abandoner())),
       slot_};
 }
 
@@ -386,13 +386,13 @@ auto machine_handle::call_goal(
   }
   auto future = [&] {
     auto const              held = lock_for_request();
-    core::owner_scope const owning{*host_, held};
-    auto&                   target = host_->member(held, core::member_id{});
+    core::owner_scope const owning{*host(), held};
+    auto&                   target = host()->member(held, core::member_id{});
     if(target.in_call())
     {
       throw popcorn::machine_busy("a call is already in progress on this machine");
     }
-    host_->give_back_core(held, core::member_id{});
+    host()->give_back_core(held, core::member_id{});
     if(prepare and not prepare->is_none())
     {
       (*prepare)();
@@ -412,9 +412,9 @@ auto machine_handle::call_goal(
     {
       begin(target);
     }
-    return host_->run(held, core::member_id{}, std::move(goal));
+    return host()->run(held, core::member_id{}, std::move(goal));
   }();
-  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()));
+  auto cancel = cancel_reporting_finish(cancel_goal(host(), abandoner()));
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
@@ -434,9 +434,9 @@ auto machine_handle::failing_finish_goal(std::uint64_t budget) -> host_future_ha
                       }};
   auto           future = [&] {
     auto const held = lock_for_request();
-    return host_->run(held, core::member_id{}, std::move(goal));
+    return host()->run(held, core::member_id{}, std::move(goal));
   }();
-  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()));
+  auto cancel = cancel_reporting_finish(cancel_goal(host(), abandoner()));
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future), [](core::goal_result const&) { return nb::none(); },
@@ -448,13 +448,13 @@ void machine_handle::start()
 {
   auto const held = lock_for_request();
   apply_reset_request(held);
-  host_->start(held, core::member_id{});
+  host()->start(held, core::member_id{});
   delivered_->reset();
 }
 
 auto machine_handle::halt() -> nb::object
 {
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     return nb::none();
   }
@@ -471,13 +471,13 @@ auto machine_handle::halt_or_park(bool refuse_goal) -> nb::object
   core::halt_ticket ticket;
   {
     nb::gil_scoped_release const released;
-    ticket = host_->request_halt(core::member_id{}, refuse_goal);
+    ticket = host()->request_halt(core::member_id{}, refuse_goal);
   }
-  wait_interruptibly(*host_, ticket, abandoner());
+  wait_interruptibly(*host(), ticket, abandoner());
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;
-    ended = host_->finish_halt(core::member_id{}, ticket);
+    ended = host()->finish_halt(core::member_id{}, ticket);
   }
   if(not ended)
   {
@@ -508,14 +508,14 @@ void machine_handle::flush_logs_unraisable() const noexcept
 
 auto machine_handle::unreported_end() -> nb::object
 {
-  if(host_->forked())
+  if(host()->forked())
   {
     return nb::none();
   }
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;
-    ended = host_->halt(core::member_id{});
+    ended = host()->halt(core::member_id{});
   }
   flush_logs_unraisable();
   if(not ended)
@@ -610,10 +610,10 @@ auto machine_handle::run_test(
     apply_reset_request(held);
     if(for_ps or deadline_ps)
     {
-      auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
+      auto const now  = host()->member(held, core::member_id{}).virtual_clock().time();
       goal.until_time = for_ps ? later(now.ps, *for_ps) : std::max(vtime{*deadline_ps}, now);
     }
-    return host_->run(held, core::member_id{}, std::move(goal));
+    return host()->run(held, core::member_id{}, std::move(goal));
   }();
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
@@ -621,7 +621,7 @@ auto machine_handle::run_test(
           [keep = std::move(keep)](core::goal_result const& result) {
             return nb::cast(record(result.stopped));
           },
-          cancel_goal(host_, abandoner())),
+          cancel_goal(host(), abandoner())),
       slot_};
 }
 
@@ -678,18 +678,18 @@ auto machine_handle::waiting_on(
   {
     spec.deadline = vtime{*deadline_ps};
   }
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     throw core::machine_closed("the host was abandoned");
   }
   detail::raise_kept_log_error(*slot_->logs);
-  refuse_inside(*host_);
+  refuse_inside(*host());
   auto const held = lock_releasing();
-  if(not host_->session_open(held, core::member_id{}))
+  if(not host()->session_open(held, core::member_id{}))
   {
     throw std::runtime_error("wait() needs a free run opened by start()");
   }
-  auto       waiting = host_->wait(held, core::member_id{}, std::move(spec));
+  auto       waiting = host()->wait(held, core::member_id{}, std::move(spec));
   auto       future  = waiting.future();
   auto const made    = delivered_->generation();
   return host_future_handle{
@@ -734,30 +734,30 @@ auto machine_handle::is_plain_memory(address addr, std::uint8_t size) const -> b
 
 auto machine_handle::busy() const -> bool
 {
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     return false;
   }
-  if(host_->owns_engine())
+  if(host()->owns_engine())
   {
     return core::detail::host_locks_held == 0;
   }
   auto const held = lock_releasing();
-  return host_->busy(held, core::member_id{});
+  return host()->busy(held, core::member_id{});
 }
 
 auto machine_handle::session_open() const -> bool
 {
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     return false;
   }
-  if(host_->owns_engine() and core::detail::host_locks_held > 0)
+  if(host()->owns_engine() and core::detail::host_locks_held > 0)
   {
     return false;
   }
   auto const held = lock_releasing();
-  return host_->session_open(held, core::member_id{});
+  return host()->session_open(held, core::member_id{});
 }
 
 void machine_handle::require_boundary_caller() const
@@ -767,7 +767,7 @@ void machine_handle::require_boundary_caller() const
   {
     throw std::runtime_error("a handler accesses the machine directly");
   }
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     throw core::machine_closed("the host was abandoned");
   }
@@ -775,7 +775,7 @@ void machine_handle::require_boundary_caller() const
 
 void machine_handle::at_boundary(std::move_only_function<void(core::machine&)> body)
 {
-  if(host_->owns_engine())
+  if(host()->owns_engine())
   {
     access(body);
     return;
@@ -784,9 +784,9 @@ void machine_handle::at_boundary(std::move_only_function<void(core::machine&)> b
   std::optional<core::host_future<vtime>> posted;
   {
     auto const held = lock_releasing();
-    if(host_->busy(held, core::member_id{}))
+    if(host()->busy(held, core::member_id{}))
     {
-      posted = host_->post(held, core::member_id{}, std::move(body));
+      posted = host()->post(held, core::member_id{}, std::move(body));
     }
   }
   if(not posted)
@@ -809,9 +809,9 @@ void machine_handle::at_boundary(std::move_only_function<void(core::machine&)> b
     if(PyErr_CheckSignals() != 0)
     {
       nb::python_error const raised;
-      if(auto const held = detail::try_lock_releasing_gil(*host_); held.owns_lock())
+      if(auto const held = detail::try_lock_releasing_gil(*host()); held.owns_lock())
       {
-        std::ignore = host_->withdraw(held, core::member_id{}, *posted);
+        std::ignore = host()->withdraw(held, core::member_id{}, *posted);
       }
       throw raised;
     }
@@ -849,9 +849,9 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
   }
   auto future = [&] {
     auto const held = lock_releasing();
-    return host_->post(held, core::member_id{}, std::move(command), at);
+    return host()->post(held, core::member_id{}, std::move(command), at);
   }();
-  auto withdraw = [host = std::weak_ptr{host_}](core::host_future<vtime> const& future) {
+  auto withdraw = [host = std::weak_ptr{host()}](core::host_future<vtime> const& future) {
     auto const on = host.lock();
     if(on == nullptr)
     {
@@ -912,9 +912,9 @@ auto machine_handle::submit_ops(
   }
   auto future = [&] {
     auto const held = lock_releasing();
-    return host_->post(held, core::member_id{}, std::move(command), at);
+    return host()->post(held, core::member_id{}, std::move(command), at);
   }();
-  auto withdraw = [host = std::weak_ptr{host_}](core::host_future<vtime> const& future) {
+  auto withdraw = [host = std::weak_ptr{host()}](core::host_future<vtime> const& future) {
     auto const on = host.lock();
     if(on == nullptr)
     {

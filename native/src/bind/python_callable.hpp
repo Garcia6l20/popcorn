@@ -196,7 +196,7 @@ public:
    * @param alive The machine's lifetime flag.
    * @param collected The machine's collected flag.
    */
-  void run_in(reflex::py::nb::object cell, alive_flag alive, alive_flag collected)
+  void run_in(reflex::py::nb::object cell, alive_flag alive, plain_flag collected)
   {
     cell_      = std::move(cell);
     alive_     = std::move(alive);
@@ -245,7 +245,7 @@ private:
 
   reflex::py::nb::object  cell_      = reflex::py::nb::none();
   alive_flag              alive_     = nullptr;
-  alive_flag              collected_ = nullptr;
+  plain_flag              collected_ = nullptr;
   core::machine_services* services_  = nullptr;
 };
 

@@ -524,6 +524,10 @@ void count_interruptible_wait() noexcept;
 [[= py::doc{"Number of machine threads running now."}]] [[nodiscard]] auto host_threads()
     -> std::uint64_t;
 
+/** @brief Hosts the exit shutdown would visit, entries of destroyed hosts included. */
+[[= py::doc{"Number of machines the exit shutdown keeps track of, for tests."}]] [[nodiscard]] auto
+    registered_hosts() -> std::uint64_t;
+
 /** @brief Removals run so far by a stopping host thread for a handle that died first. */
 [[= py::doc{"Number of removals run by stopping machine threads, for tests."}]] [[nodiscard]] auto
     exit_removals_run() -> std::uint64_t;

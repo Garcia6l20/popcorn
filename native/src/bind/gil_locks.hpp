@@ -365,6 +365,10 @@ struct host_slot
   /** @brief Whether a parked access is refused: a member of a linked system with a pending
    * goal, whose position at a pause depends on the quantum. */
   mutable std::atomic<bool> refused{false};
+  /** @brief Whether the machine was closed: every access refuses with machine_closed. */
+  mutable std::atomic<bool> closed{false};
+  /** @brief Whether the machine is a member of a linked system: close() refuses. */
+  mutable std::atomic<bool> member{false};
 
   host_slot()                                    = default;
   host_slot(host_slot const&)                    = delete;
@@ -726,7 +730,8 @@ inline auto host_gone(host_ref const& ref) noexcept -> bool
  *        @p body runs directly.
  * @param ref The slot.
  * @param body Called with no argument, its result dropped.
- * @return Whether @p body ran, false once the machine's handle destroyed the host.
+ * @return Whether @p body ran, false once the machine was closed or its handle destroyed the
+ *         host.
  */
 template <typename Body> auto host_access_if_alive(host_ref const& ref, Body&& body) -> bool
 {
@@ -750,11 +755,16 @@ template <typename Body> auto host_access_if_alive(host_ref const& ref, Body&& b
  *        this thread, @p body runs directly.
  * @param ref The slot.
  * @param body Called with no argument.
+ * @throws core::machine_closed once the machine was closed.
  * @throws config_error once the machine's handle destroyed the host.
  */
 template <typename Body>
 auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
 {
+  if(ref->closed.load(std::memory_order_acquire))
+  {
+    throw core::machine_closed("the machine was closed");
+  }
   using result = std::invoke_result_t<Body>;
   if constexpr(std::is_void_v<result>)
   {

@@ -38,7 +38,7 @@ struct view_scope
     detail::clear_alive(*alive);
   }
 
-  std::shared_ptr<std::atomic<bool>> alive = detail::make_alive();
+  std::shared_ptr<detail::alive_state> alive = detail::make_alive();
 };
 }
 
@@ -199,7 +199,7 @@ void machine_handle::remove_probe(probe_hook const& probe)
   {
     return;
   }
-  if(host_->owns_engine())
+  if(host()->owns_engine())
   {
     probe.removal()->remove();
     return;

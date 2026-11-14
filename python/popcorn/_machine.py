@@ -747,8 +747,13 @@ class Machine:
         is left to its system.
 
         It is not supported while another thread uses the same machine, as `del m` is not.
-        The host thread and the models are released when the last view, `Pending` or other
-        object that holds the machine's native handle is dropped, so drop such objects first.
+        The host thread and the models are released at once, even while a view, `Pending`,
+        stream, pin or hook made from the machine is held: such an object raises EmulationError
+        when it reaches the machine, keeps the frames its stream already captured, and
+        `Intercept.remove()` does nothing. A command whose awaiter was cancelled and that the
+        close failed is raised from `close()` after the release, with a note naming it, the
+        failures after the first go to `sys.unraisablehook`. A Ctrl-C during `close()` is
+        delivered after it returns.
 
         Raises:
             MachineRunning: A run, step, call, wait or free run is active, `halt()` it first,
@@ -774,16 +779,11 @@ class Machine:
                     expected="a machine in no linked system",
                 )
             self._require_idle()
-        self._callback_table.close()
         loop = self._loop
         try:
-            handle.mark_collected()
             if loop is not None:
                 loop._finalize()  # pyright: ignore[reportPrivateUsage]
-            if force:
-                handle.park()
-            else:
-                handle.halt()
+            handle.close(force)
         except Exception:
             if not force:
                 raise

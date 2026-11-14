@@ -153,7 +153,7 @@ public:
   void run_in(
       nb::object              cell,
       alive_flag              alive,
-      alive_flag              collected,
+      plain_flag              collected,
       core::machine_services& services)
   {
     cell_.run_in(std::move(cell), std::move(alive), std::move(collected));
@@ -251,7 +251,7 @@ auto building_alive() -> alive_flag
   return building.alive;
 }
 
-auto building_collected() -> alive_flag
+auto building_collected() -> plain_flag
 {
   return building.collected;
 }

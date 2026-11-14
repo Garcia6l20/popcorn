@@ -4,6 +4,7 @@ module global leaves no nanobind leak report, and a closed machine refuses every
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import subprocess
 import sys
@@ -20,9 +21,9 @@ from popcorn import _core
 from popcorn._machine import Machine
 from popcorn._refs import Pending
 from popcorn.model import Model, on_read
-from popcorn.units import ms, us
+from popcorn.units import ms, s, us
 
-from .conftest import DRIVER_ELF, M33_JSON, Machines, collected, quiet_host_threads, settled
+from .conftest import DRIVER_ELF, M33_JSON, Machines, collected, quiet_host_threads
 from .projects import MODEL_ELF
 
 TESTS = Path(__file__).parents[1]
@@ -101,6 +102,14 @@ def test_the_same_after_a_model_callback_raised_and_was_caught() -> None:
 
 def test_the_same_after_close() -> None:
     clean_exit(model_script(RETURNS, "\nm.close()\n"))
+
+
+def test_a_global_view_of_a_global_machine_leaves_no_leak_report() -> None:
+    clean_exit(model_script(RETURNS, "\nview = m.mem\nregs = m.reg\n"))
+
+
+def test_a_global_view_of_a_closed_machine_leaves_no_leak_report() -> None:
+    clean_exit(model_script(RETURNS, "\nview = m.mem\nm.close()\n"))
 
 
 def test_a_global_machine_with_a_raising_python_device_leaves_no_leak_report() -> None:
@@ -409,53 +418,60 @@ def test_a_closed_machine_is_collected_without_a_finalizer_report(
 TIMER_CNT = 0x4003_000C
 
 
-def test_a_lingering_view_keeps_the_host_but_the_model_is_refused_after_close() -> None:
+def test_a_lingering_view_does_not_keep_the_host_or_the_model_after_close() -> None:
     before = quiet_host_threads()
     Counted.reads = 0
     m = counted_machine()
     assert _core.host_threads() == before + 1
     gone = weakref.ref(m.model("TIMER"))
-    table = m._callback_table  # pyright: ignore[reportPrivateUsage]
     view = m.mem
     assert view.u32[TIMER_CNT] == 7
     reads = Counted.reads
     m.close()
-    assert table.closed
-    assert view.u32[TIMER_CNT] == 0
-    assert Counted.reads == reads
-    assert _core.host_threads() == before + 1
-    del view, table
-    assert settled(lambda: _core.host_threads() == before)
+    assert _core.host_threads() == before
+    del m
+    gc.collect()
     assert collected(gone)
+    with pytest.raises(popcorn.EmulationError, match="the machine was closed"):
+        view.u32[TIMER_CNT]
+    assert Counted.reads == reads
+    del view
 
 
-class RaisingHalt:
-    """A handle whose halt raises, as a late failure of an earlier command does."""
+def cancel_a_stamped_command(m: popcorn.Machine) -> None:
+    at = m.time + s(1)
+    unmapped = m.ref.mem.u32[0xF000_0000].read_op()
+    post = m._post  # pyright: ignore[reportPrivateUsage]
 
-    def __init__(self, handle: object) -> None:
-        self.handle = handle
+    async def scenario() -> None:
+        task = asyncio.create_task(post(unmapped, at, cancel=False))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-    def halt(self) -> None:
-        raise RuntimeError("late failure")
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self.handle, name)
+    asyncio.run(scenario())
 
 
-def test_a_close_that_raises_still_leaves_a_closed_machine(machines: Machines) -> None:
+def test_a_real_late_failure_is_raised_by_close_after_the_release() -> None:
     before = quiet_host_threads()
-    m = machines()
-    asyncio.run(m.run(budget=1_000))
-    assert _core.host_threads() == before + 1
-    spied: Any = m
-    spied._handle = RaisingHalt(spied._handle)
-    del spied
-    with pytest.raises(RuntimeError, match="late failure"):
+    m = popcorn.Machine(
+        popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+    )
+    m.reset()
+    gone = weakref.ref(m)
+    cancel_a_stamped_command(m)
+    with pytest.raises(popcorn.EmulationError, match="the machine was closed") as raised:
         m.close()
+    assert raised.value.__notes__ == ["a command its awaiter cancelled failed later"]
+    del raised
+    assert _core.host_threads() == before
     with pytest.raises(popcorn.EmulationError, match="the machine was closed"):
         m.busy  # noqa: B018
     m.close()
-    assert settled(lambda: _core.host_threads() == before)
+    del m
+    gc.collect()
+    assert collected(gone)
 
 
 def test_the_closed_stub_raises_for_every_protocol_use(machines: Machines) -> None:
@@ -486,3 +502,36 @@ def test_the_closed_stub_raises_for_every_protocol_use(machines: Machines) -> No
     with pytest.raises(popcorn.EmulationError, match="the machine was closed"), stub:
         pass
     assert not hasattr(stub, "__wrapped__")
+
+
+def test_a_cancelled_command_left_at_exit_is_reported_once() -> None:
+    done = child(f"""
+        import asyncio
+
+        import popcorn
+        from popcorn.units import s
+
+        m = popcorn.Machine(
+            popcorn.load_description({str(M33_JSON)!r}),
+            image=popcorn.Image.elf({str(DRIVER_ELF)!r}),
+        )
+        m.reset()
+        at = m.time + s(1)
+        unmapped = m.ref.mem.u32[0xF000_0000].read_op()
+        post = m._post
+
+
+        async def scenario() -> None:
+            task = asyncio.create_task(post(unmapped, at, cancel=False))
+            await asyncio.sleep(0)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+        asyncio.run(scenario())
+        """)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr.count("a command its awaiter cancelled failed later") == 1, done.stderr

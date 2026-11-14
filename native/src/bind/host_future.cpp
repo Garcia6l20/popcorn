@@ -530,6 +530,14 @@ auto host_threads() -> std::uint64_t
   return live_host_threads.load();
 }
 
+auto registered_hosts() -> std::uint64_t
+{
+  auto const& hosts = registry();
+  return detail::link_locked(hosts, [&](core::link_guard const&) {
+    return static_cast<std::uint64_t>(registry().hosts.size());
+  });
+}
+
 auto exit_removals_run() -> std::uint64_t
 {
   return detail::exit_removals_ran.load();

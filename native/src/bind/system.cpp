@@ -526,6 +526,7 @@ system_handle::~system_handle()
   for(auto const& one : members_)
   {
     one.slot->refused.store(false, std::memory_order_release);
+    one.slot->member.store(false, std::memory_order_release);
   }
   auto sys = std::move(system_);
   if(sys == nullptr)
@@ -548,11 +549,12 @@ auto system_handle::add_member(machine_handle& member, std::string name, bool st
   {
     throw std::logic_error("members are added before start()");
   }
+  auto const& host = member.claim_member();
   members_.push_back(
       {.handle        = &member,
        .name          = std::move(name),
        .stop_on_reset = stop_on_reset,
-       .host          = member.host(),
+       .host          = host,
        .slot          = member.slot()});
   handles_.push_back(nb::find(&member));
   return members_.size() - 1;

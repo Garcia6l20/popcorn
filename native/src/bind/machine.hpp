@@ -530,6 +530,42 @@ public:
       mark_collected() noexcept;
 
   /**
+   * @brief Ends the machine now and releases it: halts and joins the host thread, then destroys
+   *        the machine with its Python models and devices, the hooks, the pty bridges and the
+   *        USB hubs, whatever still holds this handle. Every later call through the handle or
+   *        a view, link, hook or future made from it raises EmulationError, a hook's removal
+   *        does nothing. Runs with the GIL, released only for the join. A failure a cancelled
+   *        command left is raised after the release, the ones past the first go to
+   *        sys.unraisablehook. Closing again does nothing. Not supported while another thread
+   *        uses the machine: a close that refuses a claimed member shows the handle closed to
+   *        such a thread until it refuses.
+   * @param force The interpreter exit path: nothing is refused or raised, the failures go to
+   *        sys.unraisablehook.
+   * @throws machine_running on a host thread, inside a parked section, or with a goal or
+   *         session open, unless @p force.
+   * @throws config_error naming `members` for a member of a linked system.
+   * @throws popcorn::error the first failure a cancelled command left.
+   */
+  [[= py::doc{"End the machine now and release what it holds, whatever holds this handle."}]] void
+      close(bool force);
+
+  /**
+   * @brief Marks the machine a member of a linked system, so close() refuses it.
+   * @return The host.
+   * @throws core::machine_closed once the machine was closed.
+   */
+  [[= py::skip]] auto claim_member() -> std::shared_ptr<core::host> const&;
+
+  /** @brief Whether a linked system claimed the machine as a member. */
+  [[= py::doc{
+      "Whether a linked system claimed the machine, close() then refuses."}]] [[nodiscard]] auto
+      claimed() const noexcept -> bool;
+
+  /** @brief Whether close() was called. */
+  [[= py::doc{"Whether close() ended the machine."}]] [[nodiscard]] auto closed() const noexcept
+      -> bool;
+
+  /**
    * @brief Waits on the free run.
    * @param ready Predicate called on the host thread at every slice end after the boundary that
    *        registers the wait, in a copy of the caller's context, None for a deadline only.
@@ -1844,11 +1880,17 @@ public:
    */
   [[= py::doc{"Address of the next instruction."}]] [[nodiscard]] auto pc() const -> address;
 
-  /** @brief The native machine, for its fixed data only: the host owns it. */
-  [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
+  /**
+   * @brief The native machine, for its fixed data only: the host owns it.
+   * @throws core::machine_closed once the machine was closed.
+   */
+  [[= py::skip]] [[nodiscard]] auto native() const -> core::machine&;
 
-  /** @brief The host that runs the machine. */
-  [[= py::skip]] [[nodiscard]] auto host() const noexcept -> std::shared_ptr<core::host> const&;
+  /**
+   * @brief The host that runs the machine.
+   * @throws core::machine_closed once the machine was closed.
+   */
+  [[= py::skip]] [[nodiscard]] auto host() const -> std::shared_ptr<core::host> const&;
 
   /** @brief The slot its views and links reach the host through. */
   [[= py::skip]] [[nodiscard]] auto slot() const noexcept -> detail::host_ref;
@@ -1930,7 +1972,7 @@ private:
   auto access(Body&& body) const -> std::invoke_result_t<Body, core::machine&>
   {
     detail::logs_flushed const flushed{*slot_};
-    return detail::host_access(*host_, *slot_, std::forward<Body>(body));
+    return detail::host_access(*host(), *slot_, std::forward<Body>(body));
   }
 
   auto halt_or_park(bool refuse_goal) -> reflex::py::nb::object;
@@ -1945,7 +1987,7 @@ private:
 
   std::shared_ptr<std::vector<reflex::py::nb::handle>> python_owned_ =
       std::make_shared<std::vector<reflex::py::nb::handle>>();
-  std::shared_ptr<std::atomic<bool>>          alive_;
+  std::shared_ptr<detail::alive_state>        alive_;
   std::shared_ptr<detail::host_slot>          slot_;
   std::shared_ptr<detail::pty_bridges>        ptys_;
   std::shared_ptr<std::atomic<bool>>          thread_live_;
@@ -1959,7 +2001,8 @@ private:
   std::map<std::string, detail::usb_hubs>     hubs_;
   core::machine*                              engine_{};
   std::uint64_t                               id_{};
-  std::shared_ptr<core::host>                 host_;
+  std::shared_ptr<core::host>                 host_storage_;
+  std::atomic<bool>                           closed_{false};
   mutable std::map<std::pair<std::string, std::uint32_t>, std::shared_ptr<std::atomic<bool>>>
       field_merge_logged_;
 };

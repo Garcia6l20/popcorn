@@ -121,7 +121,7 @@ struct virtual_loop_port::fire_state
 virtual_loop_port::virtual_loop_port(
     core::machine&         engine,
     detail::alive_flag     alive,
-    detail::alive_flag     collected,
+    detail::plain_flag     collected,
     detail::host_ref       host,
     reflex::py::nb::object cell,
     reflex::py::nb::object relay)

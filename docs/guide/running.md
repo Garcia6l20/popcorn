@@ -124,9 +124,14 @@ await m.run(for_=ms(1))
 m.close()
 ```
 
-`close()` is not supported while another thread uses the same machine. The host thread and the models are released when
-the last view, `Pending` or other object that holds the machine's handle is dropped: `v = m.mem; m.close()` keeps them
-until `v` goes.
+`close()` halts and joins the machine's thread, then releases the machine, its models, devices, hooks and handlers at
+once, even while a view, a `Pending`, a stream, a pin, a hook or a USB link made from the machine still exists. Every
+later use of such an object that reaches the machine raises `EmulationError`, with the exception of what it holds
+itself: a stream's frames already captured stay readable, and `Intercept.remove()` and `with m.intercepted(...)` exit
+do nothing. A command whose awaiter was cancelled and that the close failed raises from `close()` after the release,
+with a note naming the command. Further such failures go to `sys.unraisablehook`. `close()` is not supported while
+another thread uses the same machine, as `del m` is not. A `Ctrl-C` during `close()` is delivered after it returns,
+the wait for the thread to end cannot be interrupted.
 
 At interpreter exit popcorn closes every machine your code still holds, after the machine threads stop. A Machine in
 a module global with a Python model then leaves no `nanobind: leaked` report in the process that built it. An `atexit` handler registered after

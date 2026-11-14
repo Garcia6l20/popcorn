@@ -567,33 +567,37 @@ machine_handle::machine_handle(part_description const& description, machine_conf
   {
     hooks.held = held_in(std::make_shared<detail::python_cell const>(cell));
   }
-  host_         = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
-  engine_owner_ = host_->member_owner(core::member_id{});
-  slot_->host   = host_;
-  host_->name(std::format("{} #{}", description.part, id()));
-  detail::register_host(host_, slot_, description.part);
+  host_storage_ = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
+  engine_owner_ = host_storage_->member_owner(core::member_id{});
+  slot_->host   = host_storage_;
+  host_storage_->name(std::format("{} #{}", description.part, id()));
+  detail::register_host(host_storage_, slot_, description.part);
 }
 
 machine_handle::~machine_handle()
 {
   detail::clear_alive(*alive_);
-  if(host_->forked())
+  if(closed_.load(std::memory_order_acquire))
   {
-    detail::abandon(std::move(host_));
     return;
   }
-  detail::unregister_host(host_);
+  if(host_storage_->forked())
+  {
+    detail::abandon(std::move(host_storage_));
+    return;
+  }
+  detail::unregister_host(host_storage_);
   if(Py_IsFinalizing() != 0 and thread_live_->load())
   {
-    detail::abandon(std::move(host_));
+    detail::abandon(std::move(host_storage_));
     return;
   }
   contract_assert(PyGILState_Check() != 0);
-  if(host_->abandoned())
+  if(host_storage_->abandoned())
   {
-    detail::give_up(*slot_, host_->orphan());
+    detail::give_up(*slot_, host_storage_->orphan());
     detail::report_late_failures(*slot_->logs);
-    host_.reset();
+    host_storage_.reset();
     return;
   }
   if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
@@ -601,12 +605,12 @@ machine_handle::~machine_handle()
     std::optional<core::held_end> ended;
     {
       reflex::py::nb::gil_scoped_release const released;
-      ended = host_->halt(core::member_id{});
-      host_->close();
+      ended = host_storage_->halt(core::member_id{});
+      host_storage_->close();
     }
-    if(host_->abandoned())
+    if(host_storage_->abandoned())
     {
-      detail::give_up(*slot_, host_->orphan());
+      detail::give_up(*slot_, host_storage_->orphan());
     }
     else
     {
@@ -620,9 +624,146 @@ machine_handle::~machine_handle()
   }
   else
   {
-    detail::give_up(*slot_, host_->thread_token());
+    detail::give_up(*slot_, host_storage_->thread_token());
   }
-  host_.reset();
+  host_storage_.reset();
+}
+
+namespace
+{
+auto take_late(detail::log_forwarding& logs) -> std::vector<detail::late_failure>
+{
+  std::scoped_lock const lock{logs.late_mutex};
+  return std::exchange(logs.late, {});
+}
+
+void raise_first(std::vector<detail::late_failure>& late)
+{
+  if(late.empty())
+  {
+    return;
+  }
+  auto first = std::move(late.front());
+  late.erase(late.begin());
+  detail::report_late_failures(late);
+  detail::set_python_error(first.error);
+  auto* const raised = PyErr_GetRaisedException();
+  for(auto const* text : {&first.note, &first.message})
+  {
+    if(text->empty())
+    {
+      continue;
+    }
+    if(auto* const noted = PyObject_CallMethod(raised, "add_note", "s", text->c_str());
+       noted != nullptr)
+    {
+      Py_DECREF(noted);
+    }
+    else
+    {
+      PyErr_Clear();
+    }
+  }
+  PyErr_SetRaisedException(raised);
+  throw reflex::py::nb::python_error();
+}
+}
+
+void machine_handle::close(bool force)
+{
+  if(closed_.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  if(not force)
+  {
+    if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
+    {
+      throw popcorn::machine_running(
+          "the machine is running: close it from the main thread, not from its own callbacks");
+    }
+    if(not host_storage_->forked() and not host_storage_->abandoned())
+    {
+      auto const held = lock_releasing();
+      if(host_storage_->busy(held, core::member_id{})
+         or host_storage_->session_open(held, core::member_id{}))
+      {
+        throw popcorn::machine_running(
+            "the machine is running: await its run, or halt() it first, then close it");
+      }
+    }
+  }
+  if(closed_.exchange(true))
+  {
+    return;
+  }
+  if(not force and slot_->member.load())
+  {
+    closed_.store(false);
+    throw config_error("members", 0, "close", "a machine in no linked system");
+  }
+  detail::close_alive(*alive_);
+  collected_->store(true, std::memory_order_release);
+  slot_->closed.store(true, std::memory_order_release);
+  detail::unregister_host(host_storage_);
+  std::vector<detail::late_failure> late;
+  if(host_storage_->forked())
+  {
+    detail::abandon(std::move(host_storage_));
+  }
+  else if(Py_IsFinalizing() != 0 and thread_live_->load())
+  {
+    detail::abandon(std::move(host_storage_));
+    return;
+  }
+  else if(host_storage_->abandoned())
+  {
+    detail::give_up(*slot_, host_storage_->orphan());
+    late = take_late(*slot_->logs);
+  }
+  else if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
+  {
+    {
+      reflex::py::nb::gil_scoped_release const released;
+      std::ignore = host_storage_->halt(core::member_id{});
+      host_storage_->close();
+    }
+    if(host_storage_->abandoned())
+    {
+      detail::give_up(*slot_, host_storage_->orphan());
+    }
+    else
+    {
+      detail::run_retired(*slot_);
+    }
+    late = take_late(*slot_->logs);
+    flush_logs_unraisable();
+  }
+  else
+  {
+    detail::give_up(*slot_, host_storage_->thread_token());
+  }
+  python_owned_->clear();
+  {
+    std::vector<std::shared_ptr<detail::pty_bridge>> bridges;
+    {
+      auto const lock = detail::lock_ptys(*ptys_);
+      bridges         = std::exchange(ptys_->bridges, {});
+      ptys_->any.store(false, std::memory_order_release);
+    }
+  }
+  host_storage_.reset();
+  hubs_.clear();
+  log_hook_.reset();
+  engine_owner_.reset();
+  engine_      = nullptr;
+  models_cell_ = reflex::py::nb::none();
+  if(force)
+  {
+    detail::report_late_failures(late);
+    return;
+  }
+  raise_first(late);
 }
 
 void machine_handle::load(image const& loaded)
@@ -712,7 +853,7 @@ auto machine_handle::open_cdc_pty(std::string name, cdc_link const& link) -> pty
 auto machine_handle::open_pty(std::string name, std::unique_ptr<detail::pty_link> link)
     -> pty_handle
 {
-  host_->refuse_forked();
+  host()->refuse_forked();
   auto const bridge = std::make_shared<detail::pty_bridge>(std::move(name), std::move(link));
   {
     auto const lock = detail::lock_ptys(*ptys_);
@@ -723,26 +864,26 @@ auto machine_handle::open_pty(std::string name, std::unique_ptr<detail::pty_link
   try
   {
     watched =
-        host_->watch(core::member_id{}, bridge->master(), [wants = bridge->wants_write_flag()] {
+        host()->watch(core::member_id{}, bridge->master(), [wants = bridge->wants_write_flag()] {
           return wants->load(std::memory_order_relaxed);
         });
     if(bridge->clients_watch() >= 0)
     {
       watched_clients =
-          host_->watch(core::member_id{}, bridge->clients_watch(), [] { return false; });
+          host()->watch(core::member_id{}, bridge->clients_watch(), [] { return false; });
     }
   }
   catch(...)
   {
     if(watched)
     {
-      host_->unwatch(*watched);
+      host()->unwatch(*watched);
     }
     auto const lock = detail::lock_ptys(*ptys_);
     std::ignore     = detail::remove_bridge(*ptys_, lock, bridge.get());
     throw;
   }
-  return pty_handle{ptys_, bridge, host_, *watched, watched_clients};
+  return pty_handle{ptys_, bridge, host(), *watched, watched_clients};
 }
 
 auto detail::lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>
@@ -805,10 +946,10 @@ void pty_handle::close()
 
 void machine_handle::begin_call(arch::call_frame const& frame)
 {
-  if(not host_->owns_engine() and not host_->abandoned())
+  if(not host()->owns_engine() and not host()->abandoned())
   {
     auto const held = lock_releasing();
-    host_->give_back_core(held, core::member_id{});
+    host()->give_back_core(held, core::member_id{});
   }
   access([&](core::machine& target) { target.begin_call(frame); });
 }
@@ -852,7 +993,7 @@ void detail::host_abandon::operator()() const
 
 auto machine_handle::engine() const -> core::machine&
 {
-  if(host_->abandoned())
+  if(host()->abandoned())
   {
     throw core::machine_closed("the host was abandoned");
   }
@@ -861,7 +1002,7 @@ auto machine_handle::engine() const -> core::machine&
 
 auto machine_handle::abandoner() const -> detail::host_abandon
 {
-  return {.owned = python_owned_, .alive = alive_, .host = host_};
+  return {.owned = python_owned_, .alive = alive_, .host = host_storage_};
 }
 
 auto machine_handle::id() const noexcept -> std::uint64_t
@@ -1021,17 +1162,46 @@ void boundary_hold::release()
 
 auto machine_handle::owns_engine() const noexcept -> bool
 {
-  return host_->owns_engine();
+  return not closed_.load(std::memory_order_acquire) and host_storage_->owns_engine();
 }
 
-auto machine_handle::native() const noexcept -> core::machine&
+auto machine_handle::native() const -> core::machine&
 {
+  if(closed_.load(std::memory_order_acquire))
+  {
+    throw core::machine_closed("the machine was closed");
+  }
   return *engine_;
 }
 
-auto machine_handle::host() const noexcept -> std::shared_ptr<core::host> const&
+auto machine_handle::host() const -> std::shared_ptr<core::host> const&
 {
-  return host_;
+  if(closed_.load(std::memory_order_acquire))
+  {
+    throw core::machine_closed("the machine was closed");
+  }
+  return host_storage_;
+}
+
+auto machine_handle::claimed() const noexcept -> bool
+{
+  return slot_->member.load();
+}
+
+auto machine_handle::closed() const noexcept -> bool
+{
+  return closed_.load(std::memory_order_acquire);
+}
+
+auto machine_handle::claim_member() -> std::shared_ptr<core::host> const&
+{
+  slot_->member.store(true);
+  if(closed_.load())
+  {
+    slot_->member.store(false);
+    throw core::machine_closed("the machine was closed");
+  }
+  return host_storage_;
 }
 
 auto machine_handle::slot() const noexcept -> detail::host_ref
