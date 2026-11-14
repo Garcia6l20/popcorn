@@ -36,6 +36,11 @@ needs the full run. A change to the docs needs the docs stage and `tests/docs`.
 - Hold no host mutex while running user code, a destructor included.
 - A Python object held natively goes through the callback table so that the garbage collector
   sees the cycle. Native code holds a weak relay, not the object.
+- A `HostFuture` whose failure was reported as a late failure shares its Python exception with
+  the log queue, so the collector does not traverse that exception. When the exception holds
+  the future again through its traceback or arguments, the future and its machine slot stay
+  alive until that reference is dropped, for example by clearing the exception's
+  `__traceback__`.
 - Validate arguments at the call, before anything is posted to the machine thread.
 - Every per-call table, queue or record needs a stated bound.
 
