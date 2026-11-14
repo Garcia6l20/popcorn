@@ -23,8 +23,11 @@ class hook_registry;
 
 /**
  * @brief Owner of one intercept, return hook, probe, watch, trace sink or log sink: removes it on
- *        destruction or reset(). Move-only. Outliving the machine is safe, the removal is then a
- *        no-op. Removing a hook changes the translated code of a running slice, so reset()
+ *        destruction or reset(). Move-only. Outliving the machine is safe when the handle is
+ *        dropped on the thread that drives the machine, or while the machine is parked, and the
+ *        removal is then a no-op. A drop from another thread while the machine runs or is
+ *        destroyed races the registry: its remover, pending removals, running flag and log
+ *        sinks. Python and plugin hooks retire their handles onto the host thread. Removing a hook changes the translated code of a running slice, so reset()
  *        refuses it while a slice runs, handlers included. Destruction and move assignment
  *        cannot refuse: during a slice, from a handler or a garbage collector, their removal
  *        takes effect at the end of the slice: until then its handler may still be called in

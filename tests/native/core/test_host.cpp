@@ -1476,6 +1476,91 @@ TEST_CASE("a host destroyed on another host's thread takes the orphan path")
   CHECK(started_destroyed.load() == victim_thread.load());
 }
 
+TEST_CASE("a host destroyed while its dropper holds another host's mutex takes the orphan path")
+{
+  blocking_hook blocking;
+  auto          victim = blocked_host(blocking);
+  auto const    goal   = victim.run({});
+  blocking.entered.wait();
+  hosted            holder{alu(0)};
+  std::atomic<int>  locks{-1};
+  std::atomic<bool> dropped{false};
+  {
+    std::jthread dropper{[&] {
+      auto held = holder.on->lock();
+      locks     = core::detail::host_locks_held;
+      victim.on.reset();
+      dropped = true;
+    }};
+    CHECK(settles([&] { return dropped.load(); }, 2s));
+    blocking.release = true;
+  }
+  CHECK(locks.load() == 1);
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+}
+
+struct victim_hook
+{
+  std::shared_ptr<hosted> killer;
+  std::shared_ptr<void>   gate;
+
+  void operator()(core::member_id) const
+  {}
+};
+
+TEST_CASE(
+    "a running host's hook drops a host that holds it and the running host dies on its own thread")
+{
+  std::atomic<std::thread::id> killer_destroyed{};
+  std::atomic<std::thread::id> killer_thread{};
+  std::latch                   release{1};
+  auto const                   unblock = [&] {
+    if(not release.try_wait())
+    {
+      release.count_down();
+    }
+  };
+  auto const guard = std::shared_ptr<void>(nullptr, [&](void*) { unblock(); });
+
+  popcorn::testing::machine_fixture<recording_arch> killer_fixture{
+      m33(), "alu", core::machine_options{}, &killer_destroyed};
+  killer_fixture.set("r0", 1000);
+  auto made   = std::move(killer_fixture.target);
+  auto killer = std::make_shared<hosted>();
+
+  auto gate   = std::shared_ptr<void>(nullptr, [&](void*) { release.wait(); });
+  auto victim = std::make_shared<hosted>(
+      idle_forever(),
+      core::slice_bounds{
+  },
+      core::host_hooks{.boundary = victim_hook{killer, gate}});
+  gate.reset();
+  victim->start();
+  REQUIRE(settles([&] { return victim->on->state(0) == core::host_state::idle_wait; }));
+
+  killer->hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&](core::intercept_call const&) {
+        victim.reset();
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  killer->adopt(std::move(made), core::slice_bounds{}, core::host_hooks{.thread_started = [&] {
+                  killer_thread = std::this_thread::get_id();
+                }});
+
+  auto const goal = killer->run({.until = sym("alu", "alu_done")});
+  REQUIRE(goal.wait_for(5s));
+  CHECK(goal.get().stopped.reason == stop_reason::address);
+  CHECK(killer->on->state(0) == core::host_state::parked);
+  killer->hooks.clear();
+  killer.reset();
+  unblock();
+  REQUIRE(settles([&] { return killer_destroyed.load() != std::thread::id{}; }));
+  CHECK(killer_destroyed.load() == killer_thread.load());
+}
+
 TEST_CASE("an orphaned host thread drops its hooks before thread_stopping")
 {
   std::atomic<int> order{0};

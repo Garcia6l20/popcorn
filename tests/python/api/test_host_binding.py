@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 import popcorn
 import pytest
@@ -49,6 +49,7 @@ from .devices_example import Eeprom24
 from .linked import USART_LL
 from .projects import MODEL_ELF
 
+TIMER_CNT = 0x4003_000C
 VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value", default="unset")
 HOLDER: contextvars.ContextVar[list[object]] = contextvars.ContextVar("host_binding_holder")
 
@@ -706,6 +707,61 @@ def test_a_collection_inside_a_handler_destroys_another_machine(machines: Machin
     assert settles(lambda: _core.host_threads() == before + 1)
 
 
+def test_a_collection_inside_a_stop_predicate_destroys_another_machine(
+    machines: Machines,
+) -> None:
+    before = quiet_host_threads()
+    first = machines()
+    second = machines()
+    asyncio.run(second.step(1))
+    assert _core.host_threads() == before + 1
+    holder: list[object] = [Cycle(second)]
+    gone = weakref.ref(second)
+    del second
+    counts: list[int] = []
+
+    def predicate(_: popcorn.Machine) -> bool:
+        holder.clear()
+        counts.append(gc.collect())
+        return True
+
+    stop = asyncio.run(first.run(stop_when=predicate))
+    assert stop.reason is popcorn.StopReason.USER
+    assert counts and counts[0] > 0
+    assert collected(gone)
+    assert settled(lambda: _core.host_threads() == before + 1)
+
+
+@pytest.mark.parametrize("parked", [False, True], ids=["running call", "parked read"])
+def test_a_collection_inside_a_model_callback_destroys_another_machine(
+    machines: Machines, parked: bool
+) -> None:
+    before = quiet_host_threads()
+    second = machines()
+    asyncio.run(second.step(1))
+    assert _core.host_threads() == before + 1
+    CollectingTimer.holder = [Cycle(second)]
+    CollectingTimer.counts = []
+    CollectingTimer.locks = []
+    gone = weakref.ref(second)
+    del second
+    m = popcorn.Machine(
+        popcorn.load_description(model_json()),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": CollectingTimer},
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    if parked:
+        assert m.mem.u32[TIMER_CNT] == 7
+        assert CollectingTimer.locks == [1]
+    else:
+        assert read_count(m) == 7
+    assert CollectingTimer.counts and CollectingTimer.counts[0] > 0
+    assert collected(gone)
+    assert settled(lambda: _core.host_threads() == before + 1)
+
+
 class TracedRelay(Relay):
     """A relay a weak reference can follow."""
 
@@ -718,6 +774,21 @@ class Cycle:
     def __init__(self, machine: popcorn.Machine) -> None:
         self.machine = machine
         self.itself = self
+
+
+class CollectingTimer(Model):
+    """Serves the model firmware's TIMER, freeing a held cycle with a collection on each read."""
+
+    holder: ClassVar[list[object]] = []
+    counts: ClassVar[list[int]] = []
+    locks: ClassVar[list[int]] = []
+
+    @on_read("CNT")
+    def _cnt(self) -> int:
+        type(self).locks.append(_core.host_locks_held())
+        type(self).holder.clear()
+        type(self).counts.append(gc.collect())
+        return 7
 
 
 def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_machine(
