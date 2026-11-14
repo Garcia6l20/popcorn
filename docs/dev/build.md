@@ -23,8 +23,11 @@ prebuilt ELFs.
 
 `--variant` picks `release`, the default, `debug`, `asan` or `tsan`. The asan and tsan variants
 compile with the sanitizer and build the native tests only: the Python extensions are skipped,
-so the Python tests run in the release or debug build. An LTO build is on by default for a
-wheel build only, `POPCORN_ENABLE_LTO` switches it.
+so the Python tests run in the release or debug build. The asan variant also builds with
+`-fsanitize=undefined` and `-fno-sanitize-recover=undefined`, so an undefined construct aborts the
+test program that hits it. The `null`, `nonnull-attribute` and `returns-nonnull-attribute` checks
+are off, because GCC 16.2.1 cannot compile the sources with them.
+An LTO build is on by default for a wheel build only, `POPCORN_ENABLE_LTO` switches it.
 
 ## The version
 

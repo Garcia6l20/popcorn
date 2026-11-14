@@ -27,6 +27,11 @@ such as `native.plugin-loader`. `--list` shows the names.
 - A case that runs longer than its limit is killed and fails, so a deadlock fails the gate
   instead of hanging it. The default limit is 300 seconds, and a suite may set another. The
   asan and tsan variants multiply every limit by three.
+- The asan variant builds with `-fsanitize=undefined` next to the address sanitizer. On a sample of
+  259 cases (`stm32-adc4`, `core-time`, `stm32-flash-l4`) at `-j 6` it takes 1.45 times the wall
+  time and 1.3 times the CPU time of the address sanitizer alone, and the full native suite
+  of 6026 cases runs in about 49 minutes of test time. A build from empty without a compiler cache
+  takes at least 1.4 times as long, 9 minutes for the address sanitizer alone.
 - Programs link doctest with its own main. A program links one flavour of the popcorn
   libraries, shared or static, never both.
 - `add_header_check` compiles every public header alone in its own translation unit, and all of
