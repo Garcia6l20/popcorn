@@ -1,5 +1,6 @@
 #include "../support/inert_model.hpp"
 #include "stm32_fixture.hpp"
+#include "usart_rows.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
@@ -4568,4 +4569,18 @@ TEST_CASE("RM0456 66.8.7 and 66.8.16: a reset restores GTPR to 0 and AUTOCR to 0
   t.r.f->target->reset();
   CHECK(t.read("USART1", "GTPR") == 0);
   CHECK(t.read("USART1", "AUTOCR") == 0x8000'0000);
+}
+
+TEST_CASE("RM0456 67.7: the LPUART of the STM32U535 and STM32U545 binds the register views")
+{
+  namespace stm32 = popcorn::periph::stm32;
+  for(auto const part : {"STM32U535CETx", "STM32U545RETx", "STM32U575QGIx", "STM32U5A5AJHx"})
+  {
+    auto const* row =
+        stm32::select_in(stm32::usart_rows(), "LPUART", "sci3_v1_U5", part, "LPUART1");
+    REQUIRE(row != nullptr);
+    auto const views = std::string_view{part}.starts_with("STM32U535")
+                    or std::string_view{part}.starts_with("STM32U545");
+    CHECK(row->variant == (views ? "u535_u545_lpuart" : "u5_lpuart"));
+  }
 }

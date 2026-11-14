@@ -13,8 +13,8 @@ pytestmark = pytest.mark.timeout(120)
 type _Counts = tuple[int, int, int, int, int, int, int]
 
 COUNTS: dict[str, _Counts] = {
-    "STM32U535CBTx": (4, 20, 5, 521, 0, 444, 116),
-    "STM32U545CETx": (4, 20, 5, 521, 0, 444, 120),
+    "STM32U535CBTx": (5, 20, 5, 521, 0, 452, 116),
+    "STM32U545CETx": (5, 20, 5, 521, 0, 452, 120),
     "STM32U575QGIx": (10, 26, 0, 584, 1, 478, 121),
     "STM32U585QIIx": (9, 26, 0, 584, 1, 478, 128),
     "STM32U595AIHx": (4, 24, 1, 646, 1, 452, 129),
@@ -182,3 +182,57 @@ def test_the_adc4_temperature_sensor_select_is_vsensesel_in_bit_23(part: str) ->
     ccr = next(r for r in adc4.registers if "ADC_CCR" in (r.name, *(r.aliases or [])))
     select = next(f for f in ccr.fields if f.lsb == 23)
     assert (select.name, select.width) == ("VSENSESEL", 1)
+
+
+_BOUND_NAMES = {
+    "SPI1": ("SPI_CR1", "SPI_CFG1", "SPI_SR", "SPI_IFCR", "SPI_IER"),
+    "SPI2": ("SPI_CR1", "SPI_CFG1", "SPI_SR", "SPI_IFCR", "SPI_IER"),
+    "SPI3": ("SPI_CR1", "SPI_CFG1", "SPI_SR", "SPI_IFCR", "SPI_IER"),
+    "TAMP": ("TAMP_CR1", "TAMP_SECCFGR", "TAMP_PRIVCR", "TAMP_BKP0R"),
+    "DBGMCU": ("DBGMCU_SR", "DBGMCU_DBG_AUTH_DEVICE"),
+    "LPDMA1": ("LPDMA_MISR", "LPDMA_SMISR", "LPDMA_RCFGLOCKR"),
+}
+
+
+@pytest.mark.parametrize("part", ["STM32U535CETx", "STM32U545CETx", "STM32U575QGIx"])
+def test_the_registers_the_models_bind_resolve_by_their_prefixed_names(part: str) -> None:
+    description = build_description_with_report(find_sources(part))[0]
+    for name, wanted in _BOUND_NAMES.items():
+        peripheral = next(p for p in description.peripherals if p.name == name)
+        known = {n for r in peripheral.registers for n in (r.name, *(r.aliases or []))}
+        assert set(wanted) <= known, (part, name, sorted(set(wanted) - known))
+
+
+@pytest.mark.parametrize("part", ["STM32U535CETx", "STM32U545CETx", "STM32U575QGIx"])
+def test_lpdma_rcfglockr_is_the_same_register_on_every_line(part: str) -> None:
+    description = build_description_with_report(find_sources(part))[0]
+    lpdma = next(p for p in description.peripherals if p.name == "LPDMA1")
+    register = next(r for r in lpdma.registers if "LPDMA_RCFGLOCKR" in (r.aliases or []))
+    assert (register.name, register.offset, register.reset) == ("RCFGLOCKR", 8, 0)
+    assert sorted((f.name, f.lsb, f.width) for f in register.fields) == [
+        (f"LOCK{n}", n, 1) for n in range(4)
+    ]
+
+
+@pytest.mark.parametrize("part", ["STM32U535CETx", "STM32U545CETx", "STM32U575QGIx"])
+def test_the_lpdma_trigger_overrun_bits_and_the_spi_fields_carry_the_manual_names(
+    part: str,
+) -> None:
+    description = build_description_with_report(find_sources(part))[0]
+    units = {p.name: p for p in description.peripherals}
+
+    def fields(peripheral: str, register: str) -> dict[str, int]:
+        found = next(r for r in units[peripheral].registers if r.name == register)
+        return {f.name: f.lsb for f in found.fields}
+
+    assert fields("LPDMA1", "C2CR")["TOIE"] == 14
+    for channel in range(4):
+        register = next(r for r in units["LPDMA1"].registers if r.name == f"C{channel}TR1")
+        assert {f.name: f.width for f in register.fields}["PAM"] == 1
+    assert fields("LPDMA1", "C3SR")["TOF"] == 14
+    assert fields("LPDMA1", "C0FCR")["TOF"] == 14
+    assert fields("SPI3", "CFG1")["DSIZE"] == 0
+    assert fields("SPI3", "CFG1")["FTHLV"] == 5
+    assert fields("SPI2", "CFG2")["RDIOM"] == 13
+    assert fields("SPI1", "IER")["DXPIE"] == 2
+    assert fields("LPUART1", "ISR" if part == "STM32U575QGIx" else "ISR_enabled")["TXFE"] == 23

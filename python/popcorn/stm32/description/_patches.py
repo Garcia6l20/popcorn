@@ -80,6 +80,14 @@ class RegisterRename:
 
 
 @dataclass(slots=True, kw_only=True)
+class RegisterAlias:
+    peripherals: list[str]
+    source: str = field(metadata={"min_length": 1})
+    prefix: str | None = field(default=None, metadata={"min_length": 1})
+    aliases: dict[str, str] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchSvd:
     name: str
 
@@ -296,6 +304,7 @@ class Patch:
     registers: list[RegisterAdd] | None = None
     register_drops: list[RegisterDrop] | None = None
     register_renames: list[RegisterRename] | None = None
+    register_aliases: list[RegisterAlias] | None = None
     resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
@@ -326,6 +335,7 @@ class PatchReport:
     )
     registers_dropped: int = 0
     registers_renamed: int = 0
+    register_aliases_added: int = 0
     aliased: int = 0
     fields_touched: int = 0
     fields_dropped: int = 0
@@ -746,6 +756,74 @@ def _apply_register_renames(
                         register.alternate_of, register.alternate_of
                     )
     report.registers_renamed += len(rule.renames) * len(targets)
+
+
+def _apply_register_aliases(
+    rule: RegisterAlias,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    if (rule.prefix is None) == (rule.aliases is None):
+        raise DescriptionError(file, 0, key, "exactly one of prefix and aliases")
+    if rule.aliases is not None and not rule.aliases:
+        raise DescriptionError(file, 0, f"{key}.aliases", "at least one register to alias")
+    targets: list[PeripheralDesc] = []
+    for pattern in rule.peripherals:
+        matched = [
+            p
+            for p in peripherals.values()
+            if fnmatch.fnmatchcase(p.name, pattern) and p.alias_of is None
+        ]
+        if not matched:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.peripherals",
+                f"a peripheral that is not an alias matching {pattern}",
+            )
+        targets.extend(p for p in matched if all(p is not t for t in targets))
+    if not targets:
+        raise DescriptionError(file, 0, f"{key}.peripherals", "at least one peripheral glob")
+    plans: list[tuple[PeripheralDesc, dict[str, str]]] = []
+    for target in targets:
+        used = {n for r in target.registers for n in (r.name, *(r.aliases or []))}
+        present = {r.name for r in target.registers}
+        wanted: dict[str, str] = {}
+        if rule.prefix is not None:
+            wanted = {
+                r.name: f"{rule.prefix}{r.name}"
+                for r in target.registers
+                if not r.name.startswith(rule.prefix)
+            }
+            if not wanted:
+                raise DescriptionError(
+                    file, 0, f"{key}.peripherals", f"a register without the prefix in {target.name}"
+                )
+        else:
+            assert rule.aliases is not None
+            for old in rule.aliases:
+                if old not in present:
+                    raise DescriptionError(
+                        file, 0, f"{key}.aliases.{old}", f"a register named {old} in {target.name}"
+                    )
+            wanted = dict(rule.aliases)
+        for old, new in wanted.items():
+            if new in used or list(wanted.values()).count(new) > 1:
+                raise DescriptionError(
+                    file, 0, f"{key}.aliases.{old}", f"a name not used in {target.name}, not {new}"
+                )
+        plans.append((target, wanted))
+    for target, wanted in plans:
+        for peripheral in peripherals.values():
+            if peripheral is target or peripheral.alias_of == target.name:
+                for register in peripheral.registers:
+                    new = wanted.get(register.name)
+                    if new is not None:
+                        register.aliases = [*(register.aliases or []), new]
+        report.register_aliases_added += len(wanted)
 
 
 def _register_layout_key(peripheral: PeripheralDesc) -> list[object]:
@@ -1719,15 +1797,18 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     """Applies @p patches to @p target in the fixed order: peripheral drops and renames, then per
     patch in file order the IP renames and `renames_if_present`, then the `versions` of every patch
     in file order, aliases, register drops, register renames, peripheral sizes, added registers,
-    register resets, fields, cross rules, IRQ drops and adds, core, memory regions and their
-    controllers, the device signature. Drops come first, so a later rule naming a dropped peripheral
-    fails as naming an unknown one. An `[ip] versions` glob matches the instance names after every
-    `[peripherals] renames`, and a glob matching nothing is an error. A peripheral rename lands
-    before the aliases, so the alias rule pairs the new name with its base, and a later rule names
-    the new name. Peripheral merges run next, in file order. A merge names its `into` and merged
-    peripherals as the drops and renames leave them, moves the registers of each merged peripheral
-    into `into` at their offset plus the distance between the two bases, moves their IRQs, removes
-    them and sets the size of `into`, so a later rule names `into` only.
+    register aliases, register resets, fields, cross rules, IRQ drops and adds, core, memory
+    regions and their controllers, the device signature. Drops come first, so a later rule
+    naming a dropped peripheral fails as naming an unknown one. An `[ip] versions` glob matches
+    the instance names after every `[peripherals] renames`, and a glob matching nothing is an
+    error. A peripheral rename lands before the aliases, so the alias rule pairs the new name with
+    its base, and a later rule names the new name. Peripheral merges run next, in file order. A
+    merge names its `into` and merged peripherals as the drops and renames leave them, moves the
+    registers of each merged peripheral into `into` at their offset plus the distance between the
+    two bases, moves their IRQs, removes them and sets the size of `into`, so a later rule names
+    `into` only.
+    A register alias keeps the register's name and adds the prefixed spelling to its aliases, so
+    later rules name the register by its bare name.
     A peripheral size, an added register and a register reset land in the named
     peripheral and in each of its aliases, so fields and cross rules may name the register. A fields
     rule with `drop` removes its fields from the named peripheral and its aliases, and a later rule
@@ -1798,6 +1879,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     for loaded in patches:
         for j, rule in enumerate(loaded.patch.registers or []):
             _apply_register_add(rule, by_name, report, file=str(loaded.path), key=f"registers[{j}]")
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.register_aliases or []):
+            _apply_register_aliases(
+                rule, by_name, report, file=str(loaded.path), key=f"register_aliases[{j}]"
+            )
 
     resets_touched: set[tuple[str, str]] = set()
     for loaded in patches:

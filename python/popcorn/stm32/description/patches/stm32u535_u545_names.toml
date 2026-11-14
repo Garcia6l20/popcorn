@@ -1,0 +1,100 @@
+format = 1
+source = "ST's STM32U535 and STM32U545 SVDs name the SPI, TAMP and DBGMCU registers and the LPDMA1 masked interrupt status registers without the peripheral prefix the STM32U575 SVD keeps, omit LPDMA_RCFGLOCKR and the trigger overrun bits TOF and TOIE of LPDMA_CxSR, LPDMA_CxFCR and LPDMA_CxCR"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U535.svd", "STM32U545.svd"]
+
+[[register_aliases]]
+peripherals = ["SPI?"]
+prefix = "SPI_"
+source = "RM0456 rev 7, 68.8 SPI registers: SPI_CR1 to SPI_RXCRC. The SVDs of these two lines spell them CR1 to RXCRC, the STM32U575 SVD keeps SPI_"
+
+[[register_aliases]]
+peripherals = ["TAMP"]
+prefix = "TAMP_"
+source = "RM0456 rev 7, 64.7 TAMP registers: TAMP_CR1 to TAMP_BKP31R. The SVDs of these two lines spell them without TAMP_, the STM32U575 SVD keeps it"
+
+[[register_aliases]]
+peripherals = ["DBGMCU"]
+prefix = "DBGMCU_"
+source = "RM0456 rev 7, 75.12.4 DBGMCU registers: DBGMCU_SR and DBGMCU_DBG_AUTH_DEVICE. The SVDs of these two lines spell them SR and DBG_AUTH_DEVICE, the STM32U575 SVD keeps DBGMCU_"
+
+[[register_aliases]]
+peripherals = ["LPDMA1"]
+aliases = { MISR = "LPDMA_MISR", SMISR = "LPDMA_SMISR" }
+source = "RM0456 rev 7, 18.8.4 LPDMA_MISR and 18.8.5 LPDMA_SMISR. The SVDs of these two lines spell them MISR and SMISR, the STM32U575 SVD keeps LPDMA_"
+
+[[registers]]
+peripheral = "LPDMA1"
+name = "LPDMA_RCFGLOCKR"
+offset = 0x08
+width = 32
+reset = 0
+acc = "read_write"
+fields = [
+  { name = "LOCK0", lsb = 0, width = 1 },
+  { name = "LOCK1", lsb = 1, width = 1 },
+  { name = "LOCK2", lsb = 2, width = 1 },
+  { name = "LOCK3", lsb = 3, width = 1 },
+]
+source = "RM0456 rev 7, 18.8.3 LPDMA configuration lock register (LPDMA_RCFGLOCKR): offset 0x008, reset 0, LOCK0 to LOCK3 in bits 3:0, bits 31:4 reserved. The SVDs of these two lines omit it, the STM32U575 SVD has it at the same offset with the same fields"
+
+[[fields]]
+instances = ["LPDMA1"]
+registers = ["LPDMA_C{n}SR"]
+each = { n = [0, 3] }
+add = { name = "TOF", lsb = 14, width = 1, acc = "read_only", reset = 0 }
+source = "RM0456 rev 7, 18.8.8 LPDMA channel x status register (LPDMA_CxSR): TOF, bit 14, read-only, reset 0. The SVDs of these two lines omit it from every LPDMA_CxSR"
+
+[[fields]]
+instances = ["LPDMA1"]
+registers = ["LPDMA_C{n}FCR"]
+each = { n = [0, 3] }
+add = { name = "TOF", lsb = 14, width = 1, acc = "write_only", reset = 0 }
+source = "RM0456 rev 7, 18.8.7 LPDMA channel x flag clear register (LPDMA_CxFCR): TOF, bit 14, write-only, clears the flag of LPDMA_CxSR when written 1. The SVDs of these two lines omit it from every LPDMA_CxFCR"
+
+[[fields]]
+instances = ["LPDMA1"]
+registers = ["LPDMA_C{n}CR"]
+each = { n = [0, 3] }
+add = { name = "TOIE", lsb = 14, width = 1, acc = "read_write", reset = 0 }
+source = "RM0456 rev 7, 18.8.9 LPDMA channel x control register (LPDMA_CxCR): TOIE, bit 14, read-write, reset 0, the trigger overrun interrupt enable. The SVDs of these two lines omit it from every LPDMA_CxCR"
+
+[[fields]]
+instances = ["LPUART1"]
+registers = ["ISR_enabled"]
+rename = { TXFF = "TXFE" }
+source = "RM0456 rev 7, 67.7.8 LPUART interrupt and status register (LPUART_ISR): bit 23 is TXFE, the TXFIFO empty flag, bit 24 RXFF. The SVDs of these two lines spell bit 23 TXFF"
+
+[[fields]]
+ip = "SPI"
+registers = ["CFG1"]
+add = { name = "DSIZE", lsb = 0, width = 5, acc = "read_write", reset = 7 }
+source = "RM0456 rev 7, 68.8.3 SPI configuration register 1 (SPI_CFG1): DSIZE[4:0], bits 4:0, read-write, reset 7. The SVDs of these two lines omit it"
+
+[[fields]]
+ip = "SPI"
+registers = ["CFG1"]
+rename = { FTHVL = "FTHLV" }
+source = "RM0456 rev 7, 68.8.3 SPI_CFG1: FTHLV[3:0], bits 8:5. The SVDs of these two lines spell it FTHVL"
+
+[[fields]]
+ip = "SPI"
+registers = ["CFG2"]
+rename = { RDIMM = "RDIOM" }
+source = "RM0456 rev 7, 68.8.4 SPI configuration register 2 (SPI_CFG2): RDIOM, bit 13, the RDY signal input/output management. The SVDs of these two lines spell it RDIMM"
+
+[[fields]]
+ip = "SPI"
+registers = ["IER"]
+rename = { DPXPIE = "DXPIE" }
+source = "RM0456 rev 7, 68.8.5 SPI interrupt enable register (SPI_IER): DXPIE, bit 2, the DXP interrupt enable. The SVDs of these two lines spell it DPXPIE"
+
+[[fields]]
+instances = ["LPDMA1"]
+registers = ["LPDMA_C{n}TR1"]
+each = { n = [0, 3] }
+fields = ["PAM"]
+width = 1
+source = "RM0456 rev 7, 18.8.10 LPDMA channel x transfer register 1 (LPDMA_CxTR1): PAM is one bit, bit 11, and bit 12 is reserved. The SVDs of these two lines give PAM two bits"

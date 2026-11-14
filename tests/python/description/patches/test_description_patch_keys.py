@@ -676,3 +676,129 @@ def test_a_second_part_facts_row_for_one_part_is_refused(tmp_path: Path) -> None
         corrected_part(_part("STM32L151RCYx", "DIE427", 256), files)
     assert excinfo.value.key == "part_facts[0].part"
     assert "a.toml" in str(excinfo.value)
+
+
+def _alias_patch(tmp_path: Path, entry: str, extra: str = "") -> Path:
+    return _ip_patch(tmp_path, f'{extra}\n[[register_aliases]]\n{entry}\nsource = "probe"\n')
+
+
+def _aliases(target: PatchTarget, name: str) -> dict[str, list[str]]:
+    return {r.name: list(r.aliases or []) for r in target_peripheral(target, name).registers}
+
+
+def test_register_aliases_with_a_prefix_alias_every_register_of_the_peripheral(
+    tmp_path: Path,
+) -> None:
+    target = _target()
+    names = [r.name for r in target_peripheral(target, "A").registers]
+    report = _apply(target, _alias_patch(tmp_path, 'peripherals = ["A"]\nprefix = "TA_"'))
+    assert _aliases(target, "A") == {name: [f"TA_{name}"] for name in names}
+    assert _aliases(target, "B") == {r.name: [] for r in target_peripheral(target, "B").registers}
+    assert report.register_aliases_added == len(names)
+
+
+def test_register_aliases_with_a_prefix_skip_the_registers_that_carry_it(tmp_path: Path) -> None:
+    target = _target()
+    first = target_peripheral(target, "A").registers[0]
+    first.name = f"TA_{first.name}"
+    report = _apply(target, _alias_patch(tmp_path, 'peripherals = ["A"]\nprefix = "TA_"'))
+    assert _aliases(target, "A")[first.name] == []
+    assert report.register_aliases_added == len(target_peripheral(target, "A").registers) - 1
+
+
+def test_register_aliases_with_a_table_alias_only_the_named_registers(tmp_path: Path) -> None:
+    target = _target()
+    report = _apply(
+        target, _alias_patch(tmp_path, 'peripherals = ["A"]\naliases = { SR2 = "A_SR2" }')
+    )
+    got = _aliases(target, "A")
+    assert got.pop("SR2") == ["A_SR2"]
+    assert all(not aliases for aliases in got.values())
+    assert report.register_aliases_added == 1
+
+
+def test_register_aliases_reach_the_aliases_of_the_peripheral(tmp_path: Path) -> None:
+    target = _target()
+    report = _apply(target, _alias_patch(tmp_path, 'peripherals = ["D"]\nprefix = "TD_"', _ALIASES))
+    assert _aliases(target, "D") == {"CR": ["TD_CR"]}
+    assert _aliases(target, "SEC_D") == {"CR": ["TD_CR"]}
+    assert report.register_aliases_added == 1
+
+
+def test_register_aliases_keep_an_alias_the_register_already_has(tmp_path: Path) -> None:
+    target = _target()
+    target_peripheral(target, "D").registers[0].aliases = ["OLD"]
+    _apply(target, _alias_patch(tmp_path, 'peripherals = ["D"]\nprefix = "TD_"'))
+    assert _aliases(target, "D") == {"CR": ["OLD", "TD_CR"]}
+
+
+@pytest.mark.parametrize(
+    ("entry", "key", "expected"),
+    [
+        (
+            'peripherals = ["A"]\nprefix = "TA_"\naliases = { SR2 = "X" }',
+            "register_aliases[0]",
+            "exactly one of prefix and aliases",
+        ),
+        ('peripherals = ["A"]', "register_aliases[0]", "exactly one of prefix and aliases"),
+        (
+            'peripherals = ["A"]\naliases = {}',
+            "register_aliases[0].aliases",
+            "at least one register to alias",
+        ),
+        (
+            'peripherals = ["A"]\naliases = { NOPE = "X" }',
+            "register_aliases[0].aliases.NOPE",
+            "a register named NOPE in A",
+        ),
+        (
+            'peripherals = ["A"]\naliases = { SR2 = "SR" }',
+            "register_aliases[0].aliases.SR2",
+            "a name not used in A, not SR",
+        ),
+        (
+            'peripherals = ["ZZ*"]\nprefix = "X_"',
+            "register_aliases[0].peripherals",
+            "a peripheral that is not an alias matching ZZ*",
+        ),
+        (
+            'peripherals = []\nprefix = "X_"',
+            "register_aliases[0].peripherals",
+            "at least one peripheral glob",
+        ),
+    ],
+)
+def test_register_aliases_refuse_a_bad_rule_and_leave_the_target_whole(
+    tmp_path: Path, entry: str, key: str, expected: str
+) -> None:
+    target = _target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(target, _alias_patch(tmp_path, entry))
+    assert (excinfo.value.key, excinfo.value.expected) == (key, expected)
+    assert target == before
+
+
+def test_register_aliases_refuse_a_prefix_that_clashes_with_a_register_name(
+    tmp_path: Path,
+) -> None:
+    target = _target()
+    peripheral = target_peripheral(target, "A")
+    peripheral.registers[0].name = f"X_{peripheral.registers[1].name}"
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(target, _alias_patch(tmp_path, 'peripherals = ["A"]\nprefix = "X_"'))
+    assert excinfo.value.key.startswith("register_aliases[0].aliases.")
+    assert target == before
+
+
+def test_register_aliases_refuse_a_prefix_every_register_already_carries(tmp_path: Path) -> None:
+    target = _target()
+    for register in target_peripheral(target, "D").registers:
+        register.name = f"TD_{register.name}"
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(target, _alias_patch(tmp_path, 'peripherals = ["D"]\nprefix = "TD_"'))
+    assert excinfo.value.key == "register_aliases[0].peripherals"
+    assert excinfo.value.expected == "a register without the prefix in D"
+    assert target == before

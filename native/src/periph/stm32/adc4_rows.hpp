@@ -85,11 +85,12 @@ struct adc4_variant
 inline constexpr adc4_variant u5_adc4{};
 
 /**
- * @brief The ADC4 of the STM32U535 and STM32U545. DS13737 and the STM32U535 and STM32U545
- *        datasheets name no ADC4_IN5 to ADC4_IN8, whose pads are GPIOF14, GPIOF15, GPIOG0
- *        and GPIOG1 on the STM32U575, so the external channels lose bits 5 to 8.
+ * @brief The ADC4 of the STM32U535 and STM32U545. The pin definitions of DS14217 Table 26 and
+ *        DS14216 Table 27 name no ADC4_IN5 to ADC4_IN8, whose pads are GPIOF14, GPIOF15, GPIOG0
+ *        and GPIOG1 on the STM32U575, so the external channels lose bits 5 to 8. The absence
+ *        is inferred from the pinout, not stated for the die.
  */
-inline constexpr adc4_variant u535_adc4 = [] {
+inline constexpr adc4_variant u535_u545_adc4 = [] {
   adc4_variant variant;
   variant.external &= ~0x0000'01E0u;
   return variant;

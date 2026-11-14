@@ -209,6 +209,10 @@ inline constexpr usart_variant with_views_usart{};
 inline constexpr usart_variant h5_usart{.manual = "RM0481"};
 /** @brief STM32U5 LPUART, RM0456 67.7, one `CR1` and one `ISR`. */
 inline constexpr usart_variant u5_lpuart{.mode_views = false};
+/** @brief STM32U535 and STM32U545 LPUART, RM0456 67.7: the SVDs of these lines name the LPUART
+ *         registers `CR1_enabled`, `CR1_disabled`, `ISR_enabled` and `ISR_disabled` as the USART
+ *         has them. */
+inline constexpr usart_variant u535_u545_lpuart{};
 /** @brief STM32H5 LPUART, RM0481 57.7: the register views of the USART, and the CMSIS header
  *         names its line `LPUART1_IRQn` for the peripheral `LPUART`. */
 inline constexpr usart_variant h5_lpuart{

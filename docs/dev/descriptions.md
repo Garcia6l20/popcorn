@@ -215,6 +215,32 @@ An old name an instance lacks and a new name it already has are errors keyed
 is an alternate view of a renamed one, such as a host-mode view sharing its offset, names the new
 spelling as the register it is an alternate of.
 
+`[[register_aliases]]` adds the alias the builder would have kept had the SVD spelled the register
+with its peripheral prefix. The register keeps its name. The rule applies to the peripherals that
+match its `peripherals` globs and to their aliases, each glob matching at least one peripheral that
+is not an alias, and takes exactly one of `prefix` and `aliases`. `prefix` aliases every register
+whose name does not start with it, `aliases` maps register names to alias names:
+
+```toml
+[[register_aliases]]
+peripherals = ["SPI?"]
+prefix = "SPI_"
+source = "RM0456 rev 7, 68.8: the registers are SPI_CR1 to SPI_RXCRC, the SVD spells them CR1 to RXCRC"
+
+[[register_aliases]]
+peripherals = ["LPDMA1"]
+aliases = { MISR = "LPDMA_MISR", SMISR = "LPDMA_SMISR" }
+source = "RM0456 rev 7, 18.8.4 and 18.8.5: the registers are LPDMA_MISR and LPDMA_SMISR"
+```
+
+A `prefix` that every register of a peripheral already carries is an error keyed
+`register_aliases[<n>].peripherals`. A register the peripheral lacks and an alias that is already a
+register name or alias of the peripheral are errors keyed
+`register_aliases[<n>].aliases.<register>`, a rule with both or neither of `prefix` and `aliases` is
+an error keyed `register_aliases[<n>]`. The patch report counts the aliases in
+`register_aliases_added`. Models bind the aliased spelling, so a line whose SVD omits the prefix
+reaches the same model code as a line that keeps it.
+
 ## Alternate function drops
 
 The CubeMX GPIO modes file can list an alternate function a part cannot route. A patch removes

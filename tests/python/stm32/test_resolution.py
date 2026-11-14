@@ -17,6 +17,8 @@ from popcorn_build.resolution_diff import FAMILIES, GOLDEN_DIR, family_of
 FAMILY_KEYS = list(FAMILIES.values())
 
 OVERLAPS = {
+    ("ADC", "ADC/aditf4_v4*/u5:STM32U535*,STM32U545*/*"),
+    ("LPUART", "LPUART/sci3_v1*/u5:STM32U535*,STM32U545*/*"),
     ("flash", "flash/v1.0.0_U5_Cube/u5:STM32U535*,STM32U545*/*"),
     ("flash", "flash/v1.0.0_U5_Cube/u5:STM32U59*,STM32U5A*,STM32U5F*,STM32U5G*/*"),
 }

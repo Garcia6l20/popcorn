@@ -1,3 +1,4 @@
+#include "adc4_rows.hpp"
 #include "factory_data.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <tuple>
@@ -98,10 +100,11 @@ constexpr std::uint32_t awd1sgl   = 1u << 22;
 }
 
 auto options_with(
-    popcorn::part_description const& description,
-    bool                             strict,
-    double                           cpi     = 1.0,
-    std::uint32_t                    vdda_mv = 3000) -> core::machine_options
+    popcorn::part_description const&   description,
+    bool                               strict,
+    double                             cpi     = 1.0,
+    std::uint32_t                      vdda_mv = 3000,
+    std::optional<stm32::adc4_variant> variant = std::nullopt) -> core::machine_options
 {
   auto board                 = stm32::board{};
   board.supply.vdda_mv       = vdda_mv;
@@ -109,18 +112,24 @@ auto options_with(
   options.cpi                = cpi;
   options.models             = stm32::factories(board, description);
   options.strict_peripherals = strict;
+  if(variant)
+  {
+    options.models["ADC4"] = stm32::adc4_factory(board.supply, *variant);
+  }
   return options;
 }
 
 struct adc4_fixture : stm32_fixture
 {
   explicit adc4_fixture(
-      popcorn::part_description const& description = u575(),
-      bool                             strict      = false,
-      bool                             hsi         = true,
-      double                           cpi         = 1.0,
-      std::uint32_t                    vdda_mv     = 3000)
-      : stm32_fixture{description, "rcc_ll", options_with(description, strict, cpi, vdda_mv)}
+      popcorn::part_description const&   description = u575(),
+      bool                               strict      = false,
+      bool                               hsi         = true,
+      double                             cpi         = 1.0,
+      std::uint32_t                      vdda_mv     = 3000,
+      std::optional<stm32::adc4_variant> variant     = std::nullopt)
+      : stm32_fixture{
+            description, "rcc_ll", options_with(description, strict, cpi, vdda_mv, variant)}
   {
     set("pc", sym("rcc_ll", "idle"));
     put("RCC", "RCC_AHB3ENR", "ADC4EN", 1);
@@ -4341,10 +4350,9 @@ TEST_CASE("a TIM15 trigger before the planned end of a stopped scan starts a new
 
 namespace
 {
-auto without_pads_5_to_8(std::string_view part) -> popcorn::part_description
+auto without_pads_5_to_8() -> popcorn::part_description
 {
   auto description = u575();
-  description.part = std::string{part};
   for(auto& unit : description.peripherals)
   {
     if(unit.name == "ADC4" and unit.channel_pins)
@@ -4359,18 +4367,22 @@ auto without_pads_5_to_8(std::string_view part) -> popcorn::part_description
 }
 }
 
-TEST_CASE("DS14217 Table 106: the STM32U535 and STM32U545 ADC4 needs no pad for channels 5 to 8")
+TEST_CASE("DS14217 Table 26 and DS14216 Table 27: the U535 and U545 ADC4 has no channels 5 to 8")
 {
-  for(auto const part : {"STM32U535CETx", "STM32U545CETx"})
+  auto const description = without_pads_5_to_8();
+  CHECK_NOTHROW(adc4_fixture{description, false, true, 1.0, 3000, stm32::u535_u545_adc4});
+  for(auto const part : {"STM32U535CETx", "STM32U545RETx"})
   {
-    auto const description = without_pads_5_to_8(part);
-    CHECK_NOTHROW(adc4_fixture{description});
+    auto const* row =
+        stm32::select_in(stm32::adc4_rows(), "ADC", "aditf4_v4_U5_Cube", part, "ADC4");
+    REQUIRE(row != nullptr);
+    CHECK(row->variant == "u535_u545_adc4");
   }
 }
 
 TEST_CASE("RM0456 Figure 283: the STM32U575 ADC4 needs a pad for channel 5")
 {
-  auto const description = without_pads_5_to_8("STM32U575QGIx");
+  auto const description = without_pads_5_to_8();
   CHECK_THROWS_WITH_AS(
       adc4_fixture{description}, doctest::Contains("channel_pins.5"), popcorn::config_error);
 }

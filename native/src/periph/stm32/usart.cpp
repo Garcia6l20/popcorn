@@ -825,6 +825,7 @@ consteval auto fifo_named(usart_variant const& variant) -> bool
 static_assert(fifo_named(with_views_usart));
 static_assert(fifo_named(h5_usart));
 static_assert(fifo_named(u5_lpuart));
+static_assert(fifo_named(u535_u545_lpuart));
 static_assert(fifo_named(h5_lpuart));
 static_assert(fifo_named(l1_usart));
 static_assert(fifo_named(l1_uart));
@@ -2636,6 +2637,8 @@ auto usart_factory(decltype(board::uarts) const& uarts_, usart_variant variant) 
 
 namespace
 {
+constexpr auto u535_u545_lines = std::to_array<std::string_view>({"STM32U535*", "STM32U545*"});
+
 constexpr auto usart_row_table = std::to_array<builtin>({
     row_of<^^usart_factory, ^^with_views_usart, ^^board::uarts>(
         {.ip = "USART", .ip_version_glob = "sci3_v2*", .families = family::u5}),
@@ -2653,6 +2656,11 @@ constexpr auto usart_row_table = std::to_array<builtin>({
         {.ip = "USART", .ip_version_glob = "sci3_v1*", .families = family::l4}),
     row_of<^^usart_factory, ^^l4_usart, ^^board::uarts>(
         {.ip = "UART", .ip_version_glob = "sci2_v2*", .families = family::l4}),
+    row_of<^^usart_factory, ^^u535_u545_lpuart, ^^board::uarts>(
+        {.ip              = "LPUART",
+         .ip_version_glob = "sci3_v1*",
+         .families        = family::u5,
+         .lines           = u535_u545_lines}),
     row_of<^^usart_factory, ^^u5_lpuart, ^^board::uarts>(
         {.ip = "LPUART", .ip_version_glob = "sci3_v1*", .families = family::u5}),
     row_of<^^usart_factory, ^^h5_lpuart, ^^board::uarts>(

@@ -13,11 +13,7 @@ PARTS = [
 ]
 
 FIRST_ERROR: dict[tuple[str, bool], str] = {
-    (part, tzen): (
-        "peripherals.GTZC1_MPCBB1" if tzen else "peripherals.LPDMA1.registers.LPDMA_MISR"
-    )
-    for part in PARTS
-    for tzen in (False, True)
+    (part, True): "peripherals.GTZC1_MPCBB1" for part in PARTS
 }
 
 
@@ -28,7 +24,8 @@ def build(part: str, tzen: bool) -> None:
         machine = Machine(mcu(part), option_bytes=OptionBytes(tzen=tzen))
         machine.reset()
     except ConfigError as error:
-        assert (error.file, error.key) == (part, FIRST_ERROR[part, tzen]), str(error)
+        if (part, tzen) in FIRST_ERROR:
+            assert (error.file, error.key) == (part, FIRST_ERROR[part, tzen]), str(error)
         raise
 
 
