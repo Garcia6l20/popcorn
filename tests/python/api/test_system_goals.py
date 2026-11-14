@@ -19,7 +19,7 @@ from popcorn import Stop, StopReason, System, UartLink, _core
 from popcorn._system.goals import Goal
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import collected
+from .conftest import collected, wait_for_collections
 from .linked import Ticker, logged, member, received, ticker
 
 L = us(20)
@@ -1047,28 +1047,35 @@ def test_a_cancelled_wait_inside_running_lets_the_member_run_on(
 def test_a_wait_cancelled_as_its_system_closes_reports_nothing(
     u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
-    a = member(u575, "idle", "a")
-    b = member(u575, "tx_irq", "b")
-    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
+    def cancel_a_wait() -> list[weakref.ref[object]]:
+        a = member(u575, "idle", "a")
+        b = member(u575, "tx_irq", "b")
+        system = System(
+            {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+        )
 
-    async def body() -> None:
-        with contextlib.suppress(popcorn.EmulationError):
-            async with a.running():
-                opens = system._opens  # pyright: ignore[reportPrivateUsage]
-                first = opens[0]
-                waiting = asyncio.create_task(a.wait_for(a.ref.var("tx_next").ge(100)))
-                while opens[0] is first:
-                    await asyncio.sleep(0)
-                waiting.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await waiting
-                system.close()
-                for _ in range(10):
-                    await asyncio.sleep(0.001)
+        async def body() -> None:
+            with contextlib.suppress(popcorn.EmulationError):
+                async with a.running():
+                    opens = system._opens  # pyright: ignore[reportPrivateUsage]
+                    first = opens[0]
+                    waiting = asyncio.create_task(a.wait_for(a.ref.var("tx_next").ge(100)))
+                    while opens[0] is first:
+                        await asyncio.sleep(0)
+                    waiting.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await waiting
+                    system.close()
+                    for _ in range(10):
+                        await asyncio.sleep(0.001)
+
+        asyncio.run(body())
+        return [weakref.ref(a), weakref.ref(b), weakref.ref(system)]
 
     with caplog.at_level(logging.ERROR, logger="asyncio"):
-        asyncio.run(body())
-        gc.collect()
+        held = cancel_a_wait()
+        assert all(collected(one) for one in held)
+        wait_for_collections()
     assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
 
 

@@ -32,6 +32,8 @@ from .conftest import (
     collected,
     requests_inside,
     run_bounded,
+    settled,
+    wait_for_collections,
 )
 
 HANG = 10.0
@@ -608,8 +610,10 @@ def test_a_dropped_stamped_write_left_queued_at_close_is_not_reported(
     m.reset()
     pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
     del pending
+    gone = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(gone)
+    wait_for_collections()
     assert reported == []
 
 
@@ -637,8 +641,10 @@ def test_a_stamped_write_whose_await_was_thrown_into_reports_a_later_failure(
 
     asyncio.run(scenario(pending))
     del pending
+    gone = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(gone)
+    assert settled(lambda: len(reported) >= 1)
     assert reported == ["a command whose await was thrown into failed later"]
 
 
@@ -666,10 +672,12 @@ def test_a_stamped_write_dropped_after_its_machine_closed_is_not_reported(
     reported = _reports(monkeypatch)
     m = _driver_machine()
     pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    gone = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(gone)
     del pending
     gc.collect()
+    wait_for_collections()
     assert reported == []
 
 
@@ -801,8 +809,10 @@ def test_a_cancelled_stamped_write_that_was_withdrawn_is_not_reported(
             await task
 
     asyncio.run(scenario(m))
+    gone = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(gone)
+    wait_for_collections()
     assert reported == []
 
 
@@ -815,8 +825,10 @@ def test_a_pending_driven_outside_a_loop_reports_with_the_await_failure_text(
     with pytest.raises(RuntimeError, match="no running event loop"):
         pending.send(None)
     del pending
+    gone = weakref.ref(m)
     del m
-    gc.collect()
+    assert collected(gone)
+    assert settled(lambda: len(reported) >= 1)
     assert [message for message, _ in reported] == [
         "a command whose await failed before its result failed later"
     ]
@@ -833,8 +845,10 @@ def test_a_stamped_write_whose_task_is_destroyed_pending_is_withdrawn() -> None:
     task = loop.create_task(holder(m.write((m.ref.mem.u32[SRAM], 9), at=m.time + ms(1))))
     loop.run_until_complete(asyncio.sleep(0.01))
     loop.close()
+    ended = weakref.ref(task)
     del task
-    gc.collect()
+    assert collected(ended)
+    wait_for_collections()
     asyncio.run(m.run(for_=ms(2)))
     assert m.mem.u32[SRAM] == 0
 
@@ -849,9 +863,18 @@ def test_a_run_whose_task_is_destroyed_pending_leaves_the_machine_parked() -> No
     task = loop.create_task(holder())
     loop.run_until_complete(asyncio.sleep(0.01))
     loop.close()
+    ended = weakref.ref(task)
     del task
-    gc.collect()
-    assert m.mem.u32[SRAM] is not None
+    assert collected(ended)
+
+    def readable() -> bool:
+        try:
+            m.mem.u32[SRAM]
+        except popcorn.MachineRunning:
+            return False
+        return True
+
+    assert settled(readable)
 
 
 def test_a_ref_reaches_a_member_named_value(views: popcorn.Machine) -> None:

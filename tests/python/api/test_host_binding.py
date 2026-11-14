@@ -903,7 +903,7 @@ def test_a_dropped_boundary_hold_lets_its_machine_close(machines: Machines) -> N
 
     threading.Thread(target=drop, daemon=True).start()
     assert done.wait(30), "the machine never closed"
-    assert gone() is None
+    assert collected(gone)
 
 
 def test_a_stale_boundary_hold_leaves_a_later_arm_held(machines: Machines) -> None:
@@ -2205,8 +2205,10 @@ def test_a_late_failure_after_its_loop_ended_is_reported_once(
     if later == "run":
         asyncio.run(m.run(for_=s(2)))
     else:
+        gone = weakref.ref(m)
         del m, post, scenario
-        gc.collect()
+        assert collected(gone)
+        assert settled(lambda: len(reported) >= 1)
     assert reported == ["a command its awaiter cancelled failed later"]
 
 
@@ -2312,6 +2314,7 @@ def test_a_collected_machine_closes_its_callbacks_then_marks_then_parks(
     if collected:
         del m, spied, table, handle
         gc.collect()
+        assert settled(lambda: len(calls) >= 3)
     else:
         m.__del__()
         spied._callback_table, spied._handle = table, handle

@@ -23,7 +23,7 @@ from popcorn.arm import Reg
 from popcorn.board import UartDevice, UartError
 from popcorn.units import VirtualTime, ms, ps, us
 
-from .conftest import BOARD_ELF, collected
+from .conftest import BOARD_ELF, collected, settled
 
 WFI_LOOP = b"\x30\xbf\xfd\xe7"
 BRANCH_TO_SELF = b"\xfe\xe7"
@@ -1576,10 +1576,11 @@ def test_a_future_never_retrieved_is_logged_and_stops_no_run(
     m = asleep(u575)
     future = m.loop.create_future()
     future.set_exception(LookupError("nobody asks"))
+    gone = weakref.ref(future)
     del future
     with caplog.at_level(logging.ERROR, logger="asyncio"):
-        gc.collect()
-    assert "never retrieved" in caplog.text
+        assert collected(gone)
+        assert settled(lambda: "never retrieved" in caplog.text)
     run(m, ms(1))
 
 
