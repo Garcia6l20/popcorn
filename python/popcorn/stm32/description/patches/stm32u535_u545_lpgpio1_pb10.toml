@@ -1,0 +1,11 @@
+format = 1
+source = "LPGPIO1_Py on AF11 of the pad, DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), which the CubeMX GPIO modes file of the STM32U535 and STM32U545 omits. PB10 is bonded on every package but the 48-pin SMPS parts and the WLCSP56 parts, the part names C..xQ and N"
+
+[match]
+parts = ["STM32U5[34]5C??x", "STM32U5[34]5J*", "STM32U5[34]5R*", "STM32U5[34]5V*"]
+svd = ["STM32U535.svd", "STM32U545.svd"]
+
+[alternates]
+add = [
+  { peripheral = "GPIOB", pin = 10, af = 11, signal = "lpgpio1_p4", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PB10" },
+]

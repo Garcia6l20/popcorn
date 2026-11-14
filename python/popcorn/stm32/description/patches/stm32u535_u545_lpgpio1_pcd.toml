@@ -1,0 +1,14 @@
+format = 1
+source = "LPGPIO1_Py on AF11 of the pad, DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), which the CubeMX GPIO modes file of the STM32U535 and STM32U545 omits. PC2, PD2, PC10 and PC12 are bonded on the 64-pin and 100-pin packages"
+
+[match]
+parts = ["STM32U5[34]5R*", "STM32U5[34]5V*"]
+svd = ["STM32U535.svd", "STM32U545.svd"]
+
+[alternates]
+add = [
+  { peripheral = "GPIOC", pin = 2, af = 11, signal = "lpgpio1_p5", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PC2" },
+  { peripheral = "GPIOD", pin = 2, af = 11, signal = "lpgpio1_p7", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PD2" },
+  { peripheral = "GPIOC", pin = 10, af = 11, signal = "lpgpio1_p8", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PC10" },
+  { peripheral = "GPIOC", pin = 12, af = 11, signal = "lpgpio1_p10", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PC12" },
+]

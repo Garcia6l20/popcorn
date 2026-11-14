@@ -58,7 +58,8 @@ struct gpio_variant
   gpio_field_names names = {};
 };
 
-/** @brief STM32U5 ports with 16 pins, RM0456 13.4.10. */
+/** @brief STM32U5 ports with 16 pins, RM0456 13.4.10. On the STM32U535 and STM32U545 the ports G
+ *         and H bond fewer pins, and whether their unbonded bits read back is inferred. */
 inline constexpr gpio_variant u5_gpio{};
 /** @brief STM32U575 and STM32U585 ports, port I has pins 0 to 7, read back on a NUCLEO-U575ZI-Q:
  *         `GPIOI_MODER` keeps 0x0000FFFF of 0xFFFFFFFF and `GPIOI_AFRH` reads 0, RM0456 13.4.1. */

@@ -13,8 +13,8 @@ pytestmark = pytest.mark.timeout(120)
 type _Counts = tuple[int, int, int, int, int, int, int]
 
 COUNTS: dict[str, _Counts] = {
-    "STM32U535CBTx": (5, 20, 5, 521, 0, 452, 116),
-    "STM32U545CETx": (5, 20, 5, 521, 0, 452, 120),
+    "STM32U535CBTx": (7, 20, 5, 521, 0, 452, 116),
+    "STM32U545CETx": (7, 20, 5, 521, 0, 452, 120),
     "STM32U575QGIx": (10, 26, 0, 584, 1, 478, 121),
     "STM32U585QIIx": (9, 26, 0, 584, 1, 478, 128),
     "STM32U595AIHx": (4, 24, 1, 646, 1, 452, 129),

@@ -186,6 +186,26 @@ constexpr std::array<sram_blocks, 4> u575_mpcbb{
      }
 };
 
+constexpr std::array<sram_blocks, 3> u535_mpcbb{
+    {
+     {.controller        = "GTZC1_MPCBB1",
+         .start             = 0x2000'0000,
+         .size              = 0x3'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB2",
+         .start             = 0x2003'0000,
+         .size              = 0x1'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC2_MPCBB4",
+         .start             = 0x2800'0000,
+         .size              = 0x4000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     }
+};
+
 struct mpcbb_family
 {
   std::string_view             part_glob;
@@ -212,8 +232,10 @@ constexpr std::array<sram_blocks, 3> h573_mpcbb{
      }
 };
 
-constexpr std::array<mpcbb_family, 5> mpcbb_maps{
+constexpr std::array<mpcbb_family, 7> mpcbb_maps{
     {
+     {"STM32U535*", u535_mpcbb},
+     {"STM32U545*", u535_mpcbb},
      {"STM32U575*", u575_mpcbb},
      {"STM32U585*", u575_mpcbb},
      {"STM32H562*", h573_mpcbb},

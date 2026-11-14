@@ -1394,6 +1394,11 @@ constexpr auto gpio_table     = std::to_array<builtin>({
          .ip_version_glob = "STM32U5x_gpio_*",
          .instance_globs  = gpio_instances,
          .families        = family::u5}),
+    row_of<^^gpio_factory, ^^u5_gpio>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32U53x_gpio_*",
+         .instance_globs  = gpio_instances,
+         .families        = family::u5}),
     row_of<^^gpio_factory, ^^h56x_gpio>(
         {.ip              = "GPIO",
          .ip_version_glob = "STM32H56x_gpio_*",

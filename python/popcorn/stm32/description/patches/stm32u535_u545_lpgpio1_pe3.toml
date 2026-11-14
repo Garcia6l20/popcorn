@@ -1,0 +1,11 @@
+format = 1
+source = "LPGPIO1_Py on AF11 of the pad, DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), which the CubeMX GPIO modes file of the STM32U535 and STM32U545 omits. PE3 is bonded on the 100-pin packages and on WLCSP56"
+
+[match]
+parts = ["STM32U5[34]5N*", "STM32U5[34]5V*"]
+svd = ["STM32U535.svd", "STM32U545.svd"]
+
+[alternates]
+add = [
+  { peripheral = "GPIOE", pin = 3, af = 11, signal = "lpgpio1_p15", source = "DS14217 Rev 5 and DS14216 Rev 5 alternate function table AF8 to AF15 (Table 28 and Table 29), AF11 of PE3" },
+]

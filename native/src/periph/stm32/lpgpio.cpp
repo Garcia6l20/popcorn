@@ -350,6 +350,11 @@ constexpr auto lpgpio_row_table = std::to_array<builtin>({
          .ip_version_glob = "STM32U5x_gpio_*",
          .instance_globs  = lpgpio_instances,
          .families        = family::u5}),
+    row_of<^^lpgpio_factory>(
+        {.ip              = "GPIO",
+         .ip_version_glob = "STM32U53x_gpio_*",
+         .instance_globs  = lpgpio_instances,
+         .families        = family::u5}),
 });
 }
 

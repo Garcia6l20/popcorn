@@ -431,32 +431,19 @@ def test_optstrt_compares_only_the_bits_the_model_encodes(
     assert optstrt_warns(u575, caplog, SECWM1R2, second ^ (1 << 31))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ConfigError,
-    reason="the GTZC MPCBB model has no SRAM size for the STM32U535 board data, so no STM32U535"
-    " machine builds with TrustZone yet",
-)
 def test_optstrt_accepts_the_watermarks_of_a_five_bit_part(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """On the STM32U535 the SVD fields are 8 bits wide and the model encodes 5, so the
     firmware's `end << 16 | start` leaves bits 7:5 clear where the loaded word has them set.
     The 512 KB STM32U535CETx has 32 pages per bank, which the 5-bit width needs, the 128 KB
-    CBTx has 8. Only the GTZC1_MPCBB1 ConfigError is the expected failure."""
+    CBTx has 8."""
     from popcorn.stm32 import mcu
 
     u535 = mcu("STM32U535CETx")
     assert u535.part == "STM32U535CETx"
-    try:
-        assert not optstrt_warns(u535, caplog, SECWM1R1, 9 << 16 | 2)
-        assert optstrt_warns(u535, caplog, SECWM1R1, 8 << 16 | 2)
-    except ConfigError as error:
-        assert (error.file, error.key) == (
-            "STM32U535CETx",
-            "peripherals.GTZC1_MPCBB1",
-        ), str(error)
-        raise
+    assert not optstrt_warns(u535, caplog, SECWM1R1, 9 << 16 | 2)
+    assert optstrt_warns(u535, caplog, SECWM1R1, 8 << 16 | 2)
 
 
 def test_a_2_mb_u5_accepts_secwm2_up_to_page_127_and_refuses_128() -> None:
