@@ -110,3 +110,25 @@ count from the latest reset, so a firmware that resets more often than the `for_
 run on `for_`. `wait_for` and `Reached` do not end when the loop is faster than an event that samples
 them. Bound a run that may loop with `budget=` and watch `Machine.resets`. The option is for a lone
 machine: a `System` member runs with `"stop"` and the system sets the reset with `on_member_reset`.
+
+## Close a machine
+
+`m.close()` ends a machine now and releases what it holds: its Python models, bus devices, hooks and handlers, its
+host and its thread. Every later use of the machine raises `EmulationError`, `m.name` and `repr(m)` still work, and a
+second `close()` does nothing. It refuses with `MachineRunning` while a run, call, wait or free run is active (`halt()`
+first) and from a handler or a parked section, and with `ConfigError` for a member of a `System`.
+
+```python
+m = popcorn.Machine(description, image=image, models={"TIMER": Timer})
+await m.run(for_=ms(1))
+m.close()
+```
+
+`close()` is not supported while another thread uses the same machine. The host thread and the models are released when
+the last view, `Pending` or other object that holds the machine's handle is dropped: `v = m.mem; m.close()` keeps them
+until `v` goes.
+
+At interpreter exit popcorn closes every machine your code still holds, after the machine threads stop. A Machine in
+a module global with a Python model then leaves no `nanobind: leaked` report in the process that built it. An `atexit` handler registered after
+`import popcorn` runs before that and uses its machines normally, a handler registered before the import finds them
+closed. The machines of a `System` are left to their system.

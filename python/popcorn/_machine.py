@@ -9,12 +9,14 @@ import functools
 import os
 import sys
 import threading
+import traceback
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    NoReturn,
     cast,
     overload,
     override,
@@ -38,6 +40,7 @@ from popcorn._dwarf_views import Var
 from popcorn._enums import FloatAbi, PinMode, ResetKind, ValueKind
 from popcorn._errors import (
     ConfigError,
+    EmulationError,
     MachineBusy,
     MachineRunning,
     ModelError,
@@ -144,6 +147,106 @@ _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
 )
 
+
+class _Closed:
+    """What every slot of a closed Machine holds, the handle included: any use raises."""
+
+    __slots__ = ()
+
+    @staticmethod
+    def _refuse() -> NoReturn:
+        raise EmulationError("the machine was closed")
+
+    def __getattr__(self, name: str) -> NoReturn:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        self._refuse()
+
+    @override
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        self._refuse()
+
+    @override
+    def __delattr__(self, name: str) -> NoReturn:
+        self._refuse()
+
+    def __call__(self, *args: object, **kwargs: object) -> NoReturn:
+        self._refuse()
+
+    def __getitem__(self, key: object) -> NoReturn:
+        self._refuse()
+
+    def __setitem__(self, key: object, value: object) -> NoReturn:
+        self._refuse()
+
+    def __delitem__(self, key: object) -> NoReturn:
+        self._refuse()
+
+    def __contains__(self, item: object) -> NoReturn:
+        self._refuse()
+
+    def __iter__(self) -> NoReturn:
+        self._refuse()
+
+    def __next__(self) -> NoReturn:
+        self._refuse()
+
+    def __aiter__(self) -> NoReturn:
+        self._refuse()
+
+    def __anext__(self) -> NoReturn:
+        self._refuse()
+
+    def __await__(self) -> NoReturn:
+        self._refuse()
+
+    def __len__(self) -> NoReturn:
+        self._refuse()
+
+    def __bool__(self) -> NoReturn:
+        self._refuse()
+
+    def __enter__(self) -> NoReturn:
+        self._refuse()
+
+    def __exit__(self, *exc: object) -> NoReturn:
+        self._refuse()
+
+    async def __aenter__(self) -> NoReturn:
+        self._refuse()
+
+    async def __aexit__(self, *exc: object) -> NoReturn:
+        self._refuse()
+
+
+_CLOSED = _Closed()
+_KEPT_AT_CLOSE = frozenset(
+    {
+        "__weakref__",
+        "_name",
+        "_system",
+        "_on_reset_request",
+        "_strict_peripherals",
+        "_config_digest",
+    }
+)
+_LIVE: weakref.WeakSet[Machine] = weakref.WeakSet()
+
+
+def _close_live_machines() -> None:
+    """Close every machine still alive at interpreter exit, after `shutdown_hosts` has stopped
+    their hosts. A member of a live system is left to its system."""
+    for machine in list(_LIVE):
+        owner = machine._system  # pyright: ignore[reportPrivateUsage]
+        if owner is not None and owner() is not None:
+            continue
+        try:
+            machine._close(force=True)  # pyright: ignore[reportPrivateUsage]
+        except Exception:
+            traceback.print_exc()
+
+
+atexit.register(_close_live_machines)
 atexit.register(_core.shutdown_hosts)
 
 _FIRST_LOOP = threading.RLock()
@@ -586,6 +689,7 @@ class Machine:
         )
         for one in images:
             self.load(one)
+        _LIVE.add(self)
 
     def __del__(self) -> None:
         """Refuse every later callback of the machine and park it before a collection clears it.
@@ -603,6 +707,8 @@ class Machine:
         if sys.is_finalizing():
             return
         handle = getattr(self, "_handle", None)
+        if type(cast(object, handle)) is _Closed:
+            return
         table = getattr(self, "_callback_table", None)
         loop = getattr(self, "_loop", None)
         del self
@@ -628,6 +734,64 @@ class Machine:
                 raise unclaimed
             finally:
                 del unclaimed
+
+    def close(self) -> None:
+        """End the machine now and release what it holds: its Python models, bus devices, hooks
+        and handlers, its native host and its thread, even while something still holds the
+        `Machine`. A closed machine refuses every later use with EmulationError, `name` and
+        `repr` still work. Closing again does nothing.
+
+        At interpreter exit popcorn closes every machine your code still holds, after the
+        handlers registered after `import popcorn` and after the machine threads stop. A
+        handler registered before the import finds closed machines. A member of a `System`
+        is left to its system.
+
+        It is not supported while another thread uses the same machine, as `del m` is not.
+        The host thread and the models are released when the last view, `Pending` or other
+        object that holds the machine's native handle is dropped, so drop such objects first.
+
+        Raises:
+            MachineRunning: A run, step, call, wait or free run is active, `halt()` it first,
+                or the call comes from a machine thread or a parked section.
+            ConfigError: The machine is a member of a live linked system, `members.<name>`.
+        """
+        self._close(force=False)
+
+    def _close(self, *, force: bool) -> None:
+        """`close()`, with `force` the exit path: parks whatever runs and refuses nothing."""
+        handle = self._handle
+        if type(cast(object, handle)) is _Closed:
+            return
+        if not force:
+            if _core.on_host_thread() or _core.host_locks_held() > 0:
+                raise MachineRunning(f"{RUNNING}, close it from the main thread")
+            owner = self._system
+            if owner is not None and owner() is not None:
+                key = f"members.{self._name}"
+                raise ConfigError(
+                    f"{key}: the machine is a member of a linked system, close the system",
+                    key=key,
+                    expected="a machine in no linked system",
+                )
+            self._require_idle()
+        self._callback_table.close()
+        loop = self._loop
+        try:
+            handle.mark_collected()
+            if loop is not None:
+                loop._finalize()  # pyright: ignore[reportPrivateUsage]
+            if force:
+                handle.park()
+            else:
+                handle.halt()
+        except Exception:
+            if not force:
+                raise
+        finally:
+            del handle, loop
+            for slot in Machine.__slots__:
+                if slot not in _KEPT_AT_CLOSE:
+                    setattr(self, slot, _CLOSED)
 
     @property
     def loop(self) -> VirtualLoop:
@@ -2600,6 +2764,8 @@ class Machine:
 
     @override
     def __repr__(self) -> str:
+        if type(cast(object, self._handle)) is _Closed:
+            return f"Machine({self._name}, closed)"
         part = self._description.part
         if self._name == part:
             return f"Machine({part}, images={len(self._images)})"
