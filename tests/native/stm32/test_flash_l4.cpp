@@ -1915,6 +1915,9 @@ TEST_CASE(
   r.wait_idle();
   CHECK((r.read("SR") & wrperr) == wrperr);
   CHECK(r.words(otp + 0x10, 2) == erased(2));
+  CHECK(std::ranges::none_of(r.logged, [](auto const& entry) {
+    return entry.message.contains("no mass erase since the last reset");
+  }));
 }
 
 TEST_CASE(

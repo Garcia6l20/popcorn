@@ -4841,7 +4841,8 @@ template <typename Traits> void flash_model<Traits>::check_row_erased(std::uint3
 {
   if constexpr(Traits::row_bytes != 0)
   {
-    if(storage_ == nullptr or (extension_.banks_erased >> bank_of(at) & 1u) != 0)
+    auto const bank = bank_of(at);
+    if(storage_ == nullptr or bank > 1 or (extension_.banks_erased >> bank & 1u) != 0)
     {
       return;
     }

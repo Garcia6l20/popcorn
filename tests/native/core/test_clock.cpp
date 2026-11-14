@@ -634,7 +634,7 @@ auto dividends(std::uint64_t d, lcg& random) -> std::vector<u128>
   {
     auto const bits = random.next() % 129;
     auto const word = (u128{random.next()} << 64) | random.next();
-    out.push_back(bits == 128 ? word : word >> (128 - bits));
+    out.push_back(bits == 128 ? word : bits == 0 ? u128{0} : word >> (128 - bits));
   }
   return out;
 }
