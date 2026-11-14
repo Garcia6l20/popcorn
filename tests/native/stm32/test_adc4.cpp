@@ -4338,3 +4338,39 @@ TEST_CASE("a TIM15 trigger before the planned end of a stopped scan starts a new
   f.run_until(first + 20 * us + 2 * us);
   CHECK(std::ranges::contains(f.dues(), first + 20 * us + slow_latency));
 }
+
+namespace
+{
+auto without_pads_5_to_8(std::string_view part) -> popcorn::part_description
+{
+  auto description = u575();
+  description.part = std::string{part};
+  for(auto& unit : description.peripherals)
+  {
+    if(unit.name == "ADC4" and unit.channel_pins)
+    {
+      unit.bonded_channels = unit.bonded_channels.value_or(0x00DF'8FFEu) & ~0x0000'01E0u;
+      std::erase_if(*unit.channel_pins, [](popcorn::adc_pad_desc const& pad) {
+        return pad.channel >= 5 and pad.channel <= 8;
+      });
+    }
+  }
+  return description;
+}
+}
+
+TEST_CASE("DS14217 Table 106: the STM32U535 and STM32U545 ADC4 needs no pad for channels 5 to 8")
+{
+  for(auto const part : {"STM32U535CETx", "STM32U545CETx"})
+  {
+    auto const description = without_pads_5_to_8(part);
+    CHECK_NOTHROW(adc4_fixture{description});
+  }
+}
+
+TEST_CASE("RM0456 Figure 283: the STM32U575 ADC4 needs a pad for channel 5")
+{
+  auto const description = without_pads_5_to_8("STM32U575QGIx");
+  CHECK_THROWS_WITH_AS(
+      adc4_fixture{description}, doctest::Contains("channel_pins.5"), popcorn::config_error);
+}

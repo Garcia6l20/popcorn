@@ -1,0 +1,12 @@
+format = 1
+source = "STM32U545 SVD spelling of the ADC4 temperature sensor select"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U545.svd"]
+
+[[fields]]
+instances = ["ADC4"]
+registers = ["ADC_CCR"]
+rename = { TSEN = "VSENSESEL" }
+source = "RM0456 rev 7, 34.7.18 ADC common configuration register (ADC_CCR): bit 23 is VSENSESEL. ST's STM32U545 SVD spells the field TSEN, the STM32U535 and STM32U575 SVDs spell it VSENSESEL, and the ADC4 model reads VSENSESEL"

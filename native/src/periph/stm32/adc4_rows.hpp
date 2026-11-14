@@ -85,6 +85,17 @@ struct adc4_variant
 inline constexpr adc4_variant u5_adc4{};
 
 /**
+ * @brief The ADC4 of the STM32U535 and STM32U545. DS13737 and the STM32U535 and STM32U545
+ *        datasheets name no ADC4_IN5 to ADC4_IN8, whose pads are GPIOF14, GPIOF15, GPIOG0
+ *        and GPIOG1 on the STM32U575, so the external channels lose bits 5 to 8.
+ */
+inline constexpr adc4_variant u535_adc4 = [] {
+  adc4_variant variant;
+  variant.external &= ~0x0000'01E0u;
+  return variant;
+}();
+
+/**
  * @brief Factory of the ADC4 model, RM0456 section 34.
  * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
  * @param variant What differs between the ADC4 units the row serves.

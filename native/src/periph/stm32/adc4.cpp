@@ -1925,7 +1925,14 @@ void adc4_model::forbidden(bool& logged, std::string_view name, std::string_view
       logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, std::string{message});
 }
 
+constexpr auto u535_u545_parts = std::to_array<std::string_view>({"STM32U535*", "STM32U545*"});
+
 constexpr auto adc4_row_table = std::to_array<builtin>({
+    row_of<^^adc4_factory, ^^u535_adc4, ^^board::supply>(
+        {.ip              = "ADC",
+         .ip_version_glob = "aditf4_v4*",
+         .families        = family::u5,
+         .lines           = u535_u545_parts}),
     row_of<^^adc4_factory, ^^u5_adc4, ^^board::supply>(
         {.ip = "ADC", .ip_version_glob = "aditf4_v4*", .families = family::u5}),
 });

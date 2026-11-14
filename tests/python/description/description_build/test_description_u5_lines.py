@@ -14,7 +14,7 @@ type _Counts = tuple[int, int, int, int, int, int, int]
 
 COUNTS: dict[str, _Counts] = {
     "STM32U535CBTx": (4, 20, 5, 521, 0, 444, 116),
-    "STM32U545CETx": (3, 20, 5, 521, 0, 444, 120),
+    "STM32U545CETx": (4, 20, 5, 521, 0, 444, 120),
     "STM32U575QGIx": (10, 26, 0, 584, 1, 478, 121),
     "STM32U585QIIx": (9, 26, 0, 584, 1, 478, 128),
     "STM32U595AIHx": (4, 24, 1, 646, 1, 452, 129),
@@ -173,3 +173,12 @@ def test_the_u599_and_u5a9_lines_build_with_their_own_svd_irqs(part: str) -> Non
     gpdma = next(p for p in description.peripherals if p.name == "GPDMA1")
     status = next(r for r in gpdma.registers if "GPDMA_C3SR" in (r.name, *(r.aliases or [])))
     assert any((f.name, f.lsb) == ("TOF", 14) for f in status.fields)
+
+
+@pytest.mark.parametrize("part", ["STM32U535CBTx", "STM32U545CETx", "STM32U575QGIx"])
+def test_the_adc4_temperature_sensor_select_is_vsensesel_in_bit_23(part: str) -> None:
+    description = build_description_with_report(find_sources(part))[0]
+    adc4 = next(p for p in description.peripherals if p.name == "ADC4")
+    ccr = next(r for r in adc4.registers if "ADC_CCR" in (r.name, *(r.aliases or [])))
+    select = next(f for f in ccr.fields if f.lsb == 23)
+    assert (select.name, select.width) == ("VSENSESEL", 1)
