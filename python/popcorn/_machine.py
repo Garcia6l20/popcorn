@@ -266,6 +266,7 @@ class Machine:
         "_model_context",
         "_name",
         "_nvic",
+        "_on_reset_request",
         "_parked_ends",
         "_pdm",
         "_peripherals",
@@ -294,6 +295,7 @@ class Machine:
         spin_threshold: int = 0,
         strict_peripherals: bool = False,
         faults: Literal["stop", "handler"] = "stop",
+        on_reset_request: Literal["stop", "reset"] = "stop",
         vector_table: int | None = None,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
@@ -332,6 +334,17 @@ class Machine:
                 of the additional state context alone and a fault while taking a derived
                 exception stop too. Without TrustZone, the INVPC, UNSTKERR, STKERR, STKOF on
                 entry and VECTTBL faults stop too.
+            on_reset_request: What a firmware reset request, such as SYSRESETREQ or a watchdog
+                reset, does to a run of a lone machine. "stop" ends the run with a RESET_REQUEST
+                stop, and the next run applies that reset first. "reset" applies the requested reset
+                and the run goes on, `resets` counting each one. A `call` whose function requests a
+                reset stops with RESET_REQUEST under both, a reset would lose the call frame. Under
+                "reset", `for_` and `time` count from the latest reset, so a firmware that resets
+                itself more often than the `for_` bound never ends the run on `for_`, and `wait_for`
+                or `Reached` do not end when the loop is faster than an event that samples them:
+                bound a run that may loop with `budget=` and watch `resets`. A System member runs
+                with "stop" and its system sets what a reset does with `on_member_reset`, so a
+                machine built with "reset" is refused as a member.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
@@ -409,11 +422,13 @@ class Machine:
                 built: an RNG with a Python or plugin model, as `rng`.
             ImageError: An image does not fit the memory map.
             TypeError: `option_bytes` is not an `OptionBytes`, or `rng` not an `RngOptions`.
-            ValueError: `name` is empty or holds whitespace or a dot, or `faults` is neither
-                "stop" nor "handler".
+            ValueError: `name` is empty or holds whitespace or a dot, `faults` is neither
+                "stop" nor "handler", or `on_reset_request` is neither "stop" nor "reset".
         """
         if faults not in ("stop", "handler"):
             raise ValueError(f'faults is "stop" or "handler", not {faults!r}')
+        if on_reset_request not in ("stop", "reset"):
+            raise ValueError(f'on_reset_request is "stop" or "reset", not {on_reset_request!r}')
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
         check_machine_name(name)
@@ -426,6 +441,7 @@ class Machine:
         config.spin_threshold = spin_threshold
         config.strict_peripherals = strict_peripherals
         config.fault_handlers = faults == "handler"
+        config.reset_and_continue = on_reset_request == "reset"
         config.vector_table = vector_table
         config.config_digest = config_digest
         config.arena_start = arena_base
@@ -454,6 +470,7 @@ class Machine:
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
         self._strict_peripherals = strict_peripherals
+        self._on_reset_request = on_reset_request
         self._system: weakref.ref[System] | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
@@ -723,6 +740,17 @@ class Machine:
                 result is the time of the boundary it executed at.
         """
         return VirtualTime(self._handle.time_ps())
+
+    @property
+    def resets(self) -> int:
+        """Resets applied since construction, every kind: `reset()`, a firmware request applied
+        under `on_reset_request="reset"` and the reset the next run applies after a RESET_REQUEST
+        stop. A restore leaves it unchanged. A new value names a new timeline for `time`.
+
+        Raises:
+            MachineRunning: The machine is busy, read outside its callbacks.
+        """
+        return self._handle.resets()
 
     @property
     def pc(self) -> int:

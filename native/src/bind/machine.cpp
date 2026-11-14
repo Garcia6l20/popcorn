@@ -258,9 +258,12 @@ auto options_of(
   options.strict_peripherals = config.strict_peripherals;
   options.faults =
       config.fault_handlers ? arch::fault_policy::enter_handler : arch::fault_policy::stop;
-  options.vector_table  = config.vector_table;
-  options.config_digest = config.config_digest;
-  options.raz_wi        = periph::stm32::raz_wi_map(description);
+  options.on_reset_request = config.reset_and_continue
+                               ? core::reset_request_policy::reset_and_continue
+                               : core::reset_request_policy::stop;
+  options.vector_table     = config.vector_table;
+  options.config_digest    = config.config_digest;
+  options.raz_wi           = periph::stm32::raz_wi_map(description);
   if(option_bytes)
   {
     auto const configured =

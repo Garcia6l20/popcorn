@@ -77,7 +77,9 @@ In order, one turn of the loop:
 
 1. Handles requests. A model or handler may have asked for a stop, a reset or the end of the
    slice. A requested reset becomes a RESET_REQUEST stop when a call is running or the machine
-   is configured to stop on it. A run that waits for thread mode stops the same way. Otherwise the machine resets and the run goes on.
+   is configured to stop on it, which `Machine(on_reset_request="stop")` selects and is the default.
+   A run that waits for thread mode stops the same way. Otherwise, under
+   `on_reset_request="reset"`, the machine resets and the run goes on.
    A RESET_REQUEST stop keeps its kind as `reset_pending` until a reset or a restore, saved in
    snapshots. The Python binding applies it with `machine::apply_reset_request` before the next
    run, step or free run of a lone machine starts, so `for_` counts from the reset. A call never

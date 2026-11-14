@@ -83,6 +83,13 @@ def check_member(name: str, machine: Machine) -> None:
             key=f"members.{name}",
             expected="a machine in no linked system",
         )
+    if machine._on_reset_request != "stop":  # pyright: ignore[reportPrivateUsage]
+        raise ConfigError(
+            f'members.{name}: the machine was built with on_reset_request="reset", a system'
+            " decides what a member reset does with on_member_reset",
+            key=f"members.{name}",
+            expected='a machine built with on_reset_request="stop"',
+        )
     if machine.busy:
         raise MachineBusy(f"members.{name}: the machine is busy")
 

@@ -84,6 +84,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   bool strict_peripherals{};
   /** @brief Whether a processor fault enters the firmware's handler rather than stopping. */
   bool fault_handlers{};
+  /** @brief Whether a firmware reset request resets the machine and the run goes on, rather
+   * than stopping with a reset-request stop. */
+  bool reset_and_continue{};
   /** @brief Address of the vector table reset reads, empty for the description's default. */
   std::optional<address> vector_table{};
   /** @brief Digest of the configuration, recorded in snapshots. */

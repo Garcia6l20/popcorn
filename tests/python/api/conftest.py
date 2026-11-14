@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import popcorn
 import pytest
@@ -205,6 +206,7 @@ class Machines:
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
         models: Mapping[str, Callable[[], Model]] | None = None,
+        on_reset_request: Literal["stop", "reset"] = "stop",
     ) -> popcorn.Machine:
         """A machine reset into `scenario`, the vector table `vt_<scenario>`, or the ALU loop."""
         table = None if scenario is None else self.image.lookup(f"vt_{scenario}").value
@@ -214,6 +216,7 @@ class Machines:
             models=models,
             vector_table=table,
             spin_threshold=spin_threshold,
+            on_reset_request=on_reset_request,
             slice_instructions=slice_instructions,
             slice_wall_budget=slice_wall_budget,
         )

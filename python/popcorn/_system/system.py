@@ -209,20 +209,21 @@ class System:
 
         Raises:
             ConfigError: A member named apart from its key, `members.<name>`, already in a linked
-                system, or no link, `links`, or a link that is neither a `UartLink` nor an `SpiBus`
-                nor an `I2CBus`, `links[i]`, or an SPI end, `links[i].master` or
-                `links[i].slaves[<chip select>]`, that is not an SPI of a member, a master SPI with
-                a board controller, a slave SPI with a board controller or a board device, an SPI in
-                two links, a chip select on an unbonded pad of the master's package, key `pin`, or
-                an I2C end, `links[i].ports[j]`, that is not an I2C of a member, a controller I2C
-                with a board controller, a target I2C with a board controller or a board target, a
-                target on the controller's member, an I2C in two links, or a bus with no target,
-                `links[i].ports`, or a link end that is not a UART of a member, a UART in two links
-                or bridged to a pty, or whose CTS input `UartStream.set_cts` left not ready or with
-                a change pending, or whose model takes no frames from a wire, such as a plugin UART
-                implementing only `periph::uart_port`, `links[i].a` or `links[i].b`, a value out of
-                range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`, or an
-                offset of no member or below 0, `offsets.<name>`.
+                system or built with `on_reset_request="reset"`, or no link, `links`, or a link that
+                is neither a `UartLink` nor an `SpiBus` nor an `I2CBus`, `links[i]`, or an SPI end,
+                `links[i].master` or `links[i].slaves[<chip select>]`, that is not an SPI of a
+                member, a master SPI with a board controller, a slave SPI with a board controller or
+                a board device, an SPI in two links, a chip select on an unbonded pad of the
+                master's package, key `pin`, or an I2C end, `links[i].ports[j]`, that is not an I2C
+                of a member, a controller I2C with a board controller, a target I2C with a board
+                controller or a board target, a target on the controller's member, an I2C in two
+                links, or a bus with no target, `links[i].ports`, or a link end that is not a UART
+                of a member, a UART in two links or bridged to a pty, or whose CTS input
+                `UartStream.set_cts` left not ready or with a change pending, or whose model takes
+                no frames from a wire, such as a plugin UART implementing only `periph::uart_port`,
+                `links[i].a` or `links[i].b`, a value out of range, `links[i].latency`, `.baud`,
+                `.data_bits`, `.stop_bits` or `.parity`, or an offset of no member or below 0,
+                `offsets.<name>`.
             MachineBusy: A member is busy.
             ValueError: `slice_instructions`, `slice_wall_budget` or `goal_cap` not above 0.
             TypeError: `goal_cap` is no VirtualDuration.

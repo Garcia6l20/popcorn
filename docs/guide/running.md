@@ -97,7 +97,16 @@ plugin sets it per test, see [Testing with pytest](testing.md).
 | `IDLE` | The core sleeps in WFI with nothing that can wake it and no `for_` deadline. |
 | `RETURNED` | The function a `call` or `run(until=popcorn.FrameReturn())` waits on returned. |
 | `FAULT` | A processor fault under `faults="stop"`. |
-| `RESET_REQUEST` | The firmware requested a system reset. `detail` names its kind, such as `software` or `watchdog`. The next `run`, `step` or free run applies that reset first, unless `reset()` or `restore()` came between. A `call` leaves it pending. |
+| `RESET_REQUEST` | The firmware requested a system reset. `detail` names its kind, such as `software` or `watchdog`. The next `run`, `step` or free run applies that reset first, unless `reset()` or `restore()` came between. A `call` leaves it pending. See `on_reset_request` below. |
 | `SPIN` | A loop made no progress for `spin_threshold` iterations. |
 | `WATCHPOINT` | A watch on a memory access stopped the run. |
 | `USER` | A `stop_when` predicate returned True, a handler stopped the run, or a BKPT ran. |
+
+### Reset requests
+
+`Machine(on_reset_request="reset")` applies a requested reset and the run goes on, `Machine.resets`
+counting each one. Only a `call` still stops with `RESET_REQUEST`. Under `"reset"`, `for_` and `time`
+count from the latest reset, so a firmware that resets more often than the `for_` bound never ends the
+run on `for_`. `wait_for` and `Reached` do not end when the loop is faster than an event that samples
+them. Bound a run that may loop with `budget=` and watch `Machine.resets`. The option is for a lone
+machine: a `System` member runs with `"stop"` and the system sets the reset with `on_member_reset`.
