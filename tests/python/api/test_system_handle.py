@@ -21,7 +21,7 @@ from popcorn import _core
 from popcorn._host import awaited
 from popcorn.units import ms, us
 
-from .conftest import collected, quiet_host_threads, settled
+from .conftest import DRIVER_ELF, M33_JSON, collected, quiet_host_threads, settled
 from .linked import LINK_BYTE, PING_BYTES, USART_LL, logged, member
 
 LATENCY = us(20).ps
@@ -736,6 +736,44 @@ while not collected:
 del goal, other, pending
 """
 
+SIGNALLED_AT_EXIT = BLOCKED + """
+import asyncio
+import atexit
+import os
+import signal
+import threading
+
+signal.signal(signal.SIGINT, signal.default_int_handler)
+plain = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+plain.reset()
+held = threading.Event()
+
+
+def blocking(call):
+    held.set()
+    threading.Event().wait()
+    return call.proceed()
+
+
+plain.intercept("alu_mark", blocking)
+plain.start()
+assert held.wait(10)
+exiting = threading.Event()
+
+
+def interrupt_while_exiting():
+    exiting.wait()
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+healthy = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+healthy.reset()
+asyncio.run(healthy.step(1))
+threading.Thread(target=interrupt_while_exiting, daemon=True).start()
+atexit.register(exiting.set)
+print("leaving", time.monotonic(), flush=True)
+"""
+
 LEFT_OPEN = """
 pending = handle.resume(10_000_000_000_000)
 time.sleep(0.05)
@@ -773,3 +811,41 @@ def test_an_exit_reports_a_closer_stuck_past_the_exit_budget(
     assert child.stdout.strip() == "ok"
     message = "a linked system closed by a machine's thread did not finish at exit"
     assert child.stderr.count(message) == 1, child.stderr
+
+
+def _text(data: str | bytes | None) -> str:
+    if data is None:
+        return ""
+    return data.decode(errors="replace") if isinstance(data, bytes) else data
+
+
+@pytest.mark.timeout(40)
+def test_a_signal_at_exit_ends_the_wait_with_a_stuck_closer_and_a_blocked_handler(
+    u575: popcorn.PartDescription,
+) -> None:
+    script = SIGNALLED_AT_EXIT.replace("__JSON__", repr(str(M33_JSON))).replace(
+        "__ELF__", repr(str(DRIVER_ELF))
+    )
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=script)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env={**os.environ, "POPCORN_TEST_EXIT_WAIT_MS": "600000"},
+        )
+    except subprocess.TimeoutExpired as expired:
+        pytest.fail(
+            f"the exit outlived the signal\nstdout:\n{_text(expired.stdout)}\n"
+            f"stderr:\n{_text(expired.stderr)}",
+            pytrace=False,
+        )
+    now = time.monotonic()
+    stamps = [line for line in child.stdout.splitlines() if line.startswith("leaving")]
+    assert len(stamps) == 1, f"no leaving line\nstdout:\n{child.stdout}\nstderr:\n{child.stderr}"
+    assert child.returncode == 0, child.stderr
+    assert now - float(stamps[0].split()[1]) < 5, child.stderr
+    closer = "a linked system closed by a machine's thread did not finish at exit"
+    assert child.stderr.count(closer) == 1, child.stderr
+    assert child.stderr.count("the machine thread of POPCORN-M33-TEST did not stop at exit") == 1

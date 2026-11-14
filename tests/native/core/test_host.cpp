@@ -1529,12 +1529,10 @@ TEST_CASE(
   auto made   = std::move(killer_fixture.target);
   auto killer = std::make_shared<hosted>();
 
-  auto gate   = std::shared_ptr<void>(nullptr, [&](void*) { release.wait(); });
-  auto victim = std::make_shared<hosted>(
-      idle_forever(),
-      core::slice_bounds{
-  },
-      core::host_hooks{.boundary = victim_hook{killer, gate}});
+  auto             gate = std::shared_ptr<void>(nullptr, [&](void*) { release.wait(); });
+  core::host_hooks hooks;
+  hooks.boundary = victim_hook{killer, gate};
+  auto victim    = std::make_shared<hosted>(idle_forever(), core::slice_bounds{}, std::move(hooks));
   gate.reset();
   victim->start();
   REQUIRE(settles([&] { return victim->on->state(0) == core::host_state::idle_wait; }));

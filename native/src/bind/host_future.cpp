@@ -466,11 +466,13 @@ void shutdown_hosts()
       }
     }
   });
-  auto const until = std::chrono::steady_clock::now() + exit_wait();
-  detail::settle_closers(until);
-  auto interrupted = false;
-  while(not live.empty() and not interrupted and std::chrono::steady_clock::now() < until)
+  auto const until       = std::chrono::steady_clock::now() + exit_wait();
+  auto       interrupted = detail::settle_closers(until);
+  auto       closing     = interrupted;
+  while(not live.empty()
+        and (closing or (not interrupted and std::chrono::steady_clock::now() < until)))
   {
+    closing = false;
     {
       nb::gil_scoped_release const released;
       std::erase_if(live, [](auto const& entry) { return entry.first->close_for(signal_check); });

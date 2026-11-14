@@ -332,8 +332,9 @@ void abandon(std::shared_ptr<core::host> on) noexcept;
  * @brief Waits until @p until for the threads that close linked systems dropped on a machine's
  *        thread, the GIL released, checking signals. Then reports any still running on stderr
  *        and abandons the member hosts they hold. Called with the GIL held, at exit.
+ * @return whether a signal ended the wait.
  */
-void settle_closers(std::chrono::steady_clock::time_point until);
+auto settle_closers(std::chrono::steady_clock::time_point until) -> bool;
 
 /**
  * @brief Throws unless a host may start a thread now.

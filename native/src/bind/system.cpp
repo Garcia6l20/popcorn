@@ -1576,7 +1576,7 @@ auto system_handle::posted(std::size_t index) -> std::uint64_t
   return wire(index).posted();
 }
 
-void detail::settle_closers(std::chrono::steady_clock::time_point until)
+auto detail::settle_closers(std::chrono::steady_clock::time_point until) -> bool
 {
   auto&      registry    = closers();
   auto const empty       = [&registry] { return registry.live.empty(); };
@@ -1591,7 +1591,7 @@ void detail::settle_closers(std::chrono::steady_clock::time_point until)
     }
     if(settled)
     {
-      return;
+      return false;
     }
     if(PyErr_CheckSignals() != 0)
     {
@@ -1614,7 +1614,7 @@ void detail::settle_closers(std::chrono::steady_clock::time_point until)
     }
     if(registry.live.empty())
     {
-      return;
+      return interrupted;
     }
   }
   PySys_WriteStderr(
@@ -1625,6 +1625,7 @@ void detail::settle_closers(std::chrono::steady_clock::time_point until)
   {
     on->abandon_thread();
   }
+  return interrupted;
 }
 
 auto system_handle::shape() const -> std::tuple<std::size_t, std::size_t, bool>
