@@ -250,7 +250,12 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     UC_HOOK_BLOCK_ICOUNT, and a one-instruction branch-to-self block that
     consumes the budget. Upstream counts no instructions in translated code
     and has no exit that another thread can request at a block start.
-  - tests/unit/test_arm.c: added the test_arm_tb_budget tests.
+  - qemu/accel/tcg/cpu-exec.c: clear the PC sync skip flag after the
+    interrupt hooks and after a caught invalid instruction hook. A PC write
+    from such a hook left the flag set until the next exit, so every memory
+    hook in between read the PC of the block start. Upstream keeps the flag.
+  - tests/unit/test_arm.c: added the test_arm_tb_budget tests and the two
+    test_arm_mem_hook_pc tests.
   - bindings/: regenerated the constant files with the new ids.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
