@@ -126,3 +126,13 @@ def test_a_reset_policy_machine_is_refused_as_a_system_member(
     refused = popcorn.Machine(m33, image=driver, name="b", on_reset_request="reset")
     with pytest.raises(popcorn.ConfigError, match=r"members\.b: .*on_member_reset"):
         popcorn.System({"a": kept, "b": refused}, [])
+
+
+def test_a_machine_description_passes_the_reset_policy_to_its_machine() -> None:
+    description = popcorn.MachineDescription(part="STM32U575QGIx", images=())
+    kept = description.machine(name="a")
+    refused = description.machine(name="b", on_reset_request="reset")
+    with pytest.raises(popcorn.ConfigError, match=r"members\.b: .*on_member_reset"):
+        popcorn.System({"a": kept, "b": refused}, [])
+    with pytest.raises(ValueError, match=r'on_reset_request is "stop" or "reset"'):
+        description.machine(on_reset_request=cast(Literal["stop", "reset"], "halt"))

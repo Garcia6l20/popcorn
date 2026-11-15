@@ -709,6 +709,7 @@ class MachineDescription:
         strict_peripherals: bool | None = None,
         devices: Mapping[str, Sequence[AttachedDevice]] | None = None,
         name: str | None = None,
+        on_reset_request: Literal["stop", "reset"] = "stop",
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
         plugins loaded in order, board models, bus devices, RCC clock sources, SAI audio blocks,
@@ -730,9 +731,12 @@ class MachineDescription:
                 the machine description's. Not part of `digest`.
             name: Name of the machine in its log records and errors, as `Machine(name=)`
                 takes it, the part when None. Not part of `digest`.
+            on_reset_request: What a firmware reset request does to a run, as
+                `Machine(on_reset_request=)` takes it. Not part of `digest`.
 
         Raises:
-            ValueError: `name` is empty or holds whitespace or a dot.
+            ValueError: `name` is empty or holds whitespace or a dot, or `on_reset_request` is
+                neither "stop" nor "reset".
             ConfigError: As `part_description`, a model is not a `popcorn.model.Model` or a
                 device not a `popcorn.board.I2CTarget`, `SpiTarget`, `SpiController`, `UartDevice`
                 or `I2CController`, a class refuses its parameters, a model replaces no peripheral
@@ -832,6 +836,7 @@ class MachineDescription:
             option_bytes=self.option_bytes,
             rng=self.rng,
             name=name,
+            on_reset_request=on_reset_request,
         )
         if self.console is not None:
             self.console._check(m)  # pyright: ignore[reportPrivateUsage]
