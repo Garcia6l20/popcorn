@@ -257,6 +257,22 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
   - tests/unit/test_arm.c: added the test_arm_tb_budget tests and the two
     test_arm_mem_hook_pc tests.
   - bindings/: regenerated the constant files with the new ids.
+  - qemu/tcg/tcg-op.c, qemu/tcg/tcg-ldst.inc.c, qemu/tcg/i386/tcg-target.h,
+    qemu/tcg/i386/tcg-target.inc.c, qemu/accel/tcg/tcg-runtime.c,
+    qemu/include/tcg/tcg.h, symbols.sh and the qemu/<arch>.h rename headers:
+    on x86-64 hosts the translated code tests for an exit request after each
+    guest load and store and jumps to an out-of-line exit stub, in place of
+    a helper_check_exit_request call after every access. Upstream calls the
+    helper. A stop requested during a load into a TCG global, such as an
+    AArch64, PPC or RISC-V register load, leaves that register unchanged,
+    where upstream stores the loaded value first. pc is on the load in both.
+  - qemu/target/arm/translate.c: the translated code branches over
+    helper_uc_exit_after_insn when no exit after the instruction is armed and
+    no access error is recorded.
+  - tests/unit/test_arm.c, test_arm64.c, test_mips.c: added the
+    test_arm_exit_request tests, four test_arm_exit_after_insn tests for an
+    IT block closed by a store, a branch, ISB or SB,
+    test_arm64_exit_request_load and test_mips_exit_request_delay_slot.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
