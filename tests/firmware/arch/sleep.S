@@ -184,6 +184,23 @@ wfi_spot:
 return_only:
     bx lr
 
+    .global wfi_loop
+    .type wfi_loop, %function
+wfi_loop:
+    ldr r1, =SYST_RVR
+    movw r2, #3999
+    str r2, [r1]
+    ldr r1, =SYST_CVR
+    str r2, [r1]
+    ldr r1, =SYST_CSR
+    movs r2, #7
+    str r2, [r1]
+    .global wfi_loop_at
+    .type wfi_loop_at, %function
+wfi_loop_at:
+    wfi
+    b wfi_loop_at
+
     .global wfi_tick
     .type wfi_tick, %function
 wfi_tick:

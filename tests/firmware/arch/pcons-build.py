@@ -98,6 +98,8 @@ ENTRIES = {
         "return_only",
         "wfi_tick",
         "wfi_tick_at",
+        "wfi_loop",
+        "wfi_loop_at",
         "wfe_basic",
         "wfe_sev",
         "wfe_sev_twice",

@@ -470,6 +470,30 @@ TEST_CASE("until right after a sleeping wfi stops asleep, and the next slice sle
   CHECK((f.reg("xpsr") & 0x1ff) == 15);
 }
 
+TEST_CASE(
+    "a stop at the wfi after a wake and an isr return is not idle, and the next slice sleeps past "
+    "it")
+{
+  auto       f   = booted();
+  auto const wfi = code("wfi_loop_at");
+  f.set("pc", fn("wfi_loop"));
+  for(int round = 0; round < 6; ++round)
+  {
+    CAPTURE(round);
+    auto const before = ticks(f);
+    auto const asleep = f.run_to_stop({.until = wfi});
+    REQUIRE(asleep.reason == stop_reason::address);
+    CHECK(asleep.where.pc == wfi);
+    CHECK(ticks(f) == before + (round == 0 ? 0 : 1));
+    CHECK_FALSE(f.module->idle());
+    auto const slice =
+        f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
+    CHECK(slice.executed.value == 1);
+    CHECK(f.module->idle());
+    CHECK(f.module->pc() == wfi + 2);
+  }
+}
+
 TEST_CASE("an engine exit right after a wfi reached by a return is not taken for the wfi")
 {
   auto       f   = booted();
