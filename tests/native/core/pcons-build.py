@@ -88,7 +88,7 @@ if basic_firmware is not None:
 
 test_run_loop = add_doctest(
     "core-run-loop",
-    [here / "test_run_loop.cpp", here / "test_precise_exit.cpp"],
+    [here / "test_run_loop.cpp", here / "test_precise_exit.cpp", here / "test_budget_mode.cpp"],
     [test_support_static, core_static],
     env=m33_env,
 )

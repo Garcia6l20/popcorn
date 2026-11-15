@@ -78,6 +78,8 @@ auto cpu_model_of(core_desc const& core) -> int
 
 auto on_wfi(uc_engine*, void* user) noexcept -> int
 {
+  core::machine_services::engine_callback const entry{
+      static_cast<test_arch*>(user)->attached_services()};
   static_cast<test_arch*>(user)->wait_for_interrupt();
   return 0;
 }
@@ -85,6 +87,8 @@ auto on_wfi(uc_engine*, void* user) noexcept -> int
 auto system_read(uc_engine*, std::uint64_t offset, unsigned size, void* user) noexcept
     -> std::uint64_t
 {
+  core::machine_services::engine_callback const entry{
+      static_cast<test_arch const*>(user)->attached_services()};
   auto const word =
       static_cast<test_arch const*>(user)->read_system(static_cast<std::uint32_t>(offset));
   return size >= 4 ? word : word & ((1u << (size * 8)) - 1);
@@ -97,6 +101,8 @@ void system_write(
     std::uint64_t value,
     void*         user) noexcept
 {
+  core::machine_services::engine_callback const entry{
+      static_cast<test_arch*>(user)->attached_services()};
   static_cast<test_arch*>(user)->write_system(
       static_cast<std::uint32_t>(offset), static_cast<std::uint32_t>(value));
 }

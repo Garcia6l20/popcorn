@@ -37,7 +37,9 @@ struct access_ctx
    * it, since Unicorn does not tell MMIO callbacks the accessing instruction. Exact, the
    * instruction that caused the access, directly or through a DMA transfer it programmed,
    * while a watch or a trace sink asking for exact pcs is active: the machine then installs a
-   * memory hook that syncs the pc, which every guest load and store pays for. */
+   * memory hook that syncs the pc, which every guest load and store pays for. Exact as well
+   * while the run single-steps, and for a CPU write to a model whose drives_core_clock() is
+   * true. MMIO trace records keep the block start for such a write. */
   address pc;
   /** @brief Instructions executed when the access happened. */
   icount now;

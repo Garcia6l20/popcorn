@@ -976,6 +976,7 @@ constexpr std::uint64_t window = 100'000;
 
 auto wall_ended_slice(fixture<> const& f) -> core::slice_result
 {
+  core::machine_internals::set_budget_cap(*f.target, 1024);
   auto const slice = f.run(
       {.max_instructions = icount{1'000'000'000},
        .wall_budget      = std::chrono::nanoseconds{1},

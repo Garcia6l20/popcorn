@@ -398,7 +398,7 @@ void machine::run_state::note_raz(
 {
   if(record_unmodelled and by == initiator::cpu)
   {
-    unmodelled_hits.count(arch->pc(), window.id, offset / 4, write, unmodelled_reason::raz_wi);
+    unmodelled_hits.count(access_pc(), window.id, offset / 4, write, unmodelled_reason::raz_wi);
   }
   auto const strict = owner.options_.strict_peripherals;
   if(by == initiator::debugger and strict)
@@ -410,7 +410,7 @@ void machine::run_state::note_raz(
   {
     owner.hooks_->log(
         {.kind       = log_kind::model_warning,
-         .pc         = arch->pc(),
+         .pc         = access_pc(),
          .peripheral = name,
          .reg        = {},
          .offset     = offset,
@@ -487,7 +487,7 @@ auto machine::run_state::context_of(bus_attrs attrs, bool via_secure_alias) cons
     -> periph::access_ctx
 {
   return {
-      .pc               = arch->pc(),
+      .pc               = access_pc(),
       .now              = owner.clock_.now(),
       .by               = attrs.by,
       .secure           = attrs.secure,
@@ -1033,7 +1033,7 @@ void machine::run_state::note_unmodelled(
     logged = 1;
     owner.hooks_->log(
         {.kind       = log_kind::unmodelled_access,
-         .pc         = arch->pc(),
+         .pc         = access_pc(),
          .peripheral = name,
          .reg        = reg,
          .offset     = offset,
@@ -1067,7 +1067,7 @@ void machine::run_state::note_gated(
     {
       owner.hooks_->log(
           {.kind       = log_kind::model_warning,
-           .pc         = arch->pc(),
+           .pc         = access_pc(),
            .peripheral = name,
            .reg        = reg,
            .offset     = offset,
@@ -1185,7 +1185,7 @@ void machine::run_state::warn_unregistered(
   {
     owner.hooks_->log(
         {.kind       = log_kind::model_warning,
-         .pc         = arch->pc(),
+         .pc         = access_pc(),
          .peripheral = window.unit->name,
          .reg        = {},
          .offset     = offset,

@@ -251,6 +251,22 @@ TEST_CASE("a b . skipped to each event and bound gives the outputs of the run ex
   }
 }
 
+TEST_CASE("a b . with the tick unmasked is skipped by the budget, as the live hook skips it")
+{
+  auto const spin = [](bool live) {
+    auto s = spinning_at(narrow_loop, leg::fast);
+    core::machine_internals::set_budget_off(*s.f.target, live);
+    s.f.set("basepri", 0);
+    auto const runs = core::machine_internals::counters(*s.f.target).budget_runs;
+    auto const out  = run_once(s.f, {.budget_left = icount{40'003}});
+    CHECK((core::machine_internals::counters(*s.f.target).budget_runs > runs) == not live);
+    CHECK(out.ticks >= 9);
+    CHECK(skips(s.f) >= 9);
+    return out;
+  };
+  CHECK(spin(false) == spin(true));
+}
+
 TEST_CASE("a probe, ring block records or spin detection on the b . keep every iteration")
 {
   SUBCASE("a probe counts each iteration")

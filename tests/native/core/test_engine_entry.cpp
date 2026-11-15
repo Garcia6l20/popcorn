@@ -10,14 +10,17 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <regex>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -188,10 +191,10 @@ TEST_CASE("every engine callback is registered through a guarded entry")
 
   auto const& helpers = files.at("core/machine_impl.hpp");
   CHECK(helpers.contains("&entry_thunk<callback, User>::call"));
-  CHECK(helpers.contains("&entry_thunk<read, User>::call"));
-  CHECK(helpers.contains("&entry_thunk<write, User>::call"));
-  CHECK(helpers.contains("&entry_thunk<page, run_state>::call"));
-  CHECK(helpers.contains("&entry_thunk<access, run_state>::call"));
+  CHECK(helpers.contains("&entry_thunk<read, User, true>::call"));
+  CHECK(helpers.contains("&entry_thunk<write, User, true>::call"));
+  CHECK(helpers.contains("&entry_thunk<page, run_state, true>::call"));
+  CHECK(helpers.contains("&entry_thunk<access, run_state, true>::call"));
 
   auto const& arch  = files.at("arch/armv8m/cortex_m.cpp");
   auto const& sleep = files.at("arch/armv8m/sleep.cpp");
@@ -200,6 +203,14 @@ TEST_CASE("every engine callback is registered through a guarded entry")
   CHECK(opens_with(arch, "auto cortex_m::mmio_read(", "engine_callback const"));
   CHECK(opens_with(arch, "void cortex_m::mmio_write(", "engine_callback const"));
   CHECK(opens_with(sleep, "auto cortex_m::wfi_hook(", "engine_callback const"));
+
+  auto const test_arch = read_text(
+      std::filesystem::path{std::getenv("POPCORN_NATIVE_SRC")}
+      / "../../tests/native/support/test_arch.cpp");
+  CHECK(registrations(test_arch) == 2);
+  CHECK(opens_with(test_arch, "auto on_wfi(", "engine_callback const"));
+  CHECK(opens_with(test_arch, "auto system_read(", "engine_callback const"));
+  CHECK(opens_with(test_arch, "void system_write(", "engine_callback const"));
 
   auto const& security = files.at("arch/armv8m/security.cpp");
   CHECK(security.contains("uc_ctl_arm_idau(engine, &idau_lookup, this)"));
@@ -244,4 +255,40 @@ TEST_CASE("the services engine callback scope enters the machine's engine entry 
     CHECK(depth(f) == 1);
   }
   CHECK(depth(f) == 0);
+}
+
+TEST_CASE("a model read after a clock-driving write in one block carries the block start")
+{
+  constexpr address                      code = 0x2004'0000;
+  constexpr std::array<std::uint16_t, 4> body{
+      0xbf00, 0x6008 | (23u << 6), 0x6808 | (22u << 6) | 3u, 0xbe00};
+  core::machine_options options;
+  options.models.emplace(
+      "TESTDEV",
+      [](popcorn::periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+        auto made          = std::make_shared<test_model>(ctx);
+        made->drives_clock = true;
+        made->record       = true;
+        return made;
+      });
+  for(auto const live : {false, true})
+  {
+    CAPTURE(live);
+    fixture f{m33(), "intercepts", options};
+    core::machine_internals::set_budget_off(*f.target, live);
+    std::ignore = f.run_to_stop();
+    auto& model = dynamic_cast<test_model&>(*f.target->model("TESTDEV"));
+    REQUIRE(f.target->mem().write_block(code, std::as_bytes(std::span{body})));
+    f.set("pc", code | 1u);
+    f.set("r0", 0);
+    f.set("r1", 0x4001'0000);
+    model.accesses.clear();
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    REQUIRE(model.accesses.size() == 2);
+    CHECK(model.accesses[0].write);
+    CHECK(model.accesses[0].ctx.pc == code + 2);
+    CHECK_FALSE(model.accesses[1].write);
+    CHECK(model.accesses[1].ctx.pc == code);
+  }
 }

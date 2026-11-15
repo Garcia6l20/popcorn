@@ -3,6 +3,7 @@
 #include "../periph/line_bus.hpp"
 #include "../periph/register_layer.hpp"
 #include "engine.hpp"
+#include "handler_scope.hpp"
 #include "memory_map.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -748,6 +749,10 @@ enum class engine_end : std::uint8_t
   wall,
   /** @brief A model asked for a precise exit after the access instruction. */
   precise,
+  /** @brief The engine ended at a block start with nothing due, no stop and the wall budget
+   * left: the budget reached its cap, or a request whose stop bit was already taken. The engine
+   * run went on at once. */
+  budget,
   /** @brief An engine error, a trap, a stopping intercept, until_thread, or a callback that
    * threw, whichever hook then stopped the engine. */
   other,
@@ -778,8 +783,11 @@ struct run_counters
   std::uint64_t remove_calls_in_engine{};
   /** @brief `uc_ctl_remove_cache` calls of removes_direct. */
   std::uint64_t remove_calls_direct{};
-  /** @brief Clock moves over a self-branch by skip_self_branch. */
+  /** @brief Clock moves over a self-branch: by skip_self_branch, or by the engine's budget
+   * through a self-branch block. */
   std::uint64_t self_branch_skips{};
+  /** @brief Engine runs in budget mode, cap exits re-entered included. */
+  std::uint64_t budget_runs{};
   /** @brief Engine runs by engine_end. */
   std::array<std::uint64_t, engine_end_count> ends{};
 
@@ -1152,13 +1160,15 @@ struct machine::run_state
   std::atomic<std::uint8_t> stop_bits{};
 
   /**
-   * @brief Sets the engine thread's bit, also from another thread through do_request_stop(): the
-   *        release pairs with clear_internal_stop(), so a clear that erases this set sees the
-   *        request made before it.
+   * @brief Sets the engine thread's bit, also from another thread through do_request_stop(), then
+   *        asks the engine to end its run at the next block start. The store releases, pairing
+   *        with clear_internal_stop(), so a clear that erases this set sees the request made
+   *        before it.
    */
   void raise_stop() noexcept
   {
-    stop_bits.fetch_or(stop_internal, std::memory_order_release);
+    stop_bits.fetch_or(stop_internal, std::memory_order_seq_cst);
+    request_engine_exit();
   }
 
   /** @brief Clears the engine thread's bit, leaving a mail bit set. */
@@ -1260,6 +1270,15 @@ struct machine::run_state
   /** @brief Whether the MMIO write being served comes from the CPU through a window whose model
    * drives the core clock, so that pc is exact. */
   bool exact_write = false;
+
+  /** @brief pc of the CPU access a callback serves: exact outside the engine, while stepping,
+   * while the exact pc hook is held and for a write that exact_write marks, else block_pc, the
+   * start of the block making the access. */
+  [[nodiscard]] auto access_pc() const -> address
+  {
+    return not in_engine or stepping or exact_write or exact_pc.users() != 0 ? arch->pc()
+                                                                             : block_pc;
+  }
   /** @brief Bus attributes of the CPU access the MMIO callbacks serve, kept after it. */
   uc_mem_attrs access{};
   /** @brief Whether the firewall refused the CPU access being dispatched, until its MMIO
@@ -2252,15 +2271,78 @@ struct machine::run_state
    * machine_services::engine_callback. */
   std::uint32_t entry_depth = 0;
 
-  /** @brief Runs on entry to the outermost engine callback. Empty: the block hook charges every
-   * block to the clock and sets block_pc itself. */
-  void sync_clock() noexcept
-  {}
+  /** @brief How the engine run in progress counts blocks. */
+  enum class count_mode : std::uint8_t
+  {
+    /** @brief No engine run. */
+    off,
+    /** @brief The engine counts a budget in translated code, the block hook does not run. */
+    budget,
+    /** @brief The block hook runs at every block and charges it, as with no budget. */
+    live,
+  };
 
-  /** @brief Runs on exit from the outermost engine callback. Empty: the block hook tests every
-   * stop condition itself at each block. */
-  void rearm() noexcept
-  {}
+  /** @brief Largest budget armed at once: the wall budget is read at each such exit. */
+  static constexpr std::int64_t default_budget_cap = 65536;
+
+  /** @brief Budget state of the engine, null when the engine has no budget mode. */
+  uc_tb_budget* tb_budget{};
+  /** @brief Mode of the engine run in progress. */
+  count_mode counting = count_mode::off;
+  /** @brief Budget value at the last arm or sync, so the instructions run since are the
+   * difference to the engine's budget. */
+  std::int64_t armed{};
+  /** @brief Largest budget armed at once, default_budget_cap outside tests. */
+  std::int64_t budget_cap = default_budget_cap;
+  /** @brief Whether every engine run uses the live block hook, for tests comparing both modes. */
+  bool budget_off = false;
+
+  /** @brief Whether the run needs the block hook at every block: a per-block observer, or a
+   * pending exception the core cannot take yet, which an instruction may unmask with no
+   * callback. */
+  [[nodiscard]] auto wants_live() noexcept -> bool;
+
+  /** @brief In budget mode, charges the clock with the instructions the engine counted since the
+   * last arm or sync, and takes block_pc and block_size from the block the engine runs. */
+  void sync_clock() noexcept;
+
+  /** @brief In budget mode, arms the budget to the next deadline or event, capped, 0 when a stop
+   * is pending or an exception is deliverable, or turns the block hook live for the rest of the
+   * engine run when wants_live() holds. */
+  void rearm() noexcept;
+
+  /** @brief Arms the budget from the clock, the deadline, the events and the pending state. */
+  void arm_budget() noexcept;
+
+  /** @brief Turns the block hook live and the budget off for the rest of the engine run. */
+  void go_live() noexcept;
+
+  /** @brief Picks the mode of the next engine run and arms it, after clearing a request to end
+   * the previous one. */
+  void begin_engine_run() noexcept;
+
+  /** @brief After an engine run, synced: whether it ended at a block start with nothing due, no
+   * stop and the wall budget left, because the budget reached its cap or a request whose stop bit
+   * was already taken ended it, so the run goes on. Any other block-start end is recorded as a
+   * block hook stop would record it. */
+  [[nodiscard]] auto at_block_start_exit() noexcept -> bool;
+
+  /** @brief Records an engine run that ended at a block start at clock @p now as stop_at_block
+   * does. */
+  void stop_at_boundary_exit(icount now) noexcept;
+
+  /** @brief Asks the engine to end its run at the next block start, from any thread, after the
+   * caller set a stop bit with a seq_cst read-modify-write. begin_engine_run() clears the request,
+   * then reads the stop bits seq_cst. The fork stores the request with release, so a request the
+   * clear erases leaves a stop bit the read sees on x86-64 and AArch64, where the read-modify-write
+   * orders before the store, and the next budget cap or block hook takes any bit it misses. */
+  void request_engine_exit() noexcept
+  {
+    if(tb_budget != nullptr)
+    {
+      std::ignore = uc_ctl_request_exit(engine);
+    }
+  }
 
   /** @brief Enters an engine callback: the outermost one calls sync_clock(). */
   void enter_callback() noexcept
@@ -2322,20 +2404,46 @@ struct machine::run_state
     }
   }
 
+  /** @brief Whether a callback serves a guest access through an engine MMIO window or the bus
+   * filter, where the engine pc is not synced. */
+  bool serving_access = false;
+
+  /** @brief pc for a record or a log a callback makes with no pc of its own: access_pc() while
+   * serving a guest access, the engine pc otherwise, which the engine syncs before code,
+   * memory, interrupt and instruction hooks. */
+  [[nodiscard]] auto callback_pc() const -> address
+  {
+    return serving_access ? access_pc() : arch->pc();
+  }
+
   /** @brief Engine callback @p callback run inside an engine_entry of the run state its last
-   * argument, a @p User, names. */
-  template <auto callback, typename User> struct entry_thunk;
+   * argument, a @p User, names, with serving_access set when @p access. */
+  template <auto callback, typename User, bool access = false> struct entry_thunk;
 
   /** @brief entry_thunk of a callback taking @p Args, its user data last. */
-  template <typename Result, typename... Args, Result (*callback)(Args...) noexcept, typename User>
-  struct entry_thunk<callback, User>
+  template <
+      typename Result,
+      typename... Args,
+      Result (*callback)(Args...) noexcept,
+      typename User,
+      bool access>
+  struct entry_thunk<callback, User, access>
   {
     /** @brief The callback the engine calls. */
     static auto call(Args... args) noexcept -> Result
     {
       auto* const        user = std::get<sizeof...(Args) - 1>(std::forward_as_tuple(args...));
-      engine_entry const entry{entry_run(*static_cast<User*>(user))};
-      return callback(args...);
+      auto&              run  = entry_run(*static_cast<User*>(user));
+      engine_entry const entry{run};
+      if constexpr(access)
+      {
+        flag_scope const serving{run.serving_access, true};
+        return callback(args...);
+      }
+      else
+      {
+        return callback(args...);
+      }
     }
   };
 
@@ -2364,21 +2472,21 @@ struct machine::run_state
   }
 
   /** @brief Maps [@p base, @p base + @p size) as engine MMIO served by @p read and @p write,
-   * each inside an engine_entry. */
+   * each inside an engine_entry, serving_access set. */
   template <auto read, auto write, typename User>
   auto map_engine_mmio(std::uint64_t base, std::uint64_t size, User& user) noexcept -> uc_err
   {
     return uc_mmio_map_attrs(
-        engine, base, size, &entry_thunk<read, User>::call, &user, &entry_thunk<write, User>::call,
-        &user);
+        engine, base, size, &entry_thunk<read, User, true>::call, &user,
+        &entry_thunk<write, User, true>::call, &user);
   }
 
   /** @brief Installs @p page and @p access as the engine bus filter, each inside an
-   * engine_entry. */
+   * engine_entry, serving_access set. */
   template <auto page, auto access> auto install_bus_filter() noexcept -> uc_err
   {
-    auto* const on_page   = &entry_thunk<page, run_state>::call;
-    auto* const on_access = &entry_thunk<access, run_state>::call;
+    auto* const on_page   = &entry_thunk<page, run_state, true>::call;
+    auto* const on_access = &entry_thunk<access, run_state, true>::call;
     return uc_ctl_bus_filter(engine, on_page, on_access, this);
   }
 
@@ -2484,6 +2592,18 @@ struct machine_internals
   [[nodiscard]] static auto entry_depth(machine const& target) noexcept -> std::uint32_t
   {
     return target.run_->entry_depth;
+  }
+
+  /** @brief Sets the largest budget @p target arms at once, at least 1. */
+  static void set_budget_cap(machine& target, std::int64_t cap) noexcept pre(cap > 0)
+  {
+    target.run_->budget_cap = cap;
+  }
+
+  /** @brief Makes every engine run of @p target use the live block hook when @p off. */
+  static void set_budget_off(machine& target, bool off) noexcept
+  {
+    target.run_->budget_off = off;
   }
 
   /** @brief The engine of @p target. */

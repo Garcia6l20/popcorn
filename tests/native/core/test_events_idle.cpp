@@ -456,6 +456,38 @@ TEST_CASE("a timer enabled from inside the engine expires within one block of it
   }
 }
 
+TEST_CASE("a timer enabled from inside the engine expires at the same counts with any budget cap")
+{
+  auto const stamps_with = [](std::optional<std::int64_t> cap) {
+    auto f = booted_stamping();
+    if(cap)
+    {
+      core::machine_internals::set_budget_cap(*f.target, *cap);
+    }
+    else
+    {
+      core::machine_internals::set_budget_off(*f.target, true);
+    }
+    f.set("pc", sym("idle", "timer_spin"));
+    f.set("primask", 1);
+    auto const before = core::machine_internals::counters(*f.target).budget_runs;
+    auto const slice  = f.run({.wall_budget = long_wall, .budget_left = icount{4 * period + 100}});
+    CHECK((core::machine_internals::counters(*f.target).budget_runs > before) == cap.has_value());
+    REQUIRE(slice.stopped.has_value());
+    auto stamps = f.module->stamps;
+    stamps.push_back(slice.executed.value);
+    stamps.push_back(f.target->virtual_clock().now().value);
+    return stamps;
+  };
+  auto const live = stamps_with(std::nullopt);
+  REQUIRE(live.size() >= 6);
+  for(auto const cap : {std::int64_t{1}, std::int64_t{3}, std::int64_t{999}, std::int64_t{65536}})
+  {
+    CAPTURE(cap);
+    CHECK(stamps_with(cap) == live);
+  }
+}
+
 TEST_CASE("a call spanning timer ticks leaves the timer on its period, then disabling stops it")
 {
   auto f = booted_stamping();

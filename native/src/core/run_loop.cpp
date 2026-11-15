@@ -11,6 +11,8 @@
 #include <reflex/enum.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <limits>
@@ -143,6 +145,8 @@ void machine::run_state::install_hooks()
       add_engine_hook<&on_bad_access>(hook, UC_HOOK_MEM_UNMAPPED | UC_HOOK_MEM_PROT, *this, 1, 0),
       "adding the refused access hook");
   check(uc_ctl_exits_enable(engine), "enabling exits");
+  check(uc_ctl_tb_budget_enable(engine), "enabling the instruction budget");
+  check(uc_ctl_tb_budget_state(engine, &tb_budget), "reading the instruction budget");
 
   for(auto const& region : owner.memory_)
   {
@@ -1123,13 +1127,157 @@ auto machine::run_state::trap_after(uc_err err) -> std::optional<slice_end>
       std::format("engine stopped at {:#010x}: {}", owner.arch_->pc(), uc_strerror(err)));
 }
 
+auto machine::run_state::wants_live() noexcept -> bool
+{
+  return budget_off
+      or stepping
+      or spin_on
+      or coverage_on
+      or block_records
+      or block_watch
+      or (arch->pending() and not deliverable());
+}
+
+void machine::run_state::sync_clock() noexcept
+{
+  if(counting != count_mode::budget)
+  {
+    return;
+  }
+  auto const left  = tb_budget->budget;
+  auto const spent = armed - left;
+  armed            = left;
+  if(spent > 0)
+  {
+    owner.clock_driver_.advance(icount{static_cast<std::uint64_t>(spent)});
+  }
+  auto const current = tb_budget->cur_block;
+  block_pc           = static_cast<address>(current & 0xffff'ffffu);
+  block_size         = static_cast<std::uint32_t>(current >> 32);
+}
+
+void machine::run_state::rearm() noexcept
+{
+  if(counting != count_mode::budget)
+  {
+    return;
+  }
+  if(wants_live())
+  {
+    go_live();
+    return;
+  }
+  arm_budget();
+}
+
+void machine::run_state::arm_budget() noexcept
+{
+  auto const now    = owner.clock_driver_.exact_now();
+  auto const target = std::min(deadline, owner.scheduler_.earliest());
+  auto       budget = std::int64_t{};
+  if(not stop_pending() and not arch->pending() and now < target)
+  {
+    budget = static_cast<std::int64_t>(
+        std::min<std::uint64_t>(target.value - now.value, static_cast<std::uint64_t>(budget_cap)));
+  }
+  armed             = budget;
+  tb_budget->budget = budget;
+}
+
+void machine::run_state::go_live() noexcept
+{
+  counting             = count_mode::live;
+  armed                = std::numeric_limits<std::int64_t>::max();
+  tb_budget->budget    = armed;
+  tb_budget->hook_live = 1;
+}
+
+void machine::run_state::begin_engine_run() noexcept
+{
+  if(tb_budget == nullptr)
+  {
+    counting = count_mode::live;
+    return;
+  }
+  std::atomic_ref{tb_budget->async_exit}.store(0, std::memory_order_seq_cst);
+  auto const stopping = stop_bits.load(std::memory_order_seq_cst) != 0;
+  if(not stopping and wants_live())
+  {
+    go_live();
+    return;
+  }
+  counting             = count_mode::budget;
+  tb_budget->hook_live = 0;
+  arm_budget();
+}
+
+auto machine::run_state::at_block_start_exit() noexcept -> bool
+{
+  auto const cause = tb_budget == nullptr ? UC_TB_EXIT_NONE : tb_budget->exit_cause;
+  if(cause == UC_TB_EXIT_NONE or precise_exit)
+  {
+    return false;
+  }
+  auto const resumes = arch->pc();
+  if(counting == count_mode::budget
+     and cause == UC_TB_EXIT_BUDGET
+     and block_size == 1
+     and block_pc == resumes
+     and not sites.contains(resumes)
+     and guarded([this, resumes] { return arch->self_branch(resumes); }))
+  {
+    ++counters.self_branch_skips;
+  }
+  block_pc           = resumes;
+  auto const now     = owner.clock_driver_.exact_now();
+  auto const runs_on = cause == UC_TB_EXIT_ASYNC or counting == count_mode::budget;
+  if(runs_on
+     and not failure
+     and not stop_pending()
+     and not(counting == count_mode::budget and arch->pending())
+     and now < std::min(deadline, owner.scheduler_.earliest())
+     and not wall_expired_now())
+  {
+    return true;
+  }
+  stop_at_boundary_exit(now);
+  return false;
+}
+
+void machine::run_state::stop_at_boundary_exit(icount now) noexcept
+{
+  end_cause           = boundary_cause(now);
+  boundary_stop       = true;
+  coverage.open_insns = 0;
+}
+
 auto machine::run_state::engine_run() -> uc_err
 {
   engine_scope const scope{in_engine};
-  ++counters.engine_runs;
-  end_cause      = engine_end::exit;
-  auto const err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
-  contract_assert(entry_depth == 0);
+  end_cause = engine_end::exit;
+  begin_engine_run();
+  auto err = UC_ERR_OK;
+  for(;;)
+  {
+    ++counters.engine_runs;
+    if(counting == count_mode::budget)
+    {
+      ++counters.budget_runs;
+    }
+    err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+    contract_assert(entry_depth == 0);
+    sync_clock();
+    if(err != UC_ERR_OK or not at_block_start_exit())
+    {
+      break;
+    }
+    ++counters.ends[std::to_underlying(engine_end::budget)];
+    if(counting == count_mode::budget)
+    {
+      arm_budget();
+    }
+  }
+  counting               = count_mode::off;
   controller_guard.armed = false;
   if(err != UC_ERR_OK)
   {
@@ -1406,7 +1554,8 @@ auto machine::run_slice(slice_request const& request) -> slice_result
 
 void machine::interrupt() noexcept
 {
-  run_->stop_bits.fetch_or(run_state::stop_mail, std::memory_order_relaxed);
+  run_->stop_bits.fetch_or(run_state::stop_mail, std::memory_order_seq_cst);
+  run_->request_engine_exit();
 }
 
 void machine::do_request_stop(stop_reason reason, std::string detail)

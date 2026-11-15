@@ -1,5 +1,7 @@
 #include "arch_fixture.hpp"
 
+#include "../../../native/src/core/machine_impl.hpp"
+
 #include "cortex_m.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -491,6 +493,63 @@ TEST_CASE(
     CHECK(slice.executed.value == 1);
     CHECK(f.module->idle());
     CHECK(f.module->pc() == wfi + 2);
+  }
+}
+
+namespace
+{
+struct sleep_state
+{
+  address       pc{};
+  std::uint32_t ticks{};
+  std::uint64_t now{};
+  bool          idle{};
+
+  auto operator==(sleep_state const&) const -> bool = default;
+};
+}
+
+TEST_CASE("cap exits around wfi wakes, also ending each slice, give the run of the live hook")
+{
+  auto const target   = vtime{20 * period * ps_per_instr + 1234 * ps_per_instr};
+  auto const sleeping = [&target](std::optional<std::int64_t> cap, bool sliced) {
+    auto f = booted();
+    if(cap)
+    {
+      core::machine_internals::set_budget_cap(*f.target, *cap);
+    }
+    else
+    {
+      core::machine_internals::set_budget_off(*f.target, true);
+    }
+    f.set("pc", fn("wfi_loop"));
+    auto const before = core::machine_internals::counters(*f.target).budget_runs;
+    auto const wall =
+        sliced ? std::chrono::nanoseconds{0} : std::chrono::nanoseconds{60'000'000'000};
+    for(int slices = 0; slices < 100'000; ++slices)
+    {
+      auto const slice = f.run({.wall_budget = wall, .until_time = target});
+      if(slice.stopped)
+      {
+        REQUIRE(slice.stopped->reason == stop_reason::time);
+        break;
+      }
+    }
+    CHECK((core::machine_internals::counters(*f.target).budget_runs > before) == cap.has_value());
+    return sleep_state{
+        .pc    = f.module->pc(),
+        .ticks = ticks(f),
+        .now   = f.target->virtual_clock().now().value,
+        .idle  = f.module->idle()};
+  };
+  auto const live = sleeping(std::nullopt, false);
+  CHECK(live.ticks >= 19);
+  CHECK(sleeping(std::nullopt, true) == live);
+  for(auto const cap : {std::int64_t{1}, std::int64_t{2}, std::int64_t{7}, std::int64_t{65536}})
+  {
+    CAPTURE(cap);
+    CHECK(sleeping(cap, false) == live);
+    CHECK(sleeping(cap, true) == live);
   }
 }
 

@@ -139,7 +139,7 @@ TEST_CASE("SRAM stores in a spin are not hooked and never stop the engine")
   CHECK(after.removes_in_engine == before.removes_in_engine);
   CHECK(after.remove_calls_in_engine == before.remove_calls_in_engine);
   CHECK(ended(before, after, engine_end::store) == 0);
-  CHECK(after.engine_runs - before.engine_runs == 1);
+  CHECK(after.engine_runs - before.engine_runs - ended(before, after, engine_end::budget) == 1);
   CHECK(ends_sum(after) == after.engine_runs);
 }
 

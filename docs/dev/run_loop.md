@@ -11,6 +11,25 @@ of the core rate starts an epoch, and time inside an epoch is the instructions s
 divided by the instruction rate, `core_hz / cpi`. The clock never reads wall time. The
 instruction counter advances once per translated block, so it is exact to the block.
 
+The engine counts blocks in one of two modes, chosen at each engine run:
+
+- Budget mode, the default. Translated code tests a budget at each block start and subtracts
+  the block's instruction count from it, and the block hook does not run. The budget is armed
+  to the deadline or the next event, whichever comes first, capped at 65536 instructions, and 0
+  while a stop is pending or an exception is deliverable. Every engine callback runs inside an
+  `engine_entry`, or `machine_services::engine_callback` for the arch module's own: the
+  outermost one charges the clock with the instructions counted since the last arm on entry,
+  and re-arms the budget on exit, since a callback may schedule an earlier event, change the
+  rate or raise an exception. An MMIO record or access context outside the exact pc hook
+  carries the start of the block making the access.
+- Live mode. The block hook runs at every block, charges it and tests the stop conditions. A run
+  is live while a per-block observer is on: stepping, coverage, block trace records, spin
+  detection or a return watch. A budget run turns live at the callback that leaves an exception
+  pending and masked, since an instruction can unmask it with no callback.
+
+Both modes charge each block at its start and stop before the same block, so every output is
+the same.
+
 An intercept or a probe stands at a code site inside its block. The block hook has charged the
 whole block when the site runs, so the site takes the instructions from itself to the block end
 back before it reads the clock, `clock_driver::rewind`, and charges them again when the run
@@ -36,7 +55,9 @@ A core in a branch to itself, a one-instruction block that `arch::self_branch` n
 Arm `b .` outside an IT block, executes instructions. When the last block hook saw the same
 one-instruction block, the arch decodes it from its bytes and the core state. When nothing is
 deliverable the hook then advances the clock to the deadline or the next
-event, whichever comes first, then stops the engine before the block. The skipped iterations
+event, whichever comes first, then stops the engine before the block. In budget mode the engine
+consumes the rest of the budget in the block itself when no code hook is on it, which counts the
+same instructions. The skipped iterations
 count as executed, as if they had run, so every output equals the slow path. The skip is off
 while a per-block observer is on: stepping, coverage, block trace records, spin detection, a
 return watch, or a code hook site on the block. `self_branch_skips` in the run counters counts
@@ -93,8 +114,9 @@ In order, one turn of the loop:
    bound. With no event and no time bound it stops with IDLE.
 5. Otherwise delivers a pending exception. A pending interrupt therefore wakes a core in WFI
    before any jump. If the core still sleeps after the delivery, it jumps the clock as in step 4.
-6. Otherwise takes the smallest of the instruction bounds and the next event as the deadline and
-   starts the engine with `uc_emu_start`.
+6. Otherwise takes the smallest of the instruction bounds and the next event as the deadline,
+   picks budget or live mode and starts the engine with `uc_emu_start`. A budget run that
+   reaches its cap with nothing due and the wall budget left starts the engine again at once.
 7. After the engine returns, adds the executed instructions, handles requests, then turns a bus
    fault or an unmapped access into a stop or a resume through the architecture module.
 
@@ -107,8 +129,9 @@ to the next hit.
 
 `slice_request` in `native/include/popcorn/core/machine.hpp` carries the bounds. The bounds
 `until`, `budget_left`, `exact_instructions`, `until_time` and `stop_when` stop the run. The
-instruction cap of one million and the wall budget of one millisecond, read every 256 blocks,
-only end the slice so the caller can yield. `exact_instructions` runs whole blocks up to the
+instruction cap of one million and the wall budget of one millisecond, read every 256 blocks in
+live mode and at each budget cap in budget mode, about every 65536 instructions, only end the
+slice so the caller can yield. `exact_instructions` runs whole blocks up to the
 last block boundary before the count, then single-steps the rest. `stop_when` is evaluated
 after each dispatched event, at a slice end set by `max_instructions` and, for a request with
 `stop_when_events_only`, once when the core falls asleep, never per

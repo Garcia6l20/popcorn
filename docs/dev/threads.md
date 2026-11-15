@@ -11,7 +11,8 @@ never gets one. A hosted machine is in one of four states:
 
 - `parked`: no goal and no free run. Callers hold the host mutex and touch the machine directly.
 - `running`: the host thread runs slices without the mutex. Callers post commands, served at the
-  next block boundary.
+  next block boundary: `machine::interrupt` sets the mail bit, then asks the engine to end its
+  run at the next block start, never inside a block.
 - `idle_wait`: a free run idles with nothing due, and the thread sleeps until a request.
 - `stopping`: the host closed. The machine stays reachable and nothing runs it.
 

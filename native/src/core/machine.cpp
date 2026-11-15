@@ -453,14 +453,14 @@ void machine::do_trace(trace_record const& record)
   {
     ++run_->counters.entries;
   }
-  run_->emit(record, arch_->pc(), true);
+  run_->emit(record, run_->callback_pc(), true);
 }
 
 void machine::do_log(log_record record)
 {
   if(record.pc == 0)
   {
-    record.pc = arch_->pc();
+    record.pc = run_->callback_pc();
   }
   hooks_->log(record);
 }
