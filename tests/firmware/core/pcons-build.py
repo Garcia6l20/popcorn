@@ -36,6 +36,12 @@ for name, source in (
             f"-Wl,--undefined={entry}" for entry in UNREFERENCED.get(name, ())
         )
 
+for name, mode in (("b7_inline", 0), ("b7_call", 1), ("b7_bdot", 2), ("b7_wfi", 3)):
+    _, target = add_firmware("core", name, [here / "b7.c"])
+    if target is not None:
+        target.private.compile_flags.append(f"-DB7_MODE={mode}")
+        target.private.link_flags.append(SECTION_BOUNDS)
+
 add_firmware("core", "alu", [here / "alu.S"])
 add_firmware("core", "mmio", [here / "mmio.S"])
 add_firmware("core", "irq", [here / "irq.S"])

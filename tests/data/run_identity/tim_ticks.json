@@ -1,0 +1,63 @@
+{
+ "stops": [
+  [
+   "StopReason.ADDRESS",
+   134218544,
+   148,
+   37000000
+  ],
+  [
+   "StopReason.TIME",
+   134218866,
+   4148,
+   1037000000
+  ],
+  [
+   "StopReason.BUDGET",
+   134218866,
+   60240,
+   15060000000
+  ],
+  [
+   "StopReason.TIME",
+   134218866,
+   92240,
+   23060000000
+  ],
+  [
+   "StopReason.TIME",
+   134218866,
+   252240,
+   63060000000
+  ],
+  [
+   "StopReason.ADDRESS",
+   134218440,
+   256221,
+   64055250000
+  ]
+ ],
+ "snapshots": "c41ef72963d68630",
+ "uart": "",
+ "trace": [
+  "379e9abc722101e1",
+  782
+ ],
+ "trace_blocks": [
+  "7e0e7fbeb72a4565",
+  1076
+ ],
+ "coverage": [
+  "c40767e866be0485",
+  34,
+  30
+ ],
+ "trace_mmio": [
+  "b14e94a08a2d47ea",
+  435
+ ],
+ "trace_pc": [
+  "8c9e58cccb225d80",
+  729
+ ]
+}

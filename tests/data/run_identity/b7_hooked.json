@@ -1,0 +1,57 @@
+{
+ "stops": [
+  [
+   "StopReason.TIME",
+   134217888,
+   4002,
+   1000500000
+  ],
+  [
+   "StopReason.BUDGET",
+   134217884,
+   4313,
+   1078250000
+  ],
+  [
+   "call",
+   0,
+   "StopReason.RETURNED",
+   1079000000
+  ],
+  [
+   "StopReason.TIME",
+   134217888,
+   36316,
+   9079000000
+  ],
+  [
+   "StopReason.ADDRESS",
+   134217792,
+   36550,
+   9137500000
+  ]
+ ],
+ "snapshots": "762da50152052215",
+ "uart": "",
+ "trace": [
+  "7add212a5132615a",
+  10500
+ ],
+ "trace_blocks": [
+  "50471214d0afaaef",
+  26131
+ ],
+ "coverage": [
+  "25a4278a2cbf373d",
+  12,
+  13
+ ],
+ "trace_mmio": [
+  "f478d96673e49870",
+  30
+ ],
+ "trace_pc": [
+  "29cee378db6346ec",
+  15661
+ ]
+}
