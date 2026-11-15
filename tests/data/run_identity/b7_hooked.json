@@ -16,6 +16,8 @@
    "call",
    0,
    "StopReason.RETURNED",
+   1863319536,
+   4316,
    1079000000
   ],
   [
@@ -34,11 +36,11 @@
  "snapshots": "762da50152052215",
  "uart": "",
  "trace": [
-  "7add212a5132615a",
+  "f61d55e747f3f40f",
   10500
  ],
  "trace_blocks": [
-  "50471214d0afaaef",
+  "720abfd73084862e",
   26131
  ],
  "coverage": [

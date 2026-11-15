@@ -16,15 +16,13 @@ long, so the default slicing already ends many runs on that cap. Short `budget=`
 runs on a small instruction budget, and the `b7_hooked` subject runs with an intercept and a
 `call`.
 
-The trace digests of runs with memory records leave out the pc of memory and MMIO records:
-it depends on the wall-time slicing of the run. The `trace_mmio` and `trace_pc` digests keep
-it, over traces with no memory records.
+The trace digests keep the pc of every record. The `usart_hooked` subject runs the same
+firmware as `usart_echo` with an intercept, so the exact-pc hook is active for its MMIO records.
 """
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import hashlib
 import json
 import os
@@ -82,6 +80,11 @@ def hook_systick(m: popcorn.Machine) -> list[Pending[VirtualTime]]:
     return []
 
 
+def hooked_echo(m: popcorn.Machine) -> list[Pending[VirtualTime]]:
+    hook_systick(m)
+    return write_line(m)
+
+
 def irq_wfi(m: popcorn.Machine) -> list[Pending[VirtualTime]]:
     m.var("irq_period_cycles").value = 1600
     m.var("irq_stores").value = 0
@@ -137,6 +140,12 @@ SUBJECTS = [
         setup=write_line,
     ),
     Subject(
+        "usart_hooked",
+        EXAMPLES / "usart" / "prebuilt" / "usart_echo.elf",
+        [*times(1), short(311), *times(8, 40), until("HAL_IncTick", 5)],
+        setup=hooked_echo,
+    ),
+    Subject(
         "gpdma_uart",
         EXAMPLES / "gpdma" / "prebuilt" / "gpdma_uart.elf",
         [*times(1), short(311), *times(8), until("all_transfers_done", 100), *times(1)],
@@ -156,12 +165,10 @@ def sha(*parts: object) -> str:
     return hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
 
 
-def trace_digest(path: Path, masked: bool) -> list[Any]:
+def trace_digest(path: Path) -> list[Any]:
     digest = hashlib.sha256()
     count = 0
     for record in trace.read(path):
-        if masked and isinstance(record, trace.Mem | trace.Mmio):
-            record = dataclasses.replace(record, pc=0)
         digest.update(repr(record).encode())
         count += 1
     return [digest.hexdigest()[:16], count]
@@ -188,7 +195,16 @@ async def drive(
     async def go(step: Step) -> None:
         if "call" in step:
             result = await m.call(step["call"])
-            stops.append(["call", result.value, str(result.stop.reason), result.stop.time.ps])
+            stops.append(
+                [
+                    "call",
+                    result.value,
+                    str(result.stop.reason),
+                    result.stop.pc,
+                    result.stop.instructions,
+                    result.stop.time.ps,
+                ]
+            )
             return
         stop = await m.run(**step)
         stops.append([str(stop.reason), stop.pc, stop.instructions, stop.time.ps])
@@ -210,12 +226,12 @@ async def drive(
 
 
 K = trace.TraceKind
-TRACES: dict[str, tuple[frozenset[trace.TraceKind], bool, bool]] = {
-    "bare": (frozenset(), False, False),
-    "trace": (trace.ALL - {K.BLOCK}, True, False),
-    "trace_blocks": (trace.ALL, True, True),
-    "trace_mmio": (frozenset({K.MMIO, K.IRQ, K.CALL, K.STOP}), False, False),
-    "trace_pc": (frozenset({K.BLOCK, K.MMIO, K.IRQ, K.CALL, K.STOP}), False, False),
+TRACES: dict[str, tuple[frozenset[trace.TraceKind], bool]] = {
+    "bare": (frozenset(), False),
+    "trace": (trace.ALL - {K.BLOCK}, False),
+    "trace_blocks": (trace.ALL, True),
+    "trace_mmio": (frozenset({K.MMIO, K.IRQ, K.CALL, K.STOP}), False),
+    "trace_pc": (frozenset({K.BLOCK, K.MMIO, K.IRQ, K.CALL, K.STOP}), False),
 }
 
 
@@ -225,7 +241,7 @@ def record(
     slicing: dict[str, Any],
     name: str,
 ) -> dict[str, Any]:
-    kinds, masked, covered = TRACES[name]
+    kinds, covered = TRACES[name]
     m = popcorn.Machine(part, image=popcorn.Image.elf(subject.elf), **slicing)
     m.reset()
     if covered:
@@ -236,7 +252,7 @@ def record(
         if kinds:
             with m.trace(kinds, path):
                 stops, snapshots, frames = asyncio.run(drive(m, subject, name == "bare"))
-            seen = trace_digest(path, masked)
+            seen = trace_digest(path)
         else:
             stops, snapshots, frames = asyncio.run(drive(m, subject, name == "bare"))
     out: dict[str, Any] = {
