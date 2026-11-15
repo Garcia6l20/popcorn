@@ -238,6 +238,20 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     invalid_error and an exit is pending. A store to unmapped memory inside a
     Thumb IT block, which the engine runs as one instruction, recorded its
     error and let the guest run on.
+  2026-11-15, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
+    qemu/accel/tcg/translator.c, cpu-exec.c, qemu/include/exec/gen-icount.h,
+    cpu-all.h, cpu-defs.h, qemu/include/hw/core/cpu.h,
+    qemu/include/tcg/tcg.h, qemu/target/arm/translate.c: added
+    UC_CTL_UC_TB_BUDGET, an instruction budget the translated code tests and
+    subtracts at each block start, and UC_CTL_UC_REQUEST_EXIT, a
+    cross-thread exit request taken at the next block start, with the
+    uc_tb_budget state, the exit cause, a hook_live gate on
+    UC_HOOK_BLOCK_ICOUNT, and a one-instruction branch-to-self block that
+    consumes the budget. Upstream counts no instructions in translated code
+    and has no exit that another thread can request at a block start.
+  - tests/unit/test_arm.c: added the test_arm_tb_budget tests.
+  - bindings/: regenerated the constant files with the new ids.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
