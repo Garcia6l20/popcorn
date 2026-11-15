@@ -433,8 +433,10 @@ def goal_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[obje
     b = member(u575, "link_echo", "b")
     system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
     held = Held()
+    polled = threading.Event()
 
     def predicate(_: popcorn.Machine) -> bool:
+        polled.set()
         if path == "raised":
             raise ValueError(held)
         return path == "success"
@@ -446,8 +448,8 @@ def goal_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[obje
                     a.run(stop_when=predicate, until="idle", budget=10**12), 0.01
                 )
         elif path == "closed":
-            task = asyncio.create_task(a.run(stop_when=predicate, for_=ms(50)))
-            await asyncio.sleep(0.01)
+            task = asyncio.create_task(a.run(stop_when=predicate, for_=s(10)))
+            assert await asyncio.to_thread(polled.wait, 5)
             system.close()
             with pytest.raises(popcorn.EmulationError):
                 await task
