@@ -67,6 +67,10 @@ auto test_model::on_write(
     std::uint32_t          value,
     periph::access_ctx     ctx) -> std::expected<void, bus_error>
 {
+  if(write_probe)
+  {
+    write_probe();
+  }
   if(record)
   {
     accesses.push_back(

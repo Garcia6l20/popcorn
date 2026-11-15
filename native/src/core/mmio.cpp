@@ -110,8 +110,7 @@ void machine::run_state::map_peripherals()
     if(group.size() == 1)
     {
       check(
-          uc_mmio_map_attrs(
-              engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
+          map_engine_mmio<&on_mmio_read, &on_mmio_write>(lead.base, lead.size, lead),
           std::format("mapping peripheral {}", lead.unit->name));
     }
     else
@@ -134,9 +133,7 @@ void machine::run_state::map_peripherals()
                    | std::ranges::to<std::vector>(),
       });
       check(
-          uc_mmio_map_attrs(
-              engine, lead.base, end - lead.base, &on_shared_read, shared.get(), &on_shared_write,
-              shared.get()),
+          map_engine_mmio<&on_shared_read, &on_shared_write>(lead.base, end - lead.base, *shared),
           std::format("mapping peripherals {} to {}", lead.unit->name, group.back()->unit->name));
       shared_pages.push_back(std::move(shared));
     }
@@ -234,8 +231,7 @@ auto machine::run_state::map_raz_wi(std::uint32_t page)
             .range = &range,
             .id    = static_cast<std::uint32_t>(windows.size() + raz_windows.size())}));
     check(
-        uc_mmio_map_attrs(
-            engine, range.start, range.size, &on_raz_read, &window, &on_raz_write, &window),
+        map_engine_mmio<&on_raz_read, &on_raz_write>(range.start, range.size, window),
         std::format("mapping the read-as-zero range {}", range.name));
     mapped.emplace_back(start, end - 1);
   }
@@ -254,8 +250,7 @@ auto machine::run_state::map_bit_bands() -> std::vector<std::pair<std::uint64_t,
     auto& band = *bit_band_windows.emplace_back(
         std::make_unique<bit_band_window>(bit_band_window{.run = this, .desc = &region}));
     check(
-        uc_mmio_map_attrs(
-            engine, region.start, region.size, &on_bit_band_read, &band, &on_bit_band_write, &band),
+        map_engine_mmio<&on_bit_band_read, &on_bit_band_write>(region.start, region.size, band),
         std::format("mapping the bit-band region {}", region.name));
     mapped.emplace_back(region.start, std::uint64_t{region.start} + region.size - 1);
   }
@@ -537,7 +532,7 @@ void machine::run_state::install_memory_filter()
   std::uint32_t page = 0;
   check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
   filter_page_bytes = page;
-  check(uc_ctl_bus_filter(engine, &on_bus_page, &on_bus_access, this), "installing the bus filter");
+  check(install_bus_filter<&on_bus_page, &on_bus_access>(), "installing the bus filter");
   memory_filter = true;
 }
 

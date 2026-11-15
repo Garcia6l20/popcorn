@@ -116,6 +116,8 @@ auto cortex_m::mmio_read(
     uc_mem_attrs  attrs,
     void*         user) noexcept -> std::uint64_t
 {
+  core::machine_services::engine_callback const entry{
+      static_cast<window_user const*>(user)->self->context_->services};
   auto const& access   = *static_cast<window_user const*>(user);
   access.self->access_ = attrs;
   try
@@ -143,6 +145,8 @@ void cortex_m::mmio_write(
     uc_mem_attrs  attrs,
     void*         user) noexcept
 {
+  core::machine_services::engine_callback const entry{
+      static_cast<window_user const*>(user)->self->context_->services};
   auto const& access   = *static_cast<window_user const*>(user);
   access.self->access_ = attrs;
   try

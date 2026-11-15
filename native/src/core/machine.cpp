@@ -424,6 +424,16 @@ auto machine::ring_blocks() const noexcept -> bool
   return run_->ring_blocks;
 }
 
+void machine::do_enter_engine_callback() noexcept
+{
+  run_->enter_callback();
+}
+
+void machine::do_leave_engine_callback() noexcept
+{
+  run_->leave_callback();
+}
+
 void machine::do_end_after_instruction()
 {
   if(run_->in_engine)

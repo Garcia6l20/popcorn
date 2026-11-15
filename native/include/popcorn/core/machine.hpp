@@ -964,6 +964,8 @@ private:
   void do_install_firewall(periph::bus_firewall& firewall) override;
   void do_memory_policy_changed() override;
   auto do_emulated_instruction(address at) -> emulated_arrival override;
+  void do_enter_engine_callback() noexcept override;
+  void do_leave_engine_callback() noexcept override;
 
   friend class memory_view;
   friend class register_view;

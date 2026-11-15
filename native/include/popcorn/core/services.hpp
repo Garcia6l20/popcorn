@@ -498,6 +498,38 @@ public:
     return do_emulated_instruction(at);
   }
 
+  /**
+   * @brief Scope of an engine callback a module registered with the engine itself, such as the
+   *        arch module's MMIO windows and instruction hooks. Construct it first in the callback,
+   *        before it reads the clock or changes pending state: the machine may sync its clock
+   *        with the engine when the outermost scope opens and set the engine's next stop when it
+   *        closes. Scopes nest. The callbacks the machine registers run inside one already.
+   */
+  class engine_callback
+  {
+  public:
+    /**
+     * @brief Enters an engine callback.
+     * @param services Services of the machine whose engine calls the callback.
+     */
+    explicit engine_callback(machine_services& services) noexcept : services_{services}
+    {
+      services_.do_enter_engine_callback();
+    }
+    /** @brief Not copyable. */
+    engine_callback(engine_callback const&) = delete;
+    /** @brief Not copy-assignable. */
+    auto operator=(engine_callback const&) -> engine_callback& = delete;
+    /** @brief Leaves the engine callback. */
+    ~engine_callback()
+    {
+      services_.do_leave_engine_callback();
+    }
+
+  private:
+    machine_services& services_;
+  };
+
 private:
   virtual void do_request_stop(stop_reason reason, std::string detail) = 0;
   virtual void do_request_reset(reset_kind kind)                       = 0;
@@ -528,5 +560,7 @@ private:
   virtual void do_install_firewall(periph::bus_firewall& firewall);
   virtual void do_memory_policy_changed();
   virtual auto do_emulated_instruction(address at) -> emulated_arrival;
+  virtual void do_enter_engine_callback() noexcept;
+  virtual void do_leave_engine_callback() noexcept;
 };
 }

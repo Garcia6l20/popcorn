@@ -199,9 +199,8 @@ void machine::run_state::update_sink_hooks()
   for(auto const& region : owner.memory_)
   {
     uc_hook    hook = 0;
-    auto const err  = uc_hook_add(
-        engine, &hook, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
-        reinterpret_cast<void*>(&on_sink_access), this, region->desc->start,
+    auto const err  = add_engine_hook<&on_sink_access>(
+        hook, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, *this, region->desc->start,
         std::uint64_t{region->desc->start} + region->desc->size - 1);
     if(err != UC_ERR_OK)
     {

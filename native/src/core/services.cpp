@@ -62,4 +62,10 @@ auto machine_services::do_emulated_instruction(address) -> emulated_arrival
 {
   return emulated_arrival::proceed;
 }
+
+void machine_services::do_enter_engine_callback() noexcept
+{}
+
+void machine_services::do_leave_engine_callback() noexcept
+{}
 }

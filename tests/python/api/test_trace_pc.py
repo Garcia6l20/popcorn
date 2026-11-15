@@ -105,8 +105,8 @@ def test_a_sliced_run_reports_the_addresses_a_stepped_run_does(slicing: dict[str
     assert {key(record) for record in accesses(records)} <= truth
 
 
-def parked_pc(m: popcorn.Machine, duration: int) -> tuple[int, int]:
-    stop = asyncio.run(m.run(for_=ms(duration), budget=10**9))
+def parked_pc(m: popcorn.Machine, duration_ms: float) -> tuple[int, int]:
+    stop = asyncio.run(m.run(for_=ms(duration_ms), budget=10**9))
     registers = cast(dict[str, dict[str, Any]], bson(m.snapshot().to_bytes())["registers"])
     raw = next(r["value"] for r in registers.values() if r["name"] == "pc")
     return int(raw), int(stop.pc)
@@ -115,7 +115,7 @@ def parked_pc(m: popcorn.Machine, duration: int) -> tuple[int, int]:
 def test_a_parked_core_has_the_same_raw_pc_after_an_exception_return() -> None:
     m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(CORE_FIRMWARE / "b7_wfi.elf"))
     m.reset()
-    first = parked_pc(m, 1)
-    later = parked_pc(m, 5)
+    first = parked_pc(m, 0.5)
+    later = parked_pc(m, 5.5)
     assert first[1] == later[1]
     assert first[0] == later[0]

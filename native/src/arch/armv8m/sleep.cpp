@@ -44,6 +44,8 @@ void require(uc_err err, std::string_view what)
 auto cortex_m::wfi_hook(uc_struct*, void* user) noexcept -> int
 {
   auto* const self = static_cast<cortex_m*>(user);
+
+  core::machine_services::engine_callback const entry{self->context_->services};
   try
   {
     self->wait_for_interrupt();

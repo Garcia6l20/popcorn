@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -144,6 +145,8 @@ public:
   bool reschedule_now = false;
   /** @brief pc the on_event record carries. */
   static constexpr address event_pc = 0x0800'1234;
+  /** @brief Called at the start of every on_write. */
+  std::move_only_function<void()> write_probe{};
 
 private:
   void note(std::string message, address pc = 0) const;

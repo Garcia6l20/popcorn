@@ -133,22 +133,14 @@ void machine::run_state::install_hooks()
 {
   arch         = owner.arch_.get();
   uc_hook hook = 0;
+  check(add_block_hook(hook), "adding the block hook");
   check(
-      uc_hook_add(
-          engine, &hook, UC_HOOK_BLOCK_ICOUNT, reinterpret_cast<void*>(&on_block), this, 1, 0),
-      "adding the block hook");
+      add_engine_hook<&on_interrupt>(hook, UC_HOOK_INTR, *this, 1, 0), "adding the interrupt hook");
   check(
-      uc_hook_add(engine, &hook, UC_HOOK_INTR, reinterpret_cast<void*>(&on_interrupt), this, 1, 0),
-      "adding the interrupt hook");
-  check(
-      uc_hook_add(
-          engine, &hook, UC_HOOK_INSN_INVALID, reinterpret_cast<void*>(&on_invalid_insn), this, 1,
-          0),
+      add_engine_hook<&on_invalid_insn>(hook, UC_HOOK_INSN_INVALID, *this, 1, 0),
       "adding the invalid instruction hook");
   check(
-      uc_hook_add(
-          engine, &hook, UC_HOOK_MEM_UNMAPPED | UC_HOOK_MEM_PROT,
-          reinterpret_cast<void*>(&on_bad_access), this, 1, 0),
+      add_engine_hook<&on_bad_access>(hook, UC_HOOK_MEM_UNMAPPED | UC_HOOK_MEM_PROT, *this, 1, 0),
       "adding the refused access hook");
   check(uc_ctl_exits_enable(engine), "enabling exits");
 
@@ -174,9 +166,9 @@ void machine::run_state::install_hooks()
   for(auto& watched : guest_windows)
   {
     check(
-        uc_hook_add(
-            engine, &hook, UC_HOOK_MEM_WRITE, reinterpret_cast<void*>(&on_guest_store), &watched,
-            watched.window.start, watched.window.start + watched.window.size - 1),
+        add_engine_hook<&on_guest_store>(
+            hook, UC_HOOK_MEM_WRITE, watched, watched.window.start,
+            watched.window.start + watched.window.size - 1),
         std::format("adding the guest store hook at {:#010x}", watched.window.start));
   }
   install_memory_filter();
@@ -799,8 +791,7 @@ void machine::run_state::update_stepping(slice_request const& request)
     return;
   }
   check(
-      uc_hook_add(engine, &step_hook, UC_HOOK_CODE, reinterpret_cast<void*>(&on_step), this, 1, 0),
-      "adding the stepping hook");
+      add_engine_hook<&on_step>(step_hook, UC_HOOK_CODE, *this, 1, 0), "adding the stepping hook");
   stepping = true;
 }
 
@@ -1136,8 +1127,9 @@ auto machine::run_state::engine_run() -> uc_err
 {
   engine_scope const scope{in_engine};
   ++counters.engine_runs;
-  end_cause              = engine_end::exit;
-  auto const err         = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  end_cause      = engine_end::exit;
+  auto const err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  contract_assert(entry_depth == 0);
   controller_guard.armed = false;
   if(err != UC_ERR_OK)
   {

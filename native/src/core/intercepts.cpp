@@ -59,9 +59,7 @@ auto machine::run_state::site_at(address at) -> code_site&
   if(not site)
   {
     site = std::make_unique<code_site>(code_site{.run = this, .at = at, .hook = 0, .entries = {}});
-    auto const err = uc_hook_add(
-        engine, &site->hook, UC_HOOK_CODE, reinterpret_cast<void*>(&on_code_site), site.get(), at,
-        at);
+    auto const err = add_engine_hook<&on_code_site>(site->hook, UC_HOOK_CODE, *site, at, at);
     if(err != UC_ERR_OK)
     {
       sites.erase(at);
@@ -688,9 +686,8 @@ auto machine::add_watch(address at, std::uint32_t size, watch_kind kind, watch_h
     auto const lowest = std::max<std::uint64_t>(
         region->desc->start, first_byte - std::min<std::uint64_t>(first_byte, 3));
     uc_hook    hook = 0;
-    auto const err  = uc_hook_add(
-        engine_.get(), &hook, hook_types(kind),
-        reinterpret_cast<void*>(&run_state::on_watch_access), entry.get(), lowest, last_byte);
+    auto const err  = run_->add_engine_hook<&run_state::on_watch_access>(
+        hook, hook_types(kind), *entry, lowest, last_byte);
     if(err != UC_ERR_OK)
     {
       for(auto const added : entry->hooks)
@@ -879,9 +876,8 @@ auto machine::run_state::new_controller_page(host_buffer const& buffer, std::siz
           .serial    = controller_hook_serial + 1,
           .hook      = 0});
       check(
-          uc_hook_add(
-              engine, &hook->hook, UC_HOOK_MEM_READ, reinterpret_cast<void*>(&on_controller_read),
-              hook.get(), guest, guest + (to - from)),
+          add_engine_hook<&on_controller_read>(
+              hook->hook, UC_HOOK_MEM_READ, *hook, guest, guest + (to - from)),
           std::format("adding the controller read hook at {:#010x}", guest));
       ++controller_hook_serial;
       made.hooks.push_back(std::move(hook));

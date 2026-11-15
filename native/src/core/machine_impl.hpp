@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -2247,6 +2248,140 @@ struct machine::run_state
    * @return Whether the caller must stop the engine. */
   auto stop_on_pending() -> bool;
 
+  /** @brief Engine callbacks on the stack, entered through engine_entry or
+   * machine_services::engine_callback. */
+  std::uint32_t entry_depth = 0;
+
+  /** @brief Runs on entry to the outermost engine callback. Empty: the block hook charges every
+   * block to the clock and sets block_pc itself. */
+  void sync_clock() noexcept
+  {}
+
+  /** @brief Runs on exit from the outermost engine callback. Empty: the block hook tests every
+   * stop condition itself at each block. */
+  void rearm() noexcept
+  {}
+
+  /** @brief Enters an engine callback: the outermost one calls sync_clock(). */
+  void enter_callback() noexcept
+  {
+    if(entry_depth++ == 0)
+    {
+      sync_clock();
+    }
+  }
+
+  /** @brief Leaves an engine callback: the outermost one calls rearm(). */
+  void leave_callback() noexcept
+  {
+    if(--entry_depth == 0)
+    {
+      rearm();
+    }
+  }
+
+  /**
+   * @brief Scope of one engine callback, between enter_callback() and leave_callback(). Every
+   *        callback the run state registers with the engine but the block hook runs inside one,
+   *        through entry_thunk. The arch module's own callbacks enter through
+   *        machine_services::engine_callback.
+   */
+  class engine_entry
+  {
+  public:
+    /** @brief Enters a callback of @p run. */
+    explicit engine_entry(run_state& run) noexcept : run_{run}
+    {
+      run_.enter_callback();
+    }
+    engine_entry(engine_entry const&)                    = delete;
+    auto operator=(engine_entry const&) -> engine_entry& = delete;
+    ~engine_entry()
+    {
+      run_.leave_callback();
+    }
+
+  private:
+    run_state& run_;
+  };
+
+  /** @brief Run state of the user data @p user an engine callback receives. */
+  template <typename User> static auto entry_run(User& user) noexcept -> run_state&
+  {
+    if constexpr(std::same_as<User, run_state>)
+    {
+      return user;
+    }
+    else if constexpr(requires { user.owner; })
+    {
+      return *user.owner;
+    }
+    else
+    {
+      return *user.run;
+    }
+  }
+
+  /** @brief Engine callback @p callback run inside an engine_entry of the run state its last
+   * argument, a @p User, names. */
+  template <auto callback, typename User> struct entry_thunk;
+
+  /** @brief entry_thunk of a callback taking @p Args, its user data last. */
+  template <typename Result, typename... Args, Result (*callback)(Args...) noexcept, typename User>
+  struct entry_thunk<callback, User>
+  {
+    /** @brief The callback the engine calls. */
+    static auto call(Args... args) noexcept -> Result
+    {
+      auto* const        user = std::get<sizeof...(Args) - 1>(std::forward_as_tuple(args...));
+      engine_entry const entry{entry_run(*static_cast<User*>(user))};
+      return callback(args...);
+    }
+  };
+
+  /** @brief Adds @p callback as an engine hook of @p type over [@p begin, @p end], inside an
+   * engine_entry. */
+  template <auto callback, typename User>
+  auto add_engine_hook(
+      uc_hook&      hook,
+      int           type,
+      User&         user,
+      std::uint64_t begin,
+      std::uint64_t end) noexcept -> uc_err
+  {
+    return uc_hook_add(
+        engine, &hook, type, reinterpret_cast<void*>(&entry_thunk<callback, User>::call), &user,
+        begin, end);
+  }
+
+  /** @brief Adds on_block as the engine block hook over the whole space, outside any
+   * engine_entry: the hook charges each block to the clock itself, so it has nothing to sync or
+   * re-arm, and an entry at every block costs 5 % more host instructions on a busy loop. */
+  auto add_block_hook(uc_hook& hook) noexcept -> uc_err
+  {
+    return uc_hook_add(
+        engine, &hook, UC_HOOK_BLOCK_ICOUNT, reinterpret_cast<void*>(&on_block), this, 1, 0);
+  }
+
+  /** @brief Maps [@p base, @p base + @p size) as engine MMIO served by @p read and @p write,
+   * each inside an engine_entry. */
+  template <auto read, auto write, typename User>
+  auto map_engine_mmio(std::uint64_t base, std::uint64_t size, User& user) noexcept -> uc_err
+  {
+    return uc_mmio_map_attrs(
+        engine, base, size, &entry_thunk<read, User>::call, &user, &entry_thunk<write, User>::call,
+        &user);
+  }
+
+  /** @brief Installs @p page and @p access as the engine bus filter, each inside an
+   * engine_entry. */
+  template <auto page, auto access> auto install_bus_filter() noexcept -> uc_err
+  {
+    auto* const on_page   = &entry_thunk<page, run_state>::call;
+    auto* const on_access = &entry_thunk<access, run_state>::call;
+    return uc_ctl_bus_filter(engine, on_page, on_access, this);
+  }
+
   static void
       on_block(uc_struct* engine, std::uint64_t addr, std::uint32_t size, void* user) noexcept;
   static void
@@ -2342,6 +2477,13 @@ struct machine_internals
   [[nodiscard]] static auto counters(machine const& target) noexcept -> run_counters const&
   {
     return target.run_->counters;
+  }
+
+  /** @brief Engine callbacks of @p target on the stack, entered through engine_entry or
+   * machine_services::engine_callback. */
+  [[nodiscard]] static auto entry_depth(machine const& target) noexcept -> std::uint32_t
+  {
+    return target.run_->entry_depth;
   }
 
   /** @brief The engine of @p target. */

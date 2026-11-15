@@ -101,7 +101,10 @@ test_intercepts = add_doctest(
     "core-intercepts", [here / "test_intercepts.cpp"], [test_support, core], env=m33_env
 )
 test_watches = add_doctest(
-    "core-watches", [here / "test_watches.cpp"], [test_support, core], env=m33_env
+    "core-watches",
+    [here / "test_watches.cpp", here / "test_engine_entry.cpp"],
+    [test_support, core],
+    env={**m33_env, "POPCORN_NATIVE_SRC": str(project_dir / "native" / "src")},
 )
 test_memory_grant = add_doctest(
     "core-memory-grant", [here / "test_memory_grant.cpp"], [test_support, core], env=m33_env
