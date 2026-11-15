@@ -30,7 +30,7 @@ The engine counts blocks in one of two modes, chosen at each engine run:
 Both modes charge each block at its start and stop before the same block, so every output is
 the same.
 
-An intercept or a probe stands at a code site inside its block. The block hook has charged the
+An intercept or a probe stands at a code site inside its block. The block start has charged the
 whole block when the site runs, so the site takes the instructions from itself to the block end
 back before it reads the clock, `clock_driver::rewind`, and charges them again when the run
 goes on through the block. A callback reads the time of its site and a stop or a return at the
@@ -52,10 +52,10 @@ the next deadline, which is why a sleeping firmware runs fast. The slice keeps t
 counts both.
 
 A core in a branch to itself, a one-instruction block that `arch::self_branch` names, such as
-Arm `b .` outside an IT block, executes instructions. When the last block hook saw the same
-one-instruction block, the arch decodes it from its bytes and the core state. When nothing is
-deliverable the hook then advances the clock to the deadline or the next
-event, whichever comes first, then stops the engine before the block. In budget mode the engine
+Arm `b .` outside an IT block, executes instructions. In live mode, when the last block hook saw
+the same one-instruction block, the arch decodes it from its bytes and the core state. When
+nothing is deliverable the hook then advances the clock to the deadline or the next event,
+whichever comes first, then stops the engine before the block. In budget mode the engine
 consumes the rest of the budget in the block itself when no code hook is on it, which counts the
 same instructions. The skipped iterations
 count as executed, as if they had run, so every output equals the slow path. The skip is off
