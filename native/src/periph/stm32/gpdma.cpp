@@ -319,6 +319,10 @@ struct transfer_cache
  *        writes while its channel is enabled, where RM0456 17.8.10 makes it read-only. Under
  *        TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are storage, `RCFGLOCKR` ignores writes,
  *        RM0456 17.8.3, and transfers keep the attributes of a machine without TrustZone.
+ *        A request going high reaches the channels whose `CxTR2` selects it through a per-request
+ *        mask. Every register write, a linked-list load, a reset and a restore rebuild the mask
+ *        at the next request, and a poke of `CxTR2` runs no handler, so it reaches the request
+ *        routing at the next register write.
  *
  * @limits gpdma GPDMA and LPDMA
  *
@@ -1235,7 +1239,6 @@ void gpdma::latch(std::size_t ch)
 
 auto gpdma::link(std::size_t ch) -> bool
 {
-  routes_dirty_   = true;
   auto&      c    = ch_[ch];
   auto&      s    = state_.channel[ch];
   auto const llr  = regs_.peek(c.llr.offset);
@@ -1273,6 +1276,7 @@ auto gpdma::link(std::size_t ch) -> bool
                   and load(c.update_destination, c.dar)
                   and two_d()
                   and load(c.update_link, c.llr);
+  routes_dirty_ = true;
   if(c.update_tr1.of(llr) != 0)
   {
     cache_[ch] = {};
