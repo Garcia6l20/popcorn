@@ -69,7 +69,7 @@ struct field_ref
   /** @brief Bits of the field within the register word. */
   [[nodiscard]] constexpr auto mask() const noexcept -> std::uint32_t
   {
-    return (width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << width) - 1u) << lsb;
+    return static_cast<std::uint32_t>(((std::uint64_t{1} << width) - 1u) << lsb);
   }
 
   /** @brief Value of the field in @p word, right-aligned. */

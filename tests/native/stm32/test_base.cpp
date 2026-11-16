@@ -181,6 +181,23 @@ TEST_CASE("registers and fields resolve by name from the description")
   CHECK(sws.bits.mask() == 0xcu);
 }
 
+TEST_CASE("field_ref::mask() keeps the bits of every width 0 to 32 at every lsb 0 to 31")
+{
+  for(std::uint32_t width = 0; width <= 32; ++width)
+  {
+    for(std::uint32_t lsb = 0; lsb < 32; ++lsb)
+    {
+      auto const field = stm32::field_ref{
+          .offset = 0,
+          .lsb    = static_cast<std::uint8_t>(lsb),
+          .width  = static_cast<std::uint8_t>(width)};
+      auto const low = width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << width) - 1u;
+      CHECK(field.mask() == low << lsb);
+    }
+  }
+  CHECK(stm32::field_ref{}.mask() == 0);
+}
+
 TEST_CASE("a model resolves a register by its bare name and by its SVD alias")
 {
   bench b;
