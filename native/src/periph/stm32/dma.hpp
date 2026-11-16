@@ -94,9 +94,10 @@ public:
 
   /**
    * @brief Whether acknowledged() can act on @p request of @p by. The controller calls
-   *        acknowledged() only on requesters that answer true, found once per request. A
-   *        requester that overrides acknowledged() overrides this too, with the same match test.
-   *        The default answers false.
+   *        acknowledged() only on requesters that answer true, found once per request and kept
+   *        for the machine's life. A requester that overrides acknowledged() must override this
+   *        too, with the same match test, or its acknowledged() is never called. The default
+   *        answers false.
    * @param by Controller of the channel.
    * @param request Request number of the channel on @p by.
    */
@@ -171,7 +172,10 @@ struct dma_requester_list
   /**
    * @brief The requesters among @p peers that acknowledge @p request of @p by, in peer order,
    *        found on the first call for each request. The routing is fixed for the machine's
-   *        life, so the result needs no rebuild at reset or snapshot restore.
+   *        life, so the result needs no rebuild at reset or snapshot restore. A requester called
+   *        through the returned span may reach acknowledging() for another request. Each entry
+   *        owns its list and no entry is erased, so growing the index leaves the span in use
+   *        valid.
    * @param peers Peers of the machine.
    * @param by Controller that owns this list.
    * @param request Request number on @p by.

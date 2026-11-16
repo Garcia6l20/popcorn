@@ -71,6 +71,7 @@ public:
   }
 
   std::vector<std::string> acks;
+  std::size_t              calls{};
   bool                     drop_on_ack = true;
 
   void set(std::string_view name, bool level)
@@ -87,6 +88,7 @@ public:
 
   void acknowledged(stm32::dma_controller const& by, std::uint32_t request) override
   {
+    ++calls;
     for(std::size_t index = 0; index < signals_.size(); ++index)
     {
       if(signals_[index].carries(by, request))
@@ -464,6 +466,23 @@ TEST_CASE(
   idle_to(f, now_ps(f) + 4 * latency_ps);
   CHECK(read(f, dma2 + cndtr(1)) == 0);
   CHECK(read(f, dma2 + cndtr(6)) == 1);
+}
+
+TEST_CASE("RM0351 Table 47: a requester on another request is never acknowledged by a beat")
+{
+  auto const f = parked(with_requesters({
+      {"SAI1", {"sai1_a_dma"} },
+      {"SPI3", {"spi3_rx_dma"}}
+  }));
+  auto&      p = peer(f, "SAI1");
+  write(f, source, 0x1234'5678u);
+  select(f, dma2, 1, 1);
+  program(f, dma2, 1, 1);
+  p.set("sai1_a_dma", true);
+  idle_to(f, now_ps(f) + 4 * latency_ps);
+  CHECK(read(f, dma2 + cndtr(1)) == 0);
+  CHECK(p.acks == std::vector<std::string>{"sai1_a_dma"});
+  CHECK(peer(f, "SPI3").calls == 0);
 }
 
 TEST_CASE("a held request with a number above 47, USART2_TX at 55, survives a snapshot restore")

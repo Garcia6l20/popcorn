@@ -5241,3 +5241,50 @@ TEST_CASE(
   CHECK(acked.irq == alone.irq);
   CHECK(acked.levels == alone.levels);
 }
+
+TEST_CASE(
+    "RM0456 58.4.21: a GPDMA1 channel paced by lptim1_ue_dma moves one item per update event, the "
+    "beat's acknowledge drops the LPTIM request, inferred")
+{
+  rig r{units[0], false, u575()};
+  r.write(ccmr1, cc1e);
+  auto* const controller = dynamic_cast<stm32::dma_controller*>(r.f->target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  auto const request = controller->request_of("lptim1_ue_dma");
+  REQUIRE(request.has_value());
+  constexpr address from = 0x2000'0100;
+  constexpr address to   = 0x2000'0200;
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    REQUIRE(r.f->target->mem().write(from + index, 1, 0x40 + index));
+    REQUIRE(r.f->target->mem().write(to + index, 1, 0));
+  }
+  auto const channel = [&](std::string_view reg, std::string_view name, std::uint32_t value) {
+    auto const [at, bits] = field_of(*r.f->target, "GPDMA1", reg, name);
+    r.write_at(at, value << bits.lsb);
+  };
+  auto const word = [&](std::string_view reg, std::uint32_t value) {
+    auto const& desc  = r.f->target->peripheral("GPDMA1").description();
+    auto const* found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
+    r.write_at(desc.base + found->offset, value);
+  };
+  word(
+      "GPDMA_C0TR1",
+      (1u << field_of(*r.f->target, "GPDMA1", "GPDMA_C0TR1", "SINC").second.lsb)
+          | (1u << field_of(*r.f->target, "GPDMA1", "GPDMA_C0TR1", "DINC").second.lsb));
+  channel("GPDMA_C0TR2", "REQSEL", *request);
+  word("GPDMA_C0BR1", 16);
+  word("GPDMA_C0SAR", from);
+  word("GPDMA_C0DAR", to);
+  channel("GPDMA_C0CR", "EN", 1);
+  auto const t = r.started(6, 10, cntstrt, uede);
+  r.idle_to(t + 3 * 11 * cycle + 5 * cycle);
+  auto moved = 0u;
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    moved += r.f->target->mem().read(to + index, 1).value() != 0 ? 1u : 0u;
+  }
+  CHECK(moved >= 2);
+  CHECK(moved <= 4);
+}
