@@ -9,7 +9,6 @@
 #include "../support/test_arch.hpp"
 
 #include <doctest/doctest.h>
-
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
@@ -765,7 +764,11 @@ TEST_CASE("a stop requested from a handler is taken at the next block with its d
   auto f = boot_with<stop_request_arch>(m33(), request_kind::stop);
   f.set("pc", sym("run", "ram_calls"));
   f.set("r0", sym("run", "ram_fn") | 1);
-  auto const stop = f.run_to_stop();
+  auto const runs  = core::machine_internals::counters(*f.target).engine_runs;
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{2}});
+  REQUIRE(slice.stopped.has_value());
+  auto const& stop = *slice.stopped;
+  CHECK(core::machine_internals::counters(*f.target).engine_runs - runs < 16);
   CHECK(stop.reason == stop_reason::user);
   CHECK(stop.detail == "why");
   CHECK(stop.where.pc == sym("run", "ram_calls") + 10);
@@ -776,7 +779,11 @@ TEST_CASE("a reset request from a handler stops with reset_request at the next b
   auto f = boot_with<stop_request_arch>(m33(), request_kind::reset);
   f.set("pc", sym("run", "ram_calls"));
   f.set("r0", sym("run", "ram_fn") | 1);
-  auto const stop = f.run_to_stop();
+  auto const runs  = core::machine_internals::counters(*f.target).engine_runs;
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{2}});
+  REQUIRE(slice.stopped.has_value());
+  auto const& stop = *slice.stopped;
+  CHECK(core::machine_internals::counters(*f.target).engine_runs - runs < 16);
   CHECK(stop.reason == stop_reason::reset_request);
   CHECK(stop.where.pc == sym("run", "ram_calls") + 10);
 }
@@ -786,8 +793,10 @@ TEST_CASE("a slice end request from a handler ends the slice without a stop")
   auto f = boot_with<stop_request_arch>(m33(), request_kind::end);
   f.set("pc", sym("run", "ram_calls"));
   f.set("r0", sym("run", "ram_fn") | 1);
-  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}});
+  auto const runs  = core::machine_internals::counters(*f.target).engine_runs;
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{2}});
   CHECK_FALSE(slice.stopped.has_value());
+  CHECK(core::machine_internals::counters(*f.target).engine_runs - runs < 16);
   CHECK(f.target->regs().pc() == sym("run", "ram_calls") + 10);
   CHECK(f.run_to_stop().reason == stop_reason::user);
 }
@@ -1048,17 +1057,45 @@ TEST_CASE("a mail posted from another thread while the loop turns ends the slice
 {
   for(int round = 0; round < 50; ++round)
   {
-    auto f = alu(4'000'000);
+    auto f = alu(0);
     CAPTURE(round);
     std::jthread other{[&f] {
       std::this_thread::sleep_for(std::chrono::microseconds{200});
       f.target->interrupt();
     }};
-    auto const   slice =
-        f.run({.max_instructions = icount{1'000'000'000}, .wall_budget = std::chrono::seconds{20}});
+    auto const   begin = std::chrono::steady_clock::now();
+    auto const   slice = f.run({.wall_budget = std::chrono::seconds{2}});
     other.join();
     CHECK_FALSE(slice.stopped.has_value());
-    CHECK(slice.executed.value < 1'000'000'000);
+    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds{1500});
+  }
+}
+
+TEST_CASE("a mail posted from another thread while the core is held and events fire ends the slice")
+{
+  fixture<> f{m33(), "idle"};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.set("pc", sym("idle", "idle_entry"));
+  REQUIRE(
+      f.run_to_stop({.stop_when = [&f] { return f.module->timer_expiries == 1; }}).reason
+      == stop_reason::user);
+  f.target->hold_core(true);
+  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + 3'600'000'000'000'000};
+  for(int round = 0; round < 20; ++round)
+  {
+    CAPTURE(round);
+    std::jthread other{[&f] {
+      std::this_thread::sleep_for(std::chrono::microseconds{200});
+      f.target->interrupt();
+    }};
+    auto const   begin = std::chrono::steady_clock::now();
+    auto const   slice = f.run(
+        {.max_instructions = icount{1'000'000'000'000},
+         .wall_budget      = std::chrono::seconds{2},
+         .until_time       = until});
+    other.join();
+    CHECK_FALSE(slice.stopped.has_value());
+    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds{1500});
   }
 }
 

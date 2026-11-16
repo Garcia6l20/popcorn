@@ -2533,13 +2533,15 @@ struct machine::run_state
   [[nodiscard]] auto next_deadline(slice_request const& request) const -> icount;
   /**
    * @brief Takes what a model, a handler or another thread asked of the slice: a stop, a reset, a
-   *        slice end or the mail bit of machine::interrupt(). Returns at once when none is set,
-   *        without an atomic read-modify-write.
-   * @details The quiet test reads the mail bit relaxed and the stop request with acquire, the same
-   *        orders the full path uses. A request another thread posts after the test is seen at the
-   *        next turn of the loop: every poster sets its flag and then asks the engine to exit
-   *        (`raise_stop`, `interrupt`), so the engine run ends at its next block start and the loop
-   *        turns again before it runs any further.
+   *        slice end or the mail bit of machine::interrupt(). Returns at once, after plain atomic
+   *        loads, when none is set.
+   * @details The quiet test reads the mail bit relaxed and the stop request with acquire. The loop
+   *        runs it at the top of every turn, idle turns included. The mail bit is the atomic the
+   *        block hook and begin_engine_run read, so after an engine exit on the mail the test
+   *        sees it. A stop request is published before the `fetch_or` of raise_stop(), which the
+   *        next turn's clear_internal_stop() reads with acquire, so the test at the top of that
+   *        turn sees the request at the latest. drain_stale_code() clears the bit on every turn for
+   *        this pairing.
    */
   [[nodiscard, gnu::always_inline]] auto handle_requests() -> std::optional<slice_end>
   {
