@@ -1271,8 +1271,10 @@ class Machine:
 
         With `at`, `fn` runs after the events due at that boundary. A parked sample at the
         machine's time runs at once, unless a stamp due at that time is pending, which a run that
-        stopped between the events of one instant leaves: it then runs in the next run, behind
-        that stamp.
+        stopped between the events of one instant leaves, or, on a member of a system, an event
+        the system's last slice left due is pending: it then runs in the next run, behind them.
+        After an interrupt cut a block short, `m.time` can be ahead of the executed count, and a
+        parked sample at it runs at once, before the events up to `m.time`.
 
             speaking = await m.sample(lambda: decode_status(m))
             at, level = await m.sample(lambda: (m.time, m.var("level").value))

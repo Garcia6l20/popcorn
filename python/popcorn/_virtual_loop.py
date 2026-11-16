@@ -199,7 +199,8 @@ class VirtualLoop(asyncio.AbstractEventLoop):
     Step: an armed timer is one event in the machine's queue. When it fires, and when a device hook
     runs, the loop runs that hook, every ready callback and every timer due until none is left, at
     most 65536 callbacks per stamp, then arms the earliest timer. A callback may `create_task`, and
-    the task's first step happens at the same stamp.
+    the task's first step happens at the same stamp. A timer due at a device hook's stamp runs in
+    that hook's step, ahead of the events of that count still to dispatch.
 
     Time: `time()` is logical board time in seconds, inside a step the due time of the timer or the
     `at` of the device hook, monotonic through every reset kind. The machine's clock moves by block,

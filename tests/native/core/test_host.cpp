@@ -3074,6 +3074,12 @@ TEST_CASE("a free-run waiter deadline below a held count expires once the exact 
         *was_done = (*handle)->done();
       },
       at_instruction(n0 + 60));
+  auto       done_early = std::make_shared<bool>(true);
+  auto const early =
+      rig.h.post([&stored](core::machine&) { stored.wait(); }, at_instruction(n0 + 45));
+  auto const before = rig.h.post(
+      [handle, done_early](core::machine&) { *done_early = (*handle)->done(); },
+      at_instruction(n0 + 48));
   auto       done_after = std::make_shared<bool>(false);
   auto const after      = rig.h.post(
       [handle, done_after](core::machine&) { *done_after = (*handle)->done(); },
@@ -3093,6 +3099,9 @@ TEST_CASE("a free-run waiter deadline below a held count expires once the exact 
   CHECK(got.time == at_instruction(n0 + 100));
   CHECK(stamp.get() == at_instruction(n0 + 60));
   CHECK(after.get() == at_instruction(n0 + 70));
+  CHECK(early.get() == at_instruction(n0 + 45));
+  CHECK(before.get() == at_instruction(n0 + 48));
+  CHECK_FALSE(*done_early);
   CHECK_FALSE(*was_done);
   CHECK(*done_after);
   CHECK_FALSE(rig.h.on->halt(0).has_value());

@@ -150,9 +150,9 @@ with the callback's return value once it ran:
   starts, or well ahead of the machine, for the same result on every run.
 - A `close()` from a callback takes effect when its step ends, so the later posts of that step
   still run.
-- A timer due at `at` runs ahead of a post at `at`. Two posts at one stamp run in call order. A
-  run that stops between the events of the stamp's instant, such as a `stop_when` stop, leaves the
-  post to the next run, behind the rest of those events.
+- A timer due at `at` runs ahead of a post at `at`. Two posts at one stamp run in call order.
+- A run that stops between the events of the stamp's instant, such as a `stop_when` stop, leaves
+  the post to the next run, behind the rest of those events.
 - An exception of the callback reaches the result and stops nothing. A cancelled post never runs.
   A reset or a restore before the stamp fails the result with `EmulationError`.
 - From the machine's thread, such as a hook, use `call_at`.
