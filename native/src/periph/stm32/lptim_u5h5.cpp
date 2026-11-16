@@ -729,6 +729,7 @@ public:
   void               on_core_hold(bool held) override;
   void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void               acknowledged(dma_controller const& by, std::uint32_t request) override;
+  [[nodiscard]] auto acknowledges(dma_controller const& by, std::uint32_t request) -> bool override;
   void               interest_changed() override;
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
@@ -1582,6 +1583,11 @@ void lptim_u5h5::acknowledged(dma_controller const& by, std::uint32_t request)
   }
   refresh();
   reschedule();
+}
+
+auto lptim_u5h5::acknowledges(dma_controller const& by, std::uint32_t request) -> bool
+{
+  return std::ranges::any_of(requests_, [&](auto& entry) { return entry.carries(by, request); });
 }
 
 void lptim_u5h5::transfer_completed(dma_controller const&, std::uint32_t)

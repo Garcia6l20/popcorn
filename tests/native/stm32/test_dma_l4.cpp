@@ -80,6 +80,11 @@ public:
     signals_[static_cast<std::size_t>(found - names_.begin())].set(level);
   }
 
+  auto acknowledges(stm32::dma_controller const& by, std::uint32_t request) -> bool override
+  {
+    return std::ranges::any_of(signals_, [&](auto& signal) { return signal.carries(by, request); });
+  }
+
   void acknowledged(stm32::dma_controller const& by, std::uint32_t request) override
   {
     for(std::size_t index = 0; index < signals_.size(); ++index)

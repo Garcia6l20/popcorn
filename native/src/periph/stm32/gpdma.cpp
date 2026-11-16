@@ -1091,7 +1091,7 @@ void gpdma::burst(std::size_t ch)
   }
   if(get(regs_, c.software) == 0)
   {
-    for(auto* const requester : requesters_.resolve(ctx_.peers))
+    for(auto* const requester : requesters_.acknowledging(ctx_.peers, *this, request))
     {
       requester->acknowledged(*this, request);
     }

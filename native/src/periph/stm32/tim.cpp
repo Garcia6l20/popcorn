@@ -592,7 +592,8 @@ public:
       -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
-  void transfer_completed(dma_controller const& by, std::uint32_t request) override;
+  [[nodiscard]] auto acknowledges(dma_controller const& by, std::uint32_t request) -> bool override;
+  void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
 
   void                           control_written(std::uint32_t old, std::uint32_t now);
   void                           master_written(std::uint32_t old, std::uint32_t now);
@@ -2317,6 +2318,13 @@ void tim::release(dma_controller const& by, std::uint32_t request)
 void tim::acknowledged(dma_controller const& by, std::uint32_t request)
 {
   release(by, request);
+}
+
+auto tim::acknowledges(dma_controller const& by, std::uint32_t request) -> bool
+{
+  return (update_signal_ and update_signal_->carries(by, request))
+      or std::ranges::any_of(
+             channels_, [&](auto& c) { return c.signal and c.signal->carries(by, request); });
 }
 
 void tim::transfer_completed(dma_controller const& by, std::uint32_t request)

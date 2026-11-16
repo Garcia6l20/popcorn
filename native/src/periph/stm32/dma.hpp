@@ -2,6 +2,7 @@
 
 #include <popcorn/periph/model.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -92,6 +93,21 @@ public:
   }
 
   /**
+   * @brief Whether acknowledged() can act on @p request of @p by. The controller calls
+   *        acknowledged() only on requesters that answer true, found once per request. A
+   *        requester that overrides acknowledged() overrides this too, with the same match test.
+   *        The default answers false.
+   * @param by Controller of the channel.
+   * @param request Request number of the channel on @p by.
+   */
+  [[nodiscard]] virtual auto acknowledges(dma_controller const& by, std::uint32_t request) -> bool
+  {
+    static_cast<void>(by);
+    static_cast<void>(request);
+    return false;
+  }
+
+  /**
    * @brief A hardware-requested channel of @p by moved the last but one item of its count, the
    *        EOT_1 signal of RM0038 26.3.7. Called from a controller event, never inside a
    *        requester's register callback, by the STM32L1 classic DMA. The default ignores it.
@@ -151,5 +167,47 @@ struct dma_requester_list
     }
     return found;
   }
+
+  /**
+   * @brief The requesters among @p peers that acknowledge @p request of @p by, in peer order,
+   *        found on the first call for each request. The routing is fixed for the machine's
+   *        life, so the result needs no rebuild at reset or snapshot restore.
+   * @param peers Peers of the machine.
+   * @param by Controller that owns this list.
+   * @param request Request number on @p by.
+   * @return The requesters, empty until a peer exists.
+   */
+  [[nodiscard]] auto
+      acknowledging(peer_directory const& peers, dma_controller const& by, std::uint32_t request)
+          -> std::span<dma_requester* const>
+  {
+    if(auto const hit = std::ranges::find(index, request, &entry::request); hit != index.end())
+    {
+      return hit->requesters;
+    }
+    auto const all = resolve(peers);
+    if(not resolved)
+    {
+      return {};
+    }
+    auto& added = index.emplace_back(entry{.request = request, .requesters = {}});
+    for(auto* const requester : all)
+    {
+      if(requester->acknowledges(by, request))
+      {
+        added.requesters.push_back(requester);
+      }
+    }
+    return added.requesters;
+  }
+
+private:
+  struct entry
+  {
+    std::uint32_t               request;
+    std::vector<dma_requester*> requesters;
+  };
+
+  std::vector<entry> index;
 };
 }

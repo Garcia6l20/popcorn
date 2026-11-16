@@ -436,7 +436,8 @@ public:
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
-  void on_clock_change() override;
+  [[nodiscard]] auto acknowledges(dma_controller const& by, std::uint32_t request) -> bool override;
+  void               on_clock_change() override;
   [[nodiscard]] auto internal_level(std::size_t output) const
       -> std::optional<std::uint32_t> override;
 
@@ -1515,6 +1516,11 @@ void dac::acknowledged(dma_controller const& by, std::uint32_t request)
       release(channel);
     }
   }
+}
+
+auto dac::acknowledges(dma_controller const& by, std::uint32_t request) -> bool
+{
+  return std::ranges::any_of(requests_, [&](auto& signal) { return signal.carries(by, request); });
 }
 
 void dac::transfer_completed(dma_controller const&, std::uint32_t)

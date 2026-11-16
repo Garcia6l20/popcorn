@@ -58,11 +58,12 @@ struct call
 class lpuart final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
-  explicit lpuart(periph::model_context& ctx) : tx{ctx.peers, "lpuart1_tx_dma"}
+  explicit lpuart(periph::model_context& ctx, std::string signal = "lpuart1_tx_dma")
+      : tx{ctx.peers, std::move(signal)}
   {}
 
   stm32::dma_signal tx;
-  std::vector<call> acknowledges;
+  std::vector<call> acked;
   std::vector<call> completions;
 
   void transfer_completed(stm32::dma_controller const& by, std::uint32_t request) override
@@ -70,9 +71,14 @@ public:
     completions.push_back({.by = &by, .request = request, .carried = tx.carries(by, request)});
   }
 
+  auto acknowledges(stm32::dma_controller const& by, std::uint32_t request) -> bool override
+  {
+    return tx.carries(by, request);
+  }
+
   void acknowledged(stm32::dma_controller const& by, std::uint32_t request) override
   {
-    acknowledges.push_back({.by = &by, .request = request, .carried = tx.carries(by, request)});
+    acked.push_back({.by = &by, .request = request, .carried = tx.carries(by, request)});
   }
 
   void reset(periph::register_file&, popcorn::reset_kind) override
@@ -94,6 +100,12 @@ auto machine(bool strict = false) -> stm32_fixture
       "LPUART1",
       [](periph::model_context& ctx, popcorn::peripheral_desc const&)
           -> std::shared_ptr<periph::model> { return std::make_shared<lpuart>(ctx); });
+  options.models.emplace(
+      "USART1",
+      [](periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+        return std::make_shared<lpuart>(ctx, "usart1_tx_dma");
+      });
   stm32_fixture f{u575(), "rcc_ll", std::move(options)};
   f.set("pc", sym("rcc_ll", "idle"));
   for(std::uint32_t index = 0; index < 256; ++index)
@@ -107,6 +119,13 @@ auto machine(bool strict = false) -> stm32_fixture
 auto device(stm32_fixture const& f) -> lpuart&
 {
   auto* const found = f.model_of<lpuart>("LPUART1");
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+auto bystander(stm32_fixture const& f) -> lpuart&
+{
+  auto* const found = f.model_of<lpuart>("USART1");
   REQUIRE(found != nullptr);
   return *found;
 }
@@ -334,13 +353,20 @@ TEST_CASE("lpuart1_tx_dma paces LPDMA1 on REQSEL 1 and GPDMA1 on REQSEL 35, each
     CHECK(bytes_at(f, destination, 16) == expected(0, 16));
     CHECK(field(f, 2, "SR", "TCF") == 1);
     CHECK(
-        device(f).acknowledges
+        device(f).acked
         == std::vector<call>(16, call{.by = &lpdma, .request = 1, .carried = true}));
     CHECK(
         device(f).completions
         == std::vector<call>{
             {.by = &lpdma, .request = 1, .carried = true}
     });
+  }
+  SUBCASE("a requester on another request is not called")
+  {
+    device(f).tx.set(true);
+    idle_for(f, std::chrono::microseconds{100});
+    CHECK(device(f).acked.size() == 16);
+    CHECK(bystander(f).acked.empty());
   }
   SUBCASE("both controllers on the same request")
   {
@@ -359,7 +385,7 @@ TEST_CASE("lpuart1_tx_dma paces LPDMA1 on REQSEL 1 and GPDMA1 on REQSEL 35, each
     CHECK(bytes_at(f, other, 16) == expected(0, 16));
     CHECK(field(f, 2, "SR", "TCF") == 1);
     CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
-    auto const& seen = device(f).acknowledges;
+    auto const& seen = device(f).acked;
     CHECK(seen.size() == 32);
     CHECK(std::ranges::count(seen, call{.by = &lpdma, .request = 1, .carried = true}) == 16);
     CHECK(std::ranges::count(seen, call{.by = &gpdma, .request = 35, .carried = true}) == 16);
@@ -473,7 +499,7 @@ TEST_CASE("GPDMA burst, exchange, 2D and port bits written to LPDMA1 read 0 and 
   CHECK(
       bytes_at(f, destination, 5)
       == std::vector<std::uint32_t>{pattern(0), pattern(1), pattern(2), pattern(3), 0});
-  CHECK(device(f).acknowledges.size() == 4);
+  CHECK(device(f).acked.size() == 4);
   CHECK(device(f).completions.size() == 1);
   CHECK(field(f, 0, "SR", "TCF") == 1);
   CHECK(field(f, 0, "CR", "EN") == 0);
@@ -687,4 +713,26 @@ TEST_CASE("GPDMA1 copies from SRAM1 without a reach warning")
   CHECK(bytes_at(f, sram1 + 0x100, 16) == expected(0, 16));
   CHECK(f.field("GPDMA1", gp("SR"), "TCF") == 1);
   CHECK(logged.empty());
+}
+
+TEST_CASE(
+    "a paced LPDMA1 channel restored from a snapshot acknowledges only the requester it serves")
+{
+  auto f = machine();
+  copy(f, 2, incrementing(2), 1u << lsb("LPDMA1", "LPDMA_C2TR2", "REQSEL"), 16);
+  device(f).tx.set(true);
+  while(field(f, 2, "BR1", "BNDT") == 16)
+  {
+    idle_for(f, std::chrono::nanoseconds{500});
+  }
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+
+  auto other = machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  auto const left = field(other, 2, "BR1", "BNDT");
+  REQUIRE(left > 0);
+  idle_for(other, std::chrono::microseconds{100});
+  CHECK(field(other, 2, "SR", "TCF") == 1);
+  CHECK(device(other).acked.size() == left);
+  CHECK(bystander(other).acked.empty());
 }

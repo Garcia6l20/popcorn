@@ -567,7 +567,7 @@ void dma_l1l4::transfer(std::size_t ch)
     {
       if(routed(r, ch) and state_.request[r] != 0)
       {
-        for(auto* const requester : requesters_.resolve(ctx_.peers))
+        for(auto* const requester : requesters_.acknowledging(ctx_.peers, *this, first_of(r)))
         {
           requester->acknowledged(*this, first_of(r));
         }
