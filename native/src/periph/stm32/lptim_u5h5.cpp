@@ -1568,6 +1568,10 @@ void lptim_u5h5::sync_requests()
 
 void lptim_u5h5::acknowledged(dma_controller const& by, std::uint32_t request)
 {
+  if(std::ranges::none_of(requests_, [&](auto& entry) { return entry.carries(by, request); }))
+  {
+    return;
+  }
   catch_up(now_ps());
   for(std::size_t index = 0; index < requests_.size(); ++index)
   {

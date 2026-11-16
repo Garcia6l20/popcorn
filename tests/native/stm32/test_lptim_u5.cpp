@@ -5157,3 +5157,24 @@ TEST_CASE(
   r.idle_to(r.now_ps() + 20 * cycle);
   CHECK((r.read(isr) & cc2if) == cc2if);
 }
+
+TEST_CASE(
+    "inferred: a request the LPTIM does not carry, acknowledged on a running counter, leaves its "
+    "state, schedule and DMA levels untouched")
+{
+  rig r{units[0], false, u575(), {}, true};
+  r.write(ccmr1, cc1e);
+  static_cast<void>(r.started(6, 10, cntstrt, uede));
+  run_to_flag(r, ue);
+  r.ack(ue_request);
+  r.idle_to(r.now_ps() + 3 * cycle + cycle / 2);
+  auto const state  = r.saved();
+  auto const due    = r.pending();
+  auto const levels = r.dma->levels;
+  REQUIRE(due.has_value());
+  r.ack(ue_request + 1);
+  r.ack(ue_request + 20);
+  CHECK(r.saved() == state);
+  CHECK(r.pending() == due);
+  CHECK(r.dma->levels == levels);
+}
