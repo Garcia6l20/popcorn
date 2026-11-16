@@ -320,9 +320,8 @@ struct transfer_cache
  *        TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are storage, `RCFGLOCKR` ignores writes,
  *        RM0456 17.8.3, and transfers keep the attributes of a machine without TrustZone.
  *        A request going high reaches the channels whose `CxTR2` selects it through a per-request
- *        mask. Every register write, a linked-list load, a reset and a restore rebuild the mask
- *        at the next request, and a poke of `CxTR2` runs no handler, so it reaches the request
- *        routing at the next register write.
+ *        mask. Every register write, a linked-list load, a reset, a restore and a poke through
+ *        the machine rebuild the mask at the next request, `CxTR2` pokes included.
  *
  * @limits gpdma GPDMA and LPDMA
  *
@@ -349,6 +348,7 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
   void on_held_write(std::uint32_t offset, access_ctx ctx) override;
+  void on_poked(std::uint32_t offset) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_request(std::uint32_t request, bool level) override;
   auto on_write(
@@ -630,6 +630,11 @@ auto gpdma::on_write(
 {
   routes_dirty_ = true;
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+}
+
+void gpdma::on_poked(std::uint32_t)
+{
+  routes_dirty_ = true;
 }
 
 void gpdma::on_held_write(std::uint32_t offset, access_ctx ctx)

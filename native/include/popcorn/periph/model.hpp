@@ -235,6 +235,16 @@ public:
   virtual void on_event(std::uint32_t kind, std::uint64_t payload) = 0;
 
   /**
+   * @brief Tells the model that the machine's poke path stored a value in one of its registers,
+   *        as `Machine.poke` does. The poke ran no write handler. A model that derives state
+   *        from register values refreshes it here. Never called for a poke the model makes on
+   *        its own register_file.
+   * @param offset Word-aligned offset of the register poked, from the peripheral base.
+   */
+  virtual void on_poked([[maybe_unused]] std::uint32_t offset)
+  {}
+
+  /**
    * @brief Bits of the word the last on_write() left alone because the transaction could not
    *        reach them, such as a Non-secure write to a Secure register. The machine asks after
    *        a write to a claimed word that has write-once bits, and locks the word only when a

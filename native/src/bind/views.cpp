@@ -248,9 +248,13 @@ auto poke_masked_body(
     throw config_error(
         peripheral, 0, std::format("{:#x}", offset), std::format("a {}-bit value", width));
   }
-  return [at, mask, value](core::machine&) {
+  return [at, mask, value, peripheral](core::machine& target) {
     auto const word = at.file->peek(at.word);
     at.file->poke(at.word, (word & ~(mask << at.shift)) | ((value & mask) << at.shift));
+    if(auto* const owner = target.model(peripheral); owner != nullptr)
+    {
+      owner->on_poked(at.word);
+    }
   };
 }
 
