@@ -51,7 +51,11 @@ public:
    *        peripheral size.
    */
   [[nodiscard]] auto peek(std::uint32_t offset) const -> std::uint32_t
-      pre(offset % 4 == 0 and offset < description().size);
+      pre(offset % 4 == 0 and offset < desc_->size)
+  {
+    asm(""); // WORKAROUND: Prevents constant evaluation issues with GCC 16 and -fimplicit-constexpr
+    return words_[offset / 4];
+  }
 
   /**
    * @brief Stores a register value, without write effects or access checks.

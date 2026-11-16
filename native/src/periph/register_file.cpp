@@ -13,11 +13,6 @@ auto register_file::description() const noexcept -> peripheral_desc const&
   return *desc_;
 }
 
-[[gnu::hot]] auto register_file::peek(std::uint32_t offset) const -> std::uint32_t
-{
-  return words_[offset / 4];
-}
-
 void register_file::poke(std::uint32_t offset, std::uint32_t value)
 {
   words_[offset / 4] = value;
