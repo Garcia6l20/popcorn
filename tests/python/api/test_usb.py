@@ -2402,9 +2402,13 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
         first = await mic.read_frames(1000, deadline=at + ms(8))
         return first, await mic.read_frames(1000, deadline=at + ms(16))
 
+    taken: list[UacFrame] = []
+
     async def running() -> tuple[VirtualTime, tuple[list[UacFrame], list[UacFrame]]]:
         async with m.running():
-            return await late_drained_read(m, lambda _: mic.clear(), reads, ms(12))
+            return await late_drained_read(
+                m, lambda _: taken.extend(mic.take_frames()), reads, ms(12)
+            )
 
     at, (first, later) = run_bounded(running(), HANG)
     assert first
@@ -2415,8 +2419,10 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
     m.restore(start)
     asyncio.run(parked_to(m, at))
     assert m.time == at
-    mic.clear()
-    assert asyncio.run(reads(at)) == (first, later)
+    queued = [frame for frame in mic.take_frames() if not taken or taken[-1].at < frame.at]
+    assert len(queued) <= 1
+    parked_first, parked_later = asyncio.run(reads(at))
+    assert (queued + parked_first, parked_later) == (first, later)
 
 
 type Bounded = Callable[[Any, dict[str, Any]], Coroutine[Any, Any, object]]
