@@ -157,7 +157,9 @@ without `hold_from_until` only once no event is pending at the exact count. A sl
 there earlier, by mail or the wall budget, ends without a stop and writes no trace stop record.
 The goal goes on into the release slice, which drains the instant and stops on TIME. The parked
 state and the trace after a goal's TIME stop are the same whatever wall time or mail did. A
-system's hold slices stop on TIME with their events held on purpose.
+system's hold slices stop on TIME with their events held on purpose. A free-run waiter's
+deadline expires by the same rule, once the exact time reaches it and its instant ran, so a
+condition the instant's events make true fires as `user`.
 
 Both rules read the exact count, `clock_driver::exact_now`, the count `dispatch_due` drains to.
 After a `clock_driver::retract` the clock holds a higher count until execution passes it, and a

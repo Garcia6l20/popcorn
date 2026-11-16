@@ -326,11 +326,13 @@ struct condition_set
 struct waiter_spec
 {
   /** @brief Called on the host thread at the end of every slice after the boundary that
-   * registered the waiter, except one that ended where it began without idling, holding the GIL
-   * when it wraps Python. The waiter completes with a stop_reason::user stop of that slice end
-   * when it returns true. */
+   * registered the waiter, except an end at the registering boundary's own time without idling,
+   * holding the GIL when it wraps Python. The waiter completes with a stop_reason::user stop of
+   * that slice end when it returns true. */
   std::move_only_function<bool()> ready{};
-  /** @brief Virtual time at which the waiter completes with a stop_reason::time stop. */
+  /** @brief Virtual time at which the waiter completes with a stop_reason::time stop, once
+   * every event due at or before the exact instruction count of that time has run, as a goal's
+   * until_time stops. */
   std::optional<vtime> deadline{};
   /** @brief Virtual time after the boundary that registers the waiter at which it completes with
    * a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when

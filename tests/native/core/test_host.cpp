@@ -2999,6 +2999,97 @@ TEST_CASE("a parked stamp at the machine's time after a stop inside a cut block 
   CHECK_THROWS_AS(h.post([](core::machine&) {}, exact), std::invalid_argument);
 }
 
+TEST_CASE("a free-run waiter deadline completes after the events due at its time, mail or wall")
+{
+  auto const t = instant_count;
+  for(auto const crowded : {false, true})
+  {
+    CAPTURE(crowded);
+    auto const expected  = crowded ? std::size_t{300} : std::size_t{1};
+    auto       rig       = crowded ? crowded_instant(expected) : mailed_instant(true);
+    auto       ready_saw = std::make_shared<std::size_t>();
+    auto const handles   = start_waiting(
+        rig.h, {
+                   {.ready =
+                        [arch = rig.arch, ready_saw, expected] {
+                          *ready_saw = firsts_at(*arch, instant_count);
+                          return *ready_saw == expected;
+                        }, .deadline = at_instruction(t)},
+    });
+    auto const got = handles.front().future().get();
+    CHECK(got.time == at_instruction(t));
+    CHECK(got.reason == stop_reason::user);
+    CHECK(*ready_saw == expected);
+    CHECK_FALSE(rig.h.on->halt(0).has_value());
+    auto quiet  = crowded ? instant_idle(
+                                std::vector<std::pair<std::uint64_t, std::uint32_t>>(
+                                    expected, {t, instant_arch::first_event}))
+                          : mailed_instant(false);
+    std::ignore = quiet.h.run({.until_time = at_instruction(t)}).get();
+    CHECK(firsts_at(*quiet.arch, t) == *ready_saw);
+  }
+}
+
+TEST_CASE("a free-run waiter condition its deadline's instant makes true fires user, mail or wall")
+{
+  auto const t = instant_count;
+  for(auto const crowded : {false, true})
+  {
+    CAPTURE(crowded);
+    auto const expected = crowded ? std::size_t{300} : std::size_t{1};
+    auto       rig      = crowded ? crowded_instant(expected) : mailed_instant(true);
+    auto const handles  = start_waiting(
+        rig.h, {
+                   {.deadline = at_instruction(t),
+                    .when =
+                        core::condition_set{
+                            .members = {{
+                                .where    = instant_arch::marker_at,
+                                .size     = 4,
+                                .bits     = 32,
+                                .encoding = core::condition::kind::unsigned_int,
+                                .compare  = core::condition::op::ge,
+                                .value    = 1,
+                            }}}},
+    });
+    auto const& waiting = handles.front();
+    auto const  got     = waiting.future().get();
+    CHECK(got.reason == stop_reason::user);
+    CHECK(got.time == at_instruction(t));
+    CHECK(waiting.fired() == 1);
+    CHECK_FALSE(rig.h.on->halt(0).has_value());
+  }
+}
+
+TEST_CASE("a free-run waiter deadline below a held count expires once the exact count reaches it")
+{
+  auto       rig = instant_idle({});
+  auto const n0  = rig.h.now().ps / ps_per_instruction;
+  std::latch stored{1};
+  auto       handle   = std::make_shared<std::optional<core::host_future<popcorn::stop>>>();
+  auto       was_done = std::make_shared<bool>(true);
+  auto const stamp    = rig.h.post(
+      [&stored, handle, was_done](core::machine&) {
+        stored.wait();
+        *was_done = (*handle)->done();
+      },
+      at_instruction(n0 + 60));
+  core::access(*rig.h.on, 0, [&rig, n0](core::machine& m) {
+    auto& driver = core::machine_internals::clock_driver(m);
+    driver.jump_to(icount{n0 + 100});
+    driver.retract(icount{60});
+    std::ignore =
+        rig.arch->attached_events().schedule(m.virtual_clock().now(), instant_arch::first_event, 0);
+  });
+  auto const handles = start_waiting(rig.h, {{.deadline = at_instruction(n0 + 50)}});
+  *handle            = handles.front().future();
+  stored.count_down();
+  CHECK(handles.front().future().get().reason == stop_reason::time);
+  CHECK(stamp.get() == at_instruction(n0 + 60));
+  CHECK_FALSE(*was_done);
+  CHECK_FALSE(rig.h.on->halt(0).has_value());
+}
+
 TEST_CASE("stamps posted while running are checked when the goal stops in that slice")
 {
   auto                       made = alu(1000);

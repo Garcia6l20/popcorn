@@ -1239,7 +1239,9 @@ struct host_core
       {
         waiting->register_at(now, slice + 1);
         waiting->checked   = true;
-        auto const expired = waiting->spec.deadline and now >= *waiting->spec.deadline;
+        auto const expired = waiting->spec.deadline
+                         and machine_internals::exact_time(*slot.engine) >= *waiting->spec.deadline
+                         and not detail::instant_pending(*slot.engine);
         if(not waiting->fired and waiting->spec.when and not expired)
         {
           waiting->fired = holds_now(*waiting, *slot.engine);
