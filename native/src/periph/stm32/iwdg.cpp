@@ -138,7 +138,16 @@ public:
   void                                plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  struct offset_cache
+  {
+    std::uint64_t ticks   = ~std::uint64_t{};
+    std::uint32_t divider = 0;
+    std::uint64_t hz      = 0;
+    std::uint64_t value   = 0;
+  };
+
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
+  [[nodiscard]] auto offset_ps(std::size_t slot, std::uint64_t ticks) -> std::uint64_t;
   [[nodiscard]] auto anchor() const -> wide;
   [[nodiscard]] auto tick_unit() const -> wide;
   [[nodiscard]] auto count_at(std::uint64_t ps) const -> std::uint32_t;
@@ -174,6 +183,8 @@ private:
   irq_line*                  line_          = nullptr;
   bool                       freeze_logged_ = false;
   std::optional<option_bits> option_;
+
+  std::array<offset_cache, 2> offsets_{};
 };
 
 constexpr std::array<write_entry<iwdg>, 4> iwdg_writes{
@@ -265,8 +276,27 @@ void iwdg::restart(std::uint32_t value)
   reschedule();
 }
 
+auto iwdg::offset_ps(std::size_t slot, std::uint64_t ticks) -> std::uint64_t
+{
+  auto& cached = offsets_[slot];
+  if(cached.ticks != ticks or cached.divider != state_.divider or cached.hz != state_.hz)
+  {
+    cached.ticks   = ticks;
+    cached.divider = state_.divider;
+    cached.hz      = state_.hz;
+    cached.value =
+        static_cast<std::uint64_t>((wide{ticks} * tick_unit() + state_.hz - 1) / state_.hz);
+  }
+  return cached.value;
+}
+
 void iwdg::schedule_at_tick(std::uint32_t kind, std::uint64_t ticks)
 {
+  if(state_.anchor_frac == 0 and state_.hz != 0)
+  {
+    post(kind, std::max(state_.anchor_ps + offset_ps(kind == expiry ? 0 : 1, ticks), now_ps()));
+    return;
+  }
   auto const at  = anchor() + wide{ticks} * tick_unit();
   auto const due = std::max(static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz), now_ps());
   post(kind, due);
@@ -474,7 +504,9 @@ void iwdg::key_written(std::uint32_t, std::uint32_t now)
   }
   else if(key == refresh_key and state_.running != 0)
   {
-    if(variant_.window and count_at(now_ps()) > get(regs_, window_))
+    if(variant_.window
+       and get(regs_, window_) < state_.start
+       and count_at(now_ps()) > get(regs_, window_))
     {
       bite();
       return;
