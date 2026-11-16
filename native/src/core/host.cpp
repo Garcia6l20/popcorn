@@ -740,14 +740,15 @@ struct host_core
 
   /** @brief Runs each posted body as the engine owner, clears @p batch, then settles each promise
    *        outside the owner scope. */
-  template <typename Posted> void run_posted(member_slot& slot, Posted& batch)
+  template <typename Posted> void run_posted(member_slot& slot, Posted& batch, bool exact = false)
   {
     std::vector<std::pair<host_promise<vtime>, std::expected<vtime, std::exception_ptr>>> results;
     {
       owner_scope const owning{this};
       for(auto& posted : batch)
       {
-        auto const at = machine_internals::exact_time(*slot.engine);
+        auto const at = exact ? machine_internals::exact_time(*slot.engine)
+                              : slot.engine->virtual_clock().time();
         try
         {
           posted.body(*slot.engine);
@@ -885,7 +886,7 @@ struct host_core
     {
       return;
     }
-    auto const           now = machine_internals::exact_time(*slot.engine);
+    auto const           now = slot.engine->virtual_clock().time();
     std::vector<stamped> late;
     {
       std::scoped_lock const lock{mutex};
@@ -928,7 +929,7 @@ struct host_core
     {
       return;
     }
-    run_posted(slot, due);
+    run_posted(slot, due, true);
   }
 
   auto next_stamp(member_slot const& slot) -> std::optional<vtime>
@@ -1834,7 +1835,7 @@ auto host::post(
   }
   auto run_here = [&] {
     auto&      target = *slot.engine;
-    auto const at     = machine_internals::exact_time(target);
+    auto const at     = target.virtual_clock().time();
     try
     {
       body(target);
@@ -1885,7 +1886,7 @@ void host::post_stamped(
   {
     detail::supersede_parked(slot);
   }
-  auto const now = machine_internals::exact_time(*slot.engine);
+  auto const now = slot.engine->virtual_clock().time();
   if(at < now)
   {
     throw detail::past_stamp(at, now);

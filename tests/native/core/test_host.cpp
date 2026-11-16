@@ -6,6 +6,7 @@
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
+#include "../support/test_model.hpp"
 
 #include <doctest/doctest.h>
 #include <fcntl.h>
@@ -2581,8 +2582,10 @@ constexpr auto          zero_wall     = core::slice_bounds{.wall_budget = 0ns};
 
 struct instant_rig
 {
-  instant_arch* arch{};
-  hosted        h{};
+  instant_arch*                                    arch{};
+  std::shared_ptr<std::vector<core::trace_record>> stops{
+      std::make_shared<std::vector<core::trace_record>>()};
+  hosted h{};
 };
 
 auto instant_idle(
@@ -2602,6 +2605,10 @@ auto instant_idle(
   }
   instant_rig rig;
   rig.arch = f.module;
+  rig.h.hooks.push_back(f.target->add_trace_sink(
+      {core::trace_kind::stop}, [stops = rig.stops](std::span<core::trace_record const> records) {
+        stops->append_range(records);
+      }));
   rig.h.adopt(std::move(f.target), bounds);
   return rig;
 }
@@ -2776,6 +2783,8 @@ TEST_CASE("a goal's time stop comes after the events due at its time, mail or wa
       auto const parked = quiet.h.run({.until_time = at_instruction(t)}).get();
       CHECK(parked.stopped.reason == stop_reason::time);
       CHECK(rig.arch->event_log == quiet.arch->event_log);
+      CHECK(rig.stops->size() == 1);
+      CHECK(*rig.stops == *quiet.stops);
       CHECK(
           core::access(*rig.h.on, 0, [](core::machine& m) { return m.pending_events(); })
           == core::access(*quiet.h.on, 0, [](core::machine& m) { return m.pending_events(); }));
@@ -2915,6 +2924,14 @@ TEST_CASE("a stamp below a held count runs when the exact count reaches it, not 
         *seen = {core::machine_internals::exact_now(m).value, arch->event_log.size()};
       },
       at_instruction(n0 + 50));
+  std::latch in_body{1};
+  std::latch posted{1};
+  auto const blocking = rig.h.post(
+      [&in_body, &posted](core::machine&) {
+        in_body.count_down();
+        posted.wait();
+      },
+      at_instruction(n0 + 60));
   core::access(*rig.h.on, 0, [&rig, n0](core::machine& m) {
     auto& driver = core::machine_internals::clock_driver(m);
     driver.jump_to(icount{n0 + 100});
@@ -2929,22 +2946,13 @@ TEST_CASE("a stamp below a held count runs when the exact count reaches it, not 
         *held_seen = {core::machine_internals::exact_now(m).value, arch->event_log.size()};
       },
       rig.h.now());
-  auto const at_exact = rig.h.post([](core::machine&) {}, at_instruction(n0 + 40));
   CHECK_FALSE(stamp.done());
   CHECK_FALSE(at_held.done());
-  REQUIRE(at_exact.done());
-  CHECK(at_exact.get() == at_instruction(n0 + 40));
-  CHECK(rig.h.post([](core::machine&) {}).get() == at_instruction(n0 + 40));
+  CHECK(rig.h.post([](core::machine&) {}).get() == at_instruction(n0 + 100));
   CHECK_THROWS_AS(
-      rig.h.post([](core::machine&) {}, at_instruction(n0 + 39)), std::invalid_argument);
-  std::latch in_body{1};
-  std::latch posted{1};
-  auto const blocking = rig.h.post(
-      [&in_body, &posted](core::machine&) {
-        in_body.count_down();
-        posted.wait();
-      },
-      at_instruction(n0 + 60));
+      rig.h.post([](core::machine&) {}, at_instruction(n0 + 40)), std::invalid_argument);
+  CHECK_THROWS_AS(
+      rig.h.post([](core::machine&) {}, at_instruction(n0 + 99)), std::invalid_argument);
   auto const goal = rig.h.run({.until_time = at_instruction(n0 + 1000)});
   in_body.wait();
   auto const running = rig.h.post([](core::machine&) {}, at_instruction(n0 + 80));
@@ -2952,13 +2960,43 @@ TEST_CASE("a stamp below a held count runs when the exact count reaches it, not 
   auto const got = goal.get();
   CHECK(got.stopped.reason == stop_reason::time);
   CHECK(blocking.get() == at_instruction(n0 + 60));
-  CHECK(running.get() == at_instruction(n0 + 80));
+  CHECK_THROWS_AS(running.get(), std::invalid_argument);
   CHECK(stamp.get() == at_instruction(n0 + 50));
   CHECK(*seen == std::pair<std::uint64_t, std::size_t>{n0 + 50, 0});
   CHECK(at_held.get() == at_instruction(n0 + 100));
   CHECK(*held_seen == std::pair<std::uint64_t, std::size_t>{n0 + 100, 1});
   REQUIRE(rig.arch->event_log.size() == 1);
   CHECK(rig.arch->event_log.front().at == icount{n0 + 100});
+}
+
+TEST_CASE("a parked stamp at the machine's time after a stop inside a cut block runs at once")
+{
+  core::machine_options options;
+  options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+  popcorn::testing::machine_fixture<> f{m33(), "irq", std::move(options)};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto& model       = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+  model.raise_on_go = true;
+  model.raise_on_ctrl_read = true;
+  model.go_delay           = 1'000'000;
+  f.set("pc", sym("irq", "store_raise"));
+  f.set("r1", 1);
+  f.set("r2", 0x4001'0000);
+  f.set("r3", 0xaa);
+  f.set("r8", 0x3000'0000);
+  hosted     h{std::move(f.target)};
+  auto const got = h.run({.until = sym("irq", "irq_handler")}).get();
+  REQUIRE(got.stopped.reason == stop_reason::address);
+  auto const [exact, held] = core::access(*h.on, 0, [](core::machine& m) {
+    return std::pair{core::machine_internals::exact_time(m), m.virtual_clock().time()};
+  });
+  REQUIRE(held > exact);
+  auto       seen  = std::make_shared<vtime>();
+  auto const stamp = h.post([seen](core::machine& m) { *seen = m.virtual_clock().time(); }, held);
+  REQUIRE(stamp.done());
+  CHECK(stamp.get() == held);
+  CHECK(*seen == held);
+  CHECK_THROWS_AS(h.post([](core::machine&) {}, exact), std::invalid_argument);
 }
 
 TEST_CASE("stamps posted while running are checked when the goal stops in that slice")

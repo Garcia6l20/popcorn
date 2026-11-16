@@ -161,9 +161,11 @@ system's hold slices stop on TIME with their events held on purpose.
 
 Both rules read the exact count, `clock_driver::exact_now`, the count `dispatch_due` drains to.
 After a `clock_driver::retract` the clock holds a higher count until execution passes it, and a
-model event scheduled at `clock::now()` keys to that held count, past the exact one. Stamps are
-picked, refused as past and resolved by the exact time, so a stamp between the exact and the held
-count waits for execution to reach it.
+model event scheduled at `clock::now()` keys to that held count, past the exact one. The host
+picks due stamps by the exact time and resolves them with it, so a stamp it holds for a time
+between the exact and the held count waits for execution to reach it. Posts compare with the
+machine's time, `clock::time()`, the time Python reads: a post before it is in the past, and a
+parked post at it runs at once.
 
 ## Finishing
 

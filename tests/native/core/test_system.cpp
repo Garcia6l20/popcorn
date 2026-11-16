@@ -7,6 +7,7 @@
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -3963,3 +3964,52 @@ TEST_CASE_TEMPLATE(
   CHECK(WEXITSTATUS(status) == 66);
 }
 #endif
+
+TEST_CASE("a no-op stamp between a halted member's exact and held time leaves its exact count")
+{
+  auto const after = [](bool stamped) {
+    rig r{
+        .members = {member("alu", "alu_entry"), member("idle", "idle_forever")}
+    };
+    r.build(variants()[0]);
+    REQUIRE(r.run(100 * us_ps).reason == core::pause_reason::system_time);
+    auto&      on = *r.members[1].on;
+    auto const n =
+        core::access(on, 0, [](core::machine& m) { return m.virtual_clock().now().value; });
+    core::host_future<vtime> stamp;
+    auto                     ran_at = std::make_shared<std::uint64_t>();
+    if(stamped)
+    {
+      auto const at   = core::access(on, 0, [](core::machine& m) {
+        return vtime{m.virtual_clock().time().ps + 50 * 250'000};
+      });
+      auto const held = on.lock();
+      stamp           = on.post(
+          held, 0,
+          [ran_at](core::machine& m) { *ran_at = core::machine_internals::exact_now(m).value; },
+          at);
+    }
+    core::access(on, 0, [n](core::machine& m) {
+      auto& driver = core::machine_internals::clock_driver(m);
+      driver.jump_to(icount{n + 100});
+      driver.retract(icount{60});
+    });
+    auto const read = [&on] {
+      return core::access(on, 0, [](core::machine& m) {
+        return std::pair{
+            core::machine_internals::exact_now(m).value, m.virtual_clock().now().value};
+      });
+    };
+    REQUIRE(r.run(100 * us_ps).reason == core::pause_reason::system_time);
+    auto const at_pause = read();
+    REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+    auto const later = read();
+    if(stamped)
+    {
+      CHECK(bounded_get(stamp).ps == *ran_at * 250'000);
+      CHECK(*ran_at >= n + 50);
+    }
+    return std::pair{at_pause, later};
+  };
+  CHECK(after(true) == after(false));
+}
