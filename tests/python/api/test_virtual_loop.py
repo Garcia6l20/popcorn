@@ -2323,6 +2323,40 @@ def test_a_timer_due_at_the_parked_clock_runs_ahead_of_a_post_at_the_clock(
     assert order == ["timer", "post 1", "post 2"]
 
 
+def timer_and_post_at_a_frame_end(u575: popcorn.PartDescription, *, stop_inside: bool) -> list[str]:
+    m = asleep(u575)
+    order: list[str] = []
+    at = m.time + ps(FRAME_PS)
+
+    async def go() -> None:
+        m.periph.USART1.TDR.value = 0x41
+        posted = m.loop.post(order.append, "post", at=at)
+        m.loop.call_later(FRAME_PS / PS_PER_SECOND, order.append, "timer")
+        if stop_inside:
+            stop = await m.run(stop_when=lambda m: m.periph.USART1.ISR_enabled.TC == 1)
+            assert stop.reason is popcorn.StopReason.USER
+            assert stop.time == at
+            assert order == []
+            sampled = m.sample(lambda: order.append("sample"), at=m.time)
+            assert not sampled.done()
+            await m.run(for_=us(10))
+            await sampled
+            await posted
+        else:
+            async with m.running():
+                await posted
+
+    asyncio.run(go())
+    return order
+
+
+def test_a_post_at_a_device_event_runs_behind_the_timer_after_a_stop_between_them(
+    u575: popcorn.PartDescription,
+) -> None:
+    assert timer_and_post_at_a_frame_end(u575, stop_inside=True) == ["timer", "post", "sample"]
+    assert timer_and_post_at_a_frame_end(u575, stop_inside=False) == ["timer", "post"]
+
+
 def test_a_failed_submit_leaves_no_post(u575: popcorn.PartDescription) -> None:
     m = asleep(u575)
     loop = m.loop

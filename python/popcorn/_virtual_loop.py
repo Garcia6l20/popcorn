@@ -688,10 +688,12 @@ class VirtualLoop(asyncio.AbstractEventLoop):
 
         The callback runs in a step like a timer's, with `time()` the stamp, and an event due at
         or before the stamp fires first at its own stamp: a timer due at `at` runs ahead of a post
-        at `at` whichever was made first, and two posts at one stamp run in call order. A post at
-        the clock of a parked machine runs in the first step of the next run, behind the timers
-        due at that clock. Await the result on the test's own loop, it resolves once the callback
-        ran.
+        at `at` whichever was made first, and two posts at one stamp run in call order. A run that
+        stops between the events of the stamp's instant, such as a `stop_when` stop after one of
+        them, leaves the post to the next run, which runs it behind the rest of those events. A
+        post at the clock of a parked machine runs in the first step of the next run, behind the
+        timers due at that clock. Await the result on the test's own loop, it resolves once the
+        callback ran.
 
         `at` is required: a running machine has no deterministic "now", and
         `call_soon_threadsafe` is refused for the same reason. A parked machine raises

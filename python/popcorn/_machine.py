@@ -1269,6 +1269,11 @@ class Machine:
         command: at once on the calling thread while the machine is parked, on the machine's
         thread while it runs, or at the first boundary at or after `at`.
 
+        With `at`, `fn` runs after the events due at that boundary. A parked sample at the
+        machine's time runs at once, unless a stamp due at that time is pending, which a run that
+        stopped between the events of one instant leaves: it then runs in the next run, behind
+        that stamp.
+
             speaking = await m.sample(lambda: decode_status(m))
             at, level = await m.sample(lambda: (m.time, m.var("level").value))
 
