@@ -386,12 +386,19 @@ def test_a_hit_during_a_run_awaited_elsewhere_is_refused_as_busy(machines: Machi
     m = machines()
     probe = m.probe("idle_main")
 
+    release = threading.Event()
+
     async def scenario() -> None:
+        held = m.loop.post(lambda: release.wait(HANG), at=m.time + us(1))
         running = asyncio.create_task(m.run(for_=ms(50)))
         await asyncio.sleep(0)
-        with pytest.raises(popcorn.MachineBusy):
-            await probe.hit(within=ms(1))
+        try:
+            with pytest.raises(popcorn.MachineBusy):
+                await probe.hit(within=ms(1))
+        finally:
+            release.set()
         await running
+        await held
 
     run_bounded(scenario(), HANG)
 
