@@ -28,6 +28,70 @@ auto writable_by(region_desc const& region, initiator by) noexcept -> bool
 }
 }
 
+namespace
+{
+template <typename Run, typename Engine>
+auto read_outside_memory(Run& run, Engine* engine, address addr, std::uint8_t size, bus_attrs attrs)
+    -> std::expected<std::uint32_t, bus_error>
+{
+  auto const by = attrs.by;
+  if(auto const* const window = run.window_at(addr, size))
+  {
+    auto read            = run.dispatch_read(*window, addr - window->base, size, attrs);
+    run.firewall_refused = false;
+    return read;
+  }
+  if(auto* const raz = run.raz_at(addr, size))
+  {
+    run.note_raz(*raz, addr - raz->range->start, false, by);
+    return 0u;
+  }
+  if(auto const* const band = run.bit_band_at(addr, size))
+  {
+    return run.bit_band_read(*band, addr, size, attrs);
+  }
+  std::uint32_t value = 0;
+  if(uc_mem_read_attrs(engine, addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
+  {
+    return std::unexpected(bus_error::unmapped);
+  }
+  return value;
+}
+
+template <typename Run, typename Engine>
+auto write_outside_memory(
+    Run&          run,
+    Engine*       engine,
+    address       addr,
+    std::uint8_t  size,
+    std::uint32_t value,
+    bus_attrs     attrs) -> std::expected<void, bus_error>
+{
+  auto const by = attrs.by;
+  if(auto const* const window = run.window_at(addr, size))
+  {
+    auto done            = run.dispatch_write(*window, addr - window->base, size, value, attrs);
+    run.firewall_refused = false;
+    return done;
+  }
+  if(auto* const raz = run.raz_at(addr, size))
+  {
+    run.note_raz(*raz, addr - raz->range->start, true, by);
+    return {};
+  }
+  if(auto const* const band = run.bit_band_at(addr, size))
+  {
+    return run.bit_band_write(*band, addr, size, value, attrs);
+  }
+  if(uc_mem_write_attrs(engine, addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
+  {
+    return std::unexpected(bus_error::unmapped);
+  }
+  return {};
+}
+
+}
+
 [[gnu::always_inline]] inline auto machine::read_memory(
     mapped_region const& region,
     address              addr,
@@ -50,7 +114,7 @@ auto machine::do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, 
   if(region == nullptr)
   {
     grant = {};
-    return do_read(addr, size, attrs);
+    return read_outside_memory(*run_, engine_.get(), addr, size, attrs);
   }
   if(not run_->granted(grant, addr, size))
   {
@@ -89,27 +153,7 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     }
     return read_memory(*region, addr, size, attrs);
   }
-  if(auto const* const window = run_->window_at(addr, size))
-  {
-    auto read              = run_->dispatch_read(*window, addr - window->base, size, attrs);
-    run_->firewall_refused = false;
-    return read;
-  }
-  if(auto* const raz = run_->raz_at(addr, size))
-  {
-    run_->note_raz(*raz, addr - raz->range->start, false, by);
-    return 0u;
-  }
-  if(auto const* const band = run_->bit_band_at(addr, size))
-  {
-    return run_->bit_band_read(*band, addr, size, attrs);
-  }
-  std::uint32_t value = 0;
-  if(uc_mem_read_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
-  {
-    return std::unexpected(bus_error::unmapped);
-  }
-  return value;
+  return read_outside_memory(*run_, engine_.get(), addr, size, attrs);
 }
 
 [[gnu::always_inline]] inline auto machine::write_memory(
@@ -144,7 +188,7 @@ auto machine::do_write_granted(
   if(region == nullptr)
   {
     grant = {};
-    return do_write(addr, size, value, attrs);
+    return write_outside_memory(*run_, engine_.get(), addr, size, value, attrs);
   }
   if(not run_->granted(grant, addr, size))
   {
@@ -183,26 +227,7 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
     }
     return write_memory(*region, addr, size, value, attrs);
   }
-  if(auto const* const window = run_->window_at(addr, size))
-  {
-    auto done              = run_->dispatch_write(*window, addr - window->base, size, value, attrs);
-    run_->firewall_refused = false;
-    return done;
-  }
-  if(auto* const raz = run_->raz_at(addr, size))
-  {
-    run_->note_raz(*raz, addr - raz->range->start, true, by);
-    return {};
-  }
-  if(auto const* const band = run_->bit_band_at(addr, size))
-  {
-    return run_->bit_band_write(*band, addr, size, value, attrs);
-  }
-  if(uc_mem_write_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
-  {
-    return std::unexpected(bus_error::unmapped);
-  }
-  return {};
+  return write_outside_memory(*run_, engine_.get(), addr, size, value, attrs);
 }
 
 auto machine::do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)

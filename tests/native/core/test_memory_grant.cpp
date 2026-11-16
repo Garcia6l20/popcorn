@@ -137,6 +137,23 @@ TEST_CASE("an access inside a grant skips the firewall, one outside it asks agai
   CHECK(grant.first == sram + extent);
 }
 
+TEST_CASE("a granted access outside every region clears the grant and answers as the plain access")
+{
+  auto const r = booted(true);
+  for(address const at : {address{0x4001'0000}, address{0x4002'0000}, address{0x6000'0000}})
+  {
+    CAPTURE(at);
+    core::memory_grant grant{.generation = 7, .first = sram, .last = sram_last};
+    auto const         granted = services(r).read(at, 4, dma, grant);
+    CHECK(grant.generation == 0);
+    CHECK(granted == services(r).read(at, 4, dma));
+    grant              = {.generation = 7, .first = sram, .last = sram_last};
+    auto const written = services(r).write(at, 4, 0, dma, grant);
+    CHECK(grant.generation == 0);
+    CHECK(written.has_value() == (at != 0x6000'0000));
+  }
+}
+
 TEST_CASE("a grant shorter than the access does not hold it")
 {
   auto const         r = booted(true);
