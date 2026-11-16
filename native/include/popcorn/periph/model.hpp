@@ -238,7 +238,8 @@ public:
    * @brief Tells the model that the machine's poke path stored a value in one of its registers,
    *        as `Machine.poke` does. The poke ran no write handler. A model that derives state
    *        from register values refreshes it here. Never called for a poke the model makes on
-   *        its own register_file.
+   *        its own register_file, nor for a snapshot restore, which reaches the model through
+   *        load().
    * @param offset Word-aligned offset of the register poked, from the peripheral base.
    */
   virtual void on_poked([[maybe_unused]] std::uint32_t offset)

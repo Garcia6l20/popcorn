@@ -133,7 +133,6 @@ struct block_fields
   reg_ref                                      clear;
   std::vector<std::pair<field_ref, field_ref>> interrupts;
   std::vector<irq_group>                       irq_groups;
-  std::vector<std::pair<field_ref, field_ref>> irq_loose;
   std::vector<std::pair<field_ref, field_ref>> clears;
 };
 
@@ -424,7 +423,6 @@ auto sai::fields_of(char prefix, sai_variant const& variant) const -> block_fiel
       .clear            = reg(clr),
       .interrupts       = {},
       .irq_groups       = {},
-      .irq_loose        = {},
       .clears           = {}};
   for(auto const& enable : describe(im).fields)
   {
@@ -440,8 +438,8 @@ auto sai::fields_of(char prefix, sai_variant const& variant) const -> block_fiel
     auto const aligned = flag.width == 1 and enable.width == 1 and flag.lsb == enable.lsb;
     if(not aligned)
     {
-      out.irq_loose.emplace_back(flag, enable);
-      continue;
+      throw config_error(
+          desc_.name, 0, im, "an interrupt enable at the bit position of its one-bit flag");
     }
     auto const found = std::ranges::find_if(out.irq_groups, [&](irq_group const& group) {
       return group.flag_offset == flag.offset and group.enable_offset == enable.offset;
@@ -1441,10 +1439,6 @@ void sai::flags()
     {
       level = level
            or (regs_.peek(group.flag_offset) & regs_.peek(group.enable_offset) & group.mask) != 0;
-    }
-    for(auto const& [flag, enable] : f.irq_loose)
-    {
-      level = level or (get(regs_, flag) != 0 and get(regs_, enable) != 0);
     }
   }
   if(level)

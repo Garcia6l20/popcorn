@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -61,6 +62,7 @@ public:
   std::vector<stm32::captured_audio_frame> frames;
   std::vector<received_call>               calls;
   std::vector<std::uint64_t>               ends;
+  std::function<void()>                    on_receive;
 
   void transmitted(
       std::span<std::uint32_t const> slots,
@@ -81,6 +83,10 @@ public:
     for(auto& slot : slots)
     {
       slot = next_ < words_.size() ? words_[next_++] : 0;
+    }
+    if(on_receive)
+    {
+      on_receive();
     }
   }
 
@@ -2503,4 +2509,72 @@ TEST_CASE(
   std::vector<stm32::captured_audio_frame> rest{
       other.a->frames.begin() + static_cast<std::ptrdiff_t>(kept), other.a->frames.end()};
   CHECK(rest == expected_rest);
+}
+
+TEST_CASE("a frame length written mid-frame re-lays out the half frame of the next frame")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  b.stereo16("A", 64, true);
+  b.put(
+      "ACR1", {
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.push('A', ramp(0));
+  b.push('A', ramp(1));
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 5 * us);
+  b.put(
+      "AFRCR", {
+                   {"FRL",   127},
+                   {"FSALL", 63 },
+                   {"FSDEF", 1  }
+  });
+  b.run_until(start + 15 * us);
+  b.push('A', ramp(2));
+  b.push('A', ramp(3));
+  b.run_until(start + 35 * us);
+  CHECK(b.get("ASR", "FLVL") == 1);
+  b.run_until(start + 45 * us);
+  CHECK(b.get("ASR", "FLVL") == 0);
+}
+
+TEST_CASE("a slot callback that writes the data size lays out the later slots of the same instant")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  b.stereo16("B", 64, false);
+  b.put(
+      "BCR1", {
+                  {"MODE",   1},
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  auto written    = false;
+  r.b->on_receive = [&] {
+    if(not std::exchange(written, true))
+    {
+      auto&       regs = r.f->target->peripheral("SAI1");
+      auto const& cr1  = b.reg("SAI1", "BCR1");
+      auto const  field =
+          std::ranges::find(cr1.fields, std::string_view{"DS"}, &popcorn::field_desc::name);
+      auto const before = regs.peek(cr1.offset);
+      auto const mask   = ((std::uint32_t{1} << field->width) - 1u) << field->lsb;
+      auto const after  = before & ~mask;
+      REQUIRE(r.f->target->model("SAI1")
+                  ->on_write(regs, cr1.offset, 4, before, after, {.pc = 0, .now = icount{0}})
+                  .has_value());
+    }
+  };
+  b.set("BCR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 16 * bit_64 + bit_64 / 2);
+  REQUIRE(written);
+  CHECK(b.get("BSR", "FLVL") == 2);
 }
