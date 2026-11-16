@@ -130,10 +130,26 @@ auto field_of(
 class dma_recorder final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
-  explicit dma_recorder(bool knows) : knows_{knows}
+  explicit dma_recorder(bool knows, popcorn::periph::model_context* ctx = nullptr)
+      : knows_{knows}, ctx_{ctx}
   {}
 
   std::vector<std::pair<std::uint32_t, bool>> levels;
+  stm32::dma_requester*                       victim{};
+  std::uint32_t                               foreign_acks{};
+
+  void acknowledge_at(std::uint64_t ps, std::uint32_t request)
+  {
+    REQUIRE(ctx_ != nullptr);
+    ctx_->events.schedule_at(vtime{ps}, 1, request, ctx_->clock);
+  }
+
+  void on_event(std::uint32_t, std::uint64_t request) override
+  {
+    REQUIRE(victim != nullptr);
+    victim->acknowledged(*this, static_cast<std::uint32_t>(request));
+    ++foreign_acks;
+  }
 
   void on_request(std::uint32_t request, bool level) override
   {
@@ -153,7 +169,8 @@ public:
   }
 
 private:
-  bool knows_;
+  bool                            knows_;
+  popcorn::periph::model_context* ctx_;
 };
 
 constexpr std::uint32_t ic1_request = 11;
@@ -189,8 +206,8 @@ struct rig
     if(record)
     {
       options.models.insert_or_assign(
-          "GPDMA1", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
-            return std::make_shared<dma_recorder>(true);
+          "GPDMA1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<dma_recorder>(true, &ctx);
           });
       options.models.insert_or_assign(
           "LPDMA1", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
@@ -5177,4 +5194,50 @@ TEST_CASE(
   CHECK(r.saved() == state);
   CHECK(r.pending() == due);
   CHECK(r.dma->levels == levels);
+}
+
+namespace
+{
+struct coincident_run
+{
+  std::uint64_t                               at{};
+  std::uint32_t                               flags{};
+  bool                                        irq{};
+  std::vector<std::pair<std::uint32_t, bool>> levels;
+  std::uint32_t                               foreign_acks{};
+};
+
+auto coincident(std::optional<std::uint64_t> ack_at) -> coincident_run
+{
+  rig r{units[0], false, u575(), {}, true};
+  r.write(ccmr1, cc1e);
+  if(ack_at)
+  {
+    r.dma->victim = r.f->model_of<stm32::dma_requester>(r.u.name);
+    r.dma->acknowledge_at(*ack_at, ue_request + 1);
+  }
+  static_cast<void>(r.started(6, 10, cntstrt, uede | ue));
+  run_to_flag(r, ue);
+  return {
+      .at           = r.now_ps(),
+      .flags        = r.read(isr),
+      .irq          = r.irq_pending(),
+      .levels       = r.dma->levels,
+      .foreign_acks = r.dma->foreign_acks};
+}
+}
+
+TEST_CASE(
+    "inferred: a foreign request acknowledged at the picosecond the LPTIM update is due leaves the "
+    "flag, the IRQ and the DMA request as without the acknowledge")
+{
+  auto const alone = coincident(std::nullopt);
+  REQUIRE((alone.flags & ue) == ue);
+  REQUIRE(alone.irq);
+  auto const acked = coincident(alone.at);
+  CHECK(acked.foreign_acks == 1);
+  CHECK(acked.at == alone.at);
+  CHECK(acked.flags == alone.flags);
+  CHECK(acked.irq == alone.irq);
+  CHECK(acked.levels == alone.levels);
 }
