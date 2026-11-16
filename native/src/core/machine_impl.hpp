@@ -2220,6 +2220,8 @@ struct machine::run_state
 
   /** @brief Reads the wall clock and restarts the countdown, off the block hook's hot path. */
   [[gnu::noinline]] auto wall_expired_now() noexcept -> bool;
+  /** @brief Whether an event is due at or before the exact count, one dispatch_due drains now. */
+  [[nodiscard]] auto instant_left() const noexcept -> bool;
   /** @brief Instructions counted against slice_request::max_instructions: the carried since_ask,
    * the executed and the jumped of this slice. */
   [[nodiscard]] auto count_progress() const noexcept -> icount;
@@ -2654,6 +2656,19 @@ struct machine_internals
   [[nodiscard]] static auto clock_driver(machine& target) noexcept -> core::clock_driver&
   {
     return target.clock_driver_;
+  }
+
+  /** @brief Instructions @p target executed since reset, exact after a retract, the count
+   * dispatch_due drains events to. */
+  [[nodiscard]] static auto exact_now(machine const& target) noexcept -> icount
+  {
+    return target.clock_driver_.exact_now();
+  }
+
+  /** @brief Virtual time of exact_now(). */
+  [[nodiscard]] static auto exact_time(machine const& target) -> vtime
+  {
+    return target.clock_driver_.exact_time();
   }
 
   /** @brief The arch module of @p target. */

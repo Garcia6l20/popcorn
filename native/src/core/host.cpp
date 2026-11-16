@@ -1,5 +1,7 @@
 #include <popcorn/core/host.hpp>
 
+#include "machine_impl.hpp"
+
 #include <poll.h>
 #include <pthread.h>
 #include <sys/eventfd.h>
@@ -250,6 +252,12 @@ auto event_due(member_slot const& slot) -> bool
   auto const next   = slot.engine->next_event();
   auto const marked = slot.engine->held_through();
   return next and marked and *next <= *marked;
+}
+
+auto instant_pending(machine const& target) -> bool
+{
+  auto const next = target.next_event();
+  return next and *next <= machine_internals::exact_now(target);
 }
 
 struct turn_plan
@@ -739,7 +747,7 @@ struct host_core
       owner_scope const owning{this};
       for(auto& posted : batch)
       {
-        auto const at = slot.engine->virtual_clock().time();
+        auto const at = machine_internals::exact_time(*slot.engine);
         try
         {
           posted.body(*slot.engine);
@@ -877,7 +885,7 @@ struct host_core
     {
       return;
     }
-    auto const           now = slot.engine->virtual_clock().time();
+    auto const           now = machine_internals::exact_time(*slot.engine);
     std::vector<stamped> late;
     {
       std::scoped_lock const lock{mutex};
@@ -901,11 +909,11 @@ struct host_core
 
   void apply_due(member_slot& slot)
   {
-    if(detail::event_due(slot))
+    if(detail::instant_pending(*slot.engine))
     {
       return;
     }
-    auto const           now = slot.engine->virtual_clock().time();
+    auto const           now = machine_internals::exact_time(*slot.engine);
     std::vector<stamped> due;
     {
       std::scoped_lock const lock{mutex};
@@ -1826,7 +1834,7 @@ auto host::post(
   }
   auto run_here = [&] {
     auto&      target = *slot.engine;
-    auto const at     = target.virtual_clock().time();
+    auto const at     = machine_internals::exact_time(target);
     try
     {
       body(target);
@@ -1877,7 +1885,7 @@ void host::post_stamped(
   {
     detail::supersede_parked(slot);
   }
-  auto const now = slot.engine->virtual_clock().time();
+  auto const now = machine_internals::exact_time(*slot.engine);
   if(at < now)
   {
     throw detail::past_stamp(at, now);

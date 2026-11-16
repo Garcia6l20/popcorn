@@ -141,6 +141,30 @@ The run state carries the executed and jumped instructions of earlier wall-depen
 ends of a slice with a `stop_when` into the next slice's `max_instructions` count, so the
 instruction-count end falls at the same instruction whatever the wall budget.
 
+## Host stamps
+
+A host stamp, `host::post` with a time, runs on the host thread between slices, after every
+event due at or before the exact instruction count of its boundary. `apply_due` in
+`native/src/core/host.cpp` runs due stamps only when no event is pending at that count. A slice
+can end at the boundary before `dispatch_due` drained it: mail at the turn top after an idle
+jump, the wall check every 256 events, or a `stop_when` stop between two events of the instant.
+The stamp then stays pending. The next slice, bounded at the stamp by its `until_time`, drains the
+rest of the instant and stops on TIME before any instruction, and the stamp runs at that end. A
+stamp due at a reported stop with events still pending runs in the next run.
+
+A slice's own `until_time` follows the same rule. `finish` makes the TIME stop of a request
+without `hold_from_until` only once no event is pending at the exact count. A slice that ends
+there earlier, by mail or the wall budget, ends without a stop and writes no trace stop record.
+The goal goes on into the release slice, which drains the instant and stops on TIME. The parked
+state and the trace after a goal's TIME stop are the same whatever wall time or mail did. A
+system's hold slices stop on TIME with their events held on purpose.
+
+Both rules read the exact count, `clock_driver::exact_now`, the count `dispatch_due` drains to.
+After a `clock_driver::retract` the clock holds a higher count until execution passes it, and a
+model event scheduled at `clock::now()` keys to that held count, past the exact one. Stamps are
+picked, refused as past and resolved by the exact time, so a stamp between the exact and the held
+count waits for execution to reach it.
+
 ## Finishing
 
 `finish` turns the end into a `stop` record: the reason, the program counter, the instruction

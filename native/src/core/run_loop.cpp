@@ -1320,6 +1320,12 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
   return slice_end{make_stop(*result.reason(), {}, result.fault_detail())};
 }
 
+auto machine::run_state::instant_left() const noexcept -> bool
+{
+  auto const next = owner.scheduler_.next_deadline();
+  return next and *next <= owner.clock_driver_.exact_now();
+}
+
 auto machine::run_state::count_progress() const noexcept -> icount
 {
   return icount{since_ask.value + executed.value + jumped.value};
@@ -1337,7 +1343,8 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   flush_sinks();
   if(not end.stopped
      and request.until_time
-     and owner.clock_driver_.exact_time() >= *request.until_time)
+     and owner.clock_driver_.exact_time() >= *request.until_time
+     and (request.hold_from_until or not instant_left()))
   {
     end.stopped = make_stop(stop_reason::time, {}, std::nullopt);
   }

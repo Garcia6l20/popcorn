@@ -169,7 +169,9 @@ struct slice_request
    * instructions are single-stepped, which costs a per-instruction hook for those only. */
   std::optional<icount> exact_instructions{};
   /** @brief Stop with stop_reason::time on reaching this virtual time since reset, also while
-   * the core sleeps with no event pending: the clock jumps there. */
+   * the core sleeps with no event pending: the clock jumps there. Without hold_from_until the
+   * stop comes only once every event due at or before the exact count ran: a slice that ends
+   * there earlier, by mail or the wall budget, ends without a stop. */
   std::optional<vtime> until_time{};
   /** @brief Once until_time is reached, dispatch only the events due before it, whatever stop
    * ends the slice. The others stay pending and the next slice dispatches them first, in key
@@ -383,7 +385,7 @@ public:
   /**
    * @brief Count up to which the last slice_request::hold_from_until slice that reached its
    *        until_time left due events held, empty once a slice dispatched without a hold. A
-   *        host defers stamped commands while an event at or before it is pending. Saved in
+   *        system leaves its members' events held here between its slices. Saved in
    *        snapshots.
    */
   [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;

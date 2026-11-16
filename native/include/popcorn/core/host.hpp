@@ -193,7 +193,8 @@ struct run_goal
   std::optional<icount> budget{};
   /** @brief Exact instruction count of the whole goal, for stepping. */
   std::optional<icount> exact{};
-  /** @brief slice_request::until_time of every slice. */
+  /** @brief slice_request::until_time of every slice. The goal stops with stop_reason::time
+   * only once every event due at or before the exact instruction count of that time has run. */
   std::optional<vtime> until_time{};
   /** @brief slice_request::stop_when of every slice, called on the host thread. */
   std::move_only_function<bool()> stop_when{};
@@ -808,8 +809,11 @@ public:
       pre(who < members());
 
   /**
-   * @brief Runs @p body on member @p who as one command. The future resolves to the virtual time
-   *        read right before the body ran, or fails with what the body threw.
+   * @brief Runs @p body on member @p who as one command. The future resolves to the exact
+   *        virtual time of the instruction boundary the body ran at, or fails with what the body
+   *        threw. After an interrupt cut a block short, the machine's time holds the higher count
+   *        of the cut block until execution passes it, so the body can read a time past the
+   *        future's.
    *
    * Without @p at: from a thread that owns the engine, and from any thread while parked, the body
    * runs at once on the calling thread and the future is returned done. While running, the
@@ -817,19 +821,22 @@ public:
    * boundary, best effort.
    *
    * With @p at, a stamp: the body runs at the first block boundary at or after @p at, exactly at
-   * @p at when the core is idle there, before a stop of that boundary is reported. Stamps run in
-   * time order, equal stamps in posting order. A stamp equal to the machine's time runs at once,
-   * unless an earlier or equal stamp is pending, or an event a held slice left due, see
-   * machine::held_through(), is still pending: it then runs after the next slice dispatched
-   * it.
+   * @p at when the core is idle there. Stamps run in time order, equal stamps in posting order.
+   * A stamp runs after every event due at or before the exact instruction count of its boundary.
+   * When a slice ends at that boundary before those events ran, by mail, the wall budget or a
+   * stop between two events of the instant, the stamp runs after the next slice dispatched them,
+   * which can be after a stop at that boundary was reported. Stamps compare with the exact count,
+   * the one the run loop dispatches to: a stamp past it waits for execution to reach it, also
+   * where the machine's time holds a higher count after an interrupt cut a block short, and a
+   * stamp before the exact time is in the past. A stamp equal to the exact time runs at once,
+   * unless an earlier or equal stamp is pending, which a stop between the events of one instant
+   * can leave, or an event a held slice left due, see machine::held_through(), is still
+   * pending: it then runs after the next slice dispatched it.
    * A later stamp on a parked member stays pending until a goal or free run reaches it. A reset
    * or a restore fails every pending stamp with operation_cancelled. A body captures native
    * values only. A later stamp from the host thread in a callback, with no host mutex held, takes
    * this host's mutex blocking: native callers only, the binding refuses posts from a host
-   * thread. While an event a slice_request::hold_from_until slice left held is pending, up to
-   * machine::held_through(), due stamps wait for the next slice to dispatch it, so a body never
-   * runs before the events due at its point. The mark is machine state, so a snapshot restore
-   * and an unlinked member keep it.
+   * thread.
    *
    * @throws std::invalid_argument when @p at is before the machine's time, checked here unless
    *         the member is running. While running the check happens at the next boundary and

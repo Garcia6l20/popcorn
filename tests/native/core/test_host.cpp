@@ -3,6 +3,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -12,6 +13,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -2533,6 +2535,430 @@ TEST_CASE("stamp edge cases: at zero, never due, during exact stepping")
   CHECK(got.executed == icount{1000});
   CHECK(stamp.get() >= t);
   CHECK(stamp.get().ps < t.ps + 512 * ps_per_instruction);
+}
+
+class instant_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  static constexpr std::uint32_t first_event  = 3;
+  static constexpr std::uint32_t second_event = 4;
+  static constexpr std::uint32_t poke_event   = 5;
+  static constexpr address       marker_at    = 0x2001'0000;
+
+  core::machine* target = nullptr;
+  bool           pokes  = true;
+  bool           armed  = false;
+  std::uint32_t  firsts = 0;
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == poke_event)
+    {
+      armed = pokes;
+    }
+    if(kind == first_event)
+    {
+      std::ignore = attached_services().write(marker_at, 4, ++firsts, popcorn::initiator::debugger);
+    }
+    test_arch::on_event(kind, payload);
+  }
+
+  auto deliver_pending() -> popcorn::arch::trap_result override
+  {
+    if(std::exchange(armed, false))
+    {
+      target->interrupt();
+    }
+    return test_arch::deliver_pending();
+  }
+};
+
+constexpr std::uint64_t instant_count = 100'000;
+constexpr std::uint64_t instant_lead  = 1'000;
+constexpr auto          zero_wall     = core::slice_bounds{.wall_budget = 0ns};
+
+struct instant_rig
+{
+  instant_arch* arch{};
+  hosted        h{};
+};
+
+auto instant_idle(
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> const& events,
+    bool                                                        pokes  = true,
+    core::slice_bounds                                          bounds = {}) -> instant_rig
+{
+  popcorn::testing::machine_fixture<instant_arch> f{m33(), "idle", core::machine_options{}};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.target->virtual_clock().time() < at_instruction(instant_count - 2 * instant_lead));
+  f.module->target = f.target.get();
+  f.module->pokes  = pokes;
+  for(auto const& [count, kind] : events)
+  {
+    std::ignore = f.module->attached_events().schedule(icount{count}, kind, 0);
+  }
+  instant_rig rig;
+  rig.arch = f.module;
+  rig.h.adopt(std::move(f.target), bounds);
+  return rig;
+}
+
+auto kinds_at(instant_arch const& arch, std::uint64_t count) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> kinds;
+  for(auto const& logged : arch.event_log)
+  {
+    if(logged.at == icount{count} and logged.kind != instant_arch::poke_event)
+    {
+      kinds.push_back(logged.kind);
+    }
+  }
+  return kinds;
+}
+
+auto firsts_at(instant_arch const& arch, std::uint64_t count) -> std::size_t
+{
+  return static_cast<std::size_t>(
+      std::ranges::count(kinds_at(arch, count), instant_arch::first_event));
+}
+
+auto mailed_instant(bool pokes) -> instant_rig
+{
+  return instant_idle(
+      {
+          {instant_count - instant_lead, instant_arch::poke_event },
+          {instant_count,                instant_arch::first_event},
+  },
+      pokes);
+}
+
+auto crowded_instant(std::size_t events) -> instant_rig
+{
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> crowd(
+      events, {instant_count, instant_arch::first_event});
+  return instant_idle(crowd, true, zero_wall);
+}
+
+auto stamp_seeing(instant_rig const& rig, std::shared_ptr<std::vector<std::uint32_t>> seen)
+    -> core::host_future<vtime>
+{
+  return rig.h.post(
+      [arch = rig.arch, seen](core::machine&) { *seen = kinds_at(*arch, instant_count); },
+      at_instruction(instant_count));
+}
+
+TEST_CASE("a stamp runs after the events due at its boundary when mail ends the slice there")
+{
+  auto const t     = instant_count;
+  auto const later = vtime{at_instruction(t).ps + 1'000'000'000};
+  for(auto const pokes : {true, false})
+  {
+    for(auto const free : {false, true})
+    {
+      CAPTURE(pokes);
+      CAPTURE(free);
+      auto       rig   = mailed_instant(pokes);
+      auto       seen  = std::make_shared<std::vector<std::uint32_t>>();
+      auto const stamp = stamp_seeing(rig, seen);
+      if(free)
+      {
+        rig.h.start();
+        CHECK(stamp.get() == at_instruction(t));
+        CHECK_FALSE(rig.h.on->halt(0).has_value());
+      }
+      else
+      {
+        auto const got = rig.h.run({.until_time = later}).get();
+        CHECK(got.stopped.reason == stop_reason::time);
+        CHECK(stamp.get() == at_instruction(t));
+      }
+      CHECK(*seen == std::vector{instant_arch::first_event});
+    }
+  }
+}
+
+TEST_CASE("a stamp runs after every event of its boundary when the wall ends a slice inside them")
+{
+  auto const t     = instant_count;
+  auto const later = vtime{at_instruction(t).ps + 1'000'000'000};
+  auto       rig   = crowded_instant(300);
+  auto       seen  = std::make_shared<std::vector<std::uint32_t>>();
+  auto const stamp = stamp_seeing(rig, seen);
+  auto const got   = rig.h.run({.until_time = later}).get();
+  CHECK(got.stopped.reason == stop_reason::time);
+  CHECK(stamp.get() == at_instruction(t));
+  CHECK(seen->size() == 300);
+  CHECK(firsts_at(*rig.arch, t) == 300);
+}
+
+TEST_CASE("a goal stop between two events of a stamp's boundary leaves the stamp to the next run")
+{
+  auto const t     = instant_count;
+  auto       rig   = instant_idle({
+      {t, instant_arch::first_event },
+      {t, instant_arch::second_event},
+  });
+  auto       seen  = std::make_shared<std::vector<std::uint32_t>>();
+  auto const stamp = stamp_seeing(rig, seen);
+  auto const got = rig.h.run({.stop_when = [arch = rig.arch] { return arch->firsts != 0; }}).get();
+  CHECK(got.stopped.reason == stop_reason::user);
+  CHECK(got.stopped.time == at_instruction(t));
+  CHECK_FALSE(stamp.done());
+  std::ignore = rig.h.run({.until_time = vtime{at_instruction(t).ps + 1'000'000'000}}).get();
+  REQUIRE(stamp.done());
+  CHECK(stamp.get() == at_instruction(t));
+  CHECK(*seen == std::vector{instant_arch::first_event, instant_arch::second_event});
+}
+
+TEST_CASE(
+    "a free-run condition met between two events of a stamp's boundary lets the stamp see both")
+{
+  auto const t       = instant_count;
+  auto       rig     = instant_idle({
+      {t, instant_arch::first_event },
+      {t, instant_arch::second_event},
+  });
+  auto const earlier = rig.h.post([](core::machine&) {}, at_instruction(t - instant_lead));
+  auto       seen    = std::make_shared<std::vector<std::uint32_t>>();
+  auto const stamp   = stamp_seeing(rig, seen);
+  auto const handles = start_waiting(
+      rig.h, {
+                 {.when =
+                      core::condition_set{
+                          .members = {{
+                              .where    = instant_arch::marker_at,
+                              .size     = 4,
+                              .bits     = 32,
+                              .encoding = core::condition::kind::unsigned_int,
+                              .compare  = core::condition::op::ge,
+                              .value    = 1,
+                          }}}},
+             });
+  auto const& waiting = handles.front();
+  auto const  got     = waiting.future().get();
+  CHECK(earlier.get() == at_instruction(t - instant_lead));
+  CHECK(got.reason == stop_reason::user);
+  CHECK(got.time == at_instruction(t));
+  CHECK(waiting.fired() == 1);
+  CHECK(stamp.get() == at_instruction(t));
+  CHECK_FALSE(rig.h.on->halt(0).has_value());
+  CHECK(*seen == std::vector{instant_arch::first_event, instant_arch::second_event});
+}
+
+TEST_CASE("a goal's time stop comes after the events due at its time, mail or wall")
+{
+  auto const t = instant_count;
+  for(auto const crowded : {false, true})
+  {
+    for(auto const stamped : {false, true})
+    {
+      CAPTURE(crowded);
+      CAPTURE(stamped);
+      auto const expected = crowded ? std::size_t{300} : std::size_t{1};
+      auto       rig      = crowded ? crowded_instant(expected) : mailed_instant(true);
+      auto       seen     = std::make_shared<std::vector<std::uint32_t>>();
+      std::optional<core::host_future<vtime>> stamp;
+      if(stamped)
+      {
+        stamp = stamp_seeing(rig, seen);
+      }
+      auto const got = rig.h.run({.until_time = at_instruction(t)}).get();
+      CHECK(got.stopped.reason == stop_reason::time);
+      CHECK(got.stopped.time == at_instruction(t));
+      CHECK(firsts_at(*rig.arch, t) == expected);
+      auto       quiet  = crowded ? instant_idle(
+                                        std::vector<std::pair<std::uint64_t, std::uint32_t>>(
+                                            expected, {t, instant_arch::first_event}))
+                                  : mailed_instant(false);
+      auto const parked = quiet.h.run({.until_time = at_instruction(t)}).get();
+      CHECK(parked.stopped.reason == stop_reason::time);
+      CHECK(rig.arch->event_log == quiet.arch->event_log);
+      CHECK(
+          core::access(*rig.h.on, 0, [](core::machine& m) { return m.pending_events(); })
+          == core::access(*quiet.h.on, 0, [](core::machine& m) { return m.pending_events(); }));
+      if(stamp)
+      {
+        REQUIRE(stamp->done());
+        CHECK(stamp->get() == at_instruction(t));
+        CHECK(seen->size() == expected);
+      }
+    }
+  }
+}
+
+TEST_CASE("a slice ended by mail at its time stops on time only when it holds the instant")
+{
+  auto const t = instant_count;
+  for(auto const hold : {false, true})
+  {
+    CAPTURE(hold);
+    popcorn::testing::machine_fixture<instant_arch> f{m33(), "idle", core::machine_options{}};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    f.set("pc", sym("idle", "idle_forever"));
+    f.module->target = f.target.get();
+    std::ignore =
+        f.module->attached_events().schedule(icount{t - instant_lead}, instant_arch::poke_event, 0);
+    std::ignore = f.module->attached_events().schedule(icount{t}, instant_arch::first_event, 0);
+    auto const ended = f.target->run_slice(
+        {.wall_budget = long_wall, .until_time = at_instruction(t), .hold_from_until = hold});
+    CHECK(ended.stopped.has_value() == hold);
+    CHECK(f.module->firsts == 0);
+    CHECK(f.target->pending_events() == 1);
+  }
+}
+
+TEST_CASE("a stamp deferred to its instant runs before any later event and adds no instructions")
+{
+  auto const t        = instant_count;
+  auto const later    = vtime{at_instruction(t).ps + 1'000'000'000};
+  auto const schedule = std::vector<std::pair<std::uint64_t, std::uint32_t>>{
+      {t - instant_lead, instant_arch::poke_event  },
+      {t,                instant_arch::first_event },
+      {t + 1,            instant_arch::second_event},
+  };
+  auto       plain    = instant_idle(schedule);
+  auto const expected = plain.h.run({.until_time = later}).get();
+  auto       rig      = instant_idle(schedule);
+  auto       seen     = std::make_shared<std::vector<std::uint32_t>>();
+  auto const stamp    = rig.h.post(
+      [arch = rig.arch, seen](core::machine&) {
+        for(auto const& logged : arch->event_log)
+        {
+          if(logged.kind != instant_arch::poke_event)
+          {
+            seen->push_back(logged.kind);
+          }
+        }
+      },
+      at_instruction(t));
+  auto const got = rig.h.run({.until_time = later}).get();
+  CHECK(stamp.get() == at_instruction(t));
+  CHECK(*seen == std::vector{instant_arch::first_event});
+  CHECK(got.stopped.reason == expected.stopped.reason);
+  CHECK(got.stopped.time == expected.stopped.time);
+  CHECK(got.executed == expected.executed);
+  CHECK(rig.arch->event_log == plain.arch->event_log);
+}
+
+TEST_CASE("a parked stamp at the machine's time queues behind a stamp a stop left pending there")
+{
+  auto const t     = instant_count;
+  auto       rig   = instant_idle({
+      {t, instant_arch::first_event },
+      {t, instant_arch::second_event},
+  });
+  auto       order = std::make_shared<std::vector<int>>();
+  auto const first =
+      rig.h.post([order](core::machine&) { order->push_back(1); }, at_instruction(t));
+  auto const got = rig.h.run({.stop_when = [arch = rig.arch] { return arch->firsts != 0; }}).get();
+  REQUIRE(got.stopped.reason == stop_reason::user);
+  REQUIRE(rig.h.now() == at_instruction(t));
+  auto const second = rig.h.post([order](core::machine&) { order->push_back(2); }, rig.h.now());
+  CHECK_FALSE(first.done());
+  CHECK_FALSE(second.done());
+  std::ignore = rig.h.run({.until_time = vtime{at_instruction(t).ps + 1'000'000'000}}).get();
+  CHECK(first.get() == at_instruction(t));
+  CHECK(second.get() == at_instruction(t));
+  CHECK(*order == std::vector{1, 2});
+}
+
+TEST_CASE("a parked stamp at the machine's time runs at once after a stop between two events")
+{
+  auto const t   = instant_count;
+  auto       rig = instant_idle({
+      {t, instant_arch::first_event },
+      {t, instant_arch::second_event},
+  });
+  auto const got = rig.h.run({.stop_when = [arch = rig.arch] { return arch->firsts != 0; }}).get();
+  REQUIRE(got.stopped.reason == stop_reason::user);
+  auto       seen  = std::make_shared<std::vector<std::uint32_t>>();
+  auto const stamp = stamp_seeing(rig, seen);
+  REQUIRE(stamp.done());
+  CHECK(stamp.get() == at_instruction(t));
+  CHECK(*seen == std::vector{instant_arch::first_event});
+}
+
+TEST_CASE("a no-op stamp at a stop between two events of its instant leaves the stop unchanged")
+{
+  auto const t   = instant_count;
+  auto const run = [t](bool stamped) {
+    auto rig = instant_idle({
+        {t, instant_arch::first_event },
+        {t, instant_arch::second_event},
+    });
+    if(stamped)
+    {
+      std::ignore = rig.h.post([](core::machine&) {}, at_instruction(t));
+    }
+    auto const got =
+        rig.h.run({.stop_when = [arch = rig.arch] { return arch->firsts != 0; }}).get();
+    auto const pending =
+        core::access(*rig.h.on, 0, [](core::machine& m) { return m.pending_events(); });
+    return std::tuple{got.stopped.reason, got.stopped.instructions, pending, rig.arch->event_log};
+  };
+  auto const without = run(false);
+  CHECK(std::get<0>(without) == stop_reason::user);
+  CHECK(std::get<2>(without) == 1);
+  CHECK(run(true) == without);
+}
+
+TEST_CASE("a stamp below a held count runs when the exact count reaches it, not before")
+{
+  auto       rig   = instant_idle({});
+  auto const n0    = rig.h.now().ps / ps_per_instruction;
+  auto       seen  = std::make_shared<std::pair<std::uint64_t, std::size_t>>();
+  auto const stamp = rig.h.post(
+      [arch = rig.arch, seen](core::machine& m) {
+        *seen = {core::machine_internals::exact_now(m).value, arch->event_log.size()};
+      },
+      at_instruction(n0 + 50));
+  core::access(*rig.h.on, 0, [&rig, n0](core::machine& m) {
+    auto& driver = core::machine_internals::clock_driver(m);
+    driver.jump_to(icount{n0 + 100});
+    driver.retract(icount{60});
+    std::ignore =
+        rig.arch->attached_events().schedule(m.virtual_clock().now(), instant_arch::first_event, 0);
+  });
+  REQUIRE(rig.h.now() == at_instruction(n0 + 100));
+  auto       held_seen = std::make_shared<std::pair<std::uint64_t, std::size_t>>();
+  auto const at_held   = rig.h.post(
+      [arch = rig.arch, held_seen](core::machine& m) {
+        *held_seen = {core::machine_internals::exact_now(m).value, arch->event_log.size()};
+      },
+      rig.h.now());
+  auto const at_exact = rig.h.post([](core::machine&) {}, at_instruction(n0 + 40));
+  CHECK_FALSE(stamp.done());
+  CHECK_FALSE(at_held.done());
+  REQUIRE(at_exact.done());
+  CHECK(at_exact.get() == at_instruction(n0 + 40));
+  CHECK(rig.h.post([](core::machine&) {}).get() == at_instruction(n0 + 40));
+  CHECK_THROWS_AS(
+      rig.h.post([](core::machine&) {}, at_instruction(n0 + 39)), std::invalid_argument);
+  std::latch in_body{1};
+  std::latch posted{1};
+  auto const blocking = rig.h.post(
+      [&in_body, &posted](core::machine&) {
+        in_body.count_down();
+        posted.wait();
+      },
+      at_instruction(n0 + 60));
+  auto const goal = rig.h.run({.until_time = at_instruction(n0 + 1000)});
+  in_body.wait();
+  auto const running = rig.h.post([](core::machine&) {}, at_instruction(n0 + 80));
+  posted.count_down();
+  auto const got = goal.get();
+  CHECK(got.stopped.reason == stop_reason::time);
+  CHECK(blocking.get() == at_instruction(n0 + 60));
+  CHECK(running.get() == at_instruction(n0 + 80));
+  CHECK(stamp.get() == at_instruction(n0 + 50));
+  CHECK(*seen == std::pair<std::uint64_t, std::size_t>{n0 + 50, 0});
+  CHECK(at_held.get() == at_instruction(n0 + 100));
+  CHECK(*held_seen == std::pair<std::uint64_t, std::size_t>{n0 + 100, 1});
+  REQUIRE(rig.arch->event_log.size() == 1);
+  CHECK(rig.arch->event_log.front().at == icount{n0 + 100});
 }
 
 TEST_CASE("stamps posted while running are checked when the goal stops in that slice")
