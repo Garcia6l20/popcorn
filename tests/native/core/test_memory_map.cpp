@@ -390,6 +390,44 @@ TEST_CASE("flash denies CPU and DMA writes and accepts debugger writes")
   CHECK(services.read(0x0800'0004, 2, popcorn::initiator::dma) == 0x3412u);
 }
 
+TEST_CASE(
+    "a lookup finds the region holding every byte of an access, at its edges and not across them")
+{
+  for(auto const& desc : {m33(), m33_code_alias()})
+  {
+    core::machine target{desc, popcorn::testing::test_arch_factory(), {}};
+    auto const    memory = target.mem();
+    auto const    inside = [&](std::uint64_t at, std::uint64_t bytes) {
+      return std::ranges::any_of(desc.regions, [&](auto const& r) {
+        return at >= r.start and at + bytes <= std::uint64_t{r.start} + r.size;
+      });
+    };
+    for(auto const& region : desc.regions)
+    {
+      CAPTURE(region.name);
+      auto const first = std::uint64_t{region.start};
+      auto const last  = first + region.size - 1;
+      for(auto const at :
+          {first - 1, first, first + 1, first + region.size / 2, last - 3, last - 1, last,
+           last + 1})
+      {
+        if(at > 0xffff'ffffu)
+        {
+          continue;
+        }
+        for(std::uint8_t const bytes : {1, 2, 4})
+        {
+          CAPTURE(at);
+          CAPTURE(bytes);
+          CHECK(memory.is_plain_memory(static_cast<address>(at), bytes) == inside(at, bytes));
+        }
+      }
+    }
+    CHECK_FALSE(memory.is_plain_memory(0x6000'0000, 1));
+    CHECK_FALSE(memory.is_plain_memory(0xffff'fffc, 4));
+  }
+}
+
 TEST_CASE("register view round-trips every test arch register")
 {
   core::machine target{m33(), popcorn::testing::test_arch_factory(), {}};
