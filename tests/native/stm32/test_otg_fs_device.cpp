@@ -1801,6 +1801,23 @@ TEST_CASE(
   CHECK(warned() == 1);
 }
 
+TEST_CASE("the supply peer is followed across polls, a reset and a restored supply")
+{
+  rig const r;
+  r.connect();
+  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+  r.supply(false);
+  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::none);
+  r.supply(true);
+  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+  r.f->target->reset();
+  r.supply(false);
+  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::none);
+  r.supply(true);
+  r.connect();
+  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+}
+
 TEST_CASE(
     "a machine reset of a connected device logs no USV warning, "
     "a later start with USV 0 warns once")

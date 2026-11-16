@@ -469,6 +469,8 @@ private:
   field_ref                         tx_flush_;
   field_ref                         tx_flush_number_;
   std::uint32_t                     clear_on_one_{};
+  mutable usb_supply_source const*  supply_{};
+  mutable bool                      supply_resolved_{};
   field_ref                         bus_reset_;
   field_ref                         enumeration_done_;
   field_ref                         start_of_frame_;
@@ -780,8 +782,12 @@ auto otg_fs::b_valid() const -> bool
 
 auto otg_fs::supplied() const -> bool
 {
-  auto const* const supply = dynamic_cast<usb_supply_source const*>(ctx_.peers.find("PWR"));
-  return supply == nullptr or supply->usb_supply_valid();
+  if(not supply_resolved_)
+  {
+    supply_          = dynamic_cast<usb_supply_source const*>(ctx_.peers.find("PWR"));
+    supply_resolved_ = true;
+  }
+  return supply_ == nullptr or supply_->usb_supply_valid();
 }
 
 auto otg_fs::connectable() const -> bool
