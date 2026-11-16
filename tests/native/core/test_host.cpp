@@ -3074,6 +3074,10 @@ TEST_CASE("a free-run waiter deadline below a held count expires once the exact 
         *was_done = (*handle)->done();
       },
       at_instruction(n0 + 60));
+  auto       done_after = std::make_shared<bool>(false);
+  auto const after      = rig.h.post(
+      [handle, done_after](core::machine&) { *done_after = (*handle)->done(); },
+      at_instruction(n0 + 70));
   core::access(*rig.h.on, 0, [&rig, n0](core::machine& m) {
     auto& driver = core::machine_internals::clock_driver(m);
     driver.jump_to(icount{n0 + 100});
@@ -3084,9 +3088,13 @@ TEST_CASE("a free-run waiter deadline below a held count expires once the exact 
   auto const handles = start_waiting(rig.h, {{.deadline = at_instruction(n0 + 50)}});
   *handle            = handles.front().future();
   stored.count_down();
-  CHECK(handles.front().future().get().reason == stop_reason::time);
+  auto const got = handles.front().future().get();
+  CHECK(got.reason == stop_reason::time);
+  CHECK(got.time == at_instruction(n0 + 100));
   CHECK(stamp.get() == at_instruction(n0 + 60));
+  CHECK(after.get() == at_instruction(n0 + 70));
   CHECK_FALSE(*was_done);
+  CHECK(*done_after);
   CHECK_FALSE(rig.h.on->halt(0).has_value());
 }
 

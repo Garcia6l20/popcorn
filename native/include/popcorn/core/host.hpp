@@ -332,7 +332,11 @@ struct waiter_spec
   std::move_only_function<bool()> ready{};
   /** @brief Virtual time at which the waiter completes with a stop_reason::time stop, once
    * every event due at or before the exact instruction count of that time has run, as a goal's
-   * until_time stops. */
+   * until_time stops. The free run's slices are bounded no earlier than the machine's time at
+   * registration. Inside a retract window, where that time holds above the exact time, a
+   * deadline between the two expires at the first slice end once the exact time reaches it, at
+   * the latest at the end of the window, up to one block late, and the stop reports the
+   * machine's time. */
   std::optional<vtime> deadline{};
   /** @brief Virtual time after the boundary that registers the waiter at which it completes with
    * a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when
