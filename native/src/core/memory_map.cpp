@@ -302,12 +302,11 @@ auto machine::mapped_region::build(
   std::ranges::sort(index->sorted, {}, &mapped_region::region_index::entry::start);
   for(std::size_t at = 1; at < index->sorted.size(); ++at)
   {
-    index->overlapping = index->overlapping
-                      or region_end(*index->sorted[at - 1].region->desc) > index->sorted[at].start;
+    contract_assert(region_end(*index->sorted[at - 1].region->desc) <= index->sorted[at].start);
   }
-  for(auto const& mapped : memory)
+  if(not memory.empty())
   {
-    mapped->index = index;
+    memory.front()->index = std::move(index);
   }
   return memory;
 }
@@ -321,16 +320,10 @@ auto machine::mapped_region::find(
   {
     return nullptr;
   }
-  auto const* const index = memory.front()->index.get();
-  if(index == nullptr or index->overlapping)
-  {
-    auto const found = std::ranges::find_if(
-        memory, [&](auto const& mapped) { return mapped->contains(addr, size); });
-    return found == memory.end() ? nullptr : found->get();
-  }
-  auto const above = std::ranges::upper_bound(
-      index->sorted, std::uint64_t{addr}, {}, &mapped_region::region_index::entry::start);
-  if(above == index->sorted.begin())
+  auto const& index = *memory.front()->index;
+  auto const  above = std::ranges::upper_bound(
+      index.sorted, std::uint64_t{addr}, {}, &mapped_region::region_index::entry::start);
+  if(above == index.sorted.begin())
   {
     return nullptr;
   }

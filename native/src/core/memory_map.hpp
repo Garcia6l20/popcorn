@@ -92,7 +92,8 @@ constexpr auto bit_band_target(region_desc const& band, address addr, std::uint8
 /** @brief One description region as mapped in the engine. */
 struct machine::mapped_region
 {
-  /** @brief Mapped regions of a machine ordered by start address, for find(). */
+  /** @brief Mapped regions of a machine ordered by start address, for find(). The engine refuses
+   * overlapping maps, so the ranges are disjoint. */
   struct region_index
   {
     /** @brief One region and its first guest address. */
@@ -103,8 +104,6 @@ struct machine::mapped_region
     };
     /** @brief Entries sorted by start. */
     std::vector<entry> sorted{};
-    /** @brief Whether two regions overlap, which makes find() scan in region order. */
-    bool overlapping{};
   };
 
   /** @brief Region of the machine's description. */
@@ -118,7 +117,8 @@ struct machine::mapped_region
   /** @brief Model of the peripheral the description names as the region's controller, null
    * without one or when that peripheral has no model. Set once every model is attached. */
   periph::model* controller{};
-  /** @brief Index over every region of the machine, shared by all of them, set by build(). */
+  /** @brief Index over every region of the machine, set by build() on the first region only,
+   * which find() reads. */
   std::shared_ptr<region_index const> index{};
 
   /**

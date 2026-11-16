@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
+#include <latch>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1063,15 +1064,17 @@ TEST_CASE("a mail posted from another thread while the loop turns ends the slice
       std::this_thread::sleep_for(std::chrono::microseconds{200});
       f.target->interrupt();
     }};
-    auto const   begin = std::chrono::steady_clock::now();
-    auto const   slice = f.run({.wall_budget = std::chrono::seconds{2}});
+    auto const   exits =
+        core::machine_internals::counters(*f.target).ended(core::engine_end::request);
+    auto const slice = f.run({.wall_budget = std::chrono::seconds{2}});
     other.join();
     CHECK_FALSE(slice.stopped.has_value());
-    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds{1500});
+    CHECK(
+        core::machine_internals::counters(*f.target).ended(core::engine_end::request) - exits <= 2);
   }
 }
 
-TEST_CASE("a mail posted from another thread while the core is held and events fire ends the slice")
+TEST_CASE("a mail posted once the loop event fired ends a slice on a held core")
 {
   fixture<> f{m33(), "idle"};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
@@ -1080,22 +1083,30 @@ TEST_CASE("a mail posted from another thread while the core is held and events f
       f.run_to_stop({.stop_when = [&f] { return f.module->timer_expiries == 1; }}).reason
       == stop_reason::user);
   f.target->hold_core(true);
-  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + 3'600'000'000'000'000};
   for(int round = 0; round < 20; ++round)
   {
     CAPTURE(round);
-    std::jthread other{[&f] {
-      std::this_thread::sleep_for(std::chrono::microseconds{200});
+    auto const at    = f.target->virtual_clock().board_time().ps + 1'000'000'000;
+    auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + 3'600'000'000'000'000};
+    std::latch go{1};
+    std::latch posted{1};
+    std::jthread other{[&] {
+      go.wait();
       f.target->interrupt();
+      posted.count_down();
     }};
-    auto const   begin = std::chrono::steady_clock::now();
-    auto const   slice = f.run(
+    f.target->set_loop_handler([&](std::uint64_t) {
+      go.count_down();
+      posted.wait();
+    });
+    f.target->arm_loop(at);
+    auto const slice = f.run(
         {.max_instructions = icount{1'000'000'000'000},
          .wall_budget      = std::chrono::seconds{2},
          .until_time       = until});
     other.join();
     CHECK_FALSE(slice.stopped.has_value());
-    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds{1500});
+    CHECK(f.target->virtual_clock().board_time().ps == at);
   }
 }
 

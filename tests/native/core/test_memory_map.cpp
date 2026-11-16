@@ -393,38 +393,63 @@ TEST_CASE("flash denies CPU and DMA writes and accepts debugger writes")
 TEST_CASE(
     "a lookup finds the region holding every byte of an access, at its edges and not across them")
 {
+  constexpr std::uint64_t scratch_start = 0x3000'0000;
+  constexpr std::uint32_t scratch_size  = 0x1000;
   for(auto const& desc : {m33(), m33_code_alias()})
   {
-    core::machine target{desc, popcorn::testing::test_arch_factory(), {}};
-    auto const    memory = target.mem();
-    auto const    inside = [&](std::uint64_t at, std::uint64_t bytes) {
-      return std::ranges::any_of(desc.regions, [&](auto const& r) {
-        return at >= r.start and at + bytes <= std::uint64_t{r.start} + r.size;
-      });
-    };
-    for(auto const& region : desc.regions)
+    for(auto const with_scratch : {false, true})
     {
-      CAPTURE(region.name);
-      auto const first = std::uint64_t{region.start};
-      auto const last  = first + region.size - 1;
-      for(auto const at :
-          {first - 1, first, first + 1, first + region.size / 2, last - 3, last - 1, last,
-           last + 1})
+      CAPTURE(with_scratch);
+      core::machine_options options;
+      if(with_scratch)
       {
-        if(at > 0xffff'ffffu)
+        options.scratch = popcorn::address_range{
+            .name = "arena", .start = static_cast<address>(scratch_start), .size = scratch_size};
+      }
+      core::machine target{desc, popcorn::testing::test_arch_factory(), options};
+      auto const    memory = target.mem();
+      struct span
+      {
+        std::uint64_t first;
+        std::uint64_t size;
+      };
+      std::vector<span> spans;
+      for(auto const& region : desc.regions)
+      {
+        spans.push_back({region.start, region.size});
+      }
+      if(with_scratch)
+      {
+        spans.push_back({scratch_start, scratch_size});
+      }
+      auto const inside = [&](std::uint64_t at, std::uint64_t bytes) {
+        return std::ranges::any_of(
+            spans, [&](span const& r) { return at >= r.first and at + bytes <= r.first + r.size; });
+      };
+      for(auto const& region : spans)
+      {
+        CAPTURE(region.first);
+        auto const first = region.first;
+        auto const last  = first + region.size - 1;
+        for(auto const at :
+            {first - 1, first, first + 1, first + region.size / 2, last - 3, last - 1, last,
+             last + 1})
         {
-          continue;
-        }
-        for(std::uint8_t const bytes : {1, 2, 4})
-        {
-          CAPTURE(at);
-          CAPTURE(bytes);
-          CHECK(memory.is_plain_memory(static_cast<address>(at), bytes) == inside(at, bytes));
+          if(at > 0xffff'ffffu)
+          {
+            continue;
+          }
+          for(std::uint8_t const bytes : {1, 2, 4})
+          {
+            CAPTURE(at);
+            CAPTURE(bytes);
+            CHECK(memory.is_plain_memory(static_cast<address>(at), bytes) == inside(at, bytes));
+          }
         }
       }
+      CHECK_FALSE(memory.is_plain_memory(0x6000'0000, 1));
+      CHECK_FALSE(memory.is_plain_memory(0xffff'fffc, 4));
     }
-    CHECK_FALSE(memory.is_plain_memory(0x6000'0000, 1));
-    CHECK_FALSE(memory.is_plain_memory(0xffff'fffc, 4));
   }
 }
 
