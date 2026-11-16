@@ -830,7 +830,7 @@ auto machine::run_state::next_deadline(slice_request const& request) const -> ic
   return bound;
 }
 
-auto machine::run_state::handle_requests() -> std::optional<slice_end>
+auto machine::run_state::handle_requests_pending() -> std::optional<slice_end>
 {
   auto const mail = not(trap or unmapped or bus_fault) and take_mail();
   if(auto const asked = take_requested())

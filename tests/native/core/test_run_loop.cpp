@@ -9,6 +9,7 @@
 #include "../support/test_arch.hpp"
 
 #include <doctest/doctest.h>
+
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
@@ -24,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -1040,6 +1042,24 @@ TEST_CASE("a slice that continues the count adds the earlier slice's instruction
   REQUIRE(slice.stopped.has_value());
   CHECK(first.executed.value + slice.executed.value >= window);
   CHECK(first.executed.value + slice.executed.value < window + 16);
+}
+
+TEST_CASE("a mail posted from another thread while the loop turns ends the slice")
+{
+  for(int round = 0; round < 50; ++round)
+  {
+    auto f = alu(4'000'000);
+    CAPTURE(round);
+    std::jthread other{[&f] {
+      std::this_thread::sleep_for(std::chrono::microseconds{200});
+      f.target->interrupt();
+    }};
+    auto const   slice =
+        f.run({.max_instructions = icount{1'000'000'000}, .wall_budget = std::chrono::seconds{20}});
+    other.join();
+    CHECK_FALSE(slice.stopped.has_value());
+    CHECK(slice.executed.value < 1'000'000'000);
+  }
 }
 
 TEST_CASE("a mail slice end asks no predicate")

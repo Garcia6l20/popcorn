@@ -2531,7 +2531,29 @@ struct machine::run_state
   void               update_stepping(slice_request const& request);
   void               remove_step_hook() noexcept;
   [[nodiscard]] auto next_deadline(slice_request const& request) const -> icount;
-  [[nodiscard]] auto handle_requests() -> std::optional<slice_end>;
+  /**
+   * @brief Takes what a model, a handler or another thread asked of the slice: a stop, a reset, a
+   *        slice end or the mail bit of machine::interrupt(). Returns at once when none is set,
+   *        without an atomic read-modify-write.
+   * @details The quiet test reads the mail bit relaxed and the stop request with acquire, the same
+   *        orders the full path uses. A request another thread posts after the test is seen at the
+   *        next turn of the loop: every poster sets its flag and then asks the engine to exit
+   *        (`raise_stop`, `interrupt`), so the engine run ends at its next block start and the loop
+   *        turns again before it runs any further.
+   */
+  [[nodiscard, gnu::always_inline]] auto handle_requests() -> std::optional<slice_end>
+  {
+    if((stop_bits.load(std::memory_order_relaxed) & stop_mail) == 0
+       and not has_requested.load(std::memory_order_acquire)
+       and not reset_requested
+       and not end_requested)
+    {
+      return std::nullopt;
+    }
+    return handle_requests_pending();
+  }
+  /** @brief The body of handle_requests() once a request or the mail bit is set. */
+  [[nodiscard]] auto handle_requests_pending() -> std::optional<slice_end>;
   [[nodiscard]] auto dispatch_due(slice_request const& request) -> std::optional<slice_end>;
   /** @brief Counts an event dispatched now, a spin stop naming its owner once the count at this
    * instant reaches max_events_per_instant. */
