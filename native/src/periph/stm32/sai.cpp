@@ -39,6 +39,17 @@ using wide = unsigned __int128;
 
 constexpr std::array<std::uint32_t, 8> data_bits{8, 8, 8, 10, 16, 20, 24, 32};
 
+struct slot_layout
+{
+  std::uint32_t                 bits{};
+  std::uint32_t                 width{};
+  std::uint32_t                 on{};
+  std::uint8_t                  count{};
+  bool                          receiver{};
+  bool                          valid{};
+  std::array<std::uint16_t, 16> start{};
+};
+
 struct block_state
 {
   std::uint32_t              generation{};
@@ -81,6 +92,13 @@ struct sai_state
   friend auto operator==(sai_state const&, sai_state const&) -> bool = default;
 };
 
+struct irq_group
+{
+  std::uint32_t flag_offset;
+  std::uint32_t enable_offset;
+  std::uint32_t mask;
+};
+
 struct block_fields
 {
   field_ref                                    mode;
@@ -114,6 +132,8 @@ struct block_fields
   reg_ref                                      data;
   reg_ref                                      clear;
   std::vector<std::pair<field_ref, field_ref>> interrupts;
+  std::vector<irq_group>                       irq_groups;
+  std::vector<std::pair<field_ref, field_ref>> irq_loose;
   std::vector<std::pair<field_ref, field_ref>> clears;
 };
 
@@ -233,6 +253,8 @@ public:
       sai_variant const&                   variant);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void load(std::span<std::byte const> in) override;
+  void on_poked(std::uint32_t offset) override;
   void on_bus_reset() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -264,7 +286,6 @@ private:
   [[nodiscard]] auto master(std::size_t b) const -> bool;
   [[nodiscard]] auto follows(std::size_t b, std::size_t source) const -> bool;
   [[nodiscard]] auto slots(std::size_t b) const -> std::size_t;
-  [[nodiscard]] auto slot_on(std::size_t b, std::size_t slot) const -> bool;
   [[nodiscard]] auto mono(std::size_t b) const -> bool;
   [[nodiscard]] auto mask(std::size_t b) const -> std::uint32_t;
   [[nodiscard]] auto clock_rate(std::size_t b) const -> rate;
@@ -285,8 +306,7 @@ private:
   [[nodiscard]] auto slot_width(std::size_t b) const -> std::uint32_t;
   [[nodiscard]] auto slot_start(std::size_t b, std::size_t slot, std::uint32_t bits) const
       -> std::uint32_t;
-  [[nodiscard]] auto slot_end(std::size_t b, std::size_t slot, std::uint32_t bits) const
-      -> std::uint32_t;
+  [[nodiscard]] auto layout_of(std::size_t b, std::uint32_t bits) const -> slot_layout const&;
   [[nodiscard]] auto time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t;
 
   void               start(std::size_t source, std::uint64_t from_ps);
@@ -308,20 +328,22 @@ private:
   void flags();
   void warn_unsupported(std::size_t b);
 
-  sai_variant                          variant_;
-  register_file&                       regs_;
-  std::array<audio_attachment, blocks> wired_;
-  hook_failure                         hooks_;
-  std::array<block_fields, blocks>     block_;
-  field_ref                            pdm_enable_;
-  core::clock_domain                   kernel_;
-  irq_line&                            line_;
-  std::array<dma_signal, blocks>       requests_;
-  bool                                 unsupported_logged_{};
-  bool                                 no_clock_logged_{};
-  bool                                 decimation_logged_{};
-  bool                                 short_frame_logged_{};
-  bool                                 slot_rules_logged_{};
+  sai_variant                             variant_;
+  register_file&                          regs_;
+  std::array<audio_attachment, blocks>    wired_;
+  hook_failure                            hooks_;
+  std::array<block_fields, blocks>        block_;
+  field_ref                               pdm_enable_;
+  core::clock_domain                      kernel_;
+  irq_line&                               line_;
+  std::array<dma_signal, blocks>          requests_;
+  bool                                    unsupported_logged_{};
+  bool                                    no_clock_logged_{};
+  bool                                    decimation_logged_{};
+  bool                                    short_frame_logged_{};
+  bool                                    slot_rules_logged_{};
+  mutable std::array<slot_layout, blocks> layouts_{};
+  mutable bool                            layouts_dirty_{true};
 };
 
 auto sai_writes(bool pdm) -> std::span<write_entry<sai> const>
@@ -401,6 +423,8 @@ auto sai::fields_of(char prefix, sai_variant const& variant) const -> block_fiel
       .data             = reg(name("DR")),
       .clear            = reg(clr),
       .interrupts       = {},
+      .irq_groups       = {},
+      .irq_loose        = {},
       .clears           = {}};
   for(auto const& enable : describe(im).fields)
   {
@@ -409,6 +433,27 @@ auto sai::fields_of(char prefix, sai_variant const& variant) const -> block_fiel
        and std::ranges::contains(describe(sr).fields, flag, &field_desc::name))
     {
       out.interrupts.emplace_back(field(sr, flag), field(im, enable.name));
+    }
+  }
+  for(auto const& [flag, enable] : out.interrupts)
+  {
+    auto const aligned = flag.width == 1 and enable.width == 1 and flag.lsb == enable.lsb;
+    if(not aligned)
+    {
+      out.irq_loose.emplace_back(flag, enable);
+      continue;
+    }
+    auto const found = std::ranges::find_if(out.irq_groups, [&](irq_group const& group) {
+      return group.flag_offset == flag.offset and group.enable_offset == enable.offset;
+    });
+    if(found == out.irq_groups.end())
+    {
+      out.irq_groups.push_back(
+          {.flag_offset = flag.offset, .enable_offset = enable.offset, .mask = flag.mask()});
+    }
+    else
+    {
+      found->mask |= flag.mask();
     }
   }
   for(auto const& clear : describe(clr).fields)
@@ -451,11 +496,6 @@ auto sai::follows(std::size_t b, std::size_t source) const -> bool
 auto sai::slots(std::size_t b) const -> std::size_t
 {
   return get(regs_, block_[b].slot_count) + 1u;
-}
-
-auto sai::slot_on(std::size_t b, std::size_t slot) const -> bool
-{
-  return ((get(regs_, block_[b].slot_enable) >> slot) & 1u) != 0;
 }
 
 auto sai::mono(std::size_t b) const -> bool
@@ -583,6 +623,17 @@ void sai::reset(register_file&, reset_kind kind)
   restore_reset_values(kind);
 }
 
+void sai::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  layouts_dirty_ = true;
+}
+
+void sai::on_poked(std::uint32_t)
+{
+  layouts_dirty_ = true;
+}
+
 void sai::on_bus_reset()
 {
   restore_reset_values(std::nullopt);
@@ -590,6 +641,7 @@ void sai::on_bus_reset()
 
 void sai::restore_reset_values(std::optional<reset_kind> kind)
 {
+  layouts_dirty_ = true;
   for(auto const& name : claims())
   {
     regs_.poke(reg(name).offset, describe(name).reset);
@@ -853,9 +905,32 @@ auto sai::slot_start(std::size_t b, std::size_t slot, std::uint32_t bits) const 
   return offset + index * width;
 }
 
-auto sai::slot_end(std::size_t b, std::size_t slot, std::uint32_t bits) const -> std::uint32_t
+auto sai::layout_of(std::size_t b, std::uint32_t bits) const -> slot_layout const&
 {
-  return slot_start(b, slot, bits) + slot_width(b);
+  if(layouts_dirty_)
+  {
+    for(auto& entry : layouts_)
+    {
+      entry.valid = false;
+    }
+    layouts_dirty_ = false;
+  }
+  auto& layout = layouts_[b];
+  if(layout.valid and layout.bits == bits)
+  {
+    return layout;
+  }
+  layout.bits     = bits;
+  layout.width    = slot_width(b);
+  layout.count    = static_cast<std::uint8_t>(slots(b));
+  layout.receiver = receiver(b);
+  layout.on       = get(regs_, block_[b].slot_enable);
+  for(std::size_t slot = 0; slot < layout.count; ++slot)
+  {
+    layout.start[slot] = static_cast<std::uint16_t>(slot_start(b, slot, bits));
+  }
+  layout.valid = true;
+  return layout;
 }
 
 void sai::check_slots(std::size_t b)
@@ -913,16 +988,17 @@ void sai::run_frames(std::size_t source, std::uint32_t position)
       {
         flush_carry(b);
       }
-      for(std::size_t slot = 0; slot < slots(b); ++slot)
+      auto const* layout = &layout_of(b, bits);
+      for(std::size_t slot = 0; slot < layout->count; ++slot)
       {
-        auto const fits = slot_start(b, slot, bits) < bits;
-        if(not slot_on(b, slot) or not fits)
+        auto const start = layout->start[slot];
+        if(((layout->on >> slot) & 1u) == 0 or start >= bits)
         {
           continue;
         }
-        if(receiver(b))
+        if(layout->receiver)
         {
-          auto const end = slot_end(b, slot, bits);
+          auto const end = start + layout->width;
           if(end > bits and position == bits)
           {
             carry(b, slot, source, end - bits);
@@ -932,9 +1008,13 @@ void sai::run_frames(std::size_t source, std::uint32_t position)
             store(b, slot, source);
           }
         }
-        else if(not receiver(b) and slot_start(b, slot, bits) == position)
+        else if(start == position)
         {
           take(b, slot);
+        }
+        if(layouts_dirty_)
+        {
+          layout = &layout_of(b, bits);
         }
       }
     }
@@ -1014,14 +1094,16 @@ void sai::run_frames(std::size_t source, std::uint32_t position)
     {
       next = member.carry_at;
     }
-    for(std::size_t slot = 0; slot < slots(b); ++slot)
+    auto const& layout = layout_of(b, block.bits);
+    for(std::size_t slot = 0; slot < layout.count; ++slot)
     {
-      if(not slot_on(b, slot))
+      if(((layout.on >> slot) & 1u) == 0)
       {
         continue;
       }
-      auto const point = receiver(b) ? std::min(slot_end(b, slot, block.bits), block.bits)
-                                     : slot_start(b, slot, block.bits);
+      auto const point = layout.receiver
+                           ? std::min<std::uint32_t>(layout.start[slot] + layout.width, block.bits)
+                           : layout.start[slot];
       if(point > position and point < next)
       {
         next = point;
@@ -1251,6 +1333,8 @@ auto sai::on_write(
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
   auto const word = offset & ~3u;
+  layouts_dirty_ =
+      layouts_dirty_ or (word != block_[0].data.offset and word != block_[1].data.offset);
   for(std::size_t b = 0; b < blocks; ++b)
   {
     if(word == block_[b].data.offset)
@@ -1341,9 +1425,24 @@ void sai::flags()
       fill = rx ? static_cast<std::uint32_t>(count / 2 + 1)
                 : static_cast<std::uint32_t>((count + 1) / 2);
     }
-    update(regs_, f.level, fill);
-    update(regs_, f.request, (rx ? fill > threshold : fill <= threshold) ? 1 : 0);
-    for(auto const& [flag, enable] : f.interrupts)
+    auto const requested = (rx ? fill > threshold : fill <= threshold) ? 1u : 0u;
+    if(f.level.offset == f.request.offset)
+    {
+      regs_.poke(
+          f.level.offset,
+          f.request.with(f.level.with(regs_.peek(f.level.offset), fill), requested));
+    }
+    else
+    {
+      update(regs_, f.level, fill);
+      update(regs_, f.request, requested);
+    }
+    for(auto const& group : f.irq_groups)
+    {
+      level = level
+           or (regs_.peek(group.flag_offset) & regs_.peek(group.enable_offset) & group.mask) != 0;
+    }
+    for(auto const& [flag, enable] : f.irq_loose)
     {
       level = level or (get(regs_, flag) != 0 and get(regs_, enable) != 0);
     }

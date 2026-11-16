@@ -2397,3 +2397,110 @@ TEST_CASE("SAI1RST moves block A's generation past every event queued before it,
   }
   CHECK(seen[1] > seen[0]);
 }
+
+TEST_CASE("an FSOFF written mid-stream moves the slot instants of the next frame")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  b.stereo16("A", 64, false);
+  b.put(
+      "ACR1", {
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.push('A', ramp(0));
+  b.push('A', ramp(1));
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 12 * us);
+  b.put(
+      "AFRCR", {
+                   {"FRL",   63},
+                   {"FSALL", 31},
+                   {"FSOFF", 1 }
+  });
+  b.push('A', ramp(2));
+  b.run_until(start + 20 * us + bit_64 / 2);
+  CHECK(b.get("ASR", "FLVL") == 1);
+  b.run_until(start + 20 * us + bit_64 + bit_64 / 2);
+  CHECK(b.get("ASR", "FLVL") == 0);
+}
+
+TEST_CASE("a SLOTEN written mid-stream drops the slot from the next frame")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  b.stereo16("A", 64, false);
+  b.put(
+      "ACR1", {
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.push('A', ramp(0));
+  b.push('A', ramp(1));
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 12 * us);
+  b.put(
+      "ASLOTR", {
+                    {"NBSLOT", 1},
+                    {"SLOTEN", 2}
+  });
+  b.push('A', ramp(2));
+  b.run_until(start + 41 * us);
+  REQUIRE(r.a->frames.size() == 2);
+  CHECK(r.a->frames[1].slots == std::vector<std::uint32_t>{0, ramp(2)});
+}
+
+TEST_CASE(
+    "a snapshot restored over a machine that already laid out its slots uses the saved layout")
+{
+  auto const setup = [](rig& r, std::uint32_t enabled) {
+    bus b{*r.f};
+    b.clocks();
+    b.stereo16("A", 64, false);
+    b.put(
+        "ASLOTR", {
+                      {"NBSLOT", 1      },
+                      {"SLOTEN", enabled}
+    });
+    b.put(
+        "ACR1", {
+                    {"DS",     4},
+                    {"NODIV",  1},
+                    {"MCKDIV", 5}
+    });
+    for(std::uint32_t index = 0; index < 8; ++index)
+    {
+      b.push('A', ramp(index));
+    }
+    b.set("ACR1", "SAIAEN", 1);
+    return b.now();
+  };
+  rig        saved_rig{"idle"};
+  rig        other{"idle"};
+  auto const saved_start = setup(saved_rig, 2);
+  auto const other_start = setup(other, 3);
+  REQUIRE(saved_start == other_start);
+  bus saved_bus{*saved_rig.f};
+  bus other_bus{*other.f};
+  saved_bus.run_until(saved_start + 25 * us);
+  other_bus.run_until(other_start + 25 * us);
+  auto const snapshot = saved_rig.f->target->snapshot();
+  auto const done     = saved_rig.a->frames.size();
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(snapshot.data()))});
+  auto const kept = other.a->frames.size();
+  saved_bus.run_until(saved_start + 85 * us);
+  other_bus.run_until(other_start + 85 * us);
+  REQUIRE(saved_rig.a->frames.size() > done + 2);
+  std::vector<stm32::captured_audio_frame> expected_rest{
+      saved_rig.a->frames.begin() + static_cast<std::ptrdiff_t>(done), saved_rig.a->frames.end()};
+  std::vector<stm32::captured_audio_frame> rest{
+      other.a->frames.begin() + static_cast<std::ptrdiff_t>(kept), other.a->frames.end()};
+  CHECK(rest == expected_rest);
+}
