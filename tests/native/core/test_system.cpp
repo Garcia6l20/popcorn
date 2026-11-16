@@ -3965,7 +3965,9 @@ TEST_CASE_TEMPLATE(
 }
 #endif
 
-TEST_CASE("a no-op stamp between a halted member's exact and held time leaves its exact count")
+TEST_CASE(
+    "a stamp between a halted member's exact and held time runs at the end of the window and "
+    "leaves its exact count")
 {
   auto const after = [](bool stamped) {
     rig r{
@@ -4007,7 +4009,7 @@ TEST_CASE("a no-op stamp between a halted member's exact and held time leaves it
     if(stamped)
     {
       CHECK(bounded_get(stamp).ps == *ran_at * 250'000);
-      CHECK(*ran_at >= n + 50);
+      CHECK(*ran_at == n + 100);
     }
     return std::pair{at_pause, later};
   };

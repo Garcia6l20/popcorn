@@ -833,7 +833,8 @@ public:
    * end of the cut block until execution passes it, while the exact count is below it. A stamp
    * posted at the machine's time in that window runs at once, before the events up to the held
    * count, and a stamp the host already holds for a time in the window runs once execution
-   * reaches it.
+   * reaches it. A halted member of a linked system executes nothing, so a stamp it holds for a
+   * time in the window runs at the end of the window.
    * A later stamp on a parked member stays pending until a goal or free run reaches it. A reset
    * or a restore fails every pending stamp with operation_cancelled. A body captures native
    * values only. A later stamp from the host thread in a callback, with no host mutex held, takes
