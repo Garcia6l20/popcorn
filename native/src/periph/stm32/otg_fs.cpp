@@ -782,7 +782,7 @@ auto otg_fs::b_valid() const -> bool
 
 auto otg_fs::supplied() const -> bool
 {
-  if(not supply_resolved_)
+  if(not supply_resolved_ and not ctx_.peers.all().empty())
   {
     supply_          = dynamic_cast<usb_supply_source const*>(ctx_.peers.find("PWR"));
     supply_resolved_ = true;

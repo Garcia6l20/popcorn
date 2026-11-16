@@ -1801,7 +1801,7 @@ TEST_CASE(
   CHECK(warned() == 1);
 }
 
-TEST_CASE("the supply peer is followed across polls, a reset and a restored supply")
+TEST_CASE("the supply peer is followed across polls, a reset and a snapshot restore")
 {
   rig const r;
   r.connect();
@@ -1816,6 +1816,15 @@ TEST_CASE("the supply peer is followed across polls, a reset and a restored supp
   r.supply(true);
   r.connect();
   CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+  r.supply(false);
+  auto const saved = r.f->target->snapshot();
+  rig const  other;
+  other.port().attach(other.host);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.port().in(0, 0, other.now()).hs == usb::handshake::none);
+  other.supply(true);
+  CHECK(other.port().in(0, 0, other.now()).hs == usb::handshake::nak);
 }
 
 TEST_CASE(
