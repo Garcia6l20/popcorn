@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <deque>
 #include <expected>
@@ -341,11 +342,18 @@ public:
       dma_layout const&                   layout,
       std::span<write_entry<gpdma> const> table);
 
-  void               reset(register_file& regs, reset_kind kind) override;
-  void               on_bus_reset() override;
-  void               on_held_write(std::uint32_t offset, access_ctx ctx) override;
-  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void               on_request(std::uint32_t request, bool level) override;
+  void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void on_held_write(std::uint32_t offset, access_ctx ctx) override;
+  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void on_request(std::uint32_t request, bool level) override;
+  auto on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_core_hold(bool held) override;
   void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto request_of(std::string_view signal) const
@@ -392,6 +400,7 @@ private:
       -> popcorn::bus_attrs;
   [[nodiscard]] auto cached(std::size_t ch) -> transfer_cache&;
   void               drop_caches();
+  void               rebuild_routes();
   [[nodiscard]] auto busy_channels() const -> std::uint32_t;
   void               raise_illegal(bool raise, initiator by);
 
@@ -404,6 +413,8 @@ private:
   std::array<bool, 1>                                 unsupported_logged_{};
   bool                                                stopped_clock_logged_{};
   dma_requester_list                                  requesters_;
+  std::array<std::uint16_t, requests>                 routes_{};
+  bool                                                routes_dirty_{true};
   bool                                                freeze_logged_{};
   std::vector<address_range>                          reach_;
   std::array<std::uint8_t, max_channels>              reach_logged_{};
@@ -605,8 +616,21 @@ void gpdma::reset(register_file&, reset_kind)
   restore_reset_values();
 }
 
+auto gpdma::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     ctx) -> std::expected<void, bus_error>
+{
+  routes_dirty_ = true;
+  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+}
+
 void gpdma::on_held_write(std::uint32_t offset, access_ctx ctx)
 {
+  routes_dirty_ = true;
   static_cast<void>(guard(offset & ~3u, ctx, true));
 }
 
@@ -628,6 +652,7 @@ void gpdma::on_bus_reset()
 
 void gpdma::restore_reset_values()
 {
+  routes_dirty_ = true;
   drop_caches();
   for(auto const& name : claims())
   {
@@ -670,6 +695,7 @@ void gpdma::drop_caches()
 void gpdma::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
+  routes_dirty_ = true;
   drop_caches();
 }
 
@@ -1209,6 +1235,7 @@ void gpdma::latch(std::size_t ch)
 
 auto gpdma::link(std::size_t ch) -> bool
 {
+  routes_dirty_   = true;
   auto&      c    = ch_[ch];
   auto&      s    = state_.channel[ch];
   auto const llr  = regs_.peek(c.llr.offset);
@@ -1448,13 +1475,30 @@ void gpdma::on_request(std::uint32_t request, bool level)
   {
     return;
   }
+  if(routes_dirty_)
+  {
+    rebuild_routes();
+  }
+  for(auto routed = routes_[request]; routed != 0; routed &= routed - 1)
+  {
+    schedule(static_cast<std::size_t>(std::countr_zero(routed)), ctx_.clock.time().ps);
+  }
+}
+
+void gpdma::rebuild_routes()
+{
+  routes_.fill(0);
   for(std::size_t ch = 0; ch < layout_.channels; ++ch)
   {
-    if(get(regs_, ch_[ch].software) == 0 and get(regs_, ch_[ch].request) == request)
+    if(get(regs_, ch_[ch].software) == 0)
     {
-      schedule(ch, ctx_.clock.time().ps);
+      if(auto const request = get(regs_, ch_[ch].request); request < requests)
+      {
+        routes_[request] = static_cast<std::uint16_t>(routes_[request] | (1u << ch));
+      }
     }
   }
+  routes_dirty_ = false;
 }
 }
 

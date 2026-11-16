@@ -58,13 +58,50 @@ struct call
 class lpuart final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
-  explicit lpuart(periph::model_context& ctx, std::string signal = "lpuart1_tx_dma")
-      : tx{ctx.peers, std::move(signal)}
-  {}
+  explicit lpuart(
+      periph::model_context& ctx,
+      std::string            signal     = "lpuart1_tx_dma",
+      bool                   serves_tdr = false)
+      : tx{ctx.peers, std::move(signal)}, clock_{ctx.clock}, serves_tdr_{serves_tdr}
+  {
+    for(auto const& reg : ctx.regs.description().registers)
+    {
+      if(reg.offset == 0x28)
+      {
+        tdr_ = reg.name;
+      }
+    }
+  }
 
-  stm32::dma_signal tx;
-  std::vector<call> acked;
-  std::vector<call> completions;
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return serves_tdr_ ? std::vector<std::string>{tdr_} : std::vector<std::string>{};
+  }
+
+  stm32::dma_signal          tx;
+  std::vector<call>          acked;
+  std::vector<call>          completions;
+  std::vector<std::uint64_t> writes;
+  bool                       reassert_on_write{};
+
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t offset,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    if(offset == 0x28)
+    {
+      writes.push_back(clock_.time().ps);
+      if(reassert_on_write)
+      {
+        tx.set(true);
+      }
+    }
+    return {};
+  }
 
   void transfer_completed(stm32::dma_controller const& by, std::uint32_t request) override
   {
@@ -85,6 +122,11 @@ public:
   {
     tx.resolve();
   }
+
+private:
+  core::clock& clock_;
+  bool         serves_tdr_;
+  std::string  tdr_;
 };
 
 auto pattern(std::uint32_t index) -> std::uint32_t
@@ -98,13 +140,21 @@ auto machine(bool strict = false) -> stm32_fixture
   options.strict_peripherals = strict;
   options.models.emplace(
       "LPUART1",
-      [](periph::model_context& ctx, popcorn::peripheral_desc const&)
-          -> std::shared_ptr<periph::model> { return std::make_shared<lpuart>(ctx); });
+      [](periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+        return std::make_shared<lpuart>(ctx, "lpuart1_tx_dma", true);
+      });
   options.models.emplace(
       "USART1",
       [](periph::model_context& ctx,
          popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
         return std::make_shared<lpuart>(ctx, "usart1_tx_dma");
+      });
+  options.models.emplace(
+      "SPI3",
+      [](periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+        return std::make_shared<lpuart>(ctx, "spi3_tx_dma");
       });
   stm32_fixture f{u575(), "rcc_ll", std::move(options)};
   f.set("pc", sym("rcc_ll", "idle"));
@@ -126,6 +176,13 @@ auto device(stm32_fixture const& f) -> lpuart&
 auto bystander(stm32_fixture const& f) -> lpuart&
 {
   auto* const found = f.model_of<lpuart>("USART1");
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+auto spi3(stm32_fixture const& f) -> lpuart&
+{
+  auto* const found = f.model_of<lpuart>("SPI3");
   REQUIRE(found != nullptr);
   return *found;
 }
@@ -735,4 +792,138 @@ TEST_CASE(
   CHECK(field(other, 2, "SR", "TCF") == 1);
   CHECK(device(other).acked.size() == left);
   CHECK(bystander(other).acked.empty());
+}
+
+namespace
+{
+constexpr std::uint32_t tdr_request = 1;
+
+auto reqsel(std::uint32_t request, std::size_t ch) -> std::uint32_t
+{
+  return request << lsb("LPDMA1", std::format("LPDMA_C{}TR2", ch), "REQSEL");
+}
+
+struct paced_run
+{
+  std::vector<std::uint64_t> writes;
+  std::vector<std::uint32_t> output;
+  std::uint32_t              tcf{};
+  std::size_t                acked{};
+};
+
+auto paced(bool reassert, bool linked) -> paced_run
+{
+  auto f = machine();
+  REQUIRE(f.target->mem().write(0x4602'0CA8, 4, 1u << 6));
+  device(f).reassert_on_write = reassert;
+  auto const updates =
+      bit(0, "LLR", "UB1") | bit(0, "LLR", "USA") | bit(0, "LLR", "UDA") | bit(0, "LLR", "ULL");
+  if(linked)
+  {
+    for(auto const [index, word] : std::array<std::pair<std::uint32_t, std::uint32_t>, 4>{
+            {{0, 8}, {1, source + 16}, {2, lpuart1_tdr}, {3, 0}}
+    })
+    {
+      REQUIRE(f.target->mem().write(node + 4 * index, 4, word));
+    }
+    write(f, 0, "LBAR", node & 0xffff'0000u);
+    write(f, 0, "LLR", updates | (node & 0xfffcu));
+  }
+  copy(f, 0, bit(0, "TR1", "SINC"), reqsel(tdr_request, 0), 16, 0, source, lpuart1_tdr);
+  device(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{200});
+  return {
+      .writes = device(f).writes,
+      .output = bytes_at(f, destination, 1),
+      .tcf    = field(f, 0, "SR", "TCF"),
+      .acked  = device(f).acked.size()};
+}
+}
+
+TEST_CASE(
+    "a level follower re-asserting its request on each data register write leaves the burst "
+    "cadence of a paced block unchanged")
+{
+  auto const quiet = paced(false, false);
+  auto const noisy = paced(true, false);
+  REQUIRE(quiet.writes.size() == 16);
+  CHECK(quiet.tcf == 1);
+  CHECK(noisy.writes == quiet.writes);
+  CHECK(noisy.tcf == quiet.tcf);
+  CHECK(noisy.acked == quiet.acked);
+  for(std::size_t index = 1; index < quiet.writes.size(); ++index)
+  {
+    CHECK(quiet.writes[index] - quiet.writes[index - 1] == quiet.writes[1] - quiet.writes[0]);
+  }
+}
+
+TEST_CASE(
+    "a level follower re-asserting its request on each data register write leaves the burst "
+    "cadence across the last beat of a block and a linked block unchanged")
+{
+  auto const quiet = paced(false, true);
+  auto const noisy = paced(true, true);
+  REQUIRE(quiet.writes.size() == 24);
+  CHECK(quiet.tcf == 1);
+  CHECK(noisy.writes == quiet.writes);
+  CHECK(noisy.tcf == quiet.tcf);
+  CHECK(noisy.acked == quiet.acked);
+}
+
+TEST_CASE("a REQSEL loaded by a linked-list node moves the channel to the new request")
+{
+  auto f = machine();
+  for(auto const [index, word] : std::array<std::pair<std::uint32_t, std::uint32_t>, 3>{
+          {{0, reqsel(3, 0)}, {1, 8}, {2, 0}}
+  })
+  {
+    REQUIRE(f.target->mem().write(node + 4 * index, 4, word));
+  }
+  write(f, 0, "LBAR", node & 0xffff'0000u);
+  write(
+      f, 0, "LLR",
+      bit(0, "LLR", "UT2") | bit(0, "LLR", "UB1") | bit(0, "LLR", "ULL") | (node & 0xfffcu));
+  copy(f, 0, incrementing(0), reqsel(tdr_request, 0), 8);
+  device(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(bytes_at(f, destination, 8) == expected(0, 8));
+  CHECK(bytes_at(f, destination + 8, 8) == std::vector<std::uint32_t>(8, 0));
+  device(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(bytes_at(f, destination + 8, 8) == std::vector<std::uint32_t>(8, 0));
+  spi3(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(bytes_at(f, destination + 8, 8) == expected(8, 8));
+}
+
+TEST_CASE(
+    "a snapshot restored over a machine that already routed requests wakes its waiting channel")
+{
+  auto f = machine();
+  copy(f, 1, incrementing(1), reqsel(tdr_request, 1), 8);
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+
+  auto other = machine();
+  device(other).tx.set(true);
+  device(other).tx.set(false);
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  device(other).tx.set(true);
+  idle_for(other, std::chrono::microseconds{100});
+  CHECK(bytes_at(other, destination, 8) == expected(0, 8));
+}
+
+TEST_CASE("a REQSEL rewritten after its old request was routed follows the new request")
+{
+  auto f = machine();
+  copy(f, 0, incrementing(0), reqsel(tdr_request, 0), 4, 0, source, destination);
+  device(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(bytes_at(f, destination, 4) == expected(0, 4));
+  device(f).tx.set(false);
+  copy(f, 0, incrementing(0), reqsel(3, 0), 4, 0, source + 8, destination + 8);
+  idle_for(f, std::chrono::microseconds{50});
+  CHECK(bytes_at(f, destination + 8, 4) == std::vector<std::uint32_t>(4, 0));
+  spi3(f).tx.set(true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(bytes_at(f, destination + 8, 4) == expected(8, 4));
 }
