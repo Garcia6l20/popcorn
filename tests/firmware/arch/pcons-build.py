@@ -71,6 +71,7 @@ ENTRIES = {
         "spin_svc",
         "spin_svc_handler",
         "poll_then_svc",
+        "poll_then_svc_handler",
         "switch_run",
         "task_sp",
         "task_sp_first",

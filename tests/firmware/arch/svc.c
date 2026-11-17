@@ -36,6 +36,7 @@ void task_a(void);
 void task_b(void);
 void switch_svc(void);
 void switch_pendsv(void);
+void poll_then_svc(void);
 
 static inline uint32_t control(void)
 {
@@ -133,6 +134,7 @@ __attribute__((noipa)) void svc_setup(void)
   ram_vector[16 + 1] = (uint32_t)irq1_handler;
   ram_vector[16 + 3] = (uint32_t)irq3_handler;
   ram_vector[16 + 5] = (uint32_t)spin_loop;
+  ram_vector[16 + 6] = (uint32_t)poll_then_svc;
   REG32(SCB_VTOR)    = (uint32_t)ram_vector;
   REG32(SCB_CPACR) |= 0xFu << 20;
   REG8(SCB_SHPR(11)) = 0x40;
@@ -141,7 +143,8 @@ __attribute__((noipa)) void svc_setup(void)
   REG8(NVIC_IPR(1))  = 0x40;
   REG8(NVIC_IPR(3))  = 0x80;
   REG8(NVIC_IPR(5))  = 0x80;
-  REG32(NVIC_ISER0)  = 0x2Bu;
+  REG8(NVIC_IPR(6))  = 0x80;
+  REG32(NVIC_ISER0)  = 0x6Bu;
   __asm__ volatile("dsb\nisb\nbkpt #1" ::: "memory");
 }
 
@@ -240,6 +243,12 @@ __attribute__((naked)) void poll_then_svc(void)
 __attribute__((noipa)) void spin_svc_handler(void)
 {
   pend(5);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void poll_then_svc_handler(void)
+{
+  pend(6);
   __asm__ volatile("bkpt #1" ::: "memory");
 }
 

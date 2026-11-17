@@ -668,18 +668,20 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     met = target
       and run.arch->interrupt_returns(intno, target->ret)
       and run.stack_pointer() == target->sp;
-    auto const handler_returns =
-        run.loop_reports != 0 and run.arch->interrupt_returns(intno, run.arch->pc());
-    auto const result  = run.owner.arch_->on_interrupt(intno);
-    auto const arrived = std::exchange(run.arrival_stopped, false);
-    run.deadline       = std::min(run.deadline, run.owner.scheduler_.earliest());
+    auto const handler_returns = run.spin_on and run.arch->interrupt_returns(intno, run.arch->pc());
+    auto const result          = run.owner.arch_->on_interrupt(intno);
+    auto const arrived         = std::exchange(run.arrival_stopped, false);
+    run.deadline               = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
       if(handler_returns)
       {
-        run.end_loop_run(loop_ender::progress);
+        if(run.loop_reports != 0)
+        {
+          run.end_loop_run(loop_ender::progress);
+        }
+        run.spin.leave();
       }
-      run.spin.leave();
       if(failed or arrived)
       {
         return true;

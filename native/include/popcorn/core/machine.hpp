@@ -78,10 +78,14 @@ struct machine_options
    * register when it is MMIO. 0 turns spin detection off. A loop waiting on RAM that an
    * interrupt handler updates, such as a tick counter, repeats identically between two
    * interrupts, so the threshold should stay well above the iterations between interrupts,
-   * 1e5 to 1e6: a stuck loop repeats forever, so a large threshold only delays the stop.
-   * Independently of spin_threshold, the run also stops with stop_reason::spin when 65536 events
-   * are dispatched at one instruction count, detail `events repeat without time passing: <owner>
-   * kind <n>`. */
+   * 1e5 to 1e6: a stuck loop repeats forever, so a large threshold only delays the stop. A loop
+   * whose inner loop branches back to its own start twice or more per pass from inside the inner
+   * loop is not seen: the inner loop takes the head at every pass and the outer back edge takes
+   * it back, so no pass is compared. That is three iterations of an inner loop entered by
+   * fall-through, whose first back edge starts in the outer loop's code, and two of one entered
+   * by a branch to its test placed after its body. Independently of spin_threshold, the run also
+   * stops with stop_reason::spin when 65536 events are dispatched at one instruction count, detail
+   * `events repeat without time passing: <owner> kind <n>`. */
   std::uint32_t spin_threshold{};
   /** @brief Whether every CPU or DMA access to a register of an unmodelled peripheral, or to a
    * raz_wi range, fails the run with model_error. The arch module's and the models' own debugger
@@ -822,7 +826,9 @@ public:
    *        whatever machine_options::spin_threshold is, and each run of identical loop passes
    *        that ends after at least @p passes passes writes a loop record to the trace sinks
    *        selecting trace_kind::loop. The spin stop keeps its own threshold, spin_threshold, and
-   *        stays off at 0. Turning reports off writes the open run with loop_ender::end. Machine
+   *        stays off at 0. Turning reports off writes the open run with loop_ender::end. A loop
+   *        whose inner loop branches back to its own start twice or more per pass from inside
+   *        the inner loop reports no run, as machine_options::spin_threshold says. Machine
    *        configuration: not in snapshots, kept across restore().
    * @param passes Fewest passes a reported run has, 0 to turn reports off.
    * @throws machine_running while a slice runs, handlers included, and from a trace sink while

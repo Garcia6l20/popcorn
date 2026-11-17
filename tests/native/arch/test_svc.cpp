@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -284,16 +285,19 @@ TEST_CASE("a Thread poll loop that calls SVC is a spin on the polled register")
   CHECK(stopped.detail.find("TESTDEV") == std::string::npos);
 }
 
-TEST_CASE("a poll loop inside a handler that calls SVC is a spin once the depth has clamped at 0")
+TEST_CASE("a poll loop inside a handler that calls SVC is a spin of the handler's level")
 {
   core::machine_options options;
   options.spin_threshold = 1000;
   auto       f           = booted(std::move(options));
+  auto const before      = f.target->virtual_clock().now();
   auto const stopped     = start(f, "spin_svc_handler");
   REQUIRE(stopped.reason == stop_reason::spin);
   CHECK(stopped.detail.find("UNMODELLED.STAT") != std::string::npos);
   CHECK(stopped.detail.find("TESTDEV") == std::string::npos);
   CHECK((f.reg("xpsr") & 0x1ff) == 16 + 5);
+  CHECK(core::machine_internals::spin(*f.target).depth == 1);
+  CHECK(f.target->virtual_clock().now().value - before.value == 18'060);
 }
 
 TEST_CASE("a loop run left by an SVC ends at the SVCall entry with its number")
@@ -329,6 +333,40 @@ TEST_CASE("a loop run left by an SVC ends at the SVCall entry with its number")
   CHECK((loop + 1)->aux == 11);
   CHECK((loop + 1)->dt == 0);
   CHECK(std::ranges::count(*records, core::trace_kind::loop, &core::trace_record::kind) == 1);
+}
+
+TEST_CASE("a handler's loop run left by an SVC ends at the SVCall entry, one level deeper")
+{
+  auto f = booted();
+  f.set("pc", fn("poll_then_svc_handler"));
+  auto records = std::make_shared<std::vector<core::trace_record>>();
+  auto sink    = f.target->add_trace_sink(
+      {core::trace_kind::loop, core::trace_kind::irq},
+      [records](std::span<core::trace_record const> batch) { records->append_range(batch); });
+  f.target->set_loop_reports(1);
+  core::slice_request request;
+  request.max_instructions = popcorn::icount{3000};
+  request.wall_budget      = std::chrono::seconds{60};
+  REQUIRE_FALSE(f.run(request).stopped.has_value());
+  REQUIRE((f.reg("xpsr") & 0x1ff) == 16 + 6);
+  REQUIRE(
+      core::machine_internals::services(*f.target).write(
+          0x4001'0008, 4, 1, popcorn::initiator::debugger));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK((f.reg("xpsr") & 0x1ff) == 16 + 6);
+  CHECK(core::machine_internals::spin(*f.target).depth == 1);
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = *records | std::views::filter([](core::trace_record const& record) {
+    return record.kind == core::trace_kind::loop;
+  }) | std::ranges::to<std::vector>();
+  REQUIRE(loops.size() == 1);
+  CHECK(loops.front().payload[0] == code("poll_then_svc") + 2);
+  CHECK(loops.front().payload[1] > 900);
+  CHECK(
+      (loops.front().aux >> core::trace_loop_ender_shift)
+      == std::to_underlying(core::loop_ender::exception));
+  CHECK((loops.front().aux & 0xfffu) == 11);
 }
 
 TEST_CASE("coverage records no edge from the svc block into the SVCall handler")

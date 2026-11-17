@@ -72,10 +72,12 @@ struct pctr_payload
  *   a cut record inside a run does not end it. The detector sees a run end only at a head
  *   arrival, a back edge or one of the other enders, so a run whose code left the loop on its
  *   last pass reaches to the next of them: payload[2] then also counts the code from the exit
- *   to the record. flags the offset from the head of the highest
- *   block start seen in the loop window since the head was taken, below loop_window_bytes. aux
- *   the ender, trace_loop_ender() of a loop_ender and, for an exception entry, the number the
- *   arch's irq record carries, 0 when the arch writes none.
+ *   to the record. A loop whose inner loop branches back to its own start twice or more per pass
+ *   from inside the inner loop writes no record: its head alternates between the two loops and
+ *   no pass is compared, see machine_options::spin_threshold. flags the offset from the head of
+ *   the highest block start seen in the loop window since the head was taken, below
+ *   loop_window_bytes. aux the ender, trace_loop_ender() of a loop_ender and, for an exception
+ *   entry, the number the arch's irq record carries, 0 when the arch writes none.
  *
  * A register or symbol id of 0xffff or more is written as trace_id_overflow, see trace_id(), and
  * a reader resolves the record by its payload address instead.

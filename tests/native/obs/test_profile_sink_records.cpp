@@ -493,9 +493,9 @@ TEST_CASE("the FreeRTOS idle loop is one engine loop from prvCheckTasksWaitingTe
   REQUIRE(idle != result.loops.end());
   CHECK(idle->head == 0x0800'e00c);
   CHECK(idle->last == 0x0800'e05c);
-  CHECK(idle->runs == 171);
-  CHECK(idle->passes == 1'046'932);
-  CHECK(idle->instructions == 11'517'562);
-  CHECK(idle->enders == std::array<std::uint64_t, 6>{0, 171, 0, 0, 0, 0});
+  CHECK(idle->runs == 215);
+  CHECK(idle->passes == 1'421'677);
+  CHECK(idle->instructions == 15'640'093);
+  CHECK(idle->enders == std::array<std::uint64_t, 6>{0, 214, 0, 1, 0, 0});
   CHECK(result.instructions == 15'829'458);
 }

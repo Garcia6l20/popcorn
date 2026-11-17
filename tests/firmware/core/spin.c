@@ -293,6 +293,71 @@ __attribute__((naked)) void poll_exit_tail(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void helper_below(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "b 2f\n"
+                   "1: ldr r0, [r1, #4]\n"
+                   "bx lr\n"
+                   "2: bl 1b\n"
+                   "tst r0, #1\n"
+                   "bne 2b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void helper_below_flag(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "b 2f\n"
+                   "1: ldr r0, [r1]\n"
+                   "bx lr\n"
+                   "2: bl 1b\n"
+                   "cmp r0, #7\n"
+                   "bne 2b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_then_countdown(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "movs r2, #200\n"
+                   "2: subs r2, #1\n"
+                   "bne 2b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_with_inner_delay(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: movs r2, #4\n"
+                   "2: subs r2, #1\n"
+                   "bne 2b\n"
+                   "ldr r0, [r1, #4]\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_with_short_inner_delay(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: movs r2, #3\n"
+                   "2: subs r2, #1\n"
+                   "bne 2b\n"
+                   "ldr r0, [r1, #4]\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   __asm__ volatile("bkpt #0" ::: "memory");
@@ -301,7 +366,7 @@ __attribute__((naked)) void poll_exit_tail(void)
   }
 }
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[41] = {
+__attribute__((section(".isr_vector"), used)) static const void* const vectors[46] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)tick_reads,
@@ -326,4 +391,9 @@ __attribute__((section(".isr_vector"), used)) static const void* const vectors[4
     [38] = (const void*)tick_wait_flag,
     [39] = (const void*)poll_discard,
     [40] = (const void*)poll_exit_tail,
+    [41] = (const void*)helper_below,
+    [42] = (const void*)helper_below_flag,
+    [43] = (const void*)poll_then_countdown,
+    [44] = (const void*)poll_with_inner_delay,
+    [45] = (const void*)poll_with_short_inner_delay,
 };

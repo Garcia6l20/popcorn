@@ -686,7 +686,7 @@ TEST_CASE("a host call ends the open run at its start")
   CHECK(start_of(loops[1]).value > from.value + 1050);
 }
 
-TEST_CASE("stepped slices stamp loop runs at the counts of a budget run")
+TEST_CASE("stepped slices stamp loop head arrivals at their block start")
 {
   auto const exactly = [](fixture const& f, std::uint64_t instructions, std::uint64_t slice) {
     for(std::uint64_t done = 0; done < instructions; done += slice)
@@ -922,4 +922,157 @@ TEST_CASE("a handler loop left by its return ends its run at the return")
   REQUIRE(found != loops.end());
   CHECK(ender_of(found->record) == core::loop_ender::progress);
   CHECK(found->record.payload[1] > 100);
+}
+
+namespace
+{
+auto stage_stale_candidate(fixture const& f) -> void
+{
+  start(f, "helper_below");
+  auto const& loop = core::machine_internals::spin(*f.target).loop();
+  for(auto step = 0; step < 50; ++step)
+  {
+    REQUIRE_FALSE(f.run(budget(1)).stopped.has_value());
+    if(step > 20 and loop.candidate == head_of("helper_below", 8))
+    {
+      break;
+    }
+  }
+  REQUIRE(loop.head == head_of("helper_below", 4));
+  REQUIRE(loop.candidate == head_of("helper_below", 8));
+  REQUIRE(loop.candidate_hits == 1);
+  start(f, "wait_ready");
+  REQUIRE_FALSE(f.run(budget(8)).stopped.has_value());
+  REQUIRE(loop.head == head_of("wait_ready", 2));
+  f.set("pc", head_of("helper_below", 4) | 1);
+}
+}
+
+TEST_CASE("a loop with its helper below keeps the helper as head and counts its equal passes")
+{
+  auto f = booted(0);
+  start(f, "helper_below");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(5000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 1);
+  CHECK(loops.front().record.payload[0] == head_of("helper_below", 4));
+  CHECK(loops.front().record.flags == 8);
+  CHECK(loops.front().record.payload[1] > 990);
+}
+
+TEST_CASE(
+    "a back edge taken under a former head does not make a loop with its helper below "
+    "alternate heads")
+{
+  {
+    auto f = booted(1000);
+    stage_stale_candidate(f);
+    auto const before  = f.target->virtual_clock().now();
+    auto const stopped = f.run(budget(20'000));
+    REQUIRE(stopped.stopped.has_value());
+    CHECK(stopped.stopped->reason == stop_reason::spin);
+    CAPTURE(stopped.stopped->detail);
+    CHECK(stopped.stopped->detail.contains("in helper_below"));
+    CHECK(f.target->virtual_clock().now().value - before.value == 5017);
+  }
+  auto f = booted(0);
+  f.target->set_loop_reports(1);
+  stage_stale_candidate(f);
+  auto [log, sink] = listen(f);
+  REQUIRE_FALSE(f.run(budget(5000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops()
+                   | std::views::filter([](stamped const& entry) {
+                       return entry.record.payload[0] != head_of("wait_ready", 2);
+                     })
+                   | std::ranges::to<std::vector>();
+  REQUIRE(loops.size() == 1);
+  CHECK(loops.front().record.payload[0] == head_of("helper_below", 4));
+  CHECK(loops.front().record.payload[1] > 990);
+}
+
+TEST_CASE("a loop with its helper below ends its run when the helper reads another value")
+{
+  auto f = booted(0);
+  start(f, "helper_below_flag");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  write_flag(f, 1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 2);
+  CHECK(ender_of(loops[0].record) == core::loop_ender::progress);
+  CHECK(ender_of(loops[1].record) == core::loop_ender::end);
+  for(auto const& run : loops)
+  {
+    CHECK(run.record.payload[0] == head_of("helper_below_flag", 4));
+  }
+}
+
+TEST_CASE("a poll left one pass short of the threshold into a countdown is no spin")
+{
+  constexpr std::uint32_t threshold = 50;
+  auto                    f         = booted(threshold);
+  start(f, "poll_then_countdown");
+  auto const& loop = core::machine_internals::spin(*f.target).loop();
+  REQUIRE_FALSE(f.run(budget(4)).stopped.has_value());
+  while(loop.count < threshold - 2)
+  {
+    REQUIRE_FALSE(f.run(budget(3)).stopped.has_value());
+  }
+  REQUIRE(loop.count == threshold - 2);
+  REQUIRE(loop.head == head_of("poll_then_countdown", 2));
+  write_flag(f, 1);
+  CHECK(f.run_to_stop(long_request()).reason == stop_reason::user);
+}
+
+TEST_CASE("a poll whose inner countdown repeats twice per pass is not seen: its head alternates")
+{
+  {
+    auto f = booted(1000);
+    start(f, "poll_with_inner_delay");
+    CHECK_FALSE(f.run(budget(100'000)).stopped.has_value());
+  }
+  auto f = booted(0);
+  start(f, "poll_with_inner_delay");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(10'000)).stopped.has_value());
+  auto const& loop = core::machine_internals::spin(*f.target).loop();
+  CHECK(loop.count == 0);
+  f.target->set_loop_reports(0);
+  sink.reset();
+  CHECK(log->loops().empty());
+}
+
+TEST_CASE("a poll whose inner countdown repeats once per pass from inside is seen")
+{
+  {
+    auto f = booted(1000);
+    start(f, "poll_with_short_inner_delay");
+    auto const stopped = f.run(budget(100'000));
+    REQUIRE(stopped.stopped.has_value());
+    CHECK(stopped.stopped->reason == stop_reason::spin);
+    CAPTURE(stopped.stopped->detail);
+    CHECK(stopped.stopped->detail.contains("in poll_with_short_inner_delay"));
+  }
+  auto f = booted(0);
+  start(f, "poll_with_short_inner_delay");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(10'000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 1);
+  CHECK(loops.front().record.payload[0] == head_of("poll_with_short_inner_delay", 2));
+  CHECK(loops.front().record.payload[1] > 900);
 }

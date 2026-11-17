@@ -605,9 +605,10 @@ struct spin_state
     /** @brief Head of the loop being tracked, 0 before the first backward branch. */
     address head{};
     /** @brief Back-edge target inside the loop window, adopted as head after two back edges to
-     * it that do not pass the head: an inner loop that took over. */
+     * it that do not pass the head: an inner loop that took over. Cleared when the head
+     * changes, so it counts only back edges taken under the current head. */
     address candidate{};
-    /** @brief Consecutive back edges to candidate since the head was last reached. */
+    /** @brief Consecutive back edges to candidate since the head was taken or last reached. */
     std::uint32_t candidate_hits = 0;
     /** @brief Highest block start of the current iteration inside the loop window. */
     address last{};

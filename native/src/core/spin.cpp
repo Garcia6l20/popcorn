@@ -119,8 +119,10 @@ void machine::run_state::spin_block(address addr)
     loop.known = false;
     if(addr != loop.head)
     {
-      loop.head = addr;
-      loop.last = addr;
+      loop.head           = addr;
+      loop.last           = addr;
+      loop.candidate      = {};
+      loop.candidate_hits = 0;
     }
   }
   else if(not loop.known)
