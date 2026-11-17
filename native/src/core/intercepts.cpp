@@ -380,6 +380,10 @@ auto machine::run_state::visit_site(code_site& site, address addr, bool in_block
         {
           coverage.leave(*arch, addr, false);
         }
+        if(open_record_insns != 0 and in_block)
+        {
+          leave_record(addr);
+        }
         arch->return_to_caller(result.value(), result.abi().value_or(abi_at(entry.at)));
         coverage.has_previous = false;
         return site_visit::returned;
@@ -434,6 +438,7 @@ auto machine::run_state::arrive_emulated(address at) -> emulated_arrival
     end_cause           = boundary_cause(now);
     boundary_stop       = true;
     coverage.open_insns = 0;
+    open_record_insns   = 0;
     arrival_stopped     = true;
     return emulated_arrival::stopped;
   }

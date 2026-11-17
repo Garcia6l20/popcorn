@@ -37,15 +37,27 @@ struct pctr_payload
  *
  * - block: payload[0] pc, aux the block's instruction count.
  * - mem: payload pc, address, value. flags the access size, trace_write_flag for a write.
- * - mmio: as mem, aux the flat register id of `flat_register_id()`.
+ * - mmio: as mem, aux the flat register id of `flat_register_id()`. flags also carry who made
+ *   the access: trace_dma_flag for a DMA access, trace_debugger_flag for a debugger access,
+ *   neither for the CPU.
  * - irq: no payload, flags 1 on entry and 0 on exit, aux the exception number.
  * - call: payload pc and r0, aux the index of the called symbol in the machine's symbol table,
  *   the symbols of its loaded images concatenated in load order.
  * - str: file only, aux bytes of text follow the header, padded to 4, dt is the string id. Its
  *   annotation counts no fixed payload.
  * - time: payload[0] and payload[1] the absolute instruction count, low word first, written when
- *   a delta does not fit dt or time moved backwards. The next record counts from it.
+ *   a delta does not fit dt or time moved backwards. The next record counts from it. flags
+ *   trace_rebase_flag when a reset or a restore moved the count, written to every sink at once.
  * - stop: payload[0] pc, aux the `stop_reason` value.
+ * - sleep: written to sinks when the core wakes, payload[0] the instructions of time it slept,
+ *   ending at the record. flags the low bits how it went to sleep, 0 unknown, 1 WFI, 2 WFE, 3
+ *   sleep on exit, plus trace_sleep_partial when the sleep is cut by removing the sink. aux the
+ *   exception whose entry woke it, 0 for a wake with no entry.
+ * - clock: written to a sink when it is added, after a rebase and at every change of the core
+ *   rate, stamped where the rate starts, payload[0] and payload[1] the instructions per second
+ *   from there on, low word first.
+ * - cut: written to sinks when the engine leaves a block before its end, after the block record,
+ *   payload[0] the block's start, aux the instructions of the block that did not run.
  *
  * A register or symbol id of 0xffff or more is written as trace_id_overflow, see trace_id(), and
  * a reader resolves the record by its payload address instead.
@@ -60,6 +72,9 @@ enum class[[= reflex::derive{reflex::Format}]] trace_kind : std::uint8_t
   str[[= pctr_payload{0}]]   = 5,
   time[[= pctr_payload{2}]]  = 6,
   stop[[= pctr_payload{1}]]  = 7,
+  sleep[[= pctr_payload{1}]] = 8,
+  clock[[= pctr_payload{2}]] = 9,
+  cut[[= pctr_payload{1}]]   = 10,
 };
 
 static_assert(
@@ -112,6 +127,18 @@ constexpr auto pctr_payload_words(trace_kind kind) noexcept -> std::size_t
 
 /** @brief `flags` bit of a mem or mmio record set for a write. */
 inline constexpr std::uint8_t trace_write_flag = 0x80;
+
+/** @brief `flags` bit of an mmio record set for a DMA access. */
+inline constexpr std::uint8_t trace_dma_flag = 0x20;
+
+/** @brief `flags` bit of an mmio record set for a debugger access. */
+inline constexpr std::uint8_t trace_debugger_flag = 0x40;
+
+/** @brief `flags` of a time record written for a reset or a restore. */
+inline constexpr std::uint8_t trace_rebase_flag = 0x01;
+
+/** @brief `flags` bit of a sleep record cut by removing the sink. */
+inline constexpr std::uint8_t trace_sleep_partial = 0x80;
 
 /** @brief Size in bytes of the `.pctr` record header `<u8 kind, u8 flags, u16 aux, u32 dt>`. */
 inline constexpr std::size_t pctr_header_size = 8;

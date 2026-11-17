@@ -1437,7 +1437,8 @@ class Machine:
         every kind.
 
         `ranges` and `functions` limit the trace to records caused by that code, everywhere
-        when both are None. Call records name the symbols of the loaded images, then of the
+        when both are None. Sleep and clock records account for time, not code, and are written
+        whatever the ranges. Call records name the symbols of the loaded images, then of the
         symbols-only images, as they were when the trace opened, so `load` is refused while
         a trace with call records is open. Block and memory records cost a native hook while
         traced, nothing crosses to Python per record. Leaving the block removes the sink, then

@@ -355,6 +355,8 @@ void machine::restore_checked(core::snapshot const& saved, bool apply)
   clock_driver_.restore(data.clock);
   run.post_loop();
   trace_.rebase(clock_.now());
+  run.asleep_since.reset();
+  run.open_record_insns = 0;
   run.rebase_sinks(clock_.now());
   arch_->load(data.arch.data);
   std::ranges::fill(run.lines.active, 0u);

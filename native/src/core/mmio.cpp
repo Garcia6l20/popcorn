@@ -977,6 +977,7 @@ void machine::run_state::take_precise_exit()
   if(not before or *before + 1 >= block_size)
   {
     coverage.open_insns = 0;
+    open_record_insns   = 0;
     return;
   }
   if(not stepping)

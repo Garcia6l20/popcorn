@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
 
 class TraceKind(IntEnum):
@@ -20,6 +20,9 @@ class TraceKind(IntEnum):
     STR = 5
     TIME = 6
     STOP = 7
+    SLEEP = 8
+    CLOCK = 9
+    CUT = 10
 
 
 ALL: Final[frozenset[TraceKind]] = frozenset(
@@ -37,6 +40,9 @@ PAYLOAD_WORDS: Final[Mapping[TraceKind, int]] = MappingProxyType(
         TraceKind.STR: 0,
         TraceKind.TIME: 2,
         TraceKind.STOP: 1,
+        TraceKind.SLEEP: 1,
+        TraceKind.CLOCK: 2,
+        TraceKind.CUT: 1,
     }
 )
 """u32 payload words after each record header, by kind."""
@@ -67,9 +73,16 @@ class Mem:
     write: bool
 
 
+type Initiator = Literal["cpu", "dma", "debugger"]
+"""Who made a register access."""
+
+
 @dataclass(frozen=True, slots=True)
 class Mmio:
-    """A peripheral register access, the register named `<peripheral>.<register>` when known."""
+    """A peripheral register access, the register named `<peripheral>.<register>` when known.
+
+    pc is 0 for a DMA or debugger access.
+    """
 
     time: int
     pc: int
@@ -78,6 +91,7 @@ class Mmio:
     size: int
     write: bool
     register: str | None
+    initiator: Initiator = "cpu"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,4 +122,48 @@ class Stop:
     reason: int
 
 
-type Record = Block | Mem | Mmio | Irq | Call | Stop
+@dataclass(frozen=True, slots=True)
+class Sleep:
+    """The core slept over the instruction counts [time - length, time) and woke at time.
+
+    A sleep that began before the trace's origin or its last rebase starts there.
+
+    reason is how it went to sleep: 0 unknown, 1 WFI, 2 WFE, 3 sleep on exit. woke_by is the
+    exception whose entry woke it, 0 for a wake with no entry. partial marks a sleep cut short by
+    the end of the trace.
+    """
+
+    time: int
+    length: int
+    reason: int
+    woke_by: int
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Clock:
+    """The core runs hz instructions per second from time on."""
+
+    time: int
+    hz: int
+
+
+@dataclass(frozen=True, slots=True)
+class Cut:
+    """The block that started at pc and was recorded last was left with unrun of its instructions
+    not run."""
+
+    time: int
+    pc: int
+    unrun: int
+
+
+@dataclass(frozen=True, slots=True)
+class Rebase:
+    """A reset or a restore moved the instruction count to time. Records after it count from
+    there, nothing before it carries over."""
+
+    time: int
+
+
+type Record = Block | Mem | Mmio | Irq | Call | Stop | Sleep | Clock | Cut | Rebase

@@ -49,7 +49,7 @@ struct pctr_names
 };
 
 /**
- * @brief Writes trace records to a `.pctr` version 1 file: `PCTR`, u16 version 1, u16 flags 0,
+ * @brief Writes trace records to a `.pctr` version 2 file: `PCTR`, u16 version 2, u16 flags 0,
  *        a TIME record carrying the origin, then the records, each its header
  *        `<u8 kind, u8 flags, u16 aux, u32 dt>` and its pctr_payload_words() payload words, little
  *        endian. An mmio or call record's id becomes a string id, its name written first as a STR

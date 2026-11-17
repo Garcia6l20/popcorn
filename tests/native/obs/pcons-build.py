@@ -114,7 +114,11 @@ for target in (periph_firmware, tb_firmware[("core", "alu")][1]):
 u575_examples = project_dir / "examples" / "stm32u575"
 test_profile_sink = add_doctest(
     "obs-profile-sink",
-    [here / "test_profile_sink.cpp", here / "test_profile_sink_stacks.cpp"],
+    [
+        here / "test_profile_sink.cpp",
+        here / "test_profile_sink_stacks.cpp",
+        here / "test_profile_sink_records.cpp",
+    ],
     [
         obs_static,
         test_support_static,
@@ -124,6 +128,7 @@ test_profile_sink = add_doctest(
         "POPCORN_U575_DESC": str(cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")),
         "POPCORN_FW_TIM_TICKS": str(u575_examples / "tim" / "prebuilt" / "tim_ticks.elf"),
         "POPCORN_FW_SPI_FLASH": str(u575_examples / "spi" / "prebuilt" / "spi_flash.elf"),
+        "POPCORN_FW_GPDMA_UART": str(u575_examples / "gpdma" / "prebuilt" / "gpdma_uart.elf"),
         "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
     },
 )

@@ -10,19 +10,42 @@
 #include <limits>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <utility>
 
 namespace popcorn::core
 {
 namespace
 {
-auto time_record(icount now) -> trace_record
+auto time_record(icount now, std::uint8_t flags = 0) -> trace_record
 {
   return {
-      .kind = trace_kind::time,
+      .kind  = trace_kind::time,
+      .flags = flags,
       .payload =
           {static_cast<std::uint32_t>(now.value), static_cast<std::uint32_t>(now.value >> 32), 0},
   };
+}
+
+auto clock_record(std::uint64_t hz) -> trace_record
+{
+  return {
+      .kind    = trace_kind::clock,
+      .payload = {static_cast<std::uint32_t>(hz), static_cast<std::uint32_t>(hz >> 32), 0},
+  };
+}
+
+constexpr auto initiator_flags(initiator by) noexcept -> std::uint8_t
+{
+  switch(by)
+  {
+    case initiator::dma:
+      return trace_dma_flag;
+    case initiator::debugger:
+      return trace_debugger_flag;
+    default:
+      return 0;
+  }
 }
 
 auto in_ranges(std::span<address_range const> ranges, address pc) noexcept -> bool
@@ -66,7 +89,7 @@ void machine::run_state::dt_stream::stamp(
 {
   if(rebased)
   {
-    out.push_back(time_record(last));
+    out.push_back(time_record(last, trace_rebase_flag));
     rebased = false;
   }
   if(now < last or now.value - last.value > std::numeric_limits<std::uint32_t>::max())
@@ -81,7 +104,11 @@ void machine::run_state::dt_stream::stamp(
 
 void machine::run_state::emit(trace_record const& record, address pc, bool ring)
 {
-  auto const now = owner.clock_.now();
+  emit_at(record, pc, ring, owner.clock_.now());
+}
+
+void machine::run_state::emit_at(trace_record const& record, address pc, bool ring, icount now)
+{
   if(ring)
   {
     owner.trace_.append(record, now);
@@ -90,10 +117,15 @@ void machine::run_state::emit(trace_record const& record, address pc, bool ring)
   {
     return;
   }
+  deliver(record, pc, true, now);
+}
+
+void machine::run_state::deliver(trace_record const& record, address pc, bool ranged, icount now)
+{
   delivery_scope const scope{*owner.hooks_};
   for(auto const& [id, entry] : sinks)
   {
-    if(not entry->kinds.contains(record.kind) or not in_ranges(entry->ranges, pc))
+    if(not entry->kinds.contains(record.kind) or (ranged and not in_ranges(entry->ranges, pc)))
     {
       continue;
     }
@@ -133,7 +165,7 @@ void machine::run_state::trace_mmio(
   auto const   pc    = not cpu ? address{} : exact ? arch->pc() : block_pc;
   trace_record record{
       .kind    = trace_kind::mmio,
-      .flags   = mem_flags(size, write),
+      .flags   = static_cast<std::uint8_t>(mem_flags(size, write) | initiator_flags(by)),
       .aux     = slot.trace_id_at(offset),
       .payload = {pc, addr, value},
   };
@@ -167,17 +199,88 @@ void machine::run_state::flush_sinks()
 
 void machine::run_state::rebase_sinks(icount now) noexcept
 {
+  auto const hz = owner.clock_.instruction_hz();
   for(auto const& [id, entry] : sinks)
   {
     entry->stream.last    = now;
     entry->stream.rebased = true;
+    try
+    {
+      entry->batch.push_back(time_record(now, trace_rebase_flag));
+      entry->stream.rebased = false;
+      if(entry->kinds.contains(trace_kind::clock))
+      {
+        entry->stream.stamp(clock_record(hz), now, entry->batch);
+      }
+    }
+    catch(...)
+    {}
   }
+}
+
+void machine::run_state::end_sleep(std::uint16_t woke_by)
+{
+  auto const slept = std::exchange(asleep_since, std::nullopt);
+  if(not slept or not sinks_want_sleep)
+  {
+    return;
+  }
+  auto const now    = owner.clock_.now();
+  auto const length = std::min<std::uint64_t>(
+      now.value - std::min(now.value, slept->first.value),
+      std::numeric_limits<std::uint32_t>::max());
+  deliver(
+      {
+          .kind    = trace_kind::sleep,
+          .flags   = slept->second,
+          .aux     = woke_by,
+          .payload = {static_cast<std::uint32_t>(length), 0, 0}
+  },
+      address{}, false, now);
+}
+
+void machine::run_state::emit_clock()
+{
+  if(sinks_want_clock)
+  {
+    deliver(
+        clock_record(owner.clock_.instruction_hz()), address{}, false,
+        owner.clock_.to_icount(owner.clock_.epoch_time()));
+  }
+}
+
+void machine::run_state::leave_record(address pc)
+{
+  auto const insns = std::exchange(open_record_insns, 0u);
+  auto const from  = open_record_pc;
+  if(insns == 0 or not sinks_want_cut or pc - from > max_insn_bytes * insns)
+  {
+    return;
+  }
+  auto const ran = arch->instructions_between(from, pc);
+  if(not ran or *ran >= insns)
+  {
+    return;
+  }
+  emit(
+      {
+          .kind    = trace_kind::cut,
+          .aux     = static_cast<std::uint16_t>(insns - *ran),
+          .payload = {from, 0, 0}
+  },
+      from, false);
 }
 
 void machine::run_state::update_sink_hooks()
 {
-  sinks_want_block = std::ranges::any_of(
-      sinks, [](auto const& held) { return held.second->kinds.contains(trace_kind::block); });
+  auto const wanted = [this](trace_kind kind) {
+    return std::ranges::any_of(
+        sinks, [kind](auto const& held) { return held.second->kinds.contains(kind); });
+  };
+  sinks_want_block    = wanted(trace_kind::block);
+  sinks_want_sleep    = wanted(trace_kind::sleep);
+  sinks_want_clock    = wanted(trace_kind::clock);
+  sinks_want_cut      = wanted(trace_kind::cut);
   block_records       = sinks_want_block or ring_blocks;
   auto const want_mem = std::ranges::any_of(
       sinks, [](auto const& held) { return held.second->kinds.contains(trace_kind::mem); });
@@ -225,7 +328,23 @@ void machine::run_state::remove_sink(std::uint64_t id) noexcept
   }
   try
   {
-    flush(*found->second);
+    auto& entry = *found->second;
+    if(asleep_since and entry.kinds.contains(trace_kind::sleep))
+    {
+      auto const now = owner.clock_.now();
+      entry.stream.stamp(
+          {
+              .kind  = trace_kind::sleep,
+              .flags = static_cast<std::uint8_t>(asleep_since->second | trace_sleep_partial),
+              .payload =
+                  {static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                       now.value - std::min(now.value, asleep_since->first.value),
+                            std::numeric_limits<std::uint32_t>::max())),
+                            0, 0}
+      },
+          now, entry.batch);
+    }
+    flush(entry);
   }
   catch(...)
   {}
@@ -274,6 +393,10 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
     -> hook_handle
 {
   require_stopped(*this);
+  if(not sink)
+  {
+    throw std::invalid_argument("add_trace_sink needs a sink to call");
+  }
   auto const id    = ++hooks_->last_id;
   auto       entry = std::make_unique<run_state::sink_entry>(run_state::sink_entry{
       .kinds  = kinds,
@@ -283,6 +406,14 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
       .stream = {.last = clock_.now(), .rebased = false},
   });
   entry->batch.reserve(run_state::sink_batch);
+  if(kinds.contains(trace_kind::clock))
+  {
+    entry->stream.stamp(clock_record(clock_.instruction_hz()), clock_.now(), entry->batch);
+  }
+  if(kinds.contains(trace_kind::sleep) and run_->asleep_since and arch_->idle())
+  {
+    run_->asleep_since->second = arch_->idle_reason();
+  }
   run_->sinks.emplace(id, std::move(entry));
   try
   {

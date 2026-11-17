@@ -62,7 +62,7 @@ profile_sink::profile_sink(icount start, profile_options options)
     : options_{
           std::move(options)
 },
-      start_{start}, now_{start}, last_end_{start}, slots_(initial_slots),
+      start_{start}, now_{start}, last_end_{start}, base_{start}, slots_(initial_slots),
       nodes_{profile_frame{.kind = frame_kind::root}},
       last_child_{{~std::uint64_t{0}, 0}}, tracking_{static_cast<bool>(options_.code)}
 {
@@ -80,7 +80,9 @@ void profile_sink::feed(std::span<core::trace_record const> records)
   {
     if(record.kind == core::trace_kind::time)
     {
-      time(icount{std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32});
+      time(
+          icount{std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32},
+          (record.flags & core::trace_rebase_flag) != 0);
       continue;
     }
     now_.value += record.dt;
@@ -97,6 +99,18 @@ void profile_sink::feed(std::span<core::trace_record const> records)
       case core::trace_kind::mmio:
         mmio(record);
         break;
+      case core::trace_kind::sleep:
+        sleep(record);
+        break;
+      case core::trace_kind::clock:
+        clocks_.push_back(
+            {.at      = now_,
+             .segment = cuts_,
+             .hz      = std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32});
+        break;
+      case core::trace_kind::cut:
+        cut_block(record);
+        break;
       default:
         break;
     }
@@ -108,16 +122,65 @@ auto profile_sink::sink() -> core::trace_sink
   return [this](std::span<core::trace_record const> records) { feed(records); };
 }
 
-void profile_sink::time(icount to)
+void profile_sink::time(icount to, bool rebase)
 {
-  if(to > now_ and to.value - now_.value > std::numeric_limits<std::uint32_t>::max())
+  if(not rebase)
   {
-    elapsed_ += to.value - now_.value;
-    now_ = to;
+    elapsed_ = elapsed_ + to.value - now_.value;
+    now_     = to;
     return;
   }
-  now_ = to;
+  now_  = to;
+  base_ = to;
   cut();
+}
+
+void profile_sink::sleep(core::trace_record const& record)
+{
+  auto const start =
+      std::max(icount{now_.value - std::min<std::uint64_t>(now_.value, record.payload[0])}, base_);
+  auto const length = now_.value - start.value;
+  gap_before(start, other_gaps_);
+  exit_at_.reset();
+  auto const reason = static_cast<std::size_t>(record.flags & ~core::trace_sleep_partial & 0xff);
+  if(reason < sleep_reasons_.size())
+  {
+    ++sleep_reasons_[reason];
+  }
+  if((record.flags & core::trace_sleep_partial) != 0)
+  {
+    ++partial_sleeps_;
+  }
+  add_gap(sleeps_, length);
+  if(record.aux != 0)
+  {
+    add_gap(exceptions_[record.aux].totals.wakes, length);
+  }
+}
+
+void profile_sink::cut_block(core::trace_record const& record)
+{
+  auto const unrun = std::uint64_t{record.aux};
+  auto const pc    = record.payload[0];
+  auto const mask  = slots_.size() - 1;
+  for(auto at = slot_of(pc, mask); slots_[at].used; at = (at + 1) & mask)
+  {
+    if(slots_[at].pc == pc)
+    {
+      slots_[at].instructions -= std::min(slots_[at].instructions, unrun);
+      break;
+    }
+  }
+  instructions_ -= std::min(instructions_, unrun);
+  if(tracking_ and pending_.start == pc)
+  {
+    pending_ = {};
+  }
+  if(tracking_ and walked_ == pc)
+  {
+    auto& self = nodes_[current_].self;
+    self -= std::min(self, unrun);
+  }
 }
 
 void profile_sink::cut()
@@ -139,7 +202,11 @@ void profile_sink::cut()
   {
     state.last_written.reset();
   }
-  for(auto& state : other_registers_ | std::views::values)
+  for(auto& state : dma_registers_ | std::views::values)
+  {
+    state.last_written.reset();
+  }
+  for(auto& state : debugger_registers_ | std::views::values)
   {
     state.last_written.reset();
   }
@@ -288,6 +355,7 @@ void profile_sink::walk(std::uint32_t instructions, block_shape const& shape, ad
     ++nodes_[current_].entries;
   }
   nodes_[current_].self += instructions;
+  walked_ = pc;
   if(shape.exit != block_exit::other)
   {
     pending_ = {.exit = shape.exit, .start = pc, .next = shape.next};
@@ -402,7 +470,7 @@ void profile_sink::irq(core::trace_record const& record)
   if(record.flags == 1)
   {
     auto& state = exceptions_[number];
-    gap_before(now_, state.totals.wakes);
+    gap_before(now_, other_gaps_);
     auto& totals = state.totals;
     ++totals.entries;
     if(exit_at_ == now_)
@@ -450,10 +518,12 @@ void profile_sink::irq(core::trace_record const& record)
 
 void profile_sink::mmio(core::trace_record const& record)
 {
-  auto const cpu      = record.payload[0] != 0;
+  auto const dma      = (record.flags & core::trace_dma_flag) != 0;
+  auto const debugger = (record.flags & core::trace_debugger_flag) != 0;
+  auto const cpu      = not dma and not debugger;
   auto const write    = (record.flags & core::trace_write_flag) != 0;
   auto const value    = record.payload[2];
-  auto&      table    = cpu ? cpu_registers_ : other_registers_;
+  auto&      table    = dma ? dma_registers_ : debugger ? debugger_registers_ : cpu_registers_;
   auto [found, added] = table.try_emplace(register_key(record));
   auto& state         = found->second;
   if(added)
@@ -497,17 +567,22 @@ void profile_sink::mmio(core::trace_record const& record)
 auto profile_sink::result() const -> profile_result
 {
   profile_result out{
-      .start           = start_,
-      .elapsed         = elapsed_,
-      .records         = records_,
-      .blocks          = blocks_,
-      .instructions    = instructions_,
-      .cuts            = cuts_,
-      .unmatched_exits = unmatched_exits_,
-      .other_gaps      = other_gaps_,
-      .cpu_registers   = sorted_registers(cpu_registers_),
-      .other_registers = sorted_registers(other_registers_),
-      .write_logs      = write_logs_,
+      .start              = start_,
+      .elapsed            = elapsed_,
+      .records            = records_,
+      .blocks             = blocks_,
+      .instructions       = instructions_,
+      .cuts               = cuts_,
+      .unmatched_exits    = unmatched_exits_,
+      .other_gaps         = other_gaps_,
+      .sleeps             = sleeps_,
+      .sleep_reasons      = sleep_reasons_,
+      .partial_sleeps     = partial_sleeps_,
+      .clocks             = clocks_,
+      .cpu_registers      = sorted_registers(cpu_registers_),
+      .dma_registers      = sorted_registers(dma_registers_),
+      .debugger_registers = sorted_registers(debugger_registers_),
+      .write_logs         = write_logs_,
   };
   for(auto const& slot : slots_)
   {

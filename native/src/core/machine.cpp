@@ -106,7 +106,10 @@ machine::machine(part_description description, arch::arch_factory factory, machi
   run_->description_digest = description_digest(description_);
   run_->spin_on            = options_.spin_threshold != 0;
   hooks_->remover          = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
-  clock_driver_.on_rate_change([this] { scheduler_.rekey(clock_); });
+  clock_driver_.on_rate_change([this] {
+    scheduler_.rekey(clock_);
+    run_->emit_clock();
+  });
   clock_driver_.on_charged_ahead([run = run_.get()] { return run->charged_ahead(); });
   arch_ = factory(description_.core);
   if(not arch_)
@@ -452,6 +455,10 @@ void machine::do_trace(trace_record const& record)
   if(record.kind == trace_kind::irq and record.flags == 1)
   {
     ++run_->counters.entries;
+    if(run_->asleep_since)
+    {
+      run_->end_sleep(record.aux);
+    }
   }
   run_->emit(record, run_->callback_pc(), true);
 }

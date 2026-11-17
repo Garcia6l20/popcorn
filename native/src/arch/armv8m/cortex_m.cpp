@@ -493,6 +493,15 @@ auto cortex_m::idle() const -> bool
   return sleeping();
 }
 
+auto cortex_m::idle_reason() const -> std::uint8_t
+{
+  if(not state_.sleep)
+  {
+    return 0;
+  }
+  return static_cast<std::uint8_t>(std::to_underlying(state_.sleep->kind) + 1);
+}
+
 auto cortex_m::pc() const -> address
 {
   auto const at = raw_pc();

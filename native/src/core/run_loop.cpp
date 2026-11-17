@@ -321,6 +321,8 @@ void machine::run_state::reset_notified(reset_kind kind)
     }
   }
   owner.trace_.rebase(icount{0});
+  asleep_since.reset();
+  open_record_insns = 0;
   rebase_sinks(icount{0});
   ++resets;
   reset_count->fetch_add(1, std::memory_order_release);
@@ -514,6 +516,7 @@ void machine::run_state::stop_at_block(uc_struct* engine, engine_end cause) noex
   end_cause           = cause;
   boundary_stop       = true;
   coverage.open_insns = 0;
+  open_record_insns   = 0;
   uc_emu_stop(engine);
 }
 
@@ -565,6 +568,11 @@ void machine::run_state::record_block() noexcept
     };
     record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(block_size, 0xffff));
     emit(record, block_pc, ring_blocks);
+    if(sinks_want_cut)
+    {
+      open_record_pc    = block_pc;
+      open_record_insns = record.aux;
+    }
     return false;
   });
 }
@@ -1249,6 +1257,7 @@ void machine::run_state::stop_at_boundary_exit(icount now) noexcept
   end_cause           = boundary_cause(now);
   boundary_stop       = true;
   coverage.open_insns = 0;
+  open_record_insns   = 0;
 }
 
 auto machine::run_state::engine_run() -> uc_err
@@ -1460,6 +1469,11 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, stop_from(entry));
     }
+    auto const idle_now = arch->idle();
+    if(asleep_since and not idle_now)
+    {
+      end_sleep(0);
+    }
     if(until_thread and owner.thread_ready())
     {
       return finish(request, {.thread_ready = true});
@@ -1478,8 +1492,14 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
         spin.enter();
       }
     }
-    if(arch->idle())
+    if(idle_now)
     {
+      if(not asleep_since)
+      {
+        asleep_since = std::pair{
+            owner.clock_driver_.exact_now(),
+            sinks_want_sleep ? arch->idle_reason() : std::uint8_t{0}};
+      }
       spin.progress();
       if(auto end = idle_jump(request))
       {
@@ -1516,6 +1536,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       auto const pc = arch->pc();
       coverage.leave(*arch, pc, std::ranges::contains(exit_list(request), pc));
+    }
+    if(open_record_insns != 0)
+    {
+      leave_record(arch->pc());
     }
     executed.value += ran;
     retired.value += ran;

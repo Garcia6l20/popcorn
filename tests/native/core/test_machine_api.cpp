@@ -12,6 +12,8 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -78,7 +80,10 @@ TEST_CASE("every machine entry point answers on a toy description")
   CHECK(target.add_intercept(0x0800'0100, {}).active());
   CHECK(target.add_return_hook(0x0800'0100, {}, popcorn::arch::value_kind::i32, {}).active());
   CHECK(target.add_watch(0x2000'0000, 4, core::watch_kind::write, {}).active());
-  CHECK(target.add_trace_sink(core::trace_kinds::all(), {}).active());
+  CHECK_THROWS_AS(
+      std::ignore = target.add_trace_sink(core::trace_kinds::all(), {}), std::invalid_argument);
+  CHECK(target.add_trace_sink(core::trace_kinds::all(), [](std::span<core::trace_record const>) {})
+            .active());
   CHECK(target.peripheral("UART1").description().name == "UART1");
   CHECK(target.model("UART1") == nullptr);
   CHECK(target.add_log_sink({}).active());

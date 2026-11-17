@@ -824,8 +824,10 @@ public:
    * @param kinds Kinds the sink receives.
    * @param sink Receives batches of dt-stamped records, in order.
    * @param ranges Code ranges whose execution is traced, empty for everywhere. A record belongs
-   *        to a range when the pc that caused it does.
+   *        to a range when the pc that caused it does. Sleep, clock and time records account for
+   *        time, not code, and go to the sink whatever its ranges.
    * @return Handle removing the sink.
+   * @throws std::invalid_argument when @p sink is empty.
    * @throws machine_running while a slice runs, handlers included.
    */
   [[nodiscard]] auto

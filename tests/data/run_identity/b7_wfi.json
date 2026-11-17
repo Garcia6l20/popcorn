@@ -34,12 +34,12 @@
  "snapshots": "36dd575d68bdd005",
  "uart": "",
  "trace": [
-  "383b394e795d0d9b",
-  1046
+  "bf48d90b65c406a5",
+  1108
  ],
  "trace_blocks": [
-  "feefc2c4364f731e",
-  1612
+  "1a24f88155143f47",
+  1674
  ],
  "coverage": [
   "9888ced196503578",

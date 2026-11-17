@@ -4,6 +4,7 @@
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/types.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -109,7 +110,7 @@ struct profile_block
   address pc{};
   /** @brief Times a block started at pc. */
   std::uint64_t entries{};
-  /** @brief Instructions of those blocks, each block counted in full, see profile_sink. */
+  /** @brief Instructions those blocks executed. */
   std::uint64_t instructions{};
 
   /** @brief Member-wise equality. */
@@ -159,7 +160,7 @@ struct profile_exception
   std::uint64_t cut{};
   /** @brief Frames open when the result was taken. */
   std::uint64_t open{};
-  /** @brief Gaps that this exception's entry ended. */
+  /** @brief Sleeps that this exception's entry ended. */
   profile_gaps wakes{};
 
   /** @brief Member-wise equality. */
@@ -214,6 +215,20 @@ struct profile_write_log
   friend auto operator==(profile_write_log const&, profile_write_log const&) -> bool = default;
 };
 
+/** @brief A core instruction rate from a clock record. */
+struct profile_clock
+{
+  /** @brief Instruction count from which the rate holds. */
+  icount at{};
+  /** @brief Cuts seen before the record, the time base @p at counts in. */
+  std::uint64_t segment{};
+  /** @brief Instructions per second. */
+  std::uint64_t hz{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_clock const&, profile_clock const&) -> bool = default;
+};
+
 /** @brief Aggregates of a profile_sink. */
 struct profile_result
 {
@@ -226,7 +241,7 @@ struct profile_result
   std::uint64_t records{};
   /** @brief Block records. */
   std::uint64_t blocks{};
-  /** @brief Instructions of the block records, each counted in full, see profile_sink. */
+  /** @brief Instructions the blocks executed. */
   std::uint64_t instructions{};
   /** @brief Cuts, see profile_sink. */
   std::uint64_t cuts{};
@@ -236,13 +251,23 @@ struct profile_result
   std::vector<profile_block> code{};
   /** @brief Exceptions by number. */
   std::map<std::uint16_t, profile_exception> exceptions{};
-  /** @brief Gaps ended by a block or an exit record. */
+  /** @brief Spans of time covered by no block, exception or sleep record, such as a held
+   * core. */
   profile_gaps other_gaps{};
+  /** @brief Sleeps, from sleep records, each from its start or the last cut to its wake. */
+  profile_gaps sleeps{};
+  /** @brief Sleeps by how the core went to sleep: unknown, WFI, WFE, sleep on exit. */
+  std::array<std::uint64_t, 4> sleep_reasons{};
+  /** @brief Sleeps cut short by the end of the profile. */
+  std::uint64_t partial_sleeps{};
+  /** @brief Instruction rates, the first at the start, then one per change and per cut. */
+  std::vector<profile_clock> clocks{};
   /** @brief Registers the CPU accessed, by id, overflowed ids by address after them. */
   std::vector<profile_register> cpu_registers{};
-  /** @brief Registers reached by mmio records with pc 0, debugger and DMA accesses, ordered as
-   * cpu_registers. */
-  std::vector<profile_register> other_registers{};
+  /** @brief Registers DMA accesses reached, ordered as cpu_registers. */
+  std::vector<profile_register> dma_registers{};
+  /** @brief Registers debugger accesses reached, ordered as cpu_registers. */
+  std::vector<profile_register> debugger_registers{};
   /** @brief Write logs, in profile_options::logged_registers order. */
   std::vector<profile_write_log> write_logs{};
   /** @brief Call tree, parents before children, empty without profile_options::code. */
@@ -260,33 +285,30 @@ struct profile_result
 };
 
 /**
- * @brief Trace sink keeping aggregates of block, mmio and irq records, with no file: per block
- *        pc, per exception number, per register, and the gaps between records. Time is the
- *        instruction count the records are stamped with.
+ * @brief Trace sink keeping aggregates of block, mmio, irq, sleep, clock and cut records, with no
+ *        file: per block pc, per exception number, per register, the sleeps, the core rates and
+ *        the gaps between records. Time is the instruction count the records are stamped with.
  *
- * A block record carries the instruction count of the whole block. A block the engine leaves
- * after an MMIO access, a precise exit, counts its unrun tail too, so the instructions can exceed
- * the elapsed instruction time by those tails. elapsed follows the stamps.
+ * A block record carries the instruction count of the whole block. A cut record that follows it,
+ * for a block the engine left before its end, takes the instructions that did not run back.
  *
- * A gap runs from the end of the previous block or exception record, or from the start for the
- * first record, to the start of the next one, so a profile opened during a sleep counts the rest
- * of that sleep.
+ * A sleep record covers its length up to its stamp, from the start or the last cut at the
+ * earliest. A gap runs from the end of the previous block, exception or sleep record, or from the
+ * start for the first record, to the start of the next one. So instructions, sleeps and gaps sum
+ * to elapsed, and a profile opened during a sleep counts the rest of it as a sleep.
  *
- * A time record that moves the count back, or forward by at most 2^32 - 1 instructions, the most
- * a record's dt carries, is a rebase by a reset or a restore and cuts the stream: open frames are
- * closed as cut, gaps count from the new base, the tail-chain and burst state restarts and
- * same-value write tracking starts again. A time record further forward continues the stream, so
- * a restore forward by 2^32 instructions or more reads as time passing. The machine writes the
- * rebase time record before the next record it delivers: a rebase with no record after it is not
- * seen, and two rebases with no record between are one cut.
+ * A time record flagged core::trace_rebase_flag, written for a reset or a restore, cuts the
+ * stream: open frames are closed as cut, gaps count from the new base, the tail-chain and burst
+ * state restarts and same-value write tracking starts again. An unflagged time record continues
+ * the stream.
  *
  * With profile_options::code the sink keeps a shadow call stack. A block ending in a call pushes
  * a frame for the next block unless that block is the call's fall-through. A block ending in a
  * return pops to the frame returning to the next block, unless that block is the fall-through.
  * An exception entry pushes an exception frame holding the pending call or return, its exit pops
  * to it and restores them, so a return through EXC_RETURN pops no call frame. A next block that
- * starts inside the previous one shows that block was left before its last instruction, by a
- * precise exit or a stop, and moves no frame. A cut clears the stack. A call past
+ * starts inside the previous one, or a cut record of the previous block, shows that block was left
+ * before its last instruction and moves no frame. A cut clears the stack. A call past
  * profile_options::max_call_depth pushes nothing and the next return pops nothing, so deep
  * returns match their own calls. A tail call, a branch to a function, pushes nothing, so the
  * callee's instructions count in the caller. After an exception exit into other code than it
@@ -296,17 +318,19 @@ struct profile_result
  * are cached per pc and instruction count: code rewritten after its first run keeps its first
  * shape.
  *
- * An mmio record with pc 0 comes from a debugger or a DMA access and is counted apart from the
- * CPU's. Memory grows with distinct block pcs, exception numbers and registers, the open frames,
- * the entries inside a burst window and the write logs, each log bounded by
- * profile_options::write_log_limit. Neither copyable nor movable: sink() captures it.
+ * mmio records of DMA and debugger accesses, flagged core::trace_dma_flag and
+ * core::trace_debugger_flag, are counted apart from the CPU's. Memory grows with distinct block
+ * pcs, exception numbers and registers, the open frames, the entries inside a burst window and the
+ * write logs, each log bounded by profile_options::write_log_limit. Neither copyable nor movable:
+ * sink() captures it.
  */
 class profile_sink
 {
 public:
   /** @brief Kinds the sink reads. */
-  static constexpr core::trace_kinds kinds{
-      core::trace_kind::block, core::trace_kind::mmio, core::trace_kind::irq};
+  static constexpr core::trace_kinds kinds{core::trace_kind::block, core::trace_kind::mmio,
+                                           core::trace_kind::irq,   core::trace_kind::sleep,
+                                           core::trace_kind::clock, core::trace_kind::cut};
 
   /**
    * @brief Creates an empty sink.
@@ -392,7 +416,9 @@ private:
     std::optional<std::uint32_t> last_written{};
   };
 
-  void time(icount to);
+  void time(icount to, bool rebase);
+  void sleep(core::trace_record const& record);
+  void cut_block(core::trace_record const& record);
   void cut();
   void block(core::trace_record const& record);
   void irq(core::trace_record const& record);
@@ -414,6 +440,7 @@ private:
   icount                                               start_;
   icount                                               now_;
   icount                                               last_end_;
+  icount                                               base_;
   std::optional<icount>                                exit_at_{};
   std::uint64_t                                        elapsed_{};
   std::uint64_t                                        records_{};
@@ -428,7 +455,12 @@ private:
   std::map<std::uint16_t, exception_state>             exceptions_{};
   profile_gaps                                         other_gaps_{};
   std::unordered_map<std::uint64_t, register_state>    cpu_registers_{};
-  std::unordered_map<std::uint64_t, register_state>    other_registers_{};
+  std::unordered_map<std::uint64_t, register_state>    dma_registers_{};
+  std::unordered_map<std::uint64_t, register_state>    debugger_registers_{};
+  profile_gaps                                         sleeps_{};
+  std::array<std::uint64_t, 4>                         sleep_reasons_{};
+  std::uint64_t                                        partial_sleeps_{};
+  std::vector<profile_clock>                           clocks_{};
   std::vector<profile_write_log>                       write_logs_{};
   std::unordered_map<std::uint64_t, block_shape>       shapes_{};
   std::vector<profile_frame>                           nodes_{};
@@ -438,6 +470,7 @@ private:
   std::vector<stack_entry>                             stack_{};
   std::uint32_t                                        call_frames_{};
   std::uint64_t                                        deep_open_{};
+  std::optional<address>                               walked_{};
   std::uint32_t                                        current_{};
   bool                                                 reroot_{true};
   pending                                              pending_{};

@@ -15,7 +15,7 @@ namespace
 static_assert(std::endian::native == std::endian::little);
 
 constexpr std::size_t   buffer_size = std::size_t{1} << 20;
-constexpr std::uint16_t version     = 1;
+constexpr std::uint16_t version     = 2;
 constexpr std::size_t   longest     = std::numeric_limits<std::uint16_t>::max();
 constexpr std::uint32_t last_id     = core::trace_id_overflow - 1;
 

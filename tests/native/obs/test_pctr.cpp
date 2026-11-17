@@ -149,7 +149,7 @@ TEST_CASE("a machine's trace: origin first, register and symbol names before the
   CHECK(
       file.header
       == std::array{
-          std::byte{'P'}, std::byte{'C'}, std::byte{'T'}, std::byte{'R'}, std::byte{1},
+          std::byte{'P'}, std::byte{'C'}, std::byte{'T'}, std::byte{'R'}, std::byte{2},
           std::byte{0}, std::byte{0}, std::byte{0}});
   REQUIRE_FALSE(file.records.empty());
   CHECK(file.records.front().record.kind == trace_kind::time);

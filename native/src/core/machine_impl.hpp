@@ -1326,6 +1326,20 @@ struct machine::run_state
   unmodelled_table unmodelled_hits{};
   /** @brief Whether some sink selects block records. */
   bool sinks_want_block = false;
+  /** @brief Whether some sink selects sleep records. */
+  bool sinks_want_sleep = false;
+  /** @brief Whether some sink selects clock records. */
+  bool sinks_want_clock = false;
+  /** @brief Whether some sink selects cut records. */
+  bool sinks_want_cut = false;
+  /** @brief Instruction count where the core went to sleep and arch::idle_reason() then, while
+   * it sleeps. Set by the slice loop, cleared at the wake, a reset and a restore. */
+  std::optional<std::pair<icount, std::uint8_t>> asleep_since{};
+  /** @brief Start of the block whose record went to the sinks last, while the engine may still
+   * leave it before its end. */
+  address open_record_pc{};
+  /** @brief Instructions of that block, 0 once it is known complete. */
+  std::uint32_t open_record_insns = 0;
   /** @brief Whether block records go to the trace ring. */
   bool ring_blocks = false;
   /** @brief sinks_want_block or ring_blocks, the one flag the block hook tests. */
@@ -1936,6 +1950,28 @@ struct machine::run_state
    *        selecting its kind whose ranges hold @p pc, stamped at the current count.
    */
   void emit(trace_record const& record, address pc, bool ring);
+
+  /** @brief As emit(), stamped at @p now. */
+  void emit_at(trace_record const& record, address pc, bool ring, icount now);
+
+  /** @brief Ends a sleep latched in asleep_since: a sleep record to the sinks selecting it,
+   * @p woke_by the exception whose entry woke the core, 0 for none. */
+  void end_sleep(std::uint16_t woke_by);
+
+  /** @brief A clock record with the core's instruction rate to the sinks selecting it. */
+  void emit_clock();
+
+  /**
+   * @brief Closes the block whose record went out last as execution leaves it at @p pc: a cut
+   *        record with the instructions that did not run when @p pc is inside it.
+   */
+  void leave_record(address pc);
+
+  /**
+   * @brief Stamps @p record at @p now into every sink selecting its kind, only those whose
+   *        ranges hold @p pc when @p ranged.
+   */
+  void deliver(trace_record const& record, address pc, bool ranged, icount now);
 
   /**
    * @brief Records an MMIO access: to the ring for a CPU access, to the sinks for any, with

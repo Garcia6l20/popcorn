@@ -47,6 +47,7 @@ using popcorn::testing::u575;
 using namespace std::chrono_literals;
 
 constexpr std::uint16_t tim2_exception    = 16 + 45;
+constexpr std::uint16_t tim16_exception   = 16 + 70;
 constexpr std::uint16_t svcall_exception  = 11;
 constexpr std::uint16_t pendsv_exception  = 14;
 constexpr std::uint16_t systick_exception = 15;
@@ -81,19 +82,41 @@ inline auto access(
     std::uint32_t dt = 0) -> core::trace_record
 {
   return {
-      .kind    = core::trace_kind::mmio,
-      .flags   = static_cast<std::uint8_t>(4 | (write ? core::trace_write_flag : 0)),
+      .kind  = core::trace_kind::mmio,
+      .flags = static_cast<std::uint8_t>(
+          4 | (write ? core::trace_write_flag : 0) | (pc == 0 ? core::trace_debugger_flag : 0)),
       .aux     = id,
       .dt      = dt,
       .payload = {pc, at, value},
   };
 }
 
-inline auto time_to(std::uint64_t count) -> core::trace_record
+inline auto time_to(std::uint64_t count, bool rebase = true) -> core::trace_record
 {
   return {
       .kind    = core::trace_kind::time,
+      .flags   = rebase ? core::trace_rebase_flag : std::uint8_t{0},
       .payload = {static_cast<std::uint32_t>(count), static_cast<std::uint32_t>(count >> 32), 0},
+  };
+}
+
+inline auto
+    slept(std::uint32_t length, std::uint32_t dt, std::uint16_t woke_by, std::uint8_t flags = 1)
+        -> core::trace_record
+{
+  return {
+      .kind    = core::trace_kind::sleep,
+      .flags   = flags,
+      .aux     = woke_by,
+      .dt      = dt,
+      .payload = {length, 0, 0}
+  };
+}
+
+inline auto cut_at(address pc, std::uint16_t unrun) -> core::trace_record
+{
+  return {
+      .kind = core::trace_kind::cut, .aux = unrun, .payload = {pc, 0, 0}
   };
 }
 
@@ -107,9 +130,7 @@ inline auto fed(std::vector<core::trace_record> const& records, obs::profile_opt
 
 inline auto gaps(obs::profile_result const& result) -> std::uint64_t
 {
-  return std::accumulate(
-      result.exceptions.begin(), result.exceptions.end(), result.other_gaps.total,
-      [](std::uint64_t sum, auto const& entry) { return sum + entry.second.wakes.total; });
+  return result.other_gaps.total + result.sleeps.total;
 }
 
 inline auto tim_machine() -> std::unique_ptr<stm32_fixture>
@@ -120,6 +141,20 @@ inline auto tim_machine() -> std::unique_ptr<stm32_fixture>
   REQUIRE(
       f->run_to_stop({.max_instructions = icount{100'000'000},
                       .until            = sym("tim_ticks", "main"),
+                      .budget_left      = icount{1'000'000}})
+          .reason
+      == stop_reason::address);
+  return f;
+}
+
+inline auto gpdma_machine() -> std::unique_ptr<stm32_fixture>
+{
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 0;
+  auto f = std::make_unique<stm32_fixture>(u575(), "gpdma_uart", std::move(options));
+  REQUIRE(
+      f->run_to_stop({.max_instructions = icount{100'000'000},
+                      .until            = sym("gpdma_uart", "main"),
                       .budget_left      = icount{1'000'000}})
           .reason
       == stop_reason::address);

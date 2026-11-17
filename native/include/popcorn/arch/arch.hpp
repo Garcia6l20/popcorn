@@ -427,6 +427,15 @@ public:
   [[nodiscard]] virtual auto idle() const -> bool = 0;
 
   /**
+   * @brief How the core went to sleep while idle() holds, for trace sleep records: 0 unknown or
+   *        awake, 1 wait for interrupt, 2 wait for event, 3 sleep on exception exit.
+   */
+  [[nodiscard]] virtual auto idle_reason() const -> std::uint8_t
+  {
+    return 0;
+  }
+
+  /**
    * @brief Whether the instruction at @p at is an unconditional branch to itself that no
    *        predication makes conditional, such as Arm `b .`. The run loop then moves the clock
    *        over its iterations up to the next event or bound while nothing is deliverable,

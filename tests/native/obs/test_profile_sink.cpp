@@ -57,29 +57,6 @@ auto cpu_register(
   return {};
 }
 
-auto unrun_tails(
-    obs::profile_result const& result,
-    core::coverage_data const& coverage,
-    core::machine&             target) -> std::uint64_t
-{
-  std::uint64_t unrun = 0;
-  for(auto const& cut : coverage.cuts)
-  {
-    auto const found = std::ranges::find(result.code, cut.start, &obs::profile_block::pc);
-    REQUIRE(found != result.code.end());
-    REQUIRE(found->instructions % found->entries == 0);
-    std::uint64_t ran = 0;
-    for(address at = cut.start; at < cut.at; ++ran)
-    {
-      auto const half = target.mem().read(at, 2);
-      REQUIRE(half.has_value());
-      at += (*half >> 11) >= 0x1d ? 4 : 2;
-    }
-    unrun += cut.hits * (found->instructions / found->entries - ran);
-  }
-  return unrun;
-}
-
 auto file_bytes(std::filesystem::path const& path) -> std::string
 {
   std::ifstream in{path, std::ios::binary};
@@ -107,6 +84,13 @@ TEST_CASE("an empty profile has no counts and starts where the sink was added")
   CHECK(result.cuts == 0);
 }
 
+TEST_CASE("the span from the start to the first record is a gap")
+{
+  auto const result = fed({block(0x100, 4, 10)});
+  CHECK(result.other_gaps == obs::profile_gaps{.count = 1, .total = 6, .longest = 6});
+  CHECK(result.instructions + gaps(result) == result.elapsed);
+}
+
 TEST_CASE("one block counts its entry, its instructions and the time to it")
 {
   auto const result = fed({block(0x100, 7, 7)});
@@ -128,7 +112,8 @@ TEST_CASE("blocks merge by pc and a span with no record is a gap kept by the rec
       block(0x108, 2, 2),
       block(0x100, 4, 4),
       block(0x108, 2, 17),
-      enter(20, 30),
+      slept(20, 30, 20),
+      enter(20, 0),
       block(0x200, 3, 3),
       leave(20, 0),
   });
@@ -139,9 +124,12 @@ TEST_CASE("blocks merge by pc and a span with no record is a gap kept by the rec
           {.pc = 0x108, .entries = 2, .instructions = 4},
           {.pc = 0x200, .entries = 1, .instructions = 3},
   });
-  CHECK(result.other_gaps == obs::profile_gaps{.count = 1, .total = 15, .longest = 15});
+  CHECK(result.other_gaps == obs::profile_gaps{.count = 2, .total = 25, .longest = 15});
+  CHECK(result.sleeps == obs::profile_gaps{.count = 1, .total = 20, .longest = 20});
   CHECK(
-      result.exceptions.at(20).wakes == obs::profile_gaps{.count = 1, .total = 30, .longest = 30});
+      result.exceptions.at(20).wakes == obs::profile_gaps{.count = 1, .total = 20, .longest = 20});
+  CHECK(result.sleep_reasons == std::array<std::uint64_t, 4>{0, 1, 0, 0});
+  CHECK(result.instructions + gaps(result) == result.elapsed);
   CHECK(result.elapsed == 60);
 }
 
@@ -216,10 +204,14 @@ TEST_CASE("an entry that wakes the core after a sleep on exit is a wake, not a t
       enter(30, 0),
       block(0x300, 2, 2),
       leave(30, 0),
-      enter(30, 5),
+      slept(5, 5, 30, 3),
+      enter(30, 0),
   });
   CHECK(result.exceptions.at(30).tail_chained == 0);
   CHECK(result.exceptions.at(30).wakes == obs::profile_gaps{.count = 1, .total = 5, .longest = 5});
+  CHECK(result.sleep_reasons == std::array<std::uint64_t, 4>{0, 0, 0, 1});
+  auto const unrecorded = fed({enter(30, 0), block(0x300, 2, 2), leave(30, 0), enter(30, 5)});
+  CHECK(unrecorded.exceptions.at(30).tail_chained == 0);
 }
 
 TEST_CASE("an exit before a cut does not tail-chain the first entry after it")
@@ -293,14 +285,15 @@ TEST_CASE("a time record back cuts the stream: frames close as cut and totals st
   CHECK(result.other_gaps == obs::profile_gaps{.count = 1, .total = 8, .longest = 8});
 }
 
-TEST_CASE("a time record forward within a dt is a rebase, one past it continues the stream")
+TEST_CASE("a flagged time record cuts at any distance, an unflagged one continues the stream")
 {
-  auto const rebased = fed({enter(30, 0), time_to(5000), leave(30, 1)});
+  constexpr std::uint64_t ahead   = 1000 + (std::uint64_t{1} << 32) + 5;
+  auto const              rebased = fed({enter(30, 0), time_to(ahead), leave(30, 1)});
   CHECK(rebased.cuts == 1);
   CHECK(rebased.exceptions.at(30).cut == 1);
   CHECK(rebased.elapsed == 1);
   constexpr std::uint64_t far  = 1000 + (std::uint64_t{1} << 32) + 5;
-  auto const              kept = fed({enter(30, 0), time_to(far), leave(30, 1)});
+  auto const              kept = fed({enter(30, 0), time_to(far, false), leave(30, 1)});
   CHECK(kept.cuts == 0);
   CHECK(kept.exceptions.at(30).inclusive == far + 1 - 1000);
   CHECK(kept.elapsed == far + 1 - 1000);
@@ -349,7 +342,7 @@ TEST_CASE("mmio counts CPU accesses by register, pc 0 apart, overflowed ids by a
            .last_value    = 4},
   });
   CHECK(
-      result.other_registers
+      result.debugger_registers
       == std::vector<obs::profile_register>{
           {.id = 7, .first_address = 0x4000'0010, .reads = 1, .last_value = 9},
   });
@@ -415,7 +408,8 @@ TEST_CASE("a pc of 0 is a block like any other")
   });
 }
 
-TEST_CASE("the timer example sleeps between 2999 TIM2 interrupts in 3 s")
+TEST_CASE(
+    "the timer example sleeps 3000 times between TIM2 interrupts in 3 s, the last cut at the end")
 {
   auto     f = tim_machine();
   profiled p{*f->target, {.burst_window = icount{4'000}}};
@@ -426,21 +420,32 @@ TEST_CASE("the timer example sleeps between 2999 TIM2 interrupts in 3 s")
   CHECK(tim2.burst == 1);
   CHECK(tim2.max_depth == 1);
   CHECK(tim2.inclusive == tim2.self);
-  CHECK(gaps(result) == 11'932'983);
+  CHECK(gaps(result) == 11'936'889);
+  CHECK(result.sleeps.total == 11'936'889);
+  CHECK(result.sleeps.count == 3001);
+  CHECK(result.sleeps.longest == 3979);
+  CHECK(result.sleep_reasons == std::array<std::uint64_t, 4>{0, 3001, 0, 0});
+  CHECK(result.other_gaps == obs::profile_gaps{});
   CHECK(tim2.wakes.count == 2999);
+  CHECK(tim2.wakes.longest == 3979);
+  CHECK(result.exceptions.at(tim16_exception).wakes.count == 1);
+  CHECK(result.exceptions.at(tim16_exception).wakes.total == 21);
+  CHECK(result.partial_sleeps == 1);
+  REQUIRE(result.clocks.size() == 1);
+  CHECK(result.clocks[0].hz == 4'000'000);
   CHECK(result.instructions == 63'111);
   CHECK(result.cuts == 0);
   CHECK(result.unmatched_exits == 0);
   CHECK(tim2.self == 56'981);
   CHECK(tim2.longest == 19);
   CHECK(tim2.tail_chained == 0);
-  CHECK(result.elapsed == 11'996'094);
+  CHECK(result.elapsed == 12'000'000);
   CHECK(result.instructions + gaps(result) == result.elapsed);
   CHECK(cpu_register(result, *f->target, "TIM2", "SR").same_writes == 2999);
   CHECK(cpu_register(result, *f->target, "TIM16", "SR").same_writes == 1);
 }
 
-TEST_CASE("the FreeRTOS example spans 15829458 instructions in 100 ms, blocks as coverage counts")
+TEST_CASE("the FreeRTOS example runs 15829458 instructions in 100 ms, blocks as coverage counts")
 {
   auto f = spi_machine();
   f->target->enable_coverage({});
@@ -470,11 +475,9 @@ TEST_CASE("the FreeRTOS example spans 15829458 instructions in 100 ms, blocks as
                        })
                      | std::ranges::to<std::vector>();
   CHECK(entries == covered);
-  auto const unrun = unrun_tails(result, coverage, *f->target);
   CHECK(coverage.cuts.size() == 4);
-  CHECK(unrun == 1650);
-  CHECK(result.instructions == result.elapsed + unrun);
-  CHECK(result.instructions == 15'831'108);
+  CHECK(result.instructions == result.elapsed);
+  CHECK(result.instructions == 15'829'458);
   CHECK(result.unmatched_exits == 0);
   auto const& spi1 = result.exceptions.at(spi1_exception);
   CHECK(spi1.entries == 892);
@@ -543,10 +546,11 @@ TEST_CASE("a reset inside a profile cuts once and every total stays non-negative
   CHECK(tim2.inclusive == tim2.self);
   CHECK(tim2.inclusive < result.elapsed);
   CHECK(gaps(result) < result.elapsed);
-  CHECK(result.elapsed == 3'992'336);
-  CHECK(
-      result.instructions + gaps(result)
-      == result.elapsed + unrun_tails(result, f->target->coverage(), *f->target));
+  CHECK(result.elapsed == 3'996'242);
+  CHECK(result.sleeps.count == 1001);
+  CHECK(result.sleeps.longest == 3979);
+  CHECK(result.partial_sleeps == 1);
+  CHECK(result.instructions + gaps(result) == result.elapsed);
 }
 
 TEST_CASE("a restore back and a restore forward each cut the profile")
@@ -614,9 +618,9 @@ TEST_CASE("debugger reads between slices change only the non-CPU table")
   CHECK(got.cpu_registers == expected.cpu_registers);
   CHECK(got.instructions == expected.instructions);
   CHECK(got.other_gaps == expected.other_gaps);
-  REQUIRE(got.other_registers.size() == 1);
-  CHECK(got.other_registers[0].first_address == tim2_cnt);
-  CHECK(got.other_registers[0].reads == 40);
+  REQUIRE(got.debugger_registers.size() == 1);
+  CHECK(got.debugger_registers[0].first_address == tim2_cnt);
+  CHECK(got.debugger_registers[0].reads == 40);
 }
 
 TEST_CASE("a free run with reads landing while it runs profiles as the parked run")
@@ -663,8 +667,8 @@ TEST_CASE("a free run with reads landing while it runs profiles as the parked ru
   CHECK(got.exceptions == expected.exceptions);
   CHECK(got.cpu_registers == expected.cpu_registers);
   CHECK(got.other_gaps == expected.other_gaps);
-  REQUIRE(got.other_registers.size() == 1);
-  CHECK(got.other_registers[0].reads == 199);
+  REQUIRE(got.debugger_registers.size() == 1);
+  CHECK(got.debugger_registers[0].reads == 199);
 }
 
 TEST_CASE("a profile sink leaves a concurrent trace file, the ring and the stop unchanged")

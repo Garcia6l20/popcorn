@@ -14,10 +14,15 @@ from popcorn.trace._records import (
     PAYLOAD_WORDS,
     Block,
     Call,
+    Clock,
+    Cut,
+    Initiator,
     Irq,
     Mem,
     Mmio,
+    Rebase,
     Record,
+    Sleep,
     Stop,
     TraceKind,
 )
@@ -25,12 +30,26 @@ from popcorn.trace._records import (
 type PathLike = str | os.PathLike[str]
 
 _MAGIC: Final = b"PCTR"
-_VERSION: Final = 1
+_VERSION: Final = 2
 _ZSTD_MAGIC: Final = b"\x28\xb5\x2f\xfd"
 _CHUNK: Final = 1 << 20
 _HEADER: Final = struct.Struct("<BBHI")
 _OVERFLOW: Final = 0xFFFF
 _PAYLOADS: Final = {kind: struct.Struct(f"<{words}I") for kind, words in PAYLOAD_WORDS.items()}
+_WRITE: Final = 0x80
+_DEBUGGER: Final = 0x40
+_DMA: Final = 0x20
+_SIZE: Final = 0x1F
+_REBASE: Final = 0x01
+_PARTIAL: Final = 0x80
+
+
+def _initiator(flags: int) -> Initiator:
+    if flags & _DEBUGGER:
+        return "debugger"
+    if flags & _DMA:
+        return "dma"
+    return "cpu"
 
 
 class TraceFileError(ValueError):
@@ -110,7 +129,7 @@ def _header(stream: _Stream) -> None:
         raise stream.fail(0, "the PCTR magic")
     version, flags = struct.unpack_from("<HH", head, 4)
     if version != _VERSION:
-        raise stream.fail(4, "version 1")
+        raise stream.fail(4, f"version {_VERSION}")
     if flags != 0:
         raise stream.fail(6, "flags 0")
 
@@ -118,6 +137,7 @@ def _header(stream: _Stream) -> None:
 def _records(stream: _Stream) -> Iterator[Record]:
     names: dict[int, str] = {}
     time = 0
+    base: int | None = None
 
     def name(aux: int, at: int) -> str | None:
         if aux == _OVERFLOW:
@@ -144,6 +164,10 @@ def _records(stream: _Stream) -> Iterator[Record]:
         match kind:
             case TraceKind.TIME:
                 time = payload[0] | payload[1] << 32
+                if base is None or flags & _REBASE:
+                    base = time
+                if flags & _REBASE:
+                    yield Rebase(time)
                 continue
             case TraceKind.BLOCK:
                 time += dt
@@ -158,9 +182,10 @@ def _records(stream: _Stream) -> Iterator[Record]:
                     payload[0],
                     payload[1],
                     payload[2],
-                    flags & 0x7F,
-                    flags & 0x80 != 0,
+                    flags & _SIZE,
+                    flags & _WRITE != 0,
                     name(aux, at),
+                    _initiator(flags),
                 )
             case TraceKind.IRQ:
                 time += dt
@@ -171,6 +196,17 @@ def _records(stream: _Stream) -> Iterator[Record]:
             case TraceKind.STOP:
                 time += dt
                 yield Stop(time, payload[0], aux)
+            case TraceKind.SLEEP:
+                time += dt
+                floor = time if base is None else min(base, time)
+                length = min(payload[0], time - floor)
+                yield Sleep(time, length, flags & ~_PARTIAL, aux, flags & _PARTIAL != 0)
+            case TraceKind.CLOCK:
+                time += dt
+                yield Clock(time, payload[0] | payload[1] << 32)
+            case TraceKind.CUT:
+                time += dt
+                yield Cut(time, payload[0], aux)
 
 
 def _body(stream: _Stream, stack: ExitStack) -> Iterator[Record]:
