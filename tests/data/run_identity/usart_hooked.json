@@ -40,11 +40,11 @@
  "snapshots": "159af2b2f8dc8556",
  "uart": "379d40ac54c27b01",
  "trace": [
-  "8a597a3ce654c461",
+  "e7922a18b12a6e8f",
   6258
  ],
  "trace_blocks": [
-  "eb4bfd8ede68da78",
+  "b9d68cdd1f2d96e6",
   11934
  ],
  "coverage": [
@@ -53,11 +53,11 @@
   422
  ],
  "trace_mmio": [
-  "94c9b4b861c6f9de",
+  "6b24a9c2d8b34cd9",
   2121
  ],
  "trace_pc": [
-  "0fb5883ca9340b8c",
+  "a35eac952e27bee1",
   7796
  ]
 }

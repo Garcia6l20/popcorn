@@ -308,21 +308,28 @@ struct profile_result
  * An exception entry pushes an exception frame holding the pending call or return, its exit pops
  * to it and restores them, so a return through EXC_RETURN pops no call frame. A next block that
  * starts inside the previous one, or a cut record of the previous block, shows that block was left
- * before its last instruction and moves no frame. A cut clears the stack. A call past
- * profile_options::max_call_depth pushes nothing and the next return pops nothing, so deep
- * returns match their own calls. A tail call, a branch to a function, pushes nothing, so the
- * callee's instructions count in the caller. After an exception exit into other code than it
- * interrupted, an RTOS context switch through PendSV or SVC for example, the blocks of that code
- * count in the node of the interrupted code until one of its returns matches no frame, which is
- * counted and starts an entry node. A longjmp or a return to another frame does the same. Shapes
- * are cached per pc and instruction count: code rewritten after its first run keeps its first
- * shape.
+ * before its last instruction and moves no frame. A call past profile_options::max_call_depth
+ * pushes nothing and the next return pops nothing, so deep returns match their own calls. A tail
+ * call, a branch to a function, pushes nothing, so the callee's instructions count in the caller.
+ *
+ * Each context on the process stack, an RTOS task for example, keeps its own frames. An entry
+ * from thread mode on the process stack saves the frames above the innermost exception frame, the
+ * current node and the pending call or return under the address of its exception frame, the irq
+ * record's payload. An exit to thread mode on the process stack restores what is saved under its
+ * address and forgets it, or starts an empty stack with an entry node when nothing is. A task
+ * deleted while suspended leaves its frames saved, and a later context whose exception frame lands
+ * at the same address restores them. Code on the main stack keeps one stack, and a tail chain or a
+ * nested exception keeps the exception frame rules above. A cut clears the stack and every saved
+ * context. A return that matches no frame, after a longjmp for example, is counted and starts an
+ * entry node. Shapes are cached per pc and instruction count: code rewritten after its first run
+ * keeps its first shape.
  *
  * mmio records of DMA and debugger accesses, flagged core::trace_dma_flag and
  * core::trace_debugger_flag, are counted apart from the CPU's. Memory grows with distinct block
- * pcs, exception numbers and registers, the open frames, the entries inside a burst window and the
- * write logs, each log bounded by profile_options::write_log_limit. Neither copyable nor movable:
- * sink() captures it.
+ * pcs, exception numbers and registers, the open frames, the saved contexts, one per distinct
+ * exception frame address of a suspended or deleted context, the entries inside a burst window
+ * and the write logs, each log bounded by profile_options::write_log_limit. Neither copyable nor
+ * movable: sink() captures it.
  */
 class profile_sink
 {
@@ -397,6 +404,15 @@ private:
     std::uint64_t held_deep{};
   };
 
+  struct saved_context
+  {
+    std::vector<stack_entry> frames{};
+    std::uint32_t            current{};
+    bool                     reroot{};
+    pending                  held{};
+    std::uint64_t            deep{};
+  };
+
   struct frame
   {
     std::uint16_t number{};
@@ -432,8 +448,11 @@ private:
   auto child(std::uint32_t parent, frame_kind kind, std::uint32_t key) -> std::uint32_t;
   void push_call(address next, address function);
   void pop_to(address pc);
-  void enter_frame(std::uint16_t number);
-  void exit_frame();
+  void enter_frame(std::uint16_t number, address context);
+  void exit_frame(address context);
+  auto thread_part() const -> std::size_t;
+  void save_context(address context);
+  void restore_context(address context);
   void clear_stack();
 
   profile_options                                      options_;
@@ -468,6 +487,7 @@ private:
   std::vector<std::pair<std::uint64_t, std::uint32_t>> last_child_;
   bool                                                 tracking_;
   std::vector<stack_entry>                             stack_{};
+  std::unordered_map<address, saved_context>           contexts_{};
   std::uint32_t                                        call_frames_{};
   std::uint64_t                                        deep_open_{};
   std::optional<address>                               walked_{};

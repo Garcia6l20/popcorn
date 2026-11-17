@@ -63,14 +63,18 @@ inline auto block(address pc, std::uint16_t instructions, std::uint32_t dt) -> c
   };
 }
 
-inline auto enter(std::uint16_t number, std::uint32_t dt) -> core::trace_record
+inline auto enter(std::uint16_t number, std::uint32_t dt, address frame = 0) -> core::trace_record
 {
-  return {.kind = core::trace_kind::irq, .flags = 1, .aux = number, .dt = dt};
+  return {
+      .kind = core::trace_kind::irq, .flags = 1, .aux = number, .dt = dt, .payload = {frame, 0, 0}
+  };
 }
 
-inline auto leave(std::uint16_t number, std::uint32_t dt) -> core::trace_record
+inline auto leave(std::uint16_t number, std::uint32_t dt, address frame = 0) -> core::trace_record
 {
-  return {.kind = core::trace_kind::irq, .flags = 0, .aux = number, .dt = dt};
+  return {
+      .kind = core::trace_kind::irq, .flags = 0, .aux = number, .dt = dt, .payload = {frame, 0, 0}
+  };
 }
 
 inline auto access(

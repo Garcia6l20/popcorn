@@ -941,8 +941,12 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   }
   refresh_pending();
   state_.event_register = true;
-  services.trace(
-      {.kind = core::trace_kind::irq, .flags = 1, .aux = static_cast<std::uint16_t>(number)});
+  services.trace({
+      .kind    = core::trace_kind::irq,
+      .flags   = 1,
+      .aux     = static_cast<std::uint16_t>(number),
+      .payload = {use_psp ? lowest : 0u, 0, 0}
+  });
   return trap_result::resume();
 }
 
@@ -1020,17 +1024,22 @@ auto cortex_m::keeps_faultmask_on_return(std::uint32_t number) const noexcept ->
 }
 
 [[gnu::always_inline]] inline void
-    cortex_m::trace_exit(core::machine_services& services, std::uint32_t number)
+    cortex_m::trace_exit(core::machine_services& services, std::uint32_t number, address frame)
 {
-  services.trace(
-      {.kind = core::trace_kind::irq, .flags = 0, .aux = static_cast<std::uint16_t>(number)});
+  services.trace({
+      .kind    = core::trace_kind::irq,
+      .flags   = 0,
+      .aux     = static_cast<std::uint16_t>(number),
+      .payload = {frame, 0, 0}
+  });
 }
 
 [[gnu::always_inline]] inline auto cortex_m::returned(
     std::uint32_t number,
     std::uint32_t stacked_ipsr,
     address       resume_at,
-    std::uint32_t scr) -> trap_result
+    std::uint32_t scr,
+    address       frame) -> trap_result
 {
   auto& services = context_->services;
   repend_level(number);
@@ -1046,7 +1055,7 @@ auto cortex_m::keeps_faultmask_on_return(std::uint32_t number) const noexcept ->
     services.end_slice();
   }
   refresh_pending();
-  trace_exit(services, number);
+  trace_exit(services, number, frame);
   return trap_result::resume();
 }
 
@@ -1145,7 +1154,9 @@ auto cortex_m::exception_return() -> trap_result
   (returning.process_stack ? target.psp : target.msp) = popped;
   target.ge                                           = words[7] & xpsr_ge;
   set_context(engine, target, stack_limits());
-  return returned(number, stacked_ipsr, words[6] & ~1u, state_.scs.scr);
+  return returned(
+      number, stacked_ipsr, words[6] & ~1u, state_.scs.scr,
+      returning.thread and returning.process_stack ? frame_at : 0u);
 }
 
 [[gnu::noinline]] auto cortex_m::banked_return() -> trap_result
@@ -1344,7 +1355,8 @@ auto cortex_m::exception_return() -> trap_result
   }
   return returned(
       number, stacked_ipsr, frame[6] & ~1u,
-      back == security::nonsecure ? state_.scs.nonsecure.scr : state_.scs.scr);
+      back == security::nonsecure ? state_.scs.nonsecure.scr : state_.scs.scr,
+      to_psp ? frame_at : 0u);
 }
 
 auto cortex_m::function_return() -> trap_result
@@ -1466,7 +1478,7 @@ auto cortex_m::return_fault(
     return raised.error();
   }
   repend_level(number);
-  trace_exit(context_->services, number);
+  trace_exit(context_->services, number, 0);
   pend(raised->number, raised->state);
   auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
   return enter_with_frame(
@@ -1532,6 +1544,7 @@ auto cortex_m::enter_with_frame(pending_exception taken, std::uint32_t exc_retur
     }
     write(process ? UC_ARM_REG_PSP_S : UC_ARM_REG_MSP_S, at);
   }
+  auto const frame = not tail_chain and thread and spsel_bit ? read(UC_ARM_REG_PSP) : 0u;
   auto const table = state == security::nonsecure ? state_.scs.nonsecure.vtor : state_.scs.vtor;
   auto const slot  = table + 4 * number;
   std::optional<std::uint32_t> vector;
@@ -1591,8 +1604,12 @@ auto cortex_m::enter_with_frame(pending_exception taken, std::uint32_t exc_retur
   }
   refresh_pending();
   state_.event_register = true;
-  services.trace(
-      {.kind = core::trace_kind::irq, .flags = 1, .aux = static_cast<std::uint16_t>(number)});
+  services.trace({
+      .kind    = core::trace_kind::irq,
+      .flags   = 1,
+      .aux     = static_cast<std::uint16_t>(number),
+      .payload = {frame, 0, 0}
+  });
   return trap_result::resume();
 }
 

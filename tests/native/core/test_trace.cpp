@@ -38,7 +38,7 @@ TEST_CASE("trace record matches the largest fixed pctr record")
   CHECK(std::format("{}", core::trace_kind::mmio) == "mmio");
   CHECK(core::pctr_header_size + 4 * core::pctr_payload_words(core::trace_kind::block) == 12);
   CHECK(core::pctr_payload_words(core::trace_kind::mem) == 3);
-  CHECK(core::pctr_payload_words(core::trace_kind::irq) == 0);
+  CHECK(core::pctr_payload_words(core::trace_kind::irq) == 1);
   CHECK(core::pctr_payload_words(core::trace_kind::time) == 2);
 }
 

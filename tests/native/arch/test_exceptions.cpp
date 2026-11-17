@@ -14,6 +14,7 @@
 
 #include <reflex/serde/bson.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -83,6 +84,16 @@ auto run_to(arch_fixture const& f, std::string_view entry) -> popcorn::stop
 void pend(arch_fixture const& f, std::uint32_t bits)
 {
   REQUIRE(f.target->mem().write(ispr0, 4, bits));
+}
+
+auto last_irq(arch_fixture const& f, std::uint8_t flags) -> core::trace_record
+{
+  auto const records = f.target->trace().records();
+  auto const found   = std::ranges::find_if(records | std::views::reverse, [flags](auto const& r) {
+    return r.kind == core::trace_kind::irq and r.flags == flags;
+  });
+  REQUIRE(found != (records | std::views::reverse).end());
+  return *found;
 }
 
 struct exceptions_result
@@ -315,6 +326,9 @@ TEST_CASE("entry stacks the frame and return restores every register")
     auto const inside = saved_special(f);
     auto const frame  = probe.process ? inside.psp : inside.msp;
     CHECK(frame == used - probe.frame);
+    auto const entered = last_irq(f, 1);
+    CHECK(entered.aux == 16 + 11);
+    CHECK(entered.payload[0] == (probe.process ? frame : 0u));
     if(probe.process)
     {
       CHECK(inside.msp == special.msp);
@@ -340,6 +354,9 @@ TEST_CASE("entry stacks the frame and return restores every register")
       CHECK(words[24] == before[55]);
     }
     REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    auto const left = last_irq(f, 0);
+    CHECK(left.aux == 16 + 11);
+    CHECK(left.payload[0] == (probe.process ? frame : 0u));
     auto after = register_values(f);
     CHECK(after[14] == before[14] + 2);
     after[14] = before[14];

@@ -194,6 +194,7 @@ void profile_sink::cut()
   last_end_ = now_;
   exit_at_.reset();
   clear_stack();
+  contexts_.clear();
   for(auto& state : exceptions_ | std::views::values)
   {
     state.window.clear();
@@ -410,8 +411,12 @@ void profile_sink::pop_to(address pc)
   deep_open_ = 0;
 }
 
-void profile_sink::enter_frame(std::uint16_t number)
+void profile_sink::enter_frame(std::uint16_t number, address context)
 {
+  if(context != 0)
+  {
+    save_context(context);
+  }
   stack_.push_back(
       {.node        = current_,
        .exception   = true,
@@ -424,23 +429,74 @@ void profile_sink::enter_frame(std::uint16_t number)
   reroot_             = true;
 }
 
-void profile_sink::exit_frame()
+void profile_sink::exit_frame(address context)
 {
   auto const marker =
       std::ranges::find(stack_ | std::views::reverse, true, &stack_entry::exception);
   if(marker == stack_.rend())
   {
     clear_stack();
+  }
+  else
+  {
+    auto const at   = static_cast<std::size_t>(std::ranges::distance(marker, stack_.rend())) - 1;
+    auto const held = stack_[at];
+    call_frames_ -= static_cast<std::uint32_t>(stack_.size() - at - 1);
+    stack_.resize(at);
+    current_   = held.node;
+    pending_   = held.held;
+    reroot_    = held.held_reroot;
+    deep_open_ = held.held_deep;
+  }
+  if(context != 0)
+  {
+    restore_context(context);
+  }
+}
+
+auto profile_sink::thread_part() const -> std::size_t
+{
+  auto const marker =
+      std::ranges::find(stack_ | std::views::reverse, true, &stack_entry::exception);
+  return static_cast<std::size_t>(std::ranges::distance(marker, stack_.rend()));
+}
+
+void profile_sink::save_context(address context)
+{
+  auto const keep  = thread_part();
+  auto&      saved = contexts_[context];
+  saved.frames.assign(stack_.begin() + static_cast<std::ptrdiff_t>(keep), stack_.end());
+  saved.current = current_;
+  saved.reroot  = reroot_;
+  saved.held    = std::exchange(pending_, {});
+  saved.deep    = std::exchange(deep_open_, 0);
+  call_frames_ -= static_cast<std::uint32_t>(stack_.size() - keep);
+  stack_.resize(keep);
+  reroot_ = true;
+}
+
+void profile_sink::restore_context(address context)
+{
+  auto const keep = thread_part();
+  call_frames_ -= static_cast<std::uint32_t>(stack_.size() - keep);
+  stack_.resize(keep);
+  auto const found = contexts_.find(context);
+  if(found == contexts_.end())
+  {
+    current_   = keep == 0 ? 0 : stack_.back().inner;
+    reroot_    = true;
+    pending_   = {};
+    deep_open_ = 0;
     return;
   }
-  auto const at   = static_cast<std::size_t>(std::ranges::distance(marker, stack_.rend())) - 1;
-  auto const held = stack_[at];
-  call_frames_ -= static_cast<std::uint32_t>(stack_.size() - at - 1);
-  stack_.resize(at);
-  current_   = held.node;
-  pending_   = held.held;
-  reroot_    = held.held_reroot;
-  deep_open_ = held.held_deep;
+  auto& saved = found->second;
+  call_frames_ += static_cast<std::uint32_t>(saved.frames.size());
+  stack_.append_range(saved.frames);
+  current_   = saved.current;
+  reroot_    = saved.reroot;
+  pending_   = saved.held;
+  deep_open_ = saved.deep;
+  contexts_.erase(found);
 }
 
 void profile_sink::clear_stack()
@@ -460,11 +516,11 @@ void profile_sink::irq(core::trace_record const& record)
   {
     if(record.flags == 1)
     {
-      enter_frame(number);
+      enter_frame(number, record.payload[0]);
     }
     else
     {
-      exit_frame();
+      exit_frame(record.payload[0]);
     }
   }
   if(record.flags == 1)

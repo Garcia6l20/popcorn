@@ -61,6 +61,7 @@ constexpr address vtor   = 0xE000'ED08;
 constexpr address aircr  = 0xE000'ED0C;
 constexpr address iser0  = 0xE000'E100;
 constexpr address ispr0  = 0xE000'E200;
+constexpr address icpr0  = 0xE000'E280;
 constexpr address icsr   = 0xE000'ED04;
 constexpr address scr    = 0xE000'ED10;
 constexpr address sfsr   = 0xE000'EDE4;
@@ -205,6 +206,21 @@ auto resume(arch_fixture const& f, std::uint64_t bound) -> popcorn::stop
 auto secure_now(arch_fixture const& f) -> bool
 {
   return engine_read(f, UC_ARM_REG_SECURE) != 0;
+}
+
+auto irq_frames_since(arch_fixture const& f, std::size_t before)
+    -> std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>>
+{
+  std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>> out;
+  auto const records = f.target->trace().records();
+  for(auto const& record : std::span{records}.subspan(before))
+  {
+    if(record.kind == core::trace_kind::irq)
+    {
+      out.emplace_back(record.flags, record.aux, record.payload[0]);
+    }
+  }
+  return out;
 }
 
 void set_registers(arch_fixture const& f)
@@ -943,6 +959,7 @@ TEST_CASE(
     constexpr address psp = ns_stack - 0x100;
     engine_write(f, UC_ARM_REG_PSP_NS, psp);
     engine_write(f, UC_ARM_REG_CONTROL_NS, control_spsel);
+    auto const before = f.target->trace().records().size();
     REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
     REQUIRE(f.reg("lr") == 0xFFFF'FFBCu);
     f.set("lr", 0xFFFF'FFBDu);
@@ -960,6 +977,16 @@ TEST_CASE(
     CHECK(ipsr(f) == 0);
     CHECK(f.reg("pc") == ns_code + 2);
     CHECK(engine_read(f, UC_ARM_REG_PSP_NS) == psp);
+    auto const fault =
+        static_cast<std::uint16_t>(enabled ? armv8m::exc_securefault : armv8m::exc_hardfault);
+    CHECK(
+        irq_frames_since(f, before)
+        == std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>>{
+            {1, 16,    psp - 0x20},
+            {0, 16,    0         },
+            {1, fault, 0         },
+            {0, fault, psp - 0x20}
+    });
   }
 }
 
@@ -1004,6 +1031,7 @@ TEST_CASE("a Non-secure thread on PSP_NS preempted by a Secure IRQ, B3.19 and VT
   engine_write(f, UC_ARM_REG_CONTROL_NS, control_spsel);
   set_registers(f);
   poke(f, ispr0, 1u << 1);
+  auto const before = f.target->trace().records().size();
   REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
   CHECK(secure_now(f));
   CHECK(ipsr(f) == 17);
@@ -1019,6 +1047,49 @@ TEST_CASE("a Non-secure thread on PSP_NS preempted by a Secure IRQ, B3.19 and VT
   CHECK(f.reg("pc") == ns_code + 4);
   CHECK(engine_read(f, UC_ARM_REG_PSP_NS) == psp);
   CHECK((engine_read(f, UC_ARM_REG_CONTROL_NS) & control_spsel) != 0);
+  CHECK(
+      irq_frames_since(f, before)
+      == std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>>{
+          {1, 17, psp - 0x20},
+          {0, 17, psp - 0x20}
+  });
+}
+
+TEST_CASE(
+    "a Secure thread on PSP_S preempted by a Non-secure IRQ traces the frame below the callee "
+    "context at entry and exit, PushCalleeStack lines 8-17")
+{
+  auto f = booted();
+  open_nonsecure_region(f);
+  tables(f, 16);
+  put(f, ns_handler, {bkpt, bx_lr});
+  put(f, secure_code, {nop, bkpt});
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  constexpr address psp = secure_code + 0x1100;
+  engine_write(f, UC_ARM_REG_PSP_S, psp);
+  engine_write(f, UC_ARM_REG_CONTROL_S, control_spsel);
+  set_registers(f);
+  poke(f, ispr0, 1);
+  auto const before = f.target->trace().records().size();
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  CHECK_FALSE(secure_now(f));
+  CHECK(ipsr(f) == 16);
+  CHECK(f.reg("lr") == 0xFFFF'FFF8u);
+  CHECK(engine_read(f, UC_ARM_REG_PSP_S) == psp - 0x48);
+  CHECK(f.word(psp - 0x48) == 0xFEFA'125Bu);
+  CHECK(f.word(psp - 0x20 + 0x18) == secure_code);
+  REQUIRE(resume(f, 4).reason == stop_reason::user);
+  CHECK(secure_now(f));
+  CHECK(ipsr(f) == 0);
+  CHECK(f.reg("pc") == secure_code + 4);
+  CHECK(engine_read(f, UC_ARM_REG_PSP_S) == psp);
+  CHECK(
+      irq_frames_since(f, before)
+      == std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>>{
+          {1, 16, psp - 0x48},
+          {0, 16, psp - 0x48}
+  });
 }
 
 TEST_CASE(
@@ -1124,47 +1195,82 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MSPLIM_NS above the Non-secure frame takes the Non-secure UsageFault STKOF with MSP_NS at "
-    "the limit, or HardFault_S FORCED without USGFAULTENA_NS, _SP() lines 23-39 and "
-    "DerivedLateArrival lines 32-37")
+    "MSPLIM_NS or PSPLIM_NS above the Non-secure frame takes the Non-secure UsageFault STKOF with "
+    "the SP at the limit, or HardFault_S FORCED without USGFAULTENA_NS, and traces the limit as "
+    "the frame of a process-stack thread, _SP() lines 23-39 and DerivedLateArrival lines 32-37")
 {
-  constexpr address limit = ns_stack - 0x10;
-  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  for(auto const process : {false, true})
   {
-    for(auto const enabled : {true, false})
+    for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
     {
-      CAPTURE(policy == fault_policy::stop);
-      CAPTURE(enabled);
-      auto f = booted(policy);
-      open_nonsecure_region(f);
-      tables(f, 16);
-      tables(f, armv8m::exc_usagefault);
-      tables(f, armv8m::exc_hardfault);
-      if(enabled)
+      for(auto const enabled : {true, false})
       {
-        poke(f, shcsr + scs_ns, usagefault_ena);
+        CAPTURE(process);
+        CAPTURE(policy == fault_policy::stop);
+        CAPTURE(enabled);
+        auto const top   = process ? ns_stack - 0x100 : ns_stack;
+        auto const limit = top - 0x10;
+        auto const sp_id = process ? UC_ARM_REG_PSP_NS : UC_ARM_REG_MSP_NS;
+        auto       f     = booted(policy);
+        open_nonsecure_region(f);
+        tables(f, 16);
+        tables(f, armv8m::exc_usagefault);
+        tables(f, armv8m::exc_hardfault);
+        if(enabled)
+        {
+          poke(f, shcsr + scs_ns, usagefault_ena);
+        }
+        put(f, secure_handler, {bkpt, bx_lr});
+        put(f, ns_handler, {bkpt, bx_lr});
+        put(f, ns_code, {bkpt});
+        poke(f, itns0, 1);
+        poke(f, iser0, 1);
+        poke(f, ispr0, 1);
+        if(process)
+        {
+          engine_write(f, UC_ARM_REG_PSP_NS, top);
+          engine_write(f, UC_ARM_REG_PSP_S, secure_code + 0x1100);
+          engine_write(f, UC_ARM_REG_CONTROL_NS, control_spsel);
+        }
+        engine_write(f, process ? UC_ARM_REG_PSPLIM_NS : UC_ARM_REG_MSPLIM_NS, limit);
+        auto const before  = f.target->trace().records().size();
+        auto const stopped = run_nonsecure(f, ns_code, 2);
+        CHECK((f.word(cfsr + scs_ns) & ufsr_stkof) != 0);
+        CHECK((f.word(cfsr) & ufsr_stkof) == 0);
+        if(policy == fault_policy::stop)
+        {
+          REQUIRE(stopped.reason == stop_reason::fault);
+          CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+          CHECK(engine_read(f, sp_id) == top);
+          continue;
+        }
+        REQUIRE(stopped.reason == stop_reason::user);
+        CHECK(engine_read(f, sp_id) == limit);
+        CHECK(secure_now(f) != enabled);
+        auto const fault = enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault;
+        CHECK(ipsr(f) == fault);
+        CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+        CHECK(f.module->is_pending(16));
+        if(not process)
+        {
+          continue;
+        }
+        for(std::uint32_t n = 0; n < 8; ++n)
+        {
+          poke(f, limit + 4 * n, n == 6 ? ns_code : n == 7 ? 0x0100'0000u : 0u);
+        }
+        poke(f, icpr0, 1);
+        REQUIRE(resume(f, 2).reason == stop_reason::user);
+        CHECK_FALSE(secure_now(f));
+        CHECK(ipsr(f) == 0);
+        CHECK(engine_read(f, UC_ARM_REG_PSP_NS) == limit + 0x20);
+        CHECK(
+            irq_frames_since(f, before)
+            == std::vector<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>>{
+                {1, static_cast<std::uint16_t>(fault), limit},
+                {0, static_cast<std::uint16_t>(fault), limit}
+        });
       }
-      put(f, ns_code, {bkpt});
-      poke(f, itns0, 1);
-      poke(f, iser0, 1);
-      poke(f, ispr0, 1);
-      engine_write(f, UC_ARM_REG_MSPLIM_NS, limit);
-      auto const stopped = run_nonsecure(f, ns_code, 2);
-      CHECK((f.word(cfsr + scs_ns) & ufsr_stkof) != 0);
-      CHECK((f.word(cfsr) & ufsr_stkof) == 0);
-      if(policy == fault_policy::stop)
-      {
-        REQUIRE(stopped.reason == stop_reason::fault);
-        CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-        CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
-        continue;
-      }
-      REQUIRE(stopped.reason == stop_reason::user);
-      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == limit);
-      CHECK(secure_now(f) != enabled);
-      CHECK(ipsr(f) == (enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault));
-      CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
-      CHECK(f.module->is_pending(16));
     }
   }
 }

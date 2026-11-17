@@ -40,7 +40,12 @@ struct pctr_payload
  * - mmio: as mem, aux the flat register id of `flat_register_id()`. flags also carry who made
  *   the access: trace_dma_flag for a DMA access, trace_debugger_flag for a debugger access,
  *   neither for the CPU.
- * - irq: no payload, flags 1 on entry and 0 on exit, aux the exception number.
+ * - irq: flags 1 on entry and 0 on exit, aux the exception number. payload[0] the address of
+ *   the exception frame on the process stack for an entry from thread mode on the process stack,
+ *   the stack pointer after stacking, and for an exit to thread mode on the process stack, the
+ *   stack pointer before unstacking. Both are the same word for one suspended context. 0 for an
+ *   entry or exit that does not cross thread mode on the process stack, and for an exit and the
+ *   entry chained to it when a fault on the return keeps the frame stacked.
  * - call: payload pc and r0, aux the index of the called symbol in the machine's symbol table,
  *   the symbols of its loaded images concatenated in load order.
  * - str: file only, aux bytes of text follow the header, padded to 4, dt is the string id. Its
@@ -67,7 +72,7 @@ enum class[[= reflex::derive{reflex::Format}]] trace_kind : std::uint8_t
   block[[= pctr_payload{1}]] = 0,
   mem[[= pctr_payload{3}]]   = 1,
   mmio[[= pctr_payload{3}]]  = 2,
-  irq[[= pctr_payload{0}]]   = 3,
+  irq[[= pctr_payload{1}]]   = 3,
   call[[= pctr_payload{2}]]  = 4,
   str[[= pctr_payload{0}]]   = 5,
   time[[= pctr_payload{2}]]  = 6,

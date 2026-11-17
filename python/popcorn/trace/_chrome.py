@@ -67,14 +67,17 @@ def _instant(record: Record, name: str, args: dict[str, object], scope: str = "t
     }
 
 
-def _irq_event(number: int, enter: bool, time: int) -> Event:
-    return {
+def _irq_event(number: int, enter: bool, time: int, frame: int = 0) -> Event:
+    event: Event = {
         "name": f"IRQ {number}",
         "ph": "B" if enter else "E",
         "ts": time,
         "pid": _PID,
         "tid": _THREADS[TraceKind.IRQ][0],
     }
+    if frame:
+        event["args"] = {"frame": frame}
+    return event
 
 
 def _events(record: Record, open_irqs: dict[int, int]) -> list[Event]:
@@ -116,7 +119,7 @@ def _events(record: Record, open_irqs: dict[int, int]) -> list[Event]:
                 open_irqs[record.number] -= 1
             else:
                 open_irqs[record.number] = open_irqs.get(record.number, 0) + 1
-            return [_irq_event(record.number, record.enter, record.time)]
+            return [_irq_event(record.number, record.enter, record.time, record.frame)]
         case Call():
             name = record.symbol or f"0x{record.pc:08x}"
             return [_instant(record, name, {"pc": record.pc, "r0": record.r0})]
@@ -172,10 +175,11 @@ def to_chrome(src: PathLike, dst: PathLike, *, kinds: Collection[TraceKind] | No
     """Converts a .pctr file to Chrome trace JSON, one event per record, streamed.
 
     `ts` is the instruction count: one microsecond in the viewer is one instruction. Blocks and
-    sleeps are complete events, IRQs begin and end events on their own thread, the rest instant
-    events. A rebase, a reset or a restore, is always written as a global instant. An
-    IRQ exit with no open entry, from a trace started inside a handler, is dropped, and an IRQ
-    still open at the end of the file or at a rebase is closed at the time of the record before.
+    sleeps are complete events, IRQs begin and end events on their own thread, with the process
+    stack frame address as the `frame` arg when it is not 0, the rest instant events. A rebase, a
+    reset or a restore, is always written as a global instant. An IRQ exit with no open entry,
+    from a trace started inside a handler, is dropped, and an IRQ still open at the end of the
+    file or at a rebase is closed at the time of the record before.
     The JSON is written to a temporary file renamed over dst once complete.
 
     Args:

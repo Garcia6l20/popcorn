@@ -189,7 +189,7 @@ def _records(stream: _Stream) -> Iterator[Record]:
                 )
             case TraceKind.IRQ:
                 time += dt
-                yield Irq(time, aux, flags & 1 != 0)
+                yield Irq(time, aux, flags & 1 != 0, payload[0])
             case TraceKind.CALL:
                 time += dt
                 yield Call(time, payload[0], payload[1], name(aux, at))

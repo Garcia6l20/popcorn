@@ -78,8 +78,9 @@ def synthetic(count: int, seed: int = 1) -> tuple[list[Row], list[Record]]:
         elif pick < 0.995:
             enter = open_irqs == 0 or chosen.random() < 0.5
             open_irqs += 1 if enter else -1
-            rows.append((TraceKind.IRQ, 1 if enter else 0, 16, dt, 0, 0, 0))
-            expected.append(Irq(time, 16, enter))
+            frame = chosen.choice((0, 0x2000_1000 + 8 * chosen.randrange(1 << 10)))
+            rows.append((TraceKind.IRQ, 1 if enter else 0, 16, dt, frame, 0, 0))
+            expected.append(Irq(time, 16, enter, frame))
         else:
             symbol = chosen.randrange(len(SYMBOLS))
             r0 = chosen.randrange(1 << 32)
@@ -118,7 +119,7 @@ def test_sleep_clock_cut_rebase_and_initiators_round_trip(tmp_path: Path) -> Non
         (TraceKind.MMIO, 4 | 0x80 | 0x40, 2, 1, 0, 0x4000_0008, 9),
         (TraceKind.MMIO, 2, 3, 1, 0x0800_0102, 0x4000_000C, 5),
         (TraceKind.SLEEP, 1, 61, 100, 100, 0, 0),
-        (TraceKind.IRQ, 1, 61, 0, 0, 0, 0),
+        (TraceKind.IRQ, 1, 61, 0, 0x2000_0F60, 0, 0),
         (TraceKind.TIME, 1, 0, 0, 10, 0, 0),
         (TraceKind.CLOCK, 0, 0, 0, 4_000_000, 1, 0),
         (TraceKind.SLEEP, 2 | 0x80, 0, 5, 5, 0, 0),
@@ -135,7 +136,7 @@ def test_sleep_clock_cut_rebase_and_initiators_round_trip(tmp_path: Path) -> Non
         Mmio(ORIGIN + 7, 0, 0x4000_0008, 9, 4, True, REGISTERS[2], "debugger"),
         Mmio(ORIGIN + 8, 0x0800_0102, 0x4000_000C, 5, 2, False, REGISTERS[3], "cpu"),
         Sleep(ORIGIN + 108, 100, 1, 61, False),
-        Irq(ORIGIN + 108, 61, True),
+        Irq(ORIGIN + 108, 61, True, 0x2000_0F60),
         Rebase(10),
         Clock(10, 4_000_000 | 1 << 32),
         Sleep(15, 5, 2, 0, True),
@@ -149,6 +150,10 @@ def test_sleep_clock_cut_rebase_and_initiators_round_trip(tmp_path: Path) -> Non
         ("WFI", ORIGIN + 8, 100),
         ("WFE", 10, 5),
         ("WFI", 10, 8),
+    ]
+    opened = [event for event in events if event["ph"] == "B"]
+    assert [(event["name"], event.get("args")) for event in opened] == [
+        ("IRQ 61", {"frame": 0x2000_0F60})
     ]
     closed = [event for event in events if event["ph"] == "E"]
     assert [(event["name"], event["ts"]) for event in closed] == [("IRQ 61", ORIGIN + 108)]

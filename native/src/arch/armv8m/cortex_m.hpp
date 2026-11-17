@@ -256,12 +256,13 @@ private:
   auto               exception_return() -> trap_result;
   auto               banked_return() -> trap_result;
   void               repend_level(std::uint32_t number) noexcept;
-  void               trace_exit(core::machine_services& services, std::uint32_t number);
-  auto               returned(
+  void trace_exit(core::machine_services& services, std::uint32_t number, address frame);
+  auto returned(
       std::uint32_t number,
       std::uint32_t stacked_ipsr,
       address       resume_at,
-      std::uint32_t scr) -> trap_result;
+      std::uint32_t scr,
+      address       frame) -> trap_result;
   auto               function_return() -> trap_result;
   auto               secure_entry(address at) -> trap_result;
   void               clear_caller_registers(uc_struct* engine, bool callee) const;

@@ -35,7 +35,7 @@ PAYLOAD_WORDS: Final[Mapping[TraceKind, int]] = MappingProxyType(
         TraceKind.BLOCK: 1,
         TraceKind.MEM: 3,
         TraceKind.MMIO: 3,
-        TraceKind.IRQ: 0,
+        TraceKind.IRQ: 1,
         TraceKind.CALL: 2,
         TraceKind.STR: 0,
         TraceKind.TIME: 2,
@@ -96,11 +96,17 @@ class Mmio:
 
 @dataclass(frozen=True, slots=True)
 class Irq:
-    """An exception entry or exit."""
+    """An exception entry or exit.
+
+    ``frame`` is the address of the exception frame on the process stack when the entry comes
+    from, or the exit returns to, thread mode on the process stack, the same word for one
+    suspended context. It is 0 for every other entry and exit.
+    """
 
     time: int
     number: int
     enter: bool
+    frame: int = 0
 
 
 @dataclass(frozen=True, slots=True)

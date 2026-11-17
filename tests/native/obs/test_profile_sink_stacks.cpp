@@ -509,8 +509,7 @@ TEST_CASE("no code reader, no call tree")
   CHECK(result.calls == 0);
 }
 
-TEST_CASE(
-    "the FreeRTOS example builds a call tree, a switched-in task counted in the interrupted node")
+TEST_CASE("the FreeRTOS example builds a call tree with one stack per task")
 {
   auto       f      = spi_machine();
   auto       reader = obs::machine_code_reader(*f->target);
@@ -521,15 +520,15 @@ TEST_CASE(
   profiled p{*f->target, {.code = obs::machine_code_reader(*f->target)}};
   f->run_for(100 * ms_ps);
   auto const result = p.take();
-  CHECK(result.unmatched_returns == 147);
+  CHECK(result.unmatched_returns == 0);
   CHECK(result.calls == 1'427'929);
   CHECK(result.deep_calls == 0);
   CHECK(
       function_totals(result, idle)
-      == std::pair<std::uint64_t, std::uint64_t>{3'606'334, 9'931'817});
+      == std::pair<std::uint64_t, std::uint64_t>{5'688'015, 15'665'295});
   CHECK(
       function_totals(result, check)
-      == std::pair<std::uint64_t, std::uint64_t>{9'954'065, 9'968'483});
+      == std::pair<std::uint64_t, std::uint64_t>{9'954'046, 9'968'787});
   CHECK(result.frames[0].inclusive == result.instructions);
 }
 
@@ -563,4 +562,175 @@ TEST_CASE("the call tree does not depend on where slices end between blocks")
   CHECK(got.calls == expected.calls);
   CHECK(got.unmatched_returns == expected.unmatched_returns);
   CHECK(expected.calls > 0);
+}
+
+namespace
+{
+constexpr std::uint16_t pendsv  = 14;
+constexpr std::uint16_t systick = 15;
+constexpr address       task_a  = 0x2000'1000;
+constexpr address       task_b  = 0x2000'2000;
+
+auto task_code() -> shapes
+{
+  return {
+      {0x100, call_at(0x104, 0x100)},
+      {0x104, plain(0x100)},
+      {0x200, plain(0x200)},
+      {0x204, ret_at(0x206, 0x200)},
+      {0x700, plain(0x700)},
+      {0x900, plain(0x900)},
+  };
+}
+}
+
+TEST_CASE("two tasks suspended at one call site each return to their own caller")
+{
+  auto const result = stacked(
+      {block(0x100, 1, 1), block(0x200, 1, 1), enter(pendsv, 0, task_b), block(0x900, 1, 1),
+       leave(pendsv, 0, task_a), block(0x100, 1, 1), block(0x200, 1, 1), enter(pendsv, 0, task_a),
+       block(0x900, 1, 1), leave(pendsv, 0, task_b), block(0x204, 1, 1), block(0x104, 2, 2),
+       enter(pendsv, 0, task_b + 0x40), block(0x900, 1, 1), leave(pendsv, 0, task_a),
+       block(0x204, 1, 1), block(0x104, 3, 3)},
+      task_code());
+  CHECK(result.calls == 2);
+  CHECK(result.unmatched_returns == 0);
+  auto const caller = node(
+      result, {
+                  {frame_kind::entry, 0x100}
+  });
+  auto const callee = node(
+      result, {
+                  {frame_kind::entry, 0x100},
+                  {frame_kind::call,  0x200}
+  });
+  REQUIRE(caller);
+  REQUIRE(callee);
+  CHECK(caller->self == 7);
+  CHECK(callee->self == 4);
+}
+
+TEST_CASE("a switch between a call and its callee keeps the call for the task that made it")
+{
+  auto const result = stacked(
+      {block(0x700, 1, 1), enter(pendsv, 0, task_b), leave(pendsv, 0, task_a), block(0x100, 1, 1),
+       enter(pendsv, 0, task_a), block(0x900, 1, 1), leave(pendsv, 0, task_b), block(0x700, 1, 1),
+       enter(pendsv, 0, task_b), leave(pendsv, 0, task_a), block(0x200, 2, 2), block(0x204, 1, 1),
+       block(0x104, 1, 1)},
+      task_code());
+  CHECK(result.calls == 1);
+  CHECK(result.unmatched_returns == 0);
+  auto const callee = node(
+      result, {
+                  {frame_kind::entry, 0x100},
+                  {frame_kind::call,  0x200}
+  });
+  REQUIRE(callee);
+  CHECK(callee->self == 3);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x700}
+  })
+          ->self
+      == 2);
+}
+
+TEST_CASE(
+    "a return fault's exit and chained entry with no frame keep the task saved at the SysTick "
+    "entry, switched at the final exit")
+{
+  auto const result = stacked(
+      {block(0x100, 1, 1), block(0x200, 1, 1), enter(systick, 0, task_a), block(0x900, 1, 1),
+       leave(systick, 0), enter(pendsv, 0), block(0x900, 1, 1), leave(pendsv, 0, task_b),
+       block(0x700, 1, 1), enter(pendsv, 0, task_b), leave(pendsv, 0, task_a), block(0x204, 1, 1),
+       block(0x104, 1, 1)},
+      task_code());
+  CHECK(result.unmatched_returns == 0);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x700}
+  })
+          ->self
+      == 1);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x100},
+              {frame_kind::call,  0x200}
+  })
+          ->self
+      == 2);
+}
+
+TEST_CASE("a SysTick tail-chained into PendSV restores and saves the task at one count")
+{
+  auto const result = stacked(
+      {block(0x100, 1, 1), block(0x200, 1, 1), enter(systick, 0, task_a), block(0x900, 1, 1),
+       leave(systick, 0, task_a), enter(pendsv, 0, task_a), block(0x900, 1, 1),
+       leave(pendsv, 0, task_b), block(0x700, 1, 1), enter(pendsv, 0, task_b),
+       leave(pendsv, 0, task_a), block(0x204, 1, 1), block(0x104, 1, 1)},
+      task_code());
+  CHECK(result.calls == 1);
+  CHECK(result.unmatched_returns == 0);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x700}
+  })
+          ->self
+      == 1);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x100},
+              {frame_kind::call,  0x200}
+  })
+          ->self
+      == 2);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x100}
+  })
+          ->self
+      == 2);
+}
+
+TEST_CASE("a context never seen starts an empty stack, even at the address of one restored")
+{
+  auto const result = stacked(
+      {block(0x100, 1, 1), block(0x200, 1, 1), enter(pendsv, 0, task_a), leave(pendsv, 0, task_a),
+       enter(pendsv, 0, task_a + 0x40), leave(pendsv, 0, task_a), block(0x204, 1, 1),
+       block(0x104, 1, 1), enter(pendsv, 0, task_a + 0x80), leave(pendsv, 0, task_a + 0x40),
+       block(0x204, 1, 1), block(0x104, 1, 1)},
+      task_code());
+  CHECK(result.calls == 1);
+  CHECK(result.unmatched_returns == 1);
+  CHECK(
+      node(
+          result,
+          {
+              {frame_kind::entry, 0x100}
+  })
+          ->entries
+      == 2);
+}
+
+TEST_CASE("a cut forgets the saved contexts with the stack")
+{
+  auto const result = stacked(
+      {block(0x100, 1, 1), block(0x200, 1, 1), enter(pendsv, 0, task_a), leave(pendsv, 0, task_b),
+       block(0x700, 1, 1), time_to(10), enter(pendsv, 0, task_b), leave(pendsv, 0, task_a),
+       block(0x204, 1, 1), block(0x104, 1, 1)},
+      task_code());
+  CHECK(result.cuts == 1);
+  CHECK(result.unmatched_returns == 1);
 }
