@@ -353,6 +353,15 @@ auto is_call(insn const& i) noexcept -> bool
   return bl or blx;
 }
 
+auto is_return(insn const& i) noexcept -> bool
+{
+  auto const bx_lr  = i.size == 2 and (i.bits == 0x4770 or i.bits == 0x4774);
+  auto const pop    = i.size == 2 and (i.bits & 0xff00) == 0xbd00;
+  auto const pop_w  = i.size == 4 and (i.bits & 0xffff'8000) == 0xe8bd'8000;
+  auto const ldr_pc = i.size == 4 and i.bits == 0xf85d'fb04;
+  return bx_lr or pop or pop_w or ldr_pc;
+}
+
 auto it_length(insn const& i) noexcept -> std::uint8_t
 {
   return static_cast<std::uint8_t>(4 - std::countr_zero(i.bits & 0xf));

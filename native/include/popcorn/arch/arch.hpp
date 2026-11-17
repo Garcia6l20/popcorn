@@ -699,6 +699,9 @@ struct decoded_insn
   bool conditional{};
   /** @brief Whether it is a call, after which execution resumes at the next instruction. */
   bool call{};
+  /** @brief Whether it is a function return by its encoding, such as BX LR or POP with pc. An
+   * exception return through the same instruction is one too, only the run tells them apart. */
+  bool ret{};
   /** @brief Whether it is a permanently undefined instruction, which never falls through. */
   bool trap{};
   /** @brief Instructions after it that it makes conditional, 0 for none. */

@@ -114,7 +114,7 @@ for target in (periph_firmware, tb_firmware[("core", "alu")][1]):
 u575_examples = project_dir / "examples" / "stm32u575"
 test_profile_sink = add_doctest(
     "obs-profile-sink",
-    [here / "test_profile_sink.cpp"],
+    [here / "test_profile_sink.cpp", here / "test_profile_sink_stacks.cpp"],
     [
         obs_static,
         test_support_static,

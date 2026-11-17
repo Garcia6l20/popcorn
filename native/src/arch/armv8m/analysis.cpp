@@ -51,6 +51,7 @@ public:
         .target      = control.target,
         .conditional = control.conditional,
         .call        = thumb::is_call(*read),
+        .ret         = thumb::is_return(*read),
         .trap        = is_trap(*read),
         .predicates  = thumb::is_it(*read) ? thumb::it_length(*read) : std::uint8_t{0},
     };

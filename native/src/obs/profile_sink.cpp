@@ -1,5 +1,11 @@
 #include "profile_sink.hpp"
 
+#include "tb.hpp"
+
+#include <popcorn/arch/arch.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
+
 #include <algorithm>
 #include <bit>
 #include <limits>
@@ -24,6 +30,17 @@ constexpr auto register_key(core::trace_record const& record) noexcept -> std::u
                                                : (std::uint64_t{1} << 32) | record.payload[1];
 }
 
+constexpr auto child_key(std::uint32_t parent, frame_kind kind, std::uint32_t key) noexcept
+    -> std::uint64_t
+{
+  return std::uint64_t{parent} << 34 | std::uint64_t{std::to_underlying(kind)} << 32 | key;
+}
+
+constexpr auto shape_key(address pc, std::uint32_t instructions) noexcept -> std::uint64_t
+{
+  return std::uint64_t{pc} << 32 | instructions;
+}
+
 void add_gap(profile_gaps& into, std::uint64_t length) noexcept
 {
   ++into.count;
@@ -42,8 +59,12 @@ auto sorted_registers(auto const& table) -> std::vector<profile_register>
 }
 
 profile_sink::profile_sink(icount start, profile_options options)
-    : options_{std::move(options)}, start_{start}, now_{start}, last_end_{start},
-      slots_(initial_slots)
+    : options_{
+          std::move(options)
+},
+      start_{start}, now_{start}, last_end_{start}, slots_(initial_slots),
+      nodes_{profile_frame{.kind = frame_kind::root}},
+      last_child_{{~std::uint64_t{0}, 0}}, tracking_{static_cast<bool>(options_.code)}
 {
   for(auto const id : options_.logged_registers)
   {
@@ -109,6 +130,7 @@ void profile_sink::cut()
   frames_.clear();
   last_end_ = now_;
   exit_at_.reset();
+  clear_stack();
   for(auto& state : exceptions_ | std::views::values)
   {
     state.window.clear();
@@ -139,38 +161,52 @@ void profile_sink::block(core::trace_record const& record)
   exit_at_.reset();
   ++blocks_;
   instructions_ += instructions;
-  count_block(record.payload[0], instructions);
+  auto const at = count_block(record.payload[0], instructions);
+  if(tracking_)
+  {
+    track(at, instructions);
+  }
 }
 
-void profile_sink::count_block(address pc, std::uint32_t instructions)
+auto profile_sink::count_block(address pc, std::uint32_t instructions) -> std::size_t
 {
-  auto const mask = slots_.size() - 1;
-  for(auto at = slot_of(pc, mask);; at = (at + 1) & mask)
+  for(;;)
   {
-    auto& slot = slots_[at];
-    if(slot.used and slot.pc == pc)
+    auto const mask = slots_.size() - 1;
+    for(auto at = slot_of(pc, mask);; at = (at + 1) & mask)
     {
-      ++slot.entries;
-      slot.instructions += instructions;
-      return;
-    }
-    if(not slot.used)
-    {
-      slot = {.pc = pc, .used = true, .entries = 1, .instructions = instructions};
-      if(++used_slots_ * 2 > slots_.size())
+      auto& slot = slots_[at];
+      if(slot.used and slot.pc == pc)
       {
-        grow();
+        ++slot.entries;
+        slot.instructions += instructions;
+        return at;
       }
-      return;
+      if(not slot.used)
+      {
+        if((used_slots_ + 1) * 2 > slots_.size())
+        {
+          break;
+        }
+        ++used_slots_;
+        slot = {.pc = pc, .used = true, .entries = 1, .instructions = instructions};
+        return at;
+      }
     }
+    grow();
   }
 }
 
 void profile_sink::grow()
 {
-  auto       old  = std::exchange(slots_, std::vector<block_slot>(slots_.size() * 2));
+  auto old        = std::exchange(slots_, std::vector<block_slot>(slots_.size() * 2));
+  auto old_shapes = std::exchange(shaped_, {});
+  if(not old_shapes.empty())
+  {
+    shaped_.resize(slots_.size());
+  }
   auto const mask = slots_.size() - 1;
-  for(auto const& slot : old)
+  for(auto const [index, slot] : std::views::enumerate(old))
   {
     if(not slot.used)
     {
@@ -182,12 +218,187 @@ void profile_sink::grow()
       at = (at + 1) & mask;
     }
     slots_[at] = slot;
+    if(not old_shapes.empty())
+    {
+      shaped_[at] = old_shapes[static_cast<std::size_t>(index)];
+    }
   }
+}
+
+void profile_sink::track(std::size_t at, std::uint32_t instructions)
+{
+  walk(instructions, shape_of(at, instructions), slots_[at].pc);
+}
+
+auto profile_sink::shape_of(std::size_t at, std::uint32_t instructions) -> block_shape
+{
+  if(shaped_.empty())
+  {
+    shaped_.resize(slots_.size());
+  }
+  auto& held = shaped_[at];
+  if(held.known and held.instructions == instructions)
+  {
+    return held.shape;
+  }
+  auto const pc       = slots_[at].pc;
+  auto [found, added] = shapes_.try_emplace(shape_key(pc, instructions));
+  if(added)
+  {
+    found->second = options_.code(pc, instructions);
+  }
+  held = {.known = true, .instructions = instructions, .shape = found->second};
+  return found->second;
+}
+
+auto profile_sink::child(std::uint32_t parent, frame_kind kind, std::uint32_t key) -> std::uint32_t
+{
+  auto const wanted = child_key(parent, kind, key);
+  if(last_child_[parent].first == wanted)
+  {
+    return last_child_[parent].second;
+  }
+  auto const [found, added] =
+      children_.try_emplace(wanted, static_cast<std::uint32_t>(nodes_.size()));
+  if(added)
+  {
+    nodes_.push_back({.parent = parent, .kind = kind, .key = key});
+    last_child_.emplace_back(~std::uint64_t{0}, 0);
+  }
+  last_child_[parent] = {wanted, found->second};
+  return found->second;
+}
+
+void profile_sink::walk(std::uint32_t instructions, block_shape const& shape, address pc)
+{
+  auto const was  = std::exchange(pending_, {});
+  auto const went = pc <= was.start or pc > was.next;
+  if(was.exit == block_exit::call and went)
+  {
+    push_call(was.next, shape.function);
+  }
+  else if(was.exit == block_exit::ret and went)
+  {
+    pop_to(pc);
+  }
+  if(reroot_)
+  {
+    reroot_  = false;
+    current_ = child(current_, frame_kind::entry, shape.function);
+    ++nodes_[current_].entries;
+  }
+  nodes_[current_].self += instructions;
+  if(shape.exit != block_exit::other)
+  {
+    pending_ = {.exit = shape.exit, .start = pc, .next = shape.next};
+  }
+}
+
+void profile_sink::push_call(address next, address function)
+{
+  if(call_frames_ >= options_.max_call_depth)
+  {
+    ++deep_calls_;
+    ++deep_open_;
+    return;
+  }
+  ++call_frames_;
+  ++calls_;
+  stack_.push_back({.next = next, .node = current_});
+  current_ = child(current_, frame_kind::call, function);
+  ++nodes_[current_].entries;
+}
+
+void profile_sink::pop_to(address pc)
+{
+  if(deep_open_ > 0)
+  {
+    --deep_open_;
+    return;
+  }
+  for(auto at = stack_.size(); at-- > 0;)
+  {
+    auto const& held = stack_[at];
+    if(held.exception)
+    {
+      break;
+    }
+    if(held.next == pc)
+    {
+      current_ = held.node;
+      call_frames_ -= static_cast<std::uint32_t>(stack_.size() - at);
+      stack_.resize(at);
+      return;
+    }
+  }
+  ++unmatched_returns_;
+  auto const marker =
+      std::ranges::find(stack_ | std::views::reverse, true, &stack_entry::exception);
+  auto const keep = static_cast<std::size_t>(std::ranges::distance(marker, stack_.rend()));
+  call_frames_ -= static_cast<std::uint32_t>(stack_.size() - keep);
+  stack_.resize(keep);
+  current_   = keep == 0 ? 0 : stack_.back().inner;
+  reroot_    = true;
+  deep_open_ = 0;
+}
+
+void profile_sink::enter_frame(std::uint16_t number)
+{
+  stack_.push_back(
+      {.node        = current_,
+       .exception   = true,
+       .held        = std::exchange(pending_, {}),
+       .held_reroot = reroot_,
+       .held_deep   = std::exchange(deep_open_, 0)});
+  current_ = child(current_, frame_kind::exception, number);
+  ++nodes_[current_].entries;
+  stack_.back().inner = current_;
+  reroot_             = true;
+}
+
+void profile_sink::exit_frame()
+{
+  auto const marker =
+      std::ranges::find(stack_ | std::views::reverse, true, &stack_entry::exception);
+  if(marker == stack_.rend())
+  {
+    clear_stack();
+    return;
+  }
+  auto const at   = static_cast<std::size_t>(std::ranges::distance(marker, stack_.rend())) - 1;
+  auto const held = stack_[at];
+  call_frames_ -= static_cast<std::uint32_t>(stack_.size() - at - 1);
+  stack_.resize(at);
+  current_   = held.node;
+  pending_   = held.held;
+  reroot_    = held.held_reroot;
+  deep_open_ = held.held_deep;
+}
+
+void profile_sink::clear_stack()
+{
+  stack_.clear();
+  call_frames_ = 0;
+  current_     = 0;
+  reroot_      = true;
+  pending_     = {};
+  deep_open_   = 0;
 }
 
 void profile_sink::irq(core::trace_record const& record)
 {
   auto const number = record.aux;
+  if(options_.code)
+  {
+    if(record.flags == 1)
+    {
+      enter_frame(number);
+    }
+    else
+    {
+      exit_frame();
+    }
+  }
   if(record.flags == 1)
   {
     auto& state = exceptions_[number];
@@ -307,6 +518,21 @@ auto profile_sink::result() const -> profile_result
     }
   }
   std::ranges::sort(out.code, {}, &profile_block::pc);
+  if(options_.code)
+  {
+    out.frames = nodes_;
+    for(auto& node : out.frames)
+    {
+      node.inclusive = node.self;
+    }
+    for(auto at = out.frames.size(); at-- > 1;)
+    {
+      out.frames[out.frames[at].parent].inclusive += out.frames[at].inclusive;
+    }
+    out.calls             = calls_;
+    out.unmatched_returns = unmatched_returns_;
+    out.deep_calls        = deep_calls_;
+  }
   for(auto const& [number, state] : exceptions_)
   {
     out.exceptions.emplace(number, state.totals);
@@ -316,5 +542,59 @@ auto profile_sink::result() const -> profile_result
     ++out.exceptions[open.number].open;
   }
   return out;
+}
+
+auto machine_code_reader(core::machine& target) -> code_reader
+{
+  std::vector<std::pair<address, address>> functions;
+  for(auto const& held : target.observed_images())
+  {
+    for(auto const& symbol : held.symbols)
+    {
+      if(symbol.kind == image::symbol_kind::function and symbol.size != 0)
+      {
+        functions.emplace_back(symbol.value, symbol.value + symbol.size);
+      }
+    }
+  }
+  std::ranges::sort(functions);
+  auto const* const analysis = arch::find_code_analysis(target.description().core);
+  return [&target, analysis,
+          functions = std::move(functions)](address pc, std::uint32_t instructions) -> block_shape {
+    block_shape shape{.function = pc};
+    auto const  after =
+        std::ranges::upper_bound(functions, pc, {}, &std::pair<address, address>::first);
+    if(after != functions.begin() and pc < std::prev(after)->second)
+    {
+      shape.function = std::prev(after)->first;
+    }
+    if(analysis == nullptr or instructions == 0)
+    {
+      return shape;
+    }
+    code_bytes code{
+        target.loaded_images(),
+        [&target](address at, std::span<std::byte> out) -> std::size_t {
+          auto const read = target.mem().read_block(at, out);
+          return read ? out.size() : read.error().at - at;
+        },
+        analysis};
+    auto const                        bytes  = code.read(pc, instructions * 4);
+    std::size_t                       offset = 0;
+    std::optional<arch::decoded_insn> last;
+    for(std::uint32_t index = 0; index < instructions; ++index)
+    {
+      last = analysis->decode(
+          pc + static_cast<address>(offset), bytes.subspan(std::min(offset, bytes.size())));
+      if(not last)
+      {
+        return shape;
+      }
+      offset += last->size;
+    }
+    shape.next = last->at + last->size;
+    shape.exit = last->call ? block_exit::call : last->ret ? block_exit::ret : block_exit::other;
+    return shape;
+  };
 }
 }

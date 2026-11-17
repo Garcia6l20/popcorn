@@ -77,6 +77,7 @@ auto decoded_by_thumb(address where, std::span<std::byte const> bytes)
       .target      = control.target,
       .conditional = control.conditional,
       .call        = thumb::is_call(*read),
+      .ret         = thumb::is_return(*read),
       .trap        = old_trap(*read),
       .predicates  = thumb::is_it(*read) ? thumb::it_length(*read) : std::uint8_t{0},
   };
@@ -109,6 +110,7 @@ struct row
   std::optional<address>     target;
   bool                       conditional;
   bool                       call;
+  bool                       ret;
   bool                       trap;
   std::uint8_t               predicates;
 };
@@ -117,29 +119,40 @@ auto rows() -> std::vector<row>
 {
   using enum arch::ending;
   return {
-      {"movs r0, #1",      {0x2001},         2, none,      {},     false, false, false, 0},
-      {"add.w r0, r1, r2", {0xeb01, 0x0002}, 4, none,      {},     false, false, false, 0},
-      {"udf #0",           {0xde00},         2, exception, {},     false, false, true,  0},
-      {"udf.w #0",         {0xf7f0, 0xa000}, 4, exception, {},     false, false, true,  0},
-      {"svc #0",           {0xdf00},         2, exception, {},     false, false, false, 0},
-      {"bl .+8",           {0xf000, 0xf802}, 4, direct,    at + 8, false, true,  false, 0},
-      {"beq .+8",          {0xd002},         2, direct,    at + 8, true,  false, false, 0},
-      {"bne.w .+8",        {0xf040, 0x8002}, 4, direct,    at + 8, true,  false, false, 0},
-      {"cbz r0, .+8",      {0xb110},         2, direct,    at + 8, true,  false, false, 0},
-      {"b .+8",            {0xe002},         2, direct,    at + 8, false, false, false, 0},
-      {"bx lr",            {0x4770},         2, indirect,  {},     false, false, false, 0},
-      {"blx r3",           {0x4798},         2, indirect,  {},     false, true,  false, 0},
-      {"it eq",            {0xbf08},         2, none,      {},     false, false, false, 1},
-      {"itt eq",           {0xbf04},         2, none,      {},     false, false, false, 2},
-      {"ittt eq",          {0xbf02},         2, none,      {},     false, false, false, 3},
-      {"itttt eq",         {0xbf01},         2, none,      {},     false, false, false, 4},
-      {"wfi",              {0xbf30},         2, system,    {},     false, false, false, 0},
-      {"nop",              {0xbf00},         2, none,      {},     false, false, false, 0},
+      {"movs r0, #1",         {0x2001},         2, none,      {},     false, false, false, false, 0},
+      {"add.w r0, r1, r2",    {0xeb01, 0x0002}, 4, none,      {},     false, false, false, false, 0},
+      {"udf #0",              {0xde00},         2, exception, {},     false, false, false, true,  0},
+      {"udf.w #0",            {0xf7f0, 0xa000}, 4, exception, {},     false, false, false, true,  0},
+      {"svc #0",              {0xdf00},         2, exception, {},     false, false, false, false, 0},
+      {"bl .+8",              {0xf000, 0xf802}, 4, direct,    at + 8, false, true,  false, false, 0},
+      {"beq .+8",             {0xd002},         2, direct,    at + 8, true,  false, false, false, 0},
+      {"bne.w .+8",           {0xf040, 0x8002}, 4, direct,    at + 8, true,  false, false, false, 0},
+      {"cbz r0, .+8",         {0xb110},         2, direct,    at + 8, true,  false, false, false, 0},
+      {"b .+8",               {0xe002},         2, direct,    at + 8, false, false, false, false, 0},
+      {"bx lr",               {0x4770},         2, indirect,  {},     false, false, true,  false, 0},
+      {"blx r3",              {0x4798},         2, indirect,  {},     false, true,  false, false, 0},
+      {"it eq",               {0xbf08},         2, none,      {},     false, false, false, false, 1},
+      {"itt eq",              {0xbf04},         2, none,      {},     false, false, false, false, 2},
+      {"ittt eq",             {0xbf02},         2, none,      {},     false, false, false, false, 3},
+      {"itttt eq",            {0xbf01},         2, none,      {},     false, false, false, false, 4},
+      {"wfi",                 {0xbf30},         2, system,    {},     false, false, false, false, 0},
+      {"nop",                 {0xbf00},         2, none,      {},     false, false, false, false, 0},
+      {"bxns lr",             {0x4774},         2, indirect,  {},     false, false, true,  false, 0},
+      {"bxns r3",             {0x471c},         2, indirect,  {},     false, false, false, false, 0},
+      {"pop {r4, pc}",        {0xbd10},         2, indirect,  {},     false, false, true,  false, 0},
+      {"pop.w {r4-r11, pc}",  {0xe8bd, 0x8ff0}, 4, indirect,  {},     false, false, true,  false, 0},
+      {"ldr pc, [sp], #4",    {0xf85d, 0xfb04}, 4, indirect,  {},     false, false, true,  false, 0},
+      {"pop.w {r4-r11}",      {0xe8bd, 0x0ff0}, 4, none,      {},     false, false, false, false, 0},
+      {"pop {r4}",            {0xbc10},         2, none,      {},     false, false, false, false, 0},
+      {"bx r3",               {0x4718},         2, indirect,  {},     false, false, false, false, 0},
+      {"ldm.w r0!, {r1, pc}", {0xe8b0, 0x8002}, 4, indirect,  {},     false, false, false, false, 0},
+      {"ldr pc, [sp, #4]",    {0xf8dd, 0xf004}, 4, indirect,  {},     false, false, false, false, 0},
+      {"ldr pc, [sp], #8",    {0xf85d, 0xfb08}, 4, indirect,  {},     false, false, false, false, 0},
   };
 }
 }
 
-TEST_CASE("decode gives each Thumb row its size, ending, call, trap and predication")
+TEST_CASE("decode gives each Thumb row its size, ending, call, return, trap and predication")
 {
   for(auto const& expected : rows())
   {
@@ -156,6 +169,7 @@ TEST_CASE("decode gives each Thumb row its size, ending, call, trap and predicat
             .target      = expected.target,
             .conditional = expected.conditional,
             .call        = expected.call,
+            .ret         = expected.ret,
             .trap        = expected.trap,
             .predicates  = expected.predicates});
     CHECK(analysis().size(bytes) == expected.size);

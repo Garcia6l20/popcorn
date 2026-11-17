@@ -156,6 +156,14 @@ POPCORN_API auto conditional_branch(insn const& i) noexcept -> std::optional<con
 POPCORN_API auto is_call(insn const& i) noexcept -> bool;
 
 /**
+ * @brief Whether an instruction is a function return by its encoding: BX LR, BXNS LR, POP or
+ *        LDM SP! with pc in the list, or LDR pc, [sp], #4. An exception return through one of
+ *        them is one too, which only the value loaded tells apart.
+ * @param i Instruction.
+ */
+POPCORN_API auto is_return(insn const& i) noexcept -> bool;
+
+/**
  * @brief Instructions an IT instruction makes conditional, from its mask.
  * @param i An IT instruction, see is_it().
  * @return 1 to 4.
