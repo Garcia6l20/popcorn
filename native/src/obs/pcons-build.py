@@ -16,6 +16,7 @@ sources = [
     here / "drcov.cpp",
     here / "pctr.cpp",
     here / "pctr_machine.cpp",
+    here / "profile_sink.cpp",
 ]
 extension_sources = [here / "bind.cpp"]
 

@@ -4,7 +4,8 @@ from pcons import context
 
 from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest, alias_bare_name, m33_variants
+from popcorn_build.st_description import cached_st_description
+from popcorn_build.testing import add_doctest, alias_bare_name, m33_variants, popcorn_libraries
 
 project = context.current_project
 here = Path(__file__).resolve().parent
@@ -109,6 +110,24 @@ test_pctr = add_doctest(
 for target in (periph_firmware, tb_firmware[("core", "alu")][1]):
     if target is not None:
         test_pctr.depends(target)
+
+u575_examples = project_dir / "examples" / "stm32u575"
+test_profile_sink = add_doctest(
+    "obs-profile-sink",
+    [here / "test_profile_sink.cpp"],
+    [
+        obs_static,
+        test_support_static,
+        *popcorn_libraries("devices", "stm32", "usb", "armv8m", "core", static=True),
+    ],
+    env={
+        "POPCORN_U575_DESC": str(cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")),
+        "POPCORN_FW_TIM_TICKS": str(u575_examples / "tim" / "prebuilt" / "tim_ticks.elf"),
+        "POPCORN_FW_SPI_FLASH": str(u575_examples / "spi" / "prebuilt" / "spi_flash.elf"),
+        "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
+    },
+)
+test_profile_sink.private.include_dirs.append(obs_sources)
 
 obs_probe = project.Program(
     "obs-probe", project.default_environment, sources=[here / "obs_probe.cpp"]
