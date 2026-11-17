@@ -56,8 +56,9 @@ struct pctr_names
  *        record `{str, 0, length, id}` followed by the text padded to 4. An id with no name,
  *        trace_id_overflow included, is resolved by the record's address, a register's by
  *        payload[1], a symbol's by payload[0]. Error offsets are the bytes durably written. An id
- * with no name, and names past 0xfffe distinct ones, stay trace_id_overflow. Names are cut at 65535
- * bytes.
+ *        with no name, and names past 0xfffe distinct ones, stay trace_id_overflow. Names are cut
+ *        at 65535 bytes. A clock record of a clock domain, aux not 0, is left out, its dt carried
+ *        to the next record, through a TIME record when the sum does not fit dt.
  *
  * Neither copyable nor movable: sink() captures it. close() reports write errors, the destructor
  * closes and loses them.
@@ -128,6 +129,8 @@ private:
   std::uint64_t                                  records_{};
   std::uint64_t                                  bytes_{};
   std::uint64_t                                  written_{};
+  std::uint64_t                                  at_{};
+  std::uint64_t                                  carried_{};
 };
 
 /**

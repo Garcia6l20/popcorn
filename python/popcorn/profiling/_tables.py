@@ -25,6 +25,8 @@ class Analysis(StrEnum):
     """CPU and DMA accesses per peripheral register."""
     LOOPS = "loops"
     """Runs of identical loop passes, by loop head."""
+    WATCHDOG = "watchdog"
+    """Independent watchdog reloads and the margin each left before the timeout."""
 
 
 ALL = tuple(Analysis)

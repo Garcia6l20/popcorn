@@ -1478,7 +1478,9 @@ class Machine:
         recording.close()
 
     @contextlib.contextmanager
-    def profile(self, *analyses: Analysis | str) -> Generator[Profile]:
+    def profile(
+        self, *analyses: Analysis | str, milestones: Iterable[str | int] = ()
+    ) -> Generator[Profile]:
         """Profile the firmware while the block runs: `popcorn.profiling.ALL` analyses when none
         is named.
 
@@ -1501,24 +1503,70 @@ class Machine:
         next block boundary inside a free run: call `report()` after the run halts or after
         `await profile.wait_closed()`.
 
+        "watchdog" logs the CPU writes of the IWDG KR, PR and RLR registers and every change of
+        the LSI rate, each in order, and reads PR and RLR once at the entry. `milestones` names
+        symbols or addresses whose first block `Report.timeline` times, from the profile start: a
+        boot timeline for a profile opened at the reset. A milestone address has bit 0 cleared,
+        so a function pointer value names its function.
+
+        Args:
+            analyses: Analyses to run, `popcorn.profiling.Analysis` values or their names.
+            milestones: Symbols of the loaded images, resolved as `sym` does, or addresses in
+                the 32-bit address space.
+
         Raises:
-            ValueError: An analysis name is unknown.
+            ValueError: An analysis name is unknown, or a milestone address lies outside the
+                32-bit address space.
+            TypeError: A milestone is a bool.
+            SymbolError: No loaded image has a milestone symbol.
             ConfigError: The machine is a member of a live linked system, `members.<name>`.
             MachineRunning: The machine is busy, outside its handlers.
         """
         from popcorn.profiling import BURST_WINDOW_PS, MIN_PASSES, Analysis, Profile, selected
         from popcorn.profiling._symbols import Names
+        from popcorn.profiling._watchdog import watchdog_registers
 
         chosen = selected(analyses)
+        marks: list[tuple[str, int]] = []
+        for milestone in milestones:
+            if isinstance(milestone, str):
+                marks.append((milestone, self.sym(milestone) & ~1))
+            elif isinstance(milestone, bool):
+                raise TypeError(f"a milestone is a symbol name or an address, not {milestone!r}")
+            elif not 0 <= milestone <= 0xFFFF_FFFF:
+                raise ValueError(
+                    f"a milestone address must lie in [0, 0xffffffff], not {milestone:#x}"
+                )
+            else:
+                marks.append((f"{milestone & ~1:#010x}", milestone & ~1))
         self._require_stopped()
         burst = BURST_WINDOW_PS if Analysis.IRQ in chosen else 0
         passes = MIN_PASSES if Analysis.LOOPS in chosen else 0
         names = Names(self._images, self._description)
+        dog = (
+            watchdog_registers(
+                self._description, lambda at: int.from_bytes(self.mem.read(at, 4), "little")
+            )
+            if Analysis.WATCHDOG in chosen
+            else None
+        )
         from_reset = self._handle.instructions() == 0
         with self._profile(
-            call_stacks=Analysis.HOTSPOTS in chosen, loop_reports=passes, burst_window_ps=burst
+            call_stacks=Analysis.HOTSPOTS in chosen,
+            loop_reports=passes,
+            burst_window_ps=burst,
+            logged_registers=() if dog is None else dog.logged,
+            write_clock_domain="" if dog is None else "lsi",
         ) as recording:
-            yield Profile(recording, names, chosen, from_reset=from_reset, min_passes=passes)
+            yield Profile(
+                recording,
+                names,
+                chosen,
+                from_reset=from_reset,
+                min_passes=passes,
+                watchdog_registers=dog,
+                milestones=tuple(marks) if marks else None,
+            )
 
     @contextlib.contextmanager
     def _profile(
@@ -1530,6 +1578,7 @@ class Machine:
         logged_registers: Iterable[int] = (),
         write_log_limit: int = 4096,
         max_call_depth: int = 256,
+        write_clock_domain: str = "",
     ) -> Generator[ProfileRecording]:
         """Feed a native profile sink while the block runs, `Machine.profile`'s hook.
 
@@ -1548,6 +1597,8 @@ class Machine:
             logged_registers: Flat register ids whose CPU writes are logged one by one.
             write_log_limit: Writes kept per logged register.
             max_call_depth: Most call frames the tracker keeps.
+            write_clock_domain: Clock domain whose rate each logged write records, none when
+                empty or unknown.
 
         Raises:
             ValueError: An option is negative or too large.
@@ -1583,6 +1634,7 @@ class Machine:
             logged_registers=registers,
             write_log_limit=write_log_limit,
             max_call_depth=max_call_depth,
+            write_clock_domain=write_clock_domain,
         )
         try:
             yield recording

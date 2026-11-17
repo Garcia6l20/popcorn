@@ -37,6 +37,13 @@ auto clock_record(std::uint64_t hz) -> trace_record
   };
 }
 
+auto domain_clock_record(clock_domain domain, std::uint64_t hz) -> trace_record
+{
+  auto record = clock_record(hz);
+  record.aux  = static_cast<std::uint16_t>(domain.index + 1);
+  return record;
+}
+
 constexpr auto initiator_flags(initiator by) noexcept -> std::uint8_t
 {
   switch(by)
@@ -250,7 +257,8 @@ void machine::run_state::flush_sinks()
 
 void machine::run_state::rebase_sinks(icount now) noexcept
 {
-  auto const hz = owner.clock_.instruction_hz();
+  rebase_pending = false;
+  auto const hz  = owner.clock_.instruction_hz();
   for(auto const& [id, entry] : sinks)
   {
     entry->stream.last    = now;
@@ -262,6 +270,7 @@ void machine::run_state::rebase_sinks(icount now) noexcept
       if(entry->kinds.contains(trace_kind::clock))
       {
         entry->stream.stamp(clock_record(hz), now, entry->batch);
+        stamp_domain_clocks(*entry, now);
       }
     }
     catch(...)
@@ -341,6 +350,30 @@ void machine::run_state::emit_clock()
     deliver(
         clock_record(owner.clock_.instruction_hz()), address{}, false,
         owner.clock_.to_icount(owner.clock_.epoch_time()));
+  }
+}
+
+void machine::run_state::emit_domain_clock(clock_domain domain)
+{
+  if(not sinks_want_clock or rebase_pending)
+  {
+    return;
+  }
+  auto const now = owner.clock_.now();
+  for(auto* const entry : sinks_of_kind[std::to_underlying(trace_kind::clock)])
+  {
+    if(std::ranges::contains(entry->domains, domain))
+    {
+      deliver_to(*entry, domain_clock_record(domain, owner.clock_.hz(domain)), now);
+    }
+  }
+}
+
+void machine::run_state::stamp_domain_clocks(sink_entry& entry, icount now)
+{
+  for(auto const domain : entry.domains)
+  {
+    entry.stream.stamp(domain_clock_record(domain, owner.clock_.hz(domain)), now, entry.batch);
   }
 }
 
@@ -561,7 +594,8 @@ auto machine::add_trace_sink(
     trace_kinds                kinds,
     trace_sink                 sink,
     std::vector<address_range> ranges,
-    std::uint32_t              loop_passes) -> hook_handle
+    std::uint32_t              loop_passes,
+    std::vector<clock_domain>  domains) -> hook_handle
 {
   require_stopped(*this);
   if(hooks_->delivering != 0)
@@ -576,12 +610,26 @@ auto machine::add_trace_sink(
   {
     throw std::invalid_argument("add_trace_sink asks for loop reports only with loop records");
   }
+  if(not domains.empty() and not kinds.contains(trace_kind::clock))
+  {
+    throw std::invalid_argument("add_trace_sink sends clock domain rates only with clock records");
+  }
+  for(auto const domain : domains)
+  {
+    if(domain.index >= clock_driver_.state().domain_hz.size()
+       or domain.index >= trace_id_overflow - 1)
+    {
+      throw std::invalid_argument(
+          std::format("add_trace_sink has no clock domain at index {}", domain.index));
+    }
+  }
   auto const id    = ++hooks_->last_id;
   auto       entry = std::make_unique<run_state::sink_entry>(run_state::sink_entry{
       .kinds       = kinds,
       .sink        = std::move(sink),
       .ranges      = std::move(ranges),
       .loop_passes = loop_passes,
+      .domains     = std::move(domains),
       .batch       = {},
       .stream      = {.last = clock_.now(), .rebased = false},
   });
@@ -589,6 +637,7 @@ auto machine::add_trace_sink(
   if(kinds.contains(trace_kind::clock))
   {
     entry->stream.stamp(clock_record(clock_.instruction_hz()), clock_.now(), entry->batch);
+    run_->stamp_domain_clocks(*entry, clock_.now());
   }
   if(kinds.contains(trace_kind::sleep) and run_->asleep_since and arch_->idle())
   {

@@ -431,6 +431,7 @@ SECTIONS: dict[Analysis, Callable[[Report], object]] = {
     Analysis.IRQ: lambda r: r.irq,
     Analysis.PERIPHERALS: lambda r: r.peripherals,
     Analysis.LOOPS: lambda r: r.loops,
+    Analysis.WATCHDOG: lambda r: r.watchdog,
 }
 
 

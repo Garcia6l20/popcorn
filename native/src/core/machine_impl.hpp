@@ -1111,6 +1111,8 @@ struct machine::run_state
     std::vector<address_range> ranges{};
     /** @brief Fewest passes of a reported loop run the sink asks for, 0 for none. */
     std::uint32_t loop_passes = 0;
+    /** @brief Clock domains whose rates the sink receives. */
+    std::vector<clock_domain> domains{};
     /** @brief Records not delivered yet. */
     std::vector<trace_record> batch{};
     /** @brief Buffer of the batch being delivered, swapped with batch at each delivery so
@@ -1378,6 +1380,9 @@ struct machine::run_state
   bool sinks_want_sleep = false;
   /** @brief Whether some sink selects clock records. */
   bool sinks_want_clock = false;
+  /** @brief Whether a reset moved the clock back and rebase_sinks() has not run yet: the models'
+   * resets deliver no domain rate then, the rebase sends every rate. */
+  bool rebase_pending = false;
   /** @brief Whether some sink selects cut records. */
   bool sinks_want_cut = false;
   /** @brief Whether loop reports are on and some sink selects loop records. */
@@ -2010,6 +2015,12 @@ struct machine::run_state
 
   /** @brief A clock record with the core's instruction rate to the sinks selecting it. */
   void emit_clock();
+
+  /** @brief Delivers a domain's rate to the sinks that asked for it, unless rebase_pending. */
+  void emit_domain_clock(clock_domain domain);
+
+  /** @brief Stamps the rates of an entry's domains into its batch at @p now. */
+  void stamp_domain_clocks(sink_entry& entry, icount now);
 
   /**
    * @brief Closes the block whose record went out last as execution leaves it at @p pc: a cut

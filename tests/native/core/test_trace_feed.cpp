@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <optional>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -597,4 +598,60 @@ TEST_CASE("a block after an intercept that returns from a longer block is stampe
   }
   CHECK(backwards == 3);
   CHECK(seen.end_of_stream(start) == f.target->virtual_clock().now());
+}
+
+TEST_CASE(
+    "a sink asking for a clock domain gets its rate at the add, at a change and after a restore")
+{
+  auto       f       = alu_fixture();
+  auto&      clock   = const_cast<core::clock&>(f.target->virtual_clock());
+  auto const watched = clock.domain("watched");
+  auto const other   = clock.domain("other");
+  collector  seen;
+  collector  plain;
+  clock.set_hz(watched, 32'000);
+  auto const sink = f.target->add_trace_sink({trace_kind::clock}, seen.sink(), {}, 0, {watched});
+  auto const plain_sink = f.target->add_trace_sink({trace_kind::clock}, plain.sink());
+  clock.set_hz(watched, 32'000);
+  clock.set_hz(other, 5);
+  clock.set_hz(watched, 250);
+  auto const taken = f.target->snapshot();
+  clock.set_hz(watched, 1);
+  f.target->restore(taken);
+  core::slice_request budget;
+  budget.budget_left = icount{10};
+  REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
+  auto const rates = [](collector const& from) {
+    return of_kind(from.records, trace_kind::clock)
+         | std::views::filter([](trace_record const& r) { return r.aux != 0; })
+         | std::views::transform([](trace_record const& r) {
+             return std::pair{r.aux, r.payload[0] | std::uint64_t{r.payload[1]} << 32};
+           })
+         | std::ranges::to<std::vector>();
+  };
+  auto const aux = static_cast<std::uint16_t>(watched.index + 1);
+  CHECK(
+      rates(seen)
+      == std::vector<std::pair<std::uint16_t, std::uint64_t>>{
+          {aux, 32'000},
+          {aux, 250   },
+          {aux, 1     },
+          {aux, 250   }
+  });
+  CHECK(rates(plain).empty());
+}
+
+TEST_CASE("a sink asking for clock domains is refused without clock records or with no such domain")
+{
+  auto       f       = alu_fixture();
+  auto&      clock   = const_cast<core::clock&>(f.target->virtual_clock());
+  auto const watched = clock.domain("watched");
+  collector  seen;
+  CHECK_THROWS_AS(
+      std::ignore = f.target->add_trace_sink({trace_kind::block}, seen.sink(), {}, 0, {watched}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      std::ignore = f.target->add_trace_sink(
+          {trace_kind::clock}, seen.sink(), {}, 0, {core::clock_domain{watched.index + 1}}),
+      std::invalid_argument);
 }

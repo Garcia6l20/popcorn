@@ -124,6 +124,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::obs::profile_write>("ProfileWrite");
   m.bind<popcorn::obs::profile_write_log>("ProfileWriteLog");
   m.bind<popcorn::obs::profile_clock>("ProfileClock");
+  m.bind<popcorn::obs::profile_rate>("ProfileRate");
   m.bind<popcorn::obs::profile_loop>("ProfileLoop");
   m.bind<popcorn::obs::profile_result>("ProfileResult");
   popcorn::bind::detail::bind_model_base(m.handle);

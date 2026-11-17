@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/types.hpp>
@@ -63,6 +64,10 @@ struct profile_options
   /** @brief Writes kept per logged register. Later writes are counted in
    * profile_write_log::dropped. */
   std::size_t write_log_limit{4096};
+  /** @brief Clock domain whose rate each logged write records in profile_write::clock_hz, and
+   * whose rates profile_result::domain_rates keeps. The sink must be added with this domain, see
+   * core::machine::add_trace_sink(). Empty for none. */
+  std::optional<core::clock_domain> write_domain{};
   /** @brief Shapes of the blocks, which turn on the call stack tracker, profile_result::frames.
    * Empty for no tracker. */
   code_reader code{};
@@ -115,6 +120,9 @@ struct profile_block
   std::uint64_t entries{};
   /** @brief Instructions those blocks executed. */
   std::uint64_t instructions{};
+  /** @brief Profile time in picoseconds from the sink's start to the start of the first block at
+   * pc, see profile_sink. */
+  std::uint64_t first_ps{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_block const&, profile_block const&) -> bool = default;
@@ -209,6 +217,17 @@ struct profile_write
   std::uint32_t value{};
   /** @brief Cuts seen before the write, the time base @p at counts in. */
   std::uint64_t segment{};
+  /** @brief Address of the writing instruction. */
+  address pc{};
+  /** @brief Profile time in picoseconds from the sink's start to the write, see profile_sink.
+   */
+  std::uint64_t ps{};
+  /** @brief Rate in Hz of profile_options::write_domain at the write, from the clock records
+   * before it, 0 without the domain. */
+  std::uint64_t clock_hz{};
+  /** @brief profile_result::records counted up to the write, itself included: the order of
+   * writes to different registers at one instruction count. */
+  std::uint64_t record{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_write const&, profile_write const&) -> bool = default;
@@ -247,6 +266,25 @@ struct profile_clock
   friend auto operator==(profile_clock const&, profile_clock const&) -> bool = default;
 };
 
+/** @brief A rate of profile_options::write_domain from a clock record. */
+struct profile_rate
+{
+  /** @brief Instruction count from which the rate holds. */
+  icount at{};
+  /** @brief Cuts seen before the record, the time base @p at counts in. */
+  std::uint64_t segment{};
+  /** @brief Profile time in picoseconds from the sink's start to the record, see profile_sink. */
+  std::uint64_t ps{};
+  /** @brief Rate in Hz, 0 for a stopped clock. */
+  std::uint64_t hz{};
+  /** @brief profile_result::records counted before it: a write whose profile_write::record is
+   * higher came after it. */
+  std::uint64_t record{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_rate const&, profile_rate const&) -> bool = default;
+};
+
 /** @brief Runs of identical passes of one loop, from loop records, by head. */
 struct profile_loop
 {
@@ -282,7 +320,7 @@ struct profile_result
   std::uint64_t elapsed{};
   /** @brief elapsed in picoseconds, the sum of profile_clock::ps over clocks. */
   std::uint64_t elapsed_ps{};
-  /** @brief Records received, time records excluded. */
+  /** @brief Records received, time records and clock records of a domain excluded. */
   std::uint64_t records{};
   /** @brief Block records. */
   std::uint64_t blocks{};
@@ -315,6 +353,9 @@ struct profile_result
   std::vector<profile_register> debugger_registers{};
   /** @brief Write logs, in profile_options::logged_registers order. */
   std::vector<profile_write_log> write_logs{};
+  /** @brief Rates of profile_options::write_domain, oldest first: one when the sink is added,
+   * one per cut and one per change. Empty without the domain. */
+  std::vector<profile_rate> domain_rates{};
   /** @brief Call tree, parents before children, empty without profile_options::code. */
   std::vector<profile_frame> frames{};
   /** @brief Calls that pushed a frame. */
@@ -351,6 +392,11 @@ struct profile_result
  * record, its rate times its instructions, rounded down per clock span: a span differs from the
  * machine clock by less than 1 ps per clock record it covers. Without a clock record in the
  * segment, picoseconds are 0.
+ *
+ * Profile time is the time the records covered, the time across a cut left out:
+ * profile_result::elapsed_ps at the end. A point's profile time is the picoseconds of the
+ * segments before its own plus its picoseconds since its segment's first clock record. For a
+ * profile opened at a reset with no cut, it is the machine time of the point.
  *
  * A time record flagged core::trace_rebase_flag, written for a reset or a restore, cuts the
  * stream: open frames are closed as cut, gaps count from the new base, the tail-chain and burst
@@ -437,6 +483,7 @@ private:
     bool          used{};
     std::uint64_t entries{};
     std::uint64_t instructions{};
+    std::uint64_t first_ps{};
   };
 
   struct shape_slot
@@ -502,9 +549,11 @@ private:
 
   void               time(icount to, bool rebase);
   void               clock(std::uint64_t hz);
+  void               domain_clock(core::trace_record const& record);
   void               close_clock_span();
   [[nodiscard]] auto ps_at(icount at) const -> std::uint64_t;
   [[nodiscard]] auto ps_between(icount from, icount to) const -> std::uint64_t;
+  [[nodiscard]] auto profile_ps(icount at) const -> std::uint64_t;
   void               sleep(core::trace_record const& record);
   void               loop(core::trace_record const& record);
   void               cut_block(core::trace_record const& record);
@@ -556,7 +605,10 @@ private:
   std::uint64_t                                        partial_sleeps_{};
   std::vector<profile_clock>                           clocks_{};
   std::vector<rate_mark>                               marks_{};
+  std::uint64_t                                        segments_ps_{};
   std::vector<profile_write_log>                       write_logs_{};
+  std::uint64_t                                        domain_hz_{};
+  std::vector<profile_rate>                            domain_rates_{};
   std::unordered_map<std::uint64_t, block_shape>       shapes_{};
   std::vector<profile_frame>                           nodes_{};
   std::unordered_map<std::uint64_t, std::uint32_t>     children_{};

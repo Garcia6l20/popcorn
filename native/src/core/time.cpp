@@ -111,6 +111,17 @@ void clock::set_cpi(double cpi)
   }
 }
 
+auto clock::find_domain(std::string_view name) const -> std::optional<clock_domain>
+{
+  auto const found = std::ranges::find(state_.domain_names, name);
+  if(found == state_.domain_names.end())
+  {
+    return std::nullopt;
+  }
+  return clock_domain{
+      static_cast<std::uint32_t>(std::distance(state_.domain_names.begin(), found))};
+}
+
 auto clock::domain(std::string_view name) -> clock_domain
 {
   auto const found = std::ranges::find(state_.domain_names, name);
@@ -126,7 +137,10 @@ auto clock::domain(std::string_view name) -> clock_domain
 
 void clock::set_hz(clock_domain domain, std::uint64_t hz)
 {
-  state_.domain_hz[domain.index] = hz;
+  if(std::exchange(state_.domain_hz[domain.index], hz) != hz and on_domain_)
+  {
+    on_domain_(domain);
+  }
 }
 
 void clock_driver::restore(clock_state const& saved)
@@ -151,6 +165,11 @@ void clock_driver::restore(clock_state const& saved)
 void clock_driver::on_rate_change(std::move_only_function<void()> hook)
 {
   clock_.on_epoch_ = std::move(hook);
+}
+
+void clock_driver::on_domain_rate_change(std::move_only_function<void(clock_domain)> hook)
+{
+  clock_.on_domain_ = std::move(hook);
 }
 
 void clock_driver::on_charged_ahead(std::move_only_function<std::uint64_t()> ahead)

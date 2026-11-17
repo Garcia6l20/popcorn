@@ -126,6 +126,14 @@ inline auto clocked(std::uint64_t hz, std::uint32_t dt = 0) -> core::trace_recor
   };
 }
 
+inline auto domain_clocked(std::uint32_t index, std::uint64_t hz, std::uint32_t dt = 0)
+    -> core::trace_record
+{
+  auto record = clocked(hz, dt);
+  record.aux  = static_cast<std::uint16_t>(index + 1);
+  return record;
+}
+
 inline auto cut_at(address pc, std::uint16_t unrun) -> core::trace_record
 {
   return {

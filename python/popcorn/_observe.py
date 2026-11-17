@@ -250,6 +250,7 @@ def open_profile(
     logged_registers: Iterable[int],
     write_log_limit: int,
     max_call_depth: int,
+    write_clock_domain: str = "",
 ) -> ProfileRecording:
     """Start a profile for `Machine._profile`."""
     settings = _core.ProfileOptions()
@@ -259,6 +260,7 @@ def open_profile(
     settings.logged_registers = list(logged_registers)
     settings.write_log_limit = write_log_limit
     settings.max_call_depth = max_call_depth
+    settings.write_clock_domain = write_clock_domain
     return ProfileRecording(handle.open_profile(settings))
 
 

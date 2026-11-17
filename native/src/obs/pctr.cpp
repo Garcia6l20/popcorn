@@ -52,7 +52,7 @@ void pctr_writer::closer::operator()(std::FILE* file) const noexcept
 }
 
 pctr_writer::pctr_writer(std::filesystem::path path, icount origin, pctr_names names)
-    : path_{std::move(path)}, names_{std::move(names)}
+    : path_{std::move(path)}, names_{std::move(names)}, at_{origin.value}
 {
   names_.register_ranges = sorted(std::move(names_.register_ranges));
   names_.symbol_ranges   = sorted(std::move(names_.symbol_ranges));
@@ -166,7 +166,31 @@ void pctr_writer::write(std::span<core::trace_record const> records)
   }
   for(auto const& held : records)
   {
-    record(held);
+    if(held.kind == core::trace_kind::time)
+    {
+      at_      = held.payload[0] | std::uint64_t{held.payload[1]} << 32;
+      carried_ = 0;
+      record(held);
+      continue;
+    }
+    at_ += held.dt;
+    if(held.kind == core::trace_kind::clock and held.aux != 0)
+    {
+      carried_ += held.dt;
+      continue;
+    }
+    auto       kept = held;
+    auto const dt   = std::exchange(carried_, 0) + held.dt;
+    if(dt > std::numeric_limits<std::uint32_t>::max())
+    {
+      record(time_record(icount{at_}));
+      kept.dt = 0;
+    }
+    else
+    {
+      kept.dt = static_cast<std::uint32_t>(dt);
+    }
+    record(kept);
   }
 }
 

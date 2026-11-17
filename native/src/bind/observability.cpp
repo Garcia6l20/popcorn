@@ -33,6 +33,12 @@ namespace
 {
 namespace nb = reflex::py::nb;
 
+auto write_domain(core::machine const& target, std::string_view name)
+    -> std::optional<core::clock_domain>
+{
+  return name.empty() ? std::nullopt : target.virtual_clock().find_domain(name);
+}
+
 auto native_ranges(std::vector<detail::range_row> const& rows) -> std::vector<address_range>
 {
   std::vector<address_range> out;
@@ -376,13 +382,17 @@ auto machine_handle::open_profile(profile_settings const& settings) -> profile_h
         .burst_window_ps  = settings.burst_window_ps,
         .logged_registers = settings.logged_registers,
         .write_log_limit  = static_cast<std::size_t>(settings.write_log_limit),
+        .write_domain     = write_domain(target, settings.write_clock_domain),
         .code = settings.call_stacks ? obs::machine_code_reader(target) : obs::code_reader{},
         .max_call_depth = settings.max_call_depth,
     };
+    auto domains = options.write_domain ? std::vector{*options.write_domain}
+                                        : std::vector<core::clock_domain>{};
     auto sink =
         std::make_shared<obs::profile_sink>(target.virtual_clock().now(), std::move(options));
     auto hook = target.add_trace_sink(
-        obs::profile_sink::kinds, obs::owned_sink(sink), {}, settings.loop_reports);
+        obs::profile_sink::kinds, obs::owned_sink(sink), {}, settings.loop_reports,
+        std::move(domains));
     return profile_handle{std::move(sink), std::move(hook), slot_};
   });
 }

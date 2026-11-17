@@ -107,6 +107,9 @@ struct[[= py::rename{"ProfileOptions"}]] profile_settings
   std::vector<std::uint16_t> logged_registers{};
   /** @brief Writes kept per logged register. */
   std::uint64_t write_log_limit{4096};
+  /** @brief Clock domain whose rate the profile follows for the logged writes, empty or unknown
+   * for none. */
+  std::string write_clock_domain{};
   /** @brief Whether the call stack tracker runs. */
   bool call_stacks{};
   /** @brief Most call frames the tracker keeps. */

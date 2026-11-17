@@ -467,12 +467,77 @@ TEST_CASE("a write log keeps CPU writes of its registers up to the limit and cou
       == std::vector<obs::profile_write_log>{
           {.id = 7,
            .writes =
-               {{.at = icount{1003}, .value = 1, .segment = 0},
-                {.at = icount{1007}, .value = 5, .segment = 0},
-                {.at = icount{2}, .value = 6, .segment = 1}},
+               {{.at = icount{1003}, .value = 1, .segment = 0, .pc = 0x100, .record = 1},
+                {.at = icount{1007}, .value = 5, .segment = 0, .pc = 0x100, .record = 5},
+                {.at = icount{2}, .value = 6, .segment = 1, .pc = 0x100, .record = 6}},
            .dropped = 1},
           {.id = 9},
   });
+}
+
+TEST_CASE("first hits and logged writes carry their profile time across a cut")
+{
+  auto const result = fed(
+      {
+          clocked(4'000'000),
+          domain_clocked(3, 0),
+          domain_clocked(5, 99),
+          block(0x100, 4, 10),
+          domain_clocked(3, 32'000, 1),
+          access(7, 0x104, 0x4000'0010, 1, true, 1),
+          domain_clocked(5, 7, 1),
+          time_to(0),
+          clocked(160'000'000),
+          domain_clocked(3, 250),
+          block(0x200, 2, 6),
+          block(0x100, 4, 4),
+          access(7, 0x204, 0x4000'0010, 2, true, 1),
+      },
+      {.logged_registers = {7}, .write_domain = core::clock_domain{3}});
+  REQUIRE(result.code.size() == 2);
+  CHECK(result.code[0].pc == 0x100);
+  CHECK(result.code[0].entries == 2);
+  CHECK(result.code[0].first_ps == 6 * 250'000);
+  CHECK(result.code[1].first_ps == 13 * 250'000 + 4 * 6'250);
+  CHECK(result.records == 7);
+  REQUIRE(result.write_logs.size() == 1);
+  CHECK(
+      result.write_logs[0].writes
+      == std::vector<obs::profile_write>{
+          {.at       = icount{1012},
+           .value    = 1,
+           .segment  = 0,
+           .pc       = 0x104,
+           .ps       = 12 * 250'000,
+           .clock_hz = 32'000,
+           .record   = 3},
+          {.at       = icount{11},
+           .value    = 2,
+           .segment  = 1,
+           .pc       = 0x204,
+           .ps       = 13 * 250'000 + 11 * 6'250,
+           .clock_hz = 250,
+           .record   = 7},
+  });
+  CHECK(
+      result.domain_rates
+      == std::vector<obs::profile_rate>{
+          {.at = icount{1000}, .segment = 0, .ps = 0,            .hz = 0,      .record = 1},
+          {.at = icount{1011}, .segment = 0, .ps = 11 * 250'000, .hz = 32'000, .record = 2},
+          {.at = icount{0},    .segment = 1, .ps = 13 * 250'000, .hz = 250,    .record = 4},
+  });
+  CHECK(result.elapsed_ps == 13 * 250'000 + 11 * 6'250);
+}
+
+TEST_CASE("a sink with no clock domain keeps no rate and writes record 0 Hz")
+{
+  auto const result = fed(
+      {clocked(4'000'000), domain_clocked(3, 32'000), access(7, 0x104, 0x4000'0010, 1, true, 2)},
+      {.logged_registers = {7}});
+  CHECK(result.domain_rates.empty());
+  CHECK(result.records == 2);
+  REQUIRE(result.write_logs[0].writes.size() == 1);
+  CHECK(result.write_logs[0].writes[0].clock_hz == 0);
 }
 
 TEST_CASE("more distinct blocks than the initial table keep every count")

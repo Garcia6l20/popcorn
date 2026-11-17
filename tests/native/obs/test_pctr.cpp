@@ -370,3 +370,70 @@ TEST_CASE("an id past the name table falls back to the address")
   CHECK(file.records[1].name == "P.B");
   CHECK(file.records[2].record.aux == core::trace_id_overflow);
 }
+
+TEST_CASE("a clock domain's records stay out of the file and their time goes to the next record")
+{
+  auto const       path = scratch("domains.pctr");
+  obs::pctr_writer writer{path, icount{100}, {}};
+  auto const       domain_clock = [](std::uint32_t dt) {
+    return trace_record{
+        .kind = trace_kind::clock, .aux = 1, .dt = dt, .payload = {32'000, 0, 0}
+    };
+  };
+  std::array const records{
+      trace_record{.kind = trace_kind::clock, .payload = {4'000'000, 0, 0}},
+      domain_clock(5),
+      trace_record{.kind = trace_kind::block, .aux = 1, .dt = 3, .payload = {0x100, 0, 0}},
+      domain_clock(0xffff'ffff),
+      trace_record{.kind = trace_kind::block, .aux = 1, .dt = 2, .payload = {0x100, 0, 0}},
+  };
+  writer.write(records);
+  writer.close();
+  auto const file = decode(path);
+  auto const kinds =
+      file.records
+      | std::views::transform([](decoded_record const& entry) { return entry.record.kind; })
+      | std::ranges::to<std::vector>();
+  CHECK(
+      kinds
+      == std::vector{
+          trace_kind::time, trace_kind::clock, trace_kind::block, trace_kind::time,
+          trace_kind::block});
+  CHECK(file.records[1].record.aux == 0);
+  CHECK(file.records[2].record.dt == 8);
+  CHECK(file.records[2].time == 108);
+  CHECK(file.records[4].record.dt == 0);
+  CHECK(file.records[4].time == 108 + std::uint64_t{0xffff'ffff} + 2);
+}
+
+TEST_CASE("a writer added with a clock domain writes the core rates only")
+{
+  fixture          f{m33(), "alu", {}};
+  auto&            clock   = const_cast<core::clock&>(f.target->virtual_clock());
+  auto const       watched = clock.domain("watched");
+  auto const       path    = scratch("machine-domains.pctr");
+  auto const       start   = f.target->virtual_clock().now();
+  obs::pctr_writer writer{path, start, {}};
+  {
+    auto const sink = f.target->add_trace_sink(
+        {trace_kind::block, trace_kind::clock}, writer.sink(), {}, 0, {watched});
+    clock.set_hz(watched, 32'000);
+    core::slice_request budget;
+    budget.budget_left = icount{20};
+    REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
+    clock.set_hz(watched, 250);
+    REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
+  }
+  writer.close();
+  auto const file   = decode(path);
+  auto const clocks = file.records
+                    | std::views::filter([](decoded_record const& entry) {
+                        return entry.record.kind == trace_kind::clock;
+                      })
+                    | std::ranges::to<std::vector>();
+  REQUIRE_FALSE(clocks.empty());
+  CHECK(std::ranges::all_of(clocks, [](decoded_record const& entry) {
+    return entry.record.aux == 0 and entry.record.payload[0] != 32'000;
+  }));
+  CHECK(file.records.back().time == f.target->virtual_clock().now().value);
+}

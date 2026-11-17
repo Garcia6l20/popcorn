@@ -85,6 +85,11 @@ void profile_sink::feed(std::span<core::trace_record const> records)
     }
     now_.value += record.dt;
     elapsed_ += record.dt;
+    if(record.kind == core::trace_kind::clock and record.aux != 0)
+    {
+      domain_clock(record);
+      continue;
+    }
     ++records_;
     switch(record.kind)
     {
@@ -129,6 +134,7 @@ void profile_sink::time(icount to, bool rebase)
     return;
   }
   close_clock_span();
+  segments_ps_ += ps_at(now_);
   marks_.clear();
   now_  = to;
   base_ = to;
@@ -141,6 +147,17 @@ void profile_sink::clock(std::uint64_t hz)
   clock_elapsed_ = elapsed_;
   marks_.push_back({.at = now_, .ps = ps_at(now_), .hz = hz});
   clocks_.push_back({.at = now_, .segment = cuts_, .hz = hz});
+}
+
+void profile_sink::domain_clock(core::trace_record const& record)
+{
+  if(not options_.write_domain or record.aux != options_.write_domain->index + 1)
+  {
+    return;
+  }
+  domain_hz_ = std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32;
+  domain_rates_.push_back(
+      {.at = now_, .segment = cuts_, .ps = profile_ps(now_), .hz = domain_hz_, .record = records_});
 }
 
 void profile_sink::close_clock_span()
@@ -174,6 +191,11 @@ auto profile_sink::ps_at(icount at) const -> std::uint64_t
 auto profile_sink::ps_between(icount from, icount to) const -> std::uint64_t
 {
   return to > from ? ps_at(to) - ps_at(from) : 0;
+}
+
+auto profile_sink::profile_ps(icount at) const -> std::uint64_t
+{
+  return segments_ps_ + ps_at(at);
 }
 
 void profile_sink::add_gap(profile_gaps& into, icount from, icount to) const
@@ -325,7 +347,13 @@ auto profile_sink::count_block(address pc, std::uint32_t instructions) -> std::s
           break;
         }
         ++used_slots_;
-        slot = {.pc = pc, .used = true, .entries = 1, .instructions = instructions};
+        slot = {
+            .pc           = pc,
+            .used         = true,
+            .entries      = 1,
+            .instructions = instructions,
+            .first_ps =
+                profile_ps(icount{now_.value - std::min<std::uint64_t>(now_.value, instructions)})};
         return at;
       }
     }
@@ -684,7 +712,14 @@ void profile_sink::mmio(core::trace_record const& record)
     }
     if(log.writes.size() < options_.write_log_limit)
     {
-      log.writes.push_back({.at = now_, .value = value, .segment = cuts_});
+      log.writes.push_back(
+          {.at       = now_,
+           .value    = value,
+           .segment  = cuts_,
+           .pc       = record.payload[0],
+           .ps       = profile_ps(now_),
+           .clock_hz = domain_hz_,
+           .record   = records_});
     }
     else
     {
@@ -712,13 +747,17 @@ auto profile_sink::result() const -> profile_result
       .dma_registers      = sorted_registers(dma_registers_),
       .debugger_registers = sorted_registers(debugger_registers_),
       .write_logs         = write_logs_,
+      .domain_rates       = domain_rates_,
   };
   for(auto const& slot : slots_)
   {
     if(slot.used)
     {
       out.code.push_back(
-          {.pc = slot.pc, .entries = slot.entries, .instructions = slot.instructions});
+          {.pc           = slot.pc,
+           .entries      = slot.entries,
+           .instructions = slot.instructions,
+           .first_ps     = slot.first_ps});
     }
   }
   if(not marks_.empty())

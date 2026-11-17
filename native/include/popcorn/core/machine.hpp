@@ -856,10 +856,13 @@ public:
    *        follow it again when the sink is removed. The sink receives the reported runs of at
    *        least @p loop_passes passes, whatever lower requests are attached, and every reported
    *        run with no request.
+   * @param domains Clock domains whose rates the sink receives in clock records of aux the domain
+   *        index plus 1, see trace_kind::clock. Needs trace_kind::clock in @p kinds.
    * @return Handle removing the sink. Destroying the handle inside a slice removes the sink at
    *         the slice end, so @p sink must own what it calls until it is destroyed.
-   * @throws std::invalid_argument when @p sink is empty, or @p loop_passes is not 0 and @p kinds
-   *         lacks trace_kind::loop.
+   * @throws std::invalid_argument when @p sink is empty, @p loop_passes is not 0 and @p kinds
+   *         lacks trace_kind::loop, or @p domains is not empty and @p kinds lacks
+   *         trace_kind::clock, or names a domain the clock does not have.
    * @throws machine_running while a slice runs, handlers included, and from a trace sink while
    *         it is called.
    */
@@ -867,7 +870,8 @@ public:
       trace_kinds                kinds,
       trace_sink                 sink,
       std::vector<address_range> ranges      = {},
-      std::uint32_t              loop_passes = 0) -> hook_handle;
+      std::uint32_t              loop_passes = 0,
+      std::vector<clock_domain>  domains     = {}) -> hook_handle;
 
   /**
    * @brief Receives the machine's log records, such as unmodelled peripheral accesses.

@@ -9,6 +9,9 @@ instructions per function, sleeps, exceptions, register accesses and loop runs b
     asyncio.run(main())
 """
 
+from popcorn.profiling._boot import Milestone
+from popcorn.profiling._diff import ReportDiff, diff
+from popcorn.profiling._export import SCHEMA
 from popcorn.profiling._report import MIN_PASSES, NOTES, Profile, Report
 from popcorn.profiling._tables import (
     ALL,
@@ -29,12 +32,14 @@ from popcorn.profiling._tables import (
     WakeRow,
     selected,
 )
+from popcorn.profiling._watchdog import Watchdog, WatchdogGap
 
 __all__ = [
     "ALL",
     "BURST_WINDOW_PS",
     "MIN_PASSES",
     "NOTES",
+    "SCHEMA",
     "Analysis",
     "ClockSpan",
     "ExceptionRow",
@@ -45,11 +50,16 @@ __all__ = [
     "Irq",
     "LoopRow",
     "Loops",
+    "Milestone",
     "Peripherals",
     "Profile",
     "RegisterRow",
     "Report",
+    "ReportDiff",
     "Sleep",
     "WakeRow",
+    "Watchdog",
+    "WatchdogGap",
+    "diff",
     "selected",
 ]

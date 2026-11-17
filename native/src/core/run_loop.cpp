@@ -269,6 +269,7 @@ void machine::run_state::reset_notified(reset_kind kind)
   fresh.held_time       = {};
   fresh.core_hz         = core_clock_hz(owner.description_, owner.options_);
   fresh.cpi             = owner.options_.cpi;
+  rebase_pending        = true;
   owner.clock_driver_.restore(fresh);
   post_loop();
   unmapped.reset();

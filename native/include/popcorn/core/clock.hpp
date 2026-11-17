@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -211,6 +212,13 @@ public:
   [[nodiscard]] auto domain(std::string_view name) -> clock_domain;
 
   /**
+   * @brief Finds a clock domain by name without creating it.
+   * @param name Domain name.
+   * @return Its handle, empty when no model resolved the name.
+   */
+  [[nodiscard]] auto find_domain(std::string_view name) const -> std::optional<clock_domain>;
+
+  /**
    * @brief Current frequency of a clock domain.
    * @param domain Handle from domain().
    * @return Frequency in Hz. 0 for a stopped clock: a domain nothing has set yet, a gated
@@ -229,6 +237,7 @@ public:
    * @param domain Handle from domain().
    * @param hz Frequency in Hz, 0 for a stopped clock: a gated peripheral clock or a source that
    *        is off. The core clock is set through set_core_hz(), which keeps it above 0.
+   *        A change of the rate calls the hook of clock_driver::on_domain_rate_change().
    */
   void set_hz(clock_domain domain, std::uint64_t hz) pre(domain.index < state_.domain_hz.size());
 
@@ -257,11 +266,12 @@ private:
     }
   }
 
-  clock_state                              state_;
-  std::uint64_t                            instruction_hz_{};
-  divisor                                  instruction_div_;
-  std::move_only_function<void()>          on_epoch_;
-  std::move_only_function<std::uint64_t()> charged_ahead_;
+  clock_state                                 state_;
+  std::uint64_t                               instruction_hz_{};
+  divisor                                     instruction_div_;
+  std::move_only_function<void()>             on_epoch_;
+  std::move_only_function<std::uint64_t()>    charged_ahead_;
+  std::move_only_function<void(clock_domain)> on_domain_;
 };
 
 /**
@@ -400,6 +410,13 @@ public:
    * @param ahead Returns the count, 0 when none or unknown, empty to remove.
    */
   void on_charged_ahead(std::move_only_function<std::uint64_t()> ahead);
+
+  /**
+   * @brief Installs the function clock::set_hz() calls after it changed a domain's rate. A
+   *        restore() changes rates without calling it.
+   * @param hook Called with the domain, empty to remove.
+   */
+  void on_domain_rate_change(std::move_only_function<void(clock_domain)> hook);
 
 private:
   clock& clock_;

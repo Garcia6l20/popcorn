@@ -114,6 +114,8 @@ machine::machine(part_description description, arch::arch_factory factory, machi
     run_->emit_clock();
   });
   clock_driver_.on_charged_ahead([run = run_.get()] { return run->charged_ahead(); });
+  clock_driver_.on_domain_rate_change(
+      [run = run_.get()](clock_domain domain) { run->emit_domain_clock(domain); });
   arch_ = factory(description_.core);
   if(not arch_)
   {
@@ -146,6 +148,7 @@ machine::~machine()
 {
   clock_driver_.on_rate_change({});
   clock_driver_.on_charged_ahead({});
+  clock_driver_.on_domain_rate_change({});
   hooks_->remover = nullptr;
   peripherals_.clear();
   arch_.reset();

@@ -61,6 +61,17 @@ TEST_CASE("clock domains start unset and keep their handles")
   CHECK(clock.hz(apb1) == 40'000'000);
 }
 
+TEST_CASE("finding a clock domain by name creates none")
+{
+  popcorn::core::clock clock{160'000'000};
+  auto const           apb1 = clock.domain("apb1");
+  auto const           lsi  = clock.domain("lsi");
+  CHECK(clock.find_domain("lsi") == lsi);
+  CHECK(clock.find_domain("apb1") == apb1);
+  CHECK(clock.find_domain("hse") == std::nullopt);
+  CHECK(clock.domain("hse") == popcorn::core::clock_domain{2});
+}
+
 TEST_CASE("a stopped clock domain stores 0 and leaves the core clock running")
 {
   popcorn::core::clock clock{160'000'000};

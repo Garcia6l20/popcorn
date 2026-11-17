@@ -60,7 +60,9 @@ struct pctr_payload
  *   exception whose entry woke it, 0 for a wake with no entry.
  * - clock: written to a sink when it is added, after a rebase and at every change of the core
  *   rate, stamped where the rate starts, payload[0] and payload[1] the instructions per second
- *   from there on, low word first.
+ *   from there on, low word first, aux 0. A sink that asked for clock domains, see
+ *   machine::add_trace_sink(), also receives their rates in Hz at the same points and at every
+ *   change, aux the domain index plus 1.
  * - cut: written to sinks when the engine leaves a block before its end, after the block record,
  *   payload[0] the block's start, aux the instructions of the block that did not run.
  * - loop: written to sinks while loop reports are on, see machine::set_loop_reports(), when a
