@@ -330,11 +330,11 @@ def test_a_member_s_handler_error_stops_the_system_and_names_the_member(
     with System({"a": a, "b": b}, links(None)) as system:
         with pytest.raises(RuntimeError, match="TIM6 tick 50") as raised:
             asyncio.run(system.run(for_=ms(1)))
-        assert raised.value.__notes__ == ["raised by member a at system time t=100500000 ps"]
+        assert raised.value.__notes__ == ["raised by member a at system time t=100250000 ps"]
         with pytest.raises(popcorn.EmulationError, match="stopped on an error") as again:
             asyncio.run(system.run(for_=ms(1)))
         assert again.value.__cause__ is raised.value
-        assert raised.value.__notes__ == ["raised by member a at system time t=100500000 ps"]
+        assert raised.value.__notes__ == ["raised by member a at system time t=100250000 ps"]
 
 
 def test_a_closed_system_and_its_members_are_freed(u575: popcorn.PartDescription) -> None:

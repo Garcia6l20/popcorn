@@ -359,7 +359,7 @@ def test_a_goal_failed_by_a_halted_member_s_error_raises_it_naming_that_member(
             await a.run(for_=us(100))
             with pytest.raises(RuntimeError, match="TIM6 tick 150") as raised:
                 await b.run(for_=ms(3))
-            assert raised.value.__notes__ == ["raised by member a at system time t=1100500000 ps"]
+            assert raised.value.__notes__ == ["raised by member a at system time t=1100250000 ps"]
 
         asyncio.run(body())
 

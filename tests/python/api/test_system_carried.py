@@ -148,7 +148,7 @@ def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Bui
 
     message, notes = across(pair, body, a_models={"TIM6": Ticker})
     assert message == "TIM6 tick 50"
-    assert notes == ["raised by member a at system time t=100500000 ps"]
+    assert notes == ["raised by member a at system time t=100250000 ps"]
 
 
 def test_a_member_error_leaves_the_machines_of_a_closed_system_collectable(
@@ -216,7 +216,7 @@ def test_a_halted_member_s_error_fails_the_goal_of_the_next_run(pair: Build) -> 
         return point(first), raised.value.__notes__
 
     _, notes = across(pair, body, a_models={"TIM6": Ticker})
-    assert notes == ["raised by member a at system time t=1100500000 ps"]
+    assert notes == ["raised by member a at system time t=1100250000 ps"]
 
 
 def test_a_member_s_goals_count_only_what_it_executed_not_its_halt(pair: Build) -> None:

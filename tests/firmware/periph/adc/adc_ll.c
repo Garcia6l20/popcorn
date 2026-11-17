@@ -102,15 +102,16 @@ static void clocks(void)
   while(!LL_PWR_IsActiveFlag_VOS())
   {
   }
+  LL_RCC_MSIS_Enable();
+  while(!LL_RCC_MSIS_IsReady())
+  {
+  }
+  LL_RCC_PLL1_SetMainSource(LL_RCC_PLL1SOURCE_MSIS);
   LL_PWR_EnableEPODBooster();
   while(!LL_PWR_IsActiveFlag_BOOST())
   {
   }
   FLASH->ACR = (FLASH->ACR & ~FLASH_ACR_LATENCY) | 4u;
-  LL_RCC_MSIS_Enable();
-  while(!LL_RCC_MSIS_IsReady())
-  {
-  }
   LL_RCC_PLL1_ConfigDomain_SYS(LL_RCC_PLL1SOURCE_MSIS, 1, 80, 2);
   LL_RCC_PLL1_SetVCOInputRange(LL_RCC_PLLINPUTRANGE_4_8);
   LL_RCC_PLL1_EnableDomain_SYS();

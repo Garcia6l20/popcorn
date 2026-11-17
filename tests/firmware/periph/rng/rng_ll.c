@@ -212,6 +212,7 @@ void pll_160(void)
   while(!LL_PWR_IsActiveFlag_VOS())
   {
   }
+  LL_RCC_PLL1_SetMainSource(LL_RCC_PLL1SOURCE_MSIS);
   LL_PWR_EnableEPODBooster();
   while(!LL_PWR_IsActiveFlag_BOOST())
   {

@@ -1,6 +1,7 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_pwr.h"
+#include "stm32u5xx_ll_rcc.h"
 
 #define POLL(condition) \
   do                    \
@@ -18,6 +19,7 @@ int main(void)
   LL_AHB3_GRP1_EnableClock(LL_AHB3_GRP1_PERIPH_PWR);
   LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE1);
   POLL(LL_PWR_IsActiveFlag_VOS());
+  LL_RCC_PLL1_SetMainSource(LL_RCC_PLL1SOURCE_MSIS);
   LL_PWR_EnableEPODBooster();
   POLL(LL_PWR_IsActiveFlag_BOOST());
   LL_PWR_EnableBkUpAccess();
