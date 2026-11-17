@@ -285,6 +285,7 @@ void test_arch::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   event_log.push_back({.kind = kind, .payload = payload, .at = context_->clock.now()});
+  event_times.push_back(context_->clock.time());
   if(kind == chain_event)
   {
     std::ignore = events.schedule(context_->clock.now(), 1, payload + 1);

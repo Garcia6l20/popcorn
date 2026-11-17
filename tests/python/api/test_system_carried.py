@@ -257,14 +257,58 @@ def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> 
         a, b = system.members["a"], system.members["b"]
         first = await a.run(for_=us(200))
         assert a.time == first.time
-        behind = system.time_of("b").ps - system.time_of("a").ps
-        assert 0 <= behind <= us(0.25).ps
+        assert system.time_of("a") == system.time_of("b")
         second = await b.run(for_=ms(1))
         third = await a.step(5)
         assert third.reason is StopReason.BUDGET
         return point(first), point(second), point(third), logged(b)
 
     across(pair, sequence)
+
+
+OFF_GRID_TARGETS = [
+    pytest.param(200_000_000, id="200us"),
+    pytest.param(200_100_000, id="200.1us"),
+    pytest.param(201_000_000, id="201us"),
+    pytest.param(201_000_001, id="201us+1ps"),
+    pytest.param(300_000_000, id="300us"),
+    pytest.param(301_000_000, id="301us"),
+]
+
+
+@pytest.mark.parametrize("target_ps", OFF_GRID_TARGETS)
+@pytest.mark.parametrize("how", ["halted", "idle", "frozen"])
+def test_a_halted_or_idle_member_stands_exactly_where_the_running_one_stops(
+    pair: Build, target_ps: int, how: str
+) -> None:
+    async def body(system: System) -> object:
+        a, b = system.members["a"], system.members["b"]
+        if how == "frozen":
+            b.halt()
+        first = await a.run(for_=VirtualDuration(target_ps))
+        assert first.reason is StopReason.TIME
+        assert system.time_of("b") == system.time_of("a")
+        assert system.time_of("a").ps >= target_ps
+        return point(first), system.time_of("b"), b.time
+
+    across(pair, body, b_entry="idle" if how == "idle" else "link_rx")
+
+
+@pytest.mark.parametrize("target_ps", OFF_GRID_TARGETS)
+def test_an_idle_member_with_a_goal_stops_exactly_at_the_target(
+    pair: Build, target_ps: int
+) -> None:
+    async def body(system: System) -> object:
+        a, b = system.members["a"], system.members["b"]
+        a_stop, b_stop = await asyncio.gather(
+            a.run(for_=VirtualDuration(target_ps)), b.run(for_=VirtualDuration(target_ps))
+        )
+        assert (a_stop.reason, b_stop.reason) == (StopReason.TIME, StopReason.TIME)
+        assert system.to_system("b", b_stop.time) == VirtualTime(target_ps)
+        assert system.time_of("b") == system.time_of("a")
+        return system.time_of("a"), b.time
+
+    across(pair, body, b_entry="idle")
 
 
 def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_goal(

@@ -82,6 +82,7 @@ clock::~clock() = default;
 
 void clock::start_epoch()
 {
+  clear_idle();
   auto const elapsed = state_.now.value - state_.epoch_icount.value;
   auto const ahead   = charged_ahead_ ? std::min(charged_ahead_(), elapsed) : 0;
   state_.epoch_time =
@@ -160,6 +161,17 @@ void clock_driver::restore(clock_state const& saved)
   }
   current = std::move(next);
   clock_.refresh_rate();
+}
+
+void clock_driver::read_exactly(vtime at)
+{
+  auto& state = clock_.state_;
+  if(state.held.value != 0 or state.now.value == 0)
+  {
+    return;
+  }
+  state.idle_count = state.now;
+  state.idle_time  = at;
 }
 
 void clock_driver::on_rate_change(std::move_only_function<void()> hook)

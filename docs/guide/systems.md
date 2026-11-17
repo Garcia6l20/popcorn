@@ -44,9 +44,12 @@ After a member stop at system time `P`, every other member that runs a goal and 
 stands where it stopped, a position that depends on the quantum.
 
 A member that has no goal while another one runs one is halted. Its core executes nothing, and
-its clocks, peripherals and DMA follow the system time. It stands at the first instruction
-boundary of its own core clock at or after the target, up to one core period past it, 250 ns at
-4 MHz. A goal's `budget` counts executed instructions, so halted time does not use it up.
+its clocks, peripherals and DMA follow the system time. It stands exactly at the time the running
+member stops, or at the target of the run, also when that time falls inside a cycle of its own
+core clock: the cycle in progress counts as
+retired and the next instruction ends at the end of the following cycle, so a run in several
+steps equals one run. A goal's `budget` counts executed instructions, so halted time does not use
+it up.
 
 ## Frames and latency
 

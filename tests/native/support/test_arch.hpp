@@ -71,6 +71,8 @@ public:
 
   /** @brief Events dispatched to the module, timer expiries excepted, in dispatch order. */
   std::vector<logged_event> event_log{};
+  /** @brief Clock time at the dispatch of each logged event, same order as event_log. */
+  std::vector<vtime> event_times{};
   /** @brief What thread_mode() returns, for a test that drives the run loop's thread check. */
   bool in_thread_mode = true;
 

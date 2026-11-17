@@ -944,6 +944,8 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
   }
   while(auto const due = owner.scheduler_.pop_due(limit))
   {
+    owner.clock_driver_.read_cycle_end();
+    event_dispatched_at = owner.clock_driver_.exact_now();
     if(due->id.owner == arch::arch_event_owner)
     {
       arch->on_event(due->id.kind, due->payload);
@@ -1021,6 +1023,56 @@ auto machine::run_state::asks_stop(slice_request const& request) -> bool
   return request.stop_when();
 }
 
+void machine::run_state::read_inside_cycle(slice_request const& request, bool allowed, bool fresh)
+{
+  if(not request.until_time)
+  {
+    return;
+  }
+  if(not request.exact_idle_stop)
+  {
+    if(owner.clock_driver_.reads_inside_cycle() and owner.clock_.time() < *request.until_time)
+    {
+      owner.clock_driver_.read_cycle_end();
+    }
+    return;
+  }
+  if(not allowed)
+  {
+    return;
+  }
+  auto const until = *request.until_time;
+  auto const now   = owner.clock_driver_.exact_now();
+  if(owner.clock_.to_icount(until) != now)
+  {
+    return;
+  }
+  if(event_dispatched_at.value != 0 and event_dispatched_at == now)
+  {
+    owner.clock_driver_.read_cycle_end();
+    return;
+  }
+  if(owner.clock_driver_.exact_time() <= until)
+  {
+    owner.clock_driver_.read_cycle_end();
+    return;
+  }
+  if(not fresh and owner.clock_.time() >= until)
+  {
+    return;
+  }
+  if(std::ranges::none_of(owner.scheduler_.pending(), [&](event const& pending) {
+       return pending.kind == deadline::time and pending.at <= now and pending.due_ps > until.ps;
+     }))
+  {
+    owner.clock_driver_.read_exactly(until);
+  }
+  else
+  {
+    owner.clock_driver_.read_cycle_end();
+  }
+}
+
 auto machine::run_state::idle_jump(slice_request const& request) -> std::optional<slice_end>
 {
   if(request.stop_when
@@ -1063,6 +1115,7 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
   {
     jumped.value += target.value - now.value;
     owner.clock_driver_.jump_to(target);
+    idle_arrival = target;
   }
   return std::nullopt;
 }
@@ -1128,6 +1181,9 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   }
   if(request.until_time and owner.clock_driver_.exact_time() >= *request.until_time)
   {
+    auto const arrived =
+        idle_arrival.value != 0 and idle_arrival == owner.clock_driver_.exact_now();
+    read_inside_cycle(request, arrived or owner.clock_driver_.reads_inside_cycle(), arrived);
     return slice_end{make_stop(stop_reason::time, {}, std::nullopt)};
   }
   if((request.until or not request.until_also.empty())
@@ -1398,6 +1454,8 @@ auto machine::run_state::count_progress() const noexcept -> icount
 
 auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
+  idle_arrival        = {};
+  event_dispatched_at = {};
   if(not end.stopped or end.stopped->reason == stop_reason::spin)
   {
     if(auto const asked = take_requested())

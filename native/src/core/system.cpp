@@ -367,7 +367,7 @@ public:
           if(moves_on(target, sys_.chosen.target))
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.target, false, false, true);
+            return request_to(sys_.chosen.target, false, false, true, true);
           }
           settle_idle(target);
           phase_ = phase::begin;
@@ -376,7 +376,7 @@ public:
           if(moves_on(target, sys_.chosen.head->at))
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.head->at, false, true, true);
+            return request_to(sys_.chosen.head->at, false, true, true, true);
           }
           phase_ = phase::begin;
           return std::nullopt;
@@ -602,8 +602,12 @@ private:
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, bool hold, bool moves_asleep = false)
-      -> slice_request
+  auto request_to(
+      sys_time bound,
+      bool     quiescent,
+      bool     hold,
+      bool     moves_asleep = false,
+      bool     exact        = false) -> slice_request
   {
     auto& one = sys_.slots[index_];
     enter_windows();
@@ -615,6 +619,7 @@ private:
         .wall_budget           = sys_.bounds.wall_budget,
         .until_time            = until_last_,
         .hold_from_until       = hold,
+        .exact_idle_stop       = exact,
         .internal_stop         = true,
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
@@ -683,19 +688,22 @@ private:
     }
     auto const quiescent =
         bound == sys_.pending and not timed and not sys_.until and not(at and *at <= bound);
+    auto const stamped = at and *at <= bound;
+    auto const final   = (sys_.until and bound == *sys_.until) or (timed and bound == timed->first);
     if(at)
     {
       bound = earlier_of(bound, *at);
     }
-    return toward(target, bound, quiescent);
+    return toward(target, bound, quiescent, final and not stamped);
   }
 
-  auto toward(machine const& target, sys_time bound, bool quiescent) -> std::optional<slice_request>
+  auto toward(machine const& target, sys_time bound, bool quiescent, bool exact)
+      -> std::optional<slice_request>
   {
     auto const& one = sys_.slots[index_];
     if(position(target) < bound or (one.held_to and *one.held_to < bound))
     {
-      return request_to(bound, quiescent and position(target) < bound, true);
+      return request_to(bound, quiescent and position(target) < bound, true, false, exact);
     }
     return std::nullopt;
   }
@@ -715,11 +723,12 @@ private:
     }
     auto       bound     = sys_.chosen.target;
     auto const quiescent = not sys_.chosen.pause and not(at and *at <= bound);
+    auto const stamped   = at and *at <= bound;
     if(at)
     {
       bound = earlier_of(bound, *at);
     }
-    return toward(target, bound, quiescent);
+    return toward(target, bound, quiescent, not stamped);
   }
 
   auto arrive(

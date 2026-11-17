@@ -783,3 +783,63 @@ TEST_CASE("clock time follows rate changes and a restore like the exact conversi
   restoring.jump_to({count + 123'457});
   CHECK(copy.time().ps == clock.time().ps);
 }
+
+TEST_CASE("read_exactly reads a time inside the cycle, keeps the grid and clears with the count")
+{
+  popcorn::core::clock        clock{4'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.jump_to({1000});
+  REQUIRE(clock.time().ps == 250'000'000);
+  driver.read_exactly({249'900'000});
+  CHECK(clock.time().ps == 249'900'000);
+  CHECK(driver.exact_time().ps == 250'000'000);
+  CHECK(clock.now().value == 1000);
+  CHECK(clock.to_icount({249'900'001}).value == 1000);
+  CHECK(clock.to_icount({250'000'001}).value == 1001);
+  CHECK(driver.reads_inside_cycle());
+  auto const saved = driver.state();
+  driver.advance({1});
+  CHECK_FALSE(driver.reads_inside_cycle());
+  CHECK(clock.time().ps == 250'250'000);
+  driver.restore(saved);
+  CHECK(clock.time().ps == 249'900'000);
+  driver.jump_to({1000});
+  CHECK(clock.time().ps == 249'900'000);
+  driver.jump_to({1001});
+  CHECK(clock.time().ps == 250'250'000);
+}
+
+TEST_CASE("a clock reading inside a cycle ends the same run as one that read the cycle end")
+{
+  popcorn::core::clock        exact{4'000'000};
+  popcorn::core::clock_driver exact_driver{exact};
+  popcorn::core::clock        plain{4'000'000};
+  popcorn::core::clock_driver plain_driver{plain};
+  exact_driver.jump_to({1000});
+  exact_driver.read_exactly({249'900'000});
+  plain_driver.jump_to({1000});
+  exact_driver.advance({7});
+  plain_driver.advance({7});
+  CHECK(exact.time().ps == plain.time().ps);
+  CHECK(exact.now().value == plain.now().value);
+  CHECK(exact_driver.state() == plain_driver.state());
+}
+
+TEST_CASE("a rate change on a clock reading inside a cycle starts the epoch as the plain run does")
+{
+  popcorn::core::clock        exact{4'000'000};
+  popcorn::core::clock_driver exact_driver{exact};
+  popcorn::core::clock        plain{4'000'000};
+  popcorn::core::clock_driver plain_driver{plain};
+  exact_driver.jump_to({1000});
+  exact_driver.read_exactly({249'900'000});
+  plain_driver.jump_to({1000});
+  exact.set_core_hz(160'000'000);
+  plain.set_core_hz(160'000'000);
+  CHECK(exact.time().ps == plain.time().ps);
+  CHECK(exact.to_icount({250'000'000}).value == plain.to_icount({250'000'000}).value);
+  exact_driver.advance({5});
+  plain_driver.advance({5});
+  CHECK(exact.time().ps == plain.time().ps);
+  CHECK(exact_driver.state() == plain_driver.state());
+}

@@ -1443,6 +1443,12 @@ struct machine::run_state
   icount retired{};
   /** @brief Instructions the clock moved by idle jumps in the slice. */
   icount jumped{};
+  /** @brief Count an idle jump of the slice ended at, 0 when none: the clock stands there
+   * inside the cycle in progress until the core executes. */
+  icount idle_arrival{};
+  /** @brief Count an event of the slice was dispatched at, 0 when none: a model read the end of
+   * that cycle, so the clock does not read inside it afterwards. */
+  icount event_dispatched_at{};
   /** @brief Whether the stop_when of this slice was asked for the core's current fall into
    * idle, cleared when the core executes an instruction. */
   bool idle_asked = false;
@@ -2721,6 +2727,10 @@ struct machine::run_state
    * machine_running. */
   [[nodiscard]] auto asks_stop(slice_request const& request) -> bool;
   [[nodiscard]] auto idle_jump(slice_request const& request) -> std::optional<slice_end>;
+  /** @brief Makes clock::time() read until_time of an exact_idle_stop request inside the cycle
+   *         the count ends. Only when @p allowed, and a reading already below until_time only
+   *         moves up unless the count was @p fresh from a jump. */
+  void               read_inside_cycle(slice_request const& request, bool allowed, bool fresh);
   [[nodiscard]] auto exit_list(slice_request const& request) const -> std::vector<address>;
   [[nodiscard]] auto bound_reached(slice_request const& request) -> std::optional<slice_end>;
   /** @brief Whether @p pc is until or an address of until_also. */

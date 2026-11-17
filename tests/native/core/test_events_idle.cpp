@@ -1231,6 +1231,40 @@ TEST_CASE("an idle jump landing on a held bound holds the event due there")
   CHECK(f.module->event_log == after);
 }
 
+TEST_CASE("an exact idle stop never reads a time below the one an event dispatch read")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock  = f.target->virtual_clock();
+  auto const  period = ps_per_second / clock.instruction_hz();
+  REQUIRE(period > 3);
+  auto const origin = clock.time().ps;
+  auto const due    = vtime{origin + 100 * period + period / 3};
+  auto const target = vtime{origin + 100 * period + 2 * period / 3};
+  std::ignore       = f.module->attached_events().schedule_at(due, logged_kind, 1, clock);
+  f.module->event_log.clear();
+  f.module->event_times.clear();
+  auto const stopped =
+      f.run({.wall_budget = long_wall, .until_time = target, .exact_idle_stop = true});
+  REQUIRE(stopped_on_time(stopped));
+  REQUIRE(f.module->event_times.size() == 1);
+  CHECK(f.module->event_times[0] >= due);
+  CHECK(clock.time() >= f.module->event_times[0]);
+  auto const resume = vtime{target.ps + 10 * period};
+  REQUIRE(stopped_on_time(f.run({.wall_budget = long_wall, .until_time = resume})));
+
+  auto g = booted("idle");
+  g.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(g.run_to_stop().reason == stop_reason::idle);
+  std::ignore =
+      g.module->attached_events().schedule_at(due, logged_kind, 1, g.target->virtual_clock());
+  REQUIRE(stopped_on_time(g.run({.wall_budget = long_wall, .until_time = target})));
+  REQUIRE(stopped_on_time(g.run({.wall_budget = long_wall, .until_time = resume})));
+  CHECK(f.target->virtual_clock().now() == g.target->virtual_clock().now());
+  CHECK(f.target->virtual_clock().time() == g.target->virtual_clock().time());
+}
+
 TEST_CASE("a hold at count 0 holds the events at count 0")
 {
   auto f = booted("idle");

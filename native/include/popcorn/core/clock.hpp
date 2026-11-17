@@ -62,6 +62,12 @@ struct clock_state
   /** @brief Virtual time clock::time() holds at after clock_driver::retract, 0 when nothing is
    * held. */
   vtime held_time{};
+  /** @brief Instruction count at which clock::time() reads idle_time, below the time of that
+   * count, 0 when nothing is set: clock_driver::read_exactly sets it, the first change of the
+   * count clears it. */
+  icount idle_count{};
+  /** @brief Virtual time clock::time() reads at idle_count. */
+  vtime idle_time{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(clock_state const&, clock_state const&) -> bool = default;
@@ -143,6 +149,10 @@ public:
    */
   [[nodiscard]] auto time() const -> vtime
   {
+    if(state_.idle_count.value != 0 and state_.now == state_.idle_count) [[unlikely]]
+    {
+      return state_.idle_time;
+    }
     return std::max(time_at(state_.now), state_.held_time);
   }
 
@@ -257,6 +267,12 @@ private:
             ps_per_second_wide * (count.value - state_.epoch_icount.value))};
   }
 
+  void clear_idle() noexcept
+  {
+    state_.idle_count = {};
+    state_.idle_time  = {};
+  }
+
   void release_passed_hold()
   {
     if(state_.now >= state_.held and time_at(state_.now) >= state_.held_time)
@@ -296,6 +312,7 @@ public:
   void advance(icount executed)
   {
     clock_.state_.now.value += executed.value;
+    clock_.clear_idle();
     if(clock_.state_.held.value != 0) [[unlikely]]
     {
       clock_.release_passed_hold();
@@ -317,6 +334,7 @@ public:
    */
   void retract(icount unrun)
   {
+    clock_.clear_idle();
     clock_.state_.held      = clock_.now();
     clock_.state_.held_time = clock_.time();
     auto& now               = clock_.state_.now.value;
@@ -338,6 +356,7 @@ public:
     auto&      now   = clock_.state_.now.value;
     auto const taken = std::min(ahead.value, now - clock_.state_.epoch_icount.value);
     now -= taken;
+    clock_.clear_idle();
     return icount{taken};
   }
 
@@ -371,11 +390,42 @@ public:
    */
   void jump_to(icount deadline) pre(deadline.value >= clock_.state_.now.value)
   {
+    if(deadline != clock_.state_.now)
+    {
+      clock_.clear_idle();
+    }
     clock_.state_.now = deadline;
     if(clock_.state_.held.value != 0)
     {
       clock_.release_passed_hold();
     }
+  }
+
+  /**
+   * @brief Makes clock::time() read @p at while the count stays where it is, below the time of
+   *        that count: a core that idles stands at a time inside the cycle in progress. The
+   *        count and the cycle grid are unchanged, so the next instruction ends at the grid time
+   *        after the count and every event keeps its instruction count. Does nothing while a
+   *        retract() holds the clock.
+   * @param at Virtual time to read, above the time of the preceding count and not above the
+   *        time of the current one.
+   */
+  void read_exactly(vtime at) pre(at.ps <= clock_.time_at(clock_.state_.now).ps)
+      pre(clock_.state_.now.value <= clock_.state_.epoch_icount.value
+          or at.ps > clock_.time_at(icount{clock_.state_.now.value - 1}).ps);
+
+  /** @brief Makes clock::time() read the end of the cycle in progress again, undoing
+   *         read_exactly(). */
+  void read_cycle_end() noexcept
+  {
+    clock_.clear_idle();
+  }
+
+  /** @brief Whether clock::time() reads inside the cycle in progress, set by read_exactly() and
+   *         kept until the count changes. */
+  [[nodiscard]] auto reads_inside_cycle() const noexcept -> bool
+  {
+    return clock_.state_.idle_count.value != 0 and clock_.state_.idle_count == clock_.state_.now;
   }
 
   /** @brief Copy of the clock state, for a snapshot. */

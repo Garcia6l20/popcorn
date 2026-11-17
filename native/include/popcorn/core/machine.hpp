@@ -182,6 +182,13 @@ struct slice_request
    * order with any lane event posted in between. For a bound a scheduler of several machines
    * sets, never for a stamp bound. */
   bool hold_from_until{};
+  /** @brief A slice that jumps the clock to until_time, the core held or asleep with no earlier
+   * event, ends with clock::time() reading exactly until_time. The cycle grid and every
+   * instruction count are the ones of a run without it: the count is the end of the cycle in
+   * progress and the next instruction ends at the grid time after it. Without it the clock
+   * reads the end of that cycle, up to one core period past until_time. For a bound a
+   * scheduler of several machines sets. */
+  bool exact_idle_stop{};
   /** @brief Stop predicate, evaluated after every dispatched event and at a slice end set by
    * max_instructions, never per instruction and never at a slice end set by the wall budget, a
    * host stop request or a mail post. A predicate over state no event marks is asked up to
