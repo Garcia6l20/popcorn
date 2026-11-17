@@ -1,4 +1,5 @@
 #include "backup_domain.hpp"
+#include "booster_clock.hpp"
 #include "family_names.hpp"
 #include "gpio_peers.hpp"
 #include "gtzc.hpp"
@@ -34,6 +35,7 @@ namespace
 {
 constexpr std::uint32_t voltage_ready   = 0;
 constexpr std::uint32_t booster_ready   = 1;
+constexpr std::uint64_t booster_cycles  = 50;
 constexpr std::uint32_t voltage_step    = 2;
 constexpr std::uint32_t regulator_ready = 3;
 
@@ -223,16 +225,28 @@ struct pwr_variant
  *        10.11.5 and 10.11.6. A VOS write that steps to a higher voltage clears VOSRDY until the
  *        board's ready delay ends, one that steps to a lower voltage keeps VOSRDY, the voltage
  *        being at or above the selected level, RM0456 10.10.4 and RM0481 10.11.6. ACTVOSRDY clears
- *        on every VOS change until the delay ends, and BOOSTRDY follows BOOSTEN the same way on the
- *        U5. ACTVOS takes the new range at the end of the delay and the FLASH model is told for its
- *        latency check. The H5 reads them in PWR_VOSSR and writes VOS in PWR_VOSCR, and steps
- *        ACTVOS one level at the write and one more every 10.4 us, with VOSRDY and ACTVOSRDY set
- *        15.2 us after the last step: VOS3 to VOS0 is ready 36 us after the write, as measured on
- *        an STM32H573. The voltage range FLASH checks against is the one at the last ready, so the
- *        steps change it only when the ready bits set. Low-power modes are not modelled: the first
- *        change of the LPMS field, in PWR_CR1 on the U5 and PWR_PMCR on the H5, logs one warning
- *        per machine life naming the mode and raises model_error under strict_peripherals, LPMS
- *        keeping its value before the write. A deep-sleep WFI idles as a plain WFI.
+ *        on every VOS change until the delay ends. ACTVOS takes the new range at the end of the
+ *        delay and the FLASH model is told for its latency check. The H5 reads them in PWR_VOSSR
+ *        and writes VOS in PWR_VOSCR, and steps ACTVOS one level at the write and one more every
+ *        10.4 us, with VOSRDY and ACTVOSRDY set 15.2 us after the last step: VOS3 to VOS0 is ready
+ *        36 us after the write, as measured on an STM32H573. The voltage range FLASH checks
+ *        against is the one at the last ready, so the steps change it only when the ready bits
+ *        set. Low-power modes are not modelled: the first change of the LPMS field, in PWR_CR1 on
+ *        the U5 and PWR_PMCR on the H5, logs one warning per machine life naming the mode and
+ *        raises model_error under strict_peripherals, LPMS keeping its value before the write. A
+ *        deep-sleep WFI idles as a plain WFI.
+ *
+ *        EPOD booster, STM32U5, RM0456 10.5.4: `PWR_VOSR.BOOSTRDY` sets 50 cycles of the booster
+ *        input after `BOOSTEN` sets, the booster input being the PLL1 input clock divided by
+ *        `PLL1MBOOST` and read from the RCC model. It sets only while `PLL1SRC` selects a ready
+ *        oscillator, and it clears at once when `BOOSTEN` clears. The count is measured on an
+ *        STM32U575ZITxQ, 2026-11-17, at 1, 2, 4, 16, 24 and 48 MHz, within the 13 core cycle poll
+ *        resolution of the board run. Inferred, not measured: the same rule on the other STM32U5
+ *        parts, a count that starts again when the booster input changes while `BOOSTRDY` is
+ *        clear, a count that starts when a source selected earlier becomes ready, `BOOSTRDY`
+ *        staying set when the source drops, a `PLL1MBOOST` code above 8 dividing by 16, and a
+ *        `PLL1MBOOST` write while `BOOSTEN` is set taking effect as stored. `ready_delay` sets
+ *        `VOSRDY` and `ACTVOSRDY` only. A machine with no RCC model never raises `BOOSTRDY`.
  *
  *        Regulator selection, RM0456 10.5 and 10.10.3: on a U5 package with the SMPS, the part
  *        names ending in Q, PWR_SVMSR.REGS takes the value of PWR_CR3.REGSEL after the DS13737
@@ -306,6 +320,11 @@ struct pwr_variant
  *   `PWR_CR4.VBE` and `PWR_CR4.VBRS` are stored, RM0351 5.1.5.
  *
  * @group u5 rule
+ * - STM32U5: `BOOSTRDY` sets 50 cycles of the PLL1 input clock divided by `PLL1MBOOST` after
+ *   `BOOSTEN` sets, only with `PLL1SRC` selecting a ready oscillator, measured on an
+ *   STM32U575ZITxQ. The other STM32U5 parts, the restart of the count on an input change, a source
+ *   that becomes ready after `PLL1SRC`, and `BOOSTRDY` staying set when the source drops are
+ *   inferred.
  * - STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50
  *   us by default. A write that steps to a higher voltage clears VOSRDY for that delay, one that
  *   steps to a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
@@ -388,6 +407,7 @@ struct pwr_variant
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
+                  public booster_clock_listener,
                   public io_supply_source,
                   public usb_supply_source,
                   public backup_domain,
@@ -404,6 +424,7 @@ public:
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto active_level() const -> std::uint32_t override;
   [[nodiscard]] auto target_level() const -> std::uint32_t override;
+  void               on_booster_input_change() override;
   [[nodiscard]] auto io_supply_valid() const -> bool override;
   [[nodiscard]] auto usb_supply_valid() const -> bool override;
   auto               on_write(
@@ -431,6 +452,7 @@ private:
   void               add_rules();
   [[nodiscard]] auto rule_secure(pwr_rule const& rule) const -> bool;
   void               step_active(vos_stepping const& stepping, std::uint64_t generation);
+  void               start_booster_countdown(std::uint64_t generation);
   [[nodiscard]] auto active_ready() const -> bool;
 
   pwr_options                options_;
@@ -1198,9 +1220,37 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
     auto const generation = ++state_.generation[booster_ready];
     if(booster->of(now) != 0)
     {
-      schedule_in(options_.ready_delay, booster_ready, generation);
+      start_booster_countdown(generation);
     }
   }
+}
+
+void pwr::start_booster_countdown(std::uint64_t generation)
+{
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto const* const source = dynamic_cast<booster_clock_source*>(peer))
+    {
+      auto const hz = source->booster_input_hz();
+      if(hz != 0)
+      {
+        auto const ps = (booster_cycles * ps_per_second + hz - 1) / hz;
+        ctx_.events.schedule_at(
+            vtime{ctx_.clock.time().ps + ps}, booster_ready, generation, ctx_.clock);
+      }
+      return;
+    }
+  }
+}
+
+void pwr::on_booster_input_change()
+{
+  auto const booster = names_.find(pwr_role::booster);
+  if(not booster or get(regs_, *booster) == 0 or get(regs_, names_[pwr_role::booster_ready]) != 0)
+  {
+    return;
+  }
+  start_booster_countdown(++state_.generation[booster_ready]);
 }
 
 void pwr::cr1_written(std::uint32_t old, std::uint32_t now)

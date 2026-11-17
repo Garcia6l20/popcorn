@@ -443,8 +443,9 @@ struct u5_rcc
 
   static constexpr lsi_range lsi_limits = u5::lsi_limits;
 
-  static constexpr bool msi_standby_ranges = true;
-  static constexpr bool hsi_divider        = false;
+  static constexpr bool             msi_standby_ranges = true;
+  static constexpr bool             hsi_divider        = false;
+  static constexpr std::string_view booster_divider    = "PLL1MBOOST";
   /**
    * @brief RM0456 11.8.1: the ON bit of the PLL1 input is held only while PLL1 drives SYSCLK.
    */

@@ -37,15 +37,15 @@
    50324000000
   ]
  ],
- "snapshots": "2f32757ef668706e",
+ "snapshots": "b7fa359e9a15199e",
  "uart": "379d40ac54c27b01",
  "trace": [
-  "e7922a18b12a6e8f",
-  6258
+  "a9c5a4e4e847e3ce",
+  6204
  ],
  "trace_blocks": [
-  "b9d68cdd1f2d96e6",
-  11934
+  "f4e0c89ece195075",
+  11879
  ],
  "coverage": [
   "b7c4bd70f93d01bd",
@@ -53,11 +53,11 @@
   422
  ],
  "trace_mmio": [
-  "6b24a9c2d8b34cd9",
+  "312d60c865b2c356",
   2121
  ],
  "trace_pc": [
-  "a35eac952e27bee1",
+  "a42c862bf9fef743",
   7796
  ]
 }

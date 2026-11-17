@@ -1145,7 +1145,7 @@ TEST_CASE("a release through a pause point taps the frames of both mailboxes end
   auto           full    = one_way("link_tx", "link_rx", latency);
   full.oracle(script_end_ps);
   auto const& all = full.taps[0];
-  for(auto const k : {std::uint64_t{20}, std::uint64_t{27}})
+  for(auto const k : {std::uint64_t{20}, std::uint64_t{26}})
   {
     CAPTURE(k);
     auto const released = shown_mid_run("link_tx", latency, latency, k, shown_by::release);
@@ -1763,8 +1763,8 @@ TEST_CASE("a receiver reset drops an injection queued within L after it at any w
   full.oracle(end);
   auto const& all = full.taps[0];
   REQUIRE(all.size() == 64);
-  REQUIRE(all[0].start.ps > static_cast<std::int64_t>(200 * us_ps));
-  auto const at       = static_cast<std::uint64_t>(all[0].start.ps) - 200 * us_ps;
+  REQUIRE(all[0].start.ps > static_cast<std::int64_t>(100 * us_ps));
+  auto const at       = static_cast<std::uint64_t>(all[0].start.ps) - 100 * us_ps;
   auto const injected = static_cast<std::int64_t>(latency + 10 * us_ps);
   REQUIRE(static_cast<std::uint64_t>(injected) > at);
   REQUIRE(static_cast<std::uint64_t>(injected) < at + latency);

@@ -20,7 +20,7 @@ from popcorn._system.goals import Goal
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import collected, wait_for_collections
-from .linked import Ticker, logged, member, received, ticker
+from .linked import Ticker, assert_raised_after_tick, logged, member, received, tick_due, ticker
 
 L = us(20)
 IRQ = "USART1_IRQHandler"
@@ -353,13 +353,13 @@ def test_a_goal_failed_by_a_halted_member_s_error_raises_it_naming_that_member(
     if third is not None:
         links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
     ticker(a).raise_at = 150
-    with System({"a": a, "b": b}, links, slice_instructions=slice_instructions):
+    with System({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
 
         async def body() -> None:
             await a.run(for_=us(100))
             with pytest.raises(RuntimeError, match="TIM6 tick 150") as raised:
                 await b.run(for_=ms(3))
-            assert raised.value.__notes__ == ["raised by member a at system time t=1100250000 ps"]
+            assert_raised_after_tick(raised.value.__notes__, tick_due(system, "a", 150))
 
         asyncio.run(body())
 

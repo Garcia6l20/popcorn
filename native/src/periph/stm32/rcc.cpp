@@ -1,4 +1,5 @@
 #include "backup_domain.hpp"
+#include "booster_clock.hpp"
 #include "family_names.hpp"
 #include "flash_option.hpp"
 #include "gtzc.hpp"
@@ -204,6 +205,7 @@ template <typename Traits> struct rcc_state
   std::uint32_t                                       hsi_divider{};
   std::uint8_t                                        divider_clearing{};
   std::uint64_t                                       divider_set_ps{};
+  std::uint64_t                                       booster_hz{};
   std::vector<output_note>                            notes;
   std::uint64_t                                       next_note{};
 
@@ -295,7 +297,8 @@ template <typename Signal> struct bus_gate
  *        the write, RM0481 11.8.1, a write of `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output
  *        dividers while the PLL is on or ready, on the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too,
  *        RM0481 11.8.7, and a clear of the PLL1 output enable that feeds SYSCLK while it does. The
- *        STM32U5 `PLL1MBOOST` is storage. A selected SYSCLK source that runs at 0 Hz, such as a
+ *        STM32U5 `PLL1MBOOST` divides the PLL1 input clock for the PWR booster countdown, see
+ * `PWR_VOSR.BOOSTRDY`, and stores the value. A selected SYSCLK source that runs at 0 Hz, such as a
  *        PLL1 output whose enable is clear, leaves the core clock at its rate and logs one warning
  *        per machine life. A started IWDG keeps the LSI on until the next reset, RM0456 section
  *        11.4.16. FLASH programming or erase runs HSI16 for the FLASH interface, RM0456 sections
@@ -469,8 +472,9 @@ template <typename Signal> struct bus_gate
  *   oscillator feeds PLL1 and the same write leaves PLL1ON set, RM0481 11.8.1, a write of
  *   `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output dividers while the PLL is on or ready, on
  *   the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too, RM0481 11.8.7, and a clear of the PLL1 output
- *   enable that feeds SYSCLK. The STM32U5 `PLL1MBOOST` is storage. ST's CMSIS `SystemInit` run with
- *   PLL1 as SYSCLK logs nothing.
+ *   enable that feeds SYSCLK. The STM32U5 `PLL1MBOOST` divides the PLL1 input clock for the PWR
+ * booster countdown and changes nothing else. ST's CMSIS `SystemInit` run with PLL1 as SYSCLK logs
+ * nothing.
  * - A switch to a SYSCLK source that runs at 0 Hz, such as a PLL1 output whose enable is clear,
  *   keeps the core clock at its last rate and logs one `model_warning` per machine.
  * - A PLL loads `PLLxFRACN` as its fraction when `PLLxON` sets with `PLLxFRACEN` 1, and runs in
@@ -608,6 +612,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
                         public hsi16_source,
                         public kernel_gate,
                         public clock_output_port,
+                        public booster_clock_source,
                         public voltage_range_listener,
                         public voltage_range_guard,
                         public trustzone_aware
@@ -704,6 +709,7 @@ public:
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
+  [[nodiscard]] auto booster_input_hz() const -> std::uint64_t override;
 
 private:
   void               add_security_rules();
@@ -712,6 +718,7 @@ private:
 
   [[nodiscard]] auto is_ready(source which) const -> bool;
   [[nodiscard]] auto is_on(source which) const -> bool;
+  void               notify_booster_input();
   [[nodiscard]] auto pll_input(std::size_t pll) const -> source;
   [[nodiscard]] auto system_source(std::uint32_t code) const -> std::optional<source>;
   [[nodiscard]] auto in_use() const -> std::uint32_t;
@@ -761,6 +768,7 @@ private:
   std::array<std::uint64_t, output_count<Traits>> output_hz_{};
   std::shared_ptr<output_table> output_watchers_ = std::make_shared<output_table>();
   std::array<pll_fields, Traits::pll_nodes.size()>     pll_{};
+  std::optional<field_ref>                             booster_divider_;
   field_table<rcc_role>                                names_;
   std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
   std::array<field_ref, Traits::reset_flags.size()>    flags_{};
@@ -1166,6 +1174,10 @@ rcc_model<Traits>::rcc_model(
           "a field held while an oscillator is on in the register of its ON bit");
     }
   }
+  if constexpr(requires { Traits::booster_divider; })
+  {
+    booster_divider_ = field(Traits::pll_nodes[0].config, Traits::booster_divider);
+  }
   for(auto const& [index, node] : std::views::enumerate(Traits::pll_nodes))
   {
     auto const named = [&](std::string_view reg_name, std::string_view name) {
@@ -1335,6 +1347,41 @@ template <typename Traits> auto rcc_model<Traits>::is_on(source which) const -> 
 template <typename Traits> auto rcc_model<Traits>::pll_input(std::size_t pll) const -> source
 {
   return Traits::pll_inputs[get(regs_, pll_[pll].src)];
+}
+
+template <typename Traits> auto rcc_model<Traits>::booster_input_hz() const -> std::uint64_t
+{
+  if(not booster_divider_)
+  {
+    return 0;
+  }
+  auto const input = pll_input(0);
+  if(input == source::pll1 or not is_ready(input))
+  {
+    return 0;
+  }
+  auto const        code = std::min<std::uint32_t>(get(regs_, *booster_divider_), 8);
+  rate_inputs const inputs{
+      .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
+  auto const divider = code == 0 ? std::uint64_t{1} : std::uint64_t{2} * code;
+  return Traits::oscillators[std::to_underlying(input)].rate(inputs) / divider;
+}
+
+template <typename Traits> void rcc_model<Traits>::notify_booster_input()
+{
+  auto const hz = booster_input_hz();
+  if(hz == state_.booster_hz)
+  {
+    return;
+  }
+  state_.booster_hz = hz;
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto* const listener = dynamic_cast<booster_clock_listener*>(peer))
+    {
+      listener->on_booster_input_change();
+    }
+  }
 }
 
 template <typename Traits>
@@ -2236,6 +2283,14 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
         listener->on_clock_change();
       }
     }
+  }
+  if(notify)
+  {
+    notify_booster_input();
+  }
+  else
+  {
+    state_.booster_hz = booster_input_hz();
   }
 }
 

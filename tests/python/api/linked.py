@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import override
@@ -82,6 +83,26 @@ def ticker(m: popcorn.Machine) -> Ticker:
     model = m.model("TIM6")
     assert isinstance(model, Ticker)
     return model
+
+
+TICK_SERVICE_WINDOW = us(30)
+
+
+def tick_due(system: System, member: str, tick: int) -> int:
+    """The system time in ps at which `member`'s Ticker tick number `tick` is due, the Ticker's
+    `period_us` apart from the member's reset."""
+    period_us = ticker(system.members[member]).period_us
+    return system.to_system(member, VirtualTime(us(period_us * tick).ps)).ps
+
+
+def assert_raised_after_tick(notes: list[str], due_ps: int) -> None:
+    """`notes` names the system time of the one raise, which comes when the tick is due or within
+    `TICK_SERVICE_WINDOW` after it: the Python callback runs when the core next yields to the host,
+    which the firmware's wait loop of 30 us bounds."""
+    assert len(notes) == 1
+    found = re.fullmatch(r"raised by member a at system time t=(\d+) ps", notes[0])
+    assert found is not None, notes
+    assert due_ps <= int(found.group(1)) <= due_ps + TICK_SERVICE_WINDOW.ps
 
 
 L = us(20)

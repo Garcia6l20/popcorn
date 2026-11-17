@@ -1,3 +1,4 @@
+#include "booster_clock.hpp"
 #include "stm32_fixture.hpp"
 #include "voltage_range.hpp"
 
@@ -13,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -48,6 +50,103 @@ auto field(stm32_fixture const& f, std::string_view reg, std::string_view name) 
 {
   return f.field("PWR", reg, name);
 }
+
+constexpr std::uint32_t idle_loop_at = 0x2000'0100;
+
+auto booster_fixture() -> stm32_fixture
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  stm32_fixture f{u575(), "pwr_ll", std::move(options)};
+  REQUIRE(f.target->mem().write(idle_loop_at, 4, 0xE7FD'BF30).has_value());
+  f.set("pc", idle_loop_at | 1u);
+  return f;
+}
+
+void put(
+    stm32_fixture const& f,
+    std::string_view     peripheral,
+    std::string_view     reg,
+    std::string_view     name,
+    std::uint32_t        value)
+{
+  auto&       unit  = f.target->peripheral(peripheral);
+  auto const& desc  = unit.description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  auto const mask = ((std::uint32_t{1} << bits->width) - 1) << bits->lsb;
+  auto const word = (unit.peek(found->offset) & ~mask) | (value << bits->lsb);
+  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, word).has_value());
+}
+
+void run_us(stm32_fixture const& f, std::uint64_t us)
+{
+  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + us * 1'000'000};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = until}).reason
+      == stop_reason::time);
+}
+
+auto pending_due(stm32_fixture const& f, std::string_view owner_name)
+    -> std::optional<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, owner_name, &popcorn::peripheral_desc::name) - units.begin());
+  std::optional<std::uint64_t> due;
+  std::uint64_t                newest{};
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner and (not due or event.payload > newest))
+    {
+      due    = event.due_ps;
+      newest = event.payload;
+    }
+  }
+  return due;
+}
+
+auto first_due(stm32_fixture const& f, std::string_view owner_name) -> std::optional<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  owner = static_cast<std::uint32_t>(
+      std::ranges::find(units, owner_name, &popcorn::peripheral_desc::name) - units.begin());
+  std::optional<std::uint64_t> due;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner and (not due or event.due_ps < *due))
+    {
+      due = event.due_ps;
+    }
+  }
+  return due;
+}
+
+auto booster_due_after(stm32_fixture const& f, std::uint64_t written_ps)
+    -> std::optional<std::uint64_t>
+{
+  auto const due = pending_due(f, "PWR");
+  if(not due)
+  {
+    return std::nullopt;
+  }
+  return *due - written_ps;
+}
+
+void select_source(stm32_fixture const& f, std::uint32_t source, std::uint32_t mboost = 0)
+{
+  put(f, "RCC", "RCC_PLL1CFGR", "PLL1MBOOST", mboost);
+  put(f, "RCC", "RCC_PLL1CFGR", "PLL1SRC", source);
+}
+
+auto enable_booster(stm32_fixture const& f) -> std::uint64_t
+{
+  auto const written = f.target->virtual_clock().time().ps;
+  put(f, "PWR", "PWR_VOSR", "BOOSTEN", 1);
+  return written;
+}
 }
 
 TEST_CASE("voltage scale 1 and the EPOD booster become ready after the PWR delay")
@@ -56,8 +155,7 @@ TEST_CASE("voltage scale 1 and the EPOD booster become ready after the PWR delay
   REQUIRE(log.size() == 4);
   CHECK(log[0] > 0);
   CHECK(log[0] <= 200);
-  CHECK(log[1] > 0);
-  CHECK(log[1] <= 200);
+  CHECK(log[1] == 11);
   CHECK(log[2] == 3u << 16);
   CHECK(log[3] == 3);
   CHECK(run_log("pwr_ll") == log);
@@ -73,7 +171,6 @@ TEST_CASE("the PWR factory copies its ready delay: a board changed afterwards do
   auto const log        = run_log("pwr_ll", std::move(options));
   REQUIRE(log.size() == 4);
   CHECK(log[0] > 200);
-  CHECK(log[1] > 200);
 }
 
 TEST_CASE("a snapshot taken while VOSRDY is pending restores to the same run")
@@ -849,4 +946,230 @@ TEST_CASE("a U5 VOS change posts one event at the write time plus the board's re
   REQUIRE(dues.size() == 1);
   auto const delay_ps = static_cast<std::uint64_t>(board.pwr.ready_delay.count()) * 1000;
   CHECK(dues[0] == written + delay_ps);
+}
+
+namespace
+{
+constexpr std::uint32_t src_none = 0;
+constexpr std::uint32_t src_msis = 1;
+constexpr std::uint32_t src_hsi  = 2;
+constexpr std::uint32_t src_hse  = 3;
+
+constexpr auto booster_ps(std::uint64_t hz) -> std::uint64_t
+{
+  return (50 * 1'000'000'000'000 + hz - 1) / hz;
+}
+
+void set_msis_range(stm32_fixture const& f, std::uint32_t range)
+{
+  put(f, "FLASH", "FLASH_ACR", "LATENCY", 4);
+  if(range < 2)
+  {
+    put(f, "PWR", "PWR_VOSR", "VOS", 3);
+    run_us(f, 200);
+  }
+  put(f, "RCC", "RCC_ICSCR1", "MSIRGSEL", 1);
+  put(f, "RCC", "RCC_ICSCR1", "MSISRANGE", range);
+  run_us(f, 200);
+}
+
+void start_oscillator(stm32_fixture const& f, std::string_view on, std::string_view ready)
+{
+  put(f, "RCC", "RCC_CR", on, 1);
+  run_us(f, 5000);
+  REQUIRE(f.field("RCC", "RCC_CR", ready) == 1);
+}
+}
+
+TEST_CASE("RM0456 10.5.4: the MSIS is ready at reset and BOOSTRDY stays 0 with no PLL1 source")
+{
+  auto f = booster_fixture();
+  REQUIRE(f.field("RCC", "RCC_CR", "MSISRDY") == 1);
+  enable_booster(f);
+  CHECK_FALSE(pending_due(f, "PWR").has_value());
+  run_us(f, 5000);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: BOOSTRDY stays 0 with HSE selected and off")
+{
+  auto f = booster_fixture();
+  select_source(f, src_hse);
+  enable_booster(f);
+  CHECK_FALSE(pending_due(f, "PWR").has_value());
+  run_us(f, 5000);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: BOOSTRDY stays 0 with HSI16 selected and off")
+{
+  auto f = booster_fixture();
+  select_source(f, src_hsi);
+  enable_booster(f);
+  CHECK_FALSE(pending_due(f, "PWR").has_value());
+  run_us(f, 5000);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: BOOSTRDY rises 50 cycles of the booster input")
+{
+  struct row
+  {
+    std::uint32_t source;
+    std::uint32_t msis_range;
+    std::uint32_t mboost;
+    std::uint64_t input_hz;
+  };
+  constexpr std::array rows{
+      row{src_msis, 4, 0,  4'000'000 },
+      row{src_msis, 7, 0,  1'000'000 },
+      row{src_msis, 5, 0,  2'000'000 },
+      row{src_msis, 0, 0,  48'000'000},
+      row{src_msis, 1, 0,  24'000'000},
+      row{src_hsi,  4, 0,  16'000'000},
+      row{src_msis, 1, 1,  12'000'000},
+      row{src_hsi,  4, 8,  1'000'000 },
+      row{src_hsi,  4, 15, 1'000'000 },
+  };
+  for(auto const& entry : rows)
+  {
+    CAPTURE(entry.source);
+    CAPTURE(entry.msis_range);
+    CAPTURE(entry.mboost);
+    auto f = booster_fixture();
+    if(entry.source == src_hsi)
+    {
+      start_oscillator(f, "HSION", "HSIRDY");
+    }
+    set_msis_range(f, entry.msis_range);
+    select_source(f, entry.source, entry.mboost);
+    auto const written = enable_booster(f);
+    auto const delay   = booster_due_after(f, written);
+    REQUIRE(delay.has_value());
+    CHECK(*delay == booster_ps(entry.input_hz));
+    CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+    run_us(f, *delay / 1'000'000 + 1);
+    CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 1);
+  }
+}
+
+TEST_CASE("inferred: BOOSTEN kept 1 and PLL1SRC written later starts the count at the write")
+{
+  auto f = booster_fixture();
+  enable_booster(f);
+  run_us(f, 100);
+  REQUIRE(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+  auto const written = f.target->virtual_clock().time().ps;
+  select_source(f, src_msis);
+  CHECK(booster_due_after(f, written) == booster_ps(4'000'000));
+}
+
+TEST_CASE("inferred: a source ready later than PLL1SRC starts the count at its readiness")
+{
+  auto f = booster_fixture();
+  run_us(f, 1);
+  select_source(f, src_hse);
+  enable_booster(f);
+  put(f, "RCC", "RCC_CR", "HSEON", 1);
+  auto const ready = first_due(f, "RCC");
+  REQUIRE(ready.has_value());
+  run_us(f, 1);
+  REQUIRE(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+  while(f.field("RCC", "RCC_CR", "HSERDY") == 0)
+  {
+    run_us(f, 1);
+  }
+  auto const due = pending_due(f, "PWR");
+  REQUIRE(due.has_value());
+  CHECK(*due == *ready + booster_ps(16'000'000));
+}
+
+TEST_CASE("HAL sequence: BOOSTEN with no source stays 0, cleared and set again with a source rises")
+{
+  auto f = booster_fixture();
+  enable_booster(f);
+  run_us(f, 100);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+  put(f, "PWR", "PWR_VOSR", "BOOSTEN", 0);
+  select_source(f, src_msis);
+  auto const written = enable_booster(f);
+  CHECK(booster_due_after(f, written) == booster_ps(4'000'000));
+  run_us(f, 20);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 1);
+}
+
+TEST_CASE("BOOSTEN cleared mid-countdown cancels it and set again restarts it")
+{
+  auto f = booster_fixture();
+  select_source(f, src_msis);
+  enable_booster(f);
+  run_us(f, 5);
+  put(f, "PWR", "PWR_VOSR", "BOOSTEN", 0);
+  run_us(f, 20);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 0);
+  auto const written = enable_booster(f);
+  CHECK(booster_due_after(f, written) == booster_ps(4'000'000));
+}
+
+TEST_CASE("inferred: BOOSTRDY stays set when the source selection drops after the rise")
+{
+  auto f = booster_fixture();
+  select_source(f, src_msis);
+  enable_booster(f);
+  run_us(f, 20);
+  REQUIRE(field(f, "PWR_VOSR", "BOOSTRDY") == 1);
+  select_source(f, src_none);
+  run_us(f, 20);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 1);
+}
+
+TEST_CASE("inferred: a PLL1MBOOST write while the count runs restarts it from the write")
+{
+  auto f = booster_fixture();
+  select_source(f, src_msis);
+  enable_booster(f);
+  run_us(f, 5);
+  auto const written = f.target->virtual_clock().time().ps;
+  put(f, "RCC", "RCC_PLL1CFGR", "PLL1MBOOST", 1);
+  CHECK(booster_due_after(f, written) == booster_ps(2'000'000));
+}
+
+TEST_CASE("ready_delay does not apply to BOOSTRDY")
+{
+  stm32::board board{};
+  board.pwr.ready_delay = std::chrono::milliseconds{1};
+  auto options          = popcorn::testing::stm32_options();
+  options.models        = stm32::factories(board, u575());
+  stm32_fixture f{u575(), "pwr_ll", std::move(options)};
+  REQUIRE(f.target->mem().write(idle_loop_at, 4, 0xE7FD'BF30).has_value());
+  f.set("pc", idle_loop_at | 1u);
+  select_source(f, src_msis);
+  auto const written = enable_booster(f);
+  CHECK(booster_due_after(f, written) == booster_ps(4'000'000));
+}
+
+TEST_CASE("a snapshot taken mid-countdown restores the rise time, parked and running")
+{
+  auto f = booster_fixture();
+  select_source(f, src_msis);
+  auto const written = enable_booster(f);
+  run_us(f, 4);
+  auto const saved = f.target->snapshot();
+  auto const due   = pending_due(f, "PWR");
+  REQUIRE(due.has_value());
+  CHECK(*due == written + booster_ps(4'000'000));
+
+  auto other = booster_fixture();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(pending_due(other, "PWR") == due);
+  put(other, "RCC", "RCC_PLL1DIVR", "PLL1N", 20);
+  CHECK(pending_due(other, "PWR") == due);
+  CHECK(field(other, "PWR_VOSR", "BOOSTRDY") == 0);
+  run_us(other, 20);
+  CHECK(field(other, "PWR_VOSR", "BOOSTRDY") == 1);
+
+  f.target->restore(saved);
+  run_us(f, 20);
+  CHECK(field(f, "PWR_VOSR", "BOOSTRDY") == 1);
+  CHECK(other.target->virtual_clock().time().ps == f.target->virtual_clock().time().ps);
 }

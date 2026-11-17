@@ -1,4 +1,5 @@
 #include "../support/inert_model.hpp"
+#include "booster_clock.hpp"
 #include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
@@ -50,7 +51,9 @@ auto fixed_board() -> stm32::board const&
   return board;
 }
 
-class listener final : public popcorn::testing::inert_model, public stm32::clock_listener
+class listener final : public popcorn::testing::inert_model,
+                       public stm32::clock_listener,
+                       public stm32::booster_clock_listener
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -58,6 +61,7 @@ public:
 
   periph::model_context& context;
   int                    changes{};
+  int                    booster_changes{};
 
   [[nodiscard]] auto hz(std::string_view name) const -> std::uint64_t
   {
@@ -67,6 +71,11 @@ public:
   void on_clock_change() override
   {
     ++changes;
+  }
+
+  void on_booster_input_change() override
+  {
+    ++booster_changes;
   }
 };
 
@@ -540,7 +549,7 @@ TEST_CASE("a snapshot taken while PLL1 locks restores to the same run, in place 
 TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured before the template")
 {
   constexpr auto expected = std::to_array<unsigned char>(
-      {0x4f, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+      {0x63, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
        0x00, 0x8b, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
        0x00, 0x12, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00,
        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -560,9 +569,10 @@ TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured bef
        0x00, 0x00, 0x10, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x63, 0x6c, 0x65, 0x61,
        0x72, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x69, 0x76, 0x69, 0x64,
        0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x04, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
-       0x12, 0x6e, 0x65, 0x78, 0x74, 0x5f, 0x6e, 0x6f, 0x74, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00,
-       0x00, 0x00, 0x00, 0x00, 0x00});
+       0x00, 0x00, 0x00, 0x12, 0x62, 0x6f, 0x6f, 0x73, 0x74, 0x65, 0x72, 0x5f, 0x68, 0x7a, 0x00,
+       0x00, 0x09, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x00,
+       0x05, 0x00, 0x00, 0x00, 0x00, 0x12, 0x6e, 0x65, 0x78, 0x74, 0x5f, 0x6e, 0x6f, 0x74, 0x65,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   REQUIRE(probe(f).hz("sysclk") == 160 * mhz);
@@ -571,6 +581,55 @@ TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured bef
   CHECK(std::ranges::equal(bytes, expected, {}, [](std::byte b) {
     return std::to_integer<unsigned char>(b);
   }));
+}
+
+TEST_CASE(
+    "RM0456 10.5.4: the booster input is the PLL1 input divided by PLL1MBOOST, told on change")
+{
+  auto       f      = idle_fixture();
+  auto&      rcc    = *f.model_of<stm32::booster_clock_source>("RCC");
+  auto&      notice = probe(f);
+  auto const select = [&](std::uint32_t source, std::uint32_t mboost) {
+    write(
+        f, "RCC_PLL1CFGR",
+        source * bit_of("RCC_PLL1CFGR", "PLL1SRC") | mboost * bit_of("RCC_PLL1CFGR", "PLL1MBOOST"));
+  };
+  CHECK(rcc.booster_input_hz() == 0);
+  CHECK(notice.booster_changes == 0);
+  select(1, 0);
+  CHECK(rcc.booster_input_hz() == 4 * mhz);
+  CHECK(notice.booster_changes == 1);
+  select(1, 1);
+  CHECK(rcc.booster_input_hz() == 2 * mhz);
+  CHECK(notice.booster_changes == 2);
+  for(std::uint32_t code = 8; code < 16; ++code)
+  {
+    select(2, code);
+    CHECK(rcc.booster_input_hz() == 0);
+  }
+  select(1, 15);
+  CHECK(rcc.booster_input_hz() == 250'000);
+  write(f, "RCC_PLL1DIVR", 0);
+  CHECK(rcc.booster_input_hz() == 250'000);
+  select(1, 15);
+  select(0, 0);
+  CHECK(rcc.booster_input_hz() == 0);
+}
+
+TEST_CASE(
+    "RM0456 10.5.4: a selected oscillator that is not ready gives 0 until it is, no notice from "
+    "reset")
+{
+  auto  f      = idle_fixture();
+  auto& rcc    = *f.model_of<stm32::booster_clock_source>("RCC");
+  auto& notice = probe(f);
+  write(f, "RCC_PLL1CFGR", 3 * bit_of("RCC_PLL1CFGR", "PLL1SRC"));
+  CHECK(rcc.booster_input_hz() == 0);
+  CHECK(notice.booster_changes == 0);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "HSEON"));
+  idle_until(f, std::chrono::milliseconds{5});
+  CHECK(rcc.booster_input_hz() == 16 * mhz);
+  CHECK(notice.booster_changes == 1);
 }
 
 TEST_CASE("timer domains run at twice their APB clock when the APB prescaler divides")
