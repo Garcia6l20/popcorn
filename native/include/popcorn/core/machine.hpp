@@ -818,6 +818,22 @@ public:
   [[nodiscard]] auto ring_blocks() const noexcept -> bool;
 
   /**
+   * @brief Turns loop reports on or off, off by default. While on, the spin detector runs
+   *        whatever machine_options::spin_threshold is, and each run of identical loop passes
+   *        that ends after at least @p passes passes writes a loop record to the trace sinks
+   *        selecting trace_kind::loop. The spin stop keeps its own threshold, spin_threshold, and
+   *        stays off at 0. Turning reports off writes the open run with loop_ender::end. Machine
+   *        configuration: not in snapshots, kept across restore().
+   * @param passes Fewest passes a reported run has, 0 to turn reports off.
+   * @throws machine_running while a slice runs, handlers included, and from a trace sink while
+   *         it is called.
+   */
+  void set_loop_reports(std::uint32_t passes);
+
+  /** @brief Fewest passes of a reported loop run, 0 while loop reports are off. */
+  [[nodiscard]] auto loop_reports() const noexcept -> std::uint32_t;
+
+  /**
    * @brief Streams trace records of the selected kinds to a sink, the full trace a `.pctr` file
    *        writer consumes. Kinds that cost a hook, such as block and mem, are hooked only while
    *        a sink selects them, and only over its ranges. dt counts per sink, see trace_sink.

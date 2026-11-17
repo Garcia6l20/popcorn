@@ -250,6 +250,10 @@ void machine::disarm_loop()
 
 void machine::run_state::reset_notified(reset_kind kind)
 {
+  if(loop_reports != 0)
+  {
+    end_loop_run(loop_ender::rebase);
+  }
   ++memory_generation;
   retired       = {};
   reset_pending = std::nullopt;
@@ -664,11 +668,17 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     met = target
       and run.arch->interrupt_returns(intno, target->ret)
       and run.stack_pointer() == target->sp;
+    auto const handler_returns =
+        run.loop_reports != 0 and run.arch->interrupt_returns(intno, run.arch->pc());
     auto const result  = run.owner.arch_->on_interrupt(intno);
     auto const arrived = std::exchange(run.arrival_stopped, false);
     run.deadline       = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
+      if(handler_returns)
+      {
+        run.end_loop_run(loop_ender::progress);
+      }
       run.spin.leave();
       if(failed or arrived)
       {
@@ -1498,6 +1508,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(core_held or not request.execute)
     {
       rethrow_failure();
+      if(loop_reports != 0)
+      {
+        end_loop_run(loop_ender::sleep);
+      }
       spin.progress();
       if(auto end = idle_jump(request))
       {
@@ -1532,6 +1546,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous    = {};
       if(not woke)
       {
+        if(loop_reports != 0)
+        {
+          end_loop_run(loop_ender::exception);
+        }
         spin.enter();
       }
     }
@@ -1542,6 +1560,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
         asleep_since = std::pair{
             owner.clock_driver_.exact_now(),
             sinks_want_sleep ? arch->idle_reason() : std::uint8_t{0}};
+      }
+      if(loop_reports != 0)
+      {
+        end_loop_run(loop_ender::sleep);
       }
       spin.progress();
       if(auto end = idle_jump(request))

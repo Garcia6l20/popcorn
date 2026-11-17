@@ -105,6 +105,7 @@ void machine::run_state::spin_block(address addr)
     state.subset_scratch.resize(state.subset_ids.size());
     state.subset_pointers = pointers_into(state.subset_scratch);
   }
+  auto       counted  = false;
   auto const read_all = [&] {
     check(
         uc_reg_read_batch(
@@ -150,6 +151,7 @@ void machine::run_state::spin_block(address addr)
       if(state.scratch == loop.registers)
       {
         ++loop.count;
+        counted = true;
       }
       else
       {
@@ -161,7 +163,11 @@ void machine::run_state::spin_block(address addr)
   std::swap(loop.reads, loop.reading);
   loop.reading.clear();
   loop.comparable = true;
-  if(loop.count >= owner.options_.spin_threshold and not loop.reported)
+  if(loop_reports != 0) [[unlikely]]
+  {
+    loop_head_reached(loop, counted);
+  }
+  if(loop.count >= spin_stop and not loop.reported)
   {
     if(model_due())
     {
@@ -171,6 +177,30 @@ void machine::run_state::spin_block(address addr)
     loop.reported = true;
     owner.do_request_stop(stop_reason::spin, spin_detail());
   }
+}
+
+void machine::run_state::loop_head_reached(spin_state::loop_state& loop, bool counted)
+{
+  auto const at = stepping ? owner.clock_.now() : icount{owner.clock_.now().value - block_size};
+  if(not counted)
+  {
+    end_loop_run(loop, loop_ender::progress, 0, at);
+  }
+  else if(loop.run_open)
+  {
+    loop.run_passes += loop.run_passes != std::numeric_limits<std::uint32_t>::max() ? 1u : 0u;
+    loop.run_last = loop.last;
+  }
+  else if(loop.mark_valid)
+  {
+    loop.run_open   = true;
+    loop.run_start  = loop.mark;
+    loop.run_passes = 1;
+    loop.run_head   = loop.head;
+    loop.run_last   = loop.last;
+  }
+  loop.mark       = at;
+  loop.mark_valid = true;
 }
 
 auto machine::run_state::model_due() const -> bool

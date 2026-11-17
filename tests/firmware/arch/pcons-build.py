@@ -70,6 +70,7 @@ ENTRIES = {
         "stir_allowed",
         "spin_svc",
         "spin_svc_handler",
+        "poll_then_svc",
         "switch_run",
         "task_sp",
         "task_sp_first",

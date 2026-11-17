@@ -5,12 +5,17 @@
 
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/core/trace.hpp>
 
 #include <doctest/doctest.h>
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -289,6 +294,41 @@ TEST_CASE("a poll loop inside a handler that calls SVC is a spin once the depth 
   CHECK(stopped.detail.find("UNMODELLED.STAT") != std::string::npos);
   CHECK(stopped.detail.find("TESTDEV") == std::string::npos);
   CHECK((f.reg("xpsr") & 0x1ff) == 16 + 5);
+}
+
+TEST_CASE("a loop run left by an SVC ends at the SVCall entry with its number")
+{
+  auto f = booted();
+  f.set("pc", fn("poll_then_svc"));
+  auto records = std::make_shared<std::vector<core::trace_record>>();
+  auto sink    = f.target->add_trace_sink(
+      {core::trace_kind::loop, core::trace_kind::irq},
+      [records](std::span<core::trace_record const> batch) { records->append_range(batch); });
+  f.target->set_loop_reports(1);
+  core::slice_request request;
+  request.max_instructions = popcorn::icount{3000};
+  request.wall_budget      = std::chrono::seconds{60};
+  REQUIRE_FALSE(f.run(request).stopped.has_value());
+  REQUIRE(
+      core::machine_internals::services(*f.target).write(
+          0x4001'0008, 4, 1, popcorn::initiator::debugger));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loop = std::ranges::find(*records, core::trace_kind::loop, &core::trace_record::kind);
+  REQUIRE(loop != records->end());
+  CHECK(loop->payload[0] == code("poll_then_svc") + 2);
+  CHECK(loop->payload[1] > 900);
+  CHECK(
+      (loop->aux >> core::trace_loop_ender_shift)
+      == std::to_underlying(core::loop_ender::exception));
+  CHECK((loop->aux & 0xfffu) == 11);
+  REQUIRE(loop + 1 != records->end());
+  CHECK((loop + 1)->kind == core::trace_kind::irq);
+  CHECK((loop + 1)->flags == 1);
+  CHECK((loop + 1)->aux == 11);
+  CHECK((loop + 1)->dt == 0);
+  CHECK(std::ranges::count(*records, core::trace_kind::loop, &core::trace_record::kind) == 1);
 }
 
 TEST_CASE("coverage records no edge from the svc block into the SVCall handler")

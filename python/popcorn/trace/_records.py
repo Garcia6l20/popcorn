@@ -23,6 +23,7 @@ class TraceKind(IntEnum):
     SLEEP = 8
     CLOCK = 9
     CUT = 10
+    LOOP = 11
 
 
 ALL: Final[frozenset[TraceKind]] = frozenset(
@@ -43,6 +44,7 @@ PAYLOAD_WORDS: Final[Mapping[TraceKind, int]] = MappingProxyType(
         TraceKind.SLEEP: 1,
         TraceKind.CLOCK: 2,
         TraceKind.CUT: 1,
+        TraceKind.LOOP: 3,
     }
 )
 """u32 payload words after each record header, by kind."""
@@ -164,6 +166,46 @@ class Cut:
     unrun: int
 
 
+class LoopEnder(IntEnum):
+    """What ended a run of loop passes."""
+
+    PROGRESS = 0
+    """A head arrival found a pass different from the one before, a back edge took another head,
+    or a handler returned."""
+    EXCEPTION = 1
+    """An exception was entered."""
+    SLEEP = 2
+    """The core went to sleep or was held."""
+    END = 3
+    """Loop reports were turned off or the sink was removed."""
+    REBASE = 4
+    """A reset or a restore moved the instruction count."""
+    CALL = 5
+    """A host call started, or ended with a run of its own still open."""
+
+
+@dataclass(frozen=True, slots=True)
+class Loop:
+    """A run of identical passes of the loop at head, over the instruction counts
+    [time - instructions, time) while instructions is below the 0xffffffff cap.
+
+    A pass runs from head back to it with the full register file and every MMIO read value equal
+    to the pass before, RAM not compared. A run ends at a head arrival, a back edge or another
+    ender, so a run whose code left the loop on its last pass also covers the code from the exit
+    to time. instructions starts no earlier than the trace's first record or its last rebase.
+    last is the highest block start of the loop, below head + 256. exception is the exception
+    number for an EXCEPTION ender, 0 otherwise.
+    """
+
+    time: int
+    head: int
+    last: int
+    passes: int
+    instructions: int
+    ender: LoopEnder
+    exception: int
+
+
 @dataclass(frozen=True, slots=True)
 class Rebase:
     """A reset or a restore moved the instruction count to time. Records after it count from
@@ -172,4 +214,4 @@ class Rebase:
     time: int
 
 
-type Record = Block | Mem | Mmio | Irq | Call | Stop | Sleep | Clock | Cut | Rebase
+type Record = Block | Mem | Mmio | Irq | Call | Stop | Sleep | Clock | Cut | Loop | Rebase

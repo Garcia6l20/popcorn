@@ -111,6 +111,9 @@ void profile_sink::feed(std::span<core::trace_record const> records)
       case core::trace_kind::cut:
         cut_block(record);
         break;
+      case core::trace_kind::loop:
+        loop(record);
+        break;
       default:
         break;
     }
@@ -155,6 +158,21 @@ void profile_sink::sleep(core::trace_record const& record)
   if(record.aux != 0)
   {
     add_gap(exceptions_[record.aux].totals.wakes, length);
+  }
+}
+
+void profile_sink::loop(core::trace_record const& record)
+{
+  auto& entry = loops_[record.payload[0]];
+  entry.head  = record.payload[0];
+  entry.last  = std::max(entry.last, record.payload[0] + record.flags);
+  entry.runs += 1;
+  entry.passes += record.payload[1];
+  entry.instructions += std::min<std::uint64_t>(record.payload[2], now_.value - base_.value);
+  if(auto const ender = std::size_t{record.aux} >> core::trace_loop_ender_shift;
+     ender < entry.enders.size())
+  {
+    ++entry.enders[ender];
   }
 }
 
@@ -649,6 +667,7 @@ auto profile_sink::result() const -> profile_result
     }
   }
   std::ranges::sort(out.code, {}, &profile_block::pc);
+  out.loops = loops_ | std::views::values | std::ranges::to<std::vector>();
   if(options_.code)
   {
     out.frames = nodes_;

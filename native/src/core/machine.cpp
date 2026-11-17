@@ -8,6 +8,7 @@
 #include <atomic>
 #include <exception>
 #include <format>
+#include <limits>
 #include <ranges>
 #include <string>
 #include <utility>
@@ -105,7 +106,9 @@ machine::machine(part_description description, arch::arch_factory factory, machi
   run_->reset_vector       = reset_vector_of(description_, options_);
   run_->description_digest = description_digest(description_);
   run_->spin_on            = options_.spin_threshold != 0;
-  hooks_->remover          = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
+  run_->spin_stop =
+      options_.spin_threshold != 0 ? options_.spin_threshold : run_state::no_spin_stop;
+  hooks_->remover = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
   clock_driver_.on_rate_change([this] {
     scheduler_.rekey(clock_);
     run_->emit_clock();
@@ -427,6 +430,37 @@ auto machine::ring_blocks() const noexcept -> bool
   return run_->ring_blocks;
 }
 
+void machine::set_loop_reports(std::uint32_t passes)
+{
+  require_stopped(*this);
+  if(hooks_->delivering != 0)
+  {
+    throw machine_running("a trace sink is being called");
+  }
+  if(passes == 0 and run_->loop_reports != 0)
+  {
+    run_->end_loop_run(loop_ender::end);
+  }
+  auto const was_on  = run_->spin_on;
+  auto const was_off = run_->loop_reports == 0;
+  run_->loop_reports = passes;
+  run_->spin_on      = options_.spin_threshold != 0 or passes != 0;
+  if(run_->spin_on != was_on)
+  {
+    run_->spin.clear();
+  }
+  else if(was_off and passes != 0)
+  {
+    run_->spin.forget_runs();
+  }
+  run_->update_sink_hooks();
+}
+
+auto machine::loop_reports() const noexcept -> std::uint32_t
+{
+  return run_->loop_reports;
+}
+
 void machine::do_enter_engine_callback() noexcept
 {
   run_->enter_callback();
@@ -452,12 +486,21 @@ auto machine::do_emulated_instruction(address at) -> emulated_arrival
 
 void machine::do_trace(trace_record const& record)
 {
-  if(record.kind == trace_kind::irq and record.flags == 1)
+  if(record.kind == trace_kind::irq)
   {
-    ++run_->counters.entries;
-    if(run_->asleep_since)
+    if(run_->loop_reports != 0) [[unlikely]]
     {
-      run_->end_sleep(record.aux);
+      run_->end_loop_run(
+          record.flags == 1 ? loop_ender::exception : loop_ender::progress,
+          record.flags == 1 ? record.aux : 0u);
+    }
+    if(record.flags == 1)
+    {
+      ++run_->counters.entries;
+      if(run_->asleep_since)
+      {
+        run_->end_sleep(record.aux);
+      }
     }
   }
   run_->emit(record, run_->callback_pc(), true);

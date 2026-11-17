@@ -18,6 +18,8 @@ from popcorn.trace import (
     Clock,
     Cut,
     Irq,
+    Loop,
+    LoopEnder,
     Mem,
     Mmio,
     Rebase,
@@ -164,6 +166,71 @@ def test_sleep_clock_cut_rebase_and_initiators_round_trip(tmp_path: Path) -> Non
     assert [event["name"] for event in kept if event["ph"] != "M"] == ["0x08000100", "rebase"]
 
 
+def test_loop_records_round_trip_with_every_ender(tmp_path: Path) -> None:
+    head = 0x0800_0400
+    rows: list[Row] = [
+        (TraceKind.LOOP, 254, 0x1000 | 15, 600, head, 99, 300),
+        (TraceKind.LOOP, 0, 0x0000, 10, head, 1, 4),
+        (TraceKind.LOOP, 4, 0x2000, 10, head, 2, 9),
+        (TraceKind.LOOP, 4, 0x3000, 10, head, 0xFFFF_FFFF, 20),
+        (TraceKind.LOOP, 4, 0x4000, 10, head, 3, 7),
+        (TraceKind.LOOP, 4, 0x5000, 10, head, 4, 12),
+    ]
+    path = tmp_path / "loops.pctr"
+    write(path, rows)
+    assert list(read(path)) == [
+        Loop(ORIGIN + 600, head, head + 254, 99, 300, LoopEnder.EXCEPTION, 15),
+        Loop(ORIGIN + 610, head, head, 1, 4, LoopEnder.PROGRESS, 0),
+        Loop(ORIGIN + 620, head, head + 4, 2, 9, LoopEnder.SLEEP, 0),
+        Loop(ORIGIN + 630, head, head + 4, 0xFFFF_FFFF, 20, LoopEnder.END, 0),
+        Loop(ORIGIN + 640, head, head + 4, 3, 7, LoopEnder.REBASE, 0),
+        Loop(ORIGIN + 650, head, head + 4, 4, 12, LoopEnder.CALL, 0),
+    ]
+    out = tmp_path / "loops.json"
+    to_chrome(path, out)
+    events: list[dict[str, object]] = json.loads(out.read_text())["traceEvents"]
+    loops = [event for event in events if event.get("tid") == 9 and event["ph"] == "X"]
+    assert [(event["ts"], event["dur"]) for event in loops][:2] == [
+        (ORIGIN + 300, 300),
+        (ORIGIN + 606, 4),
+    ]
+    assert loops[0]["name"] == "loop 0x08000400"
+    assert loops[0]["args"] == {
+        "head": head,
+        "last": head + 254,
+        "passes": 99,
+        "ender": "exception",
+        "exception": 15,
+    }
+    bad = tmp_path / "bad.pctr"
+    write(bad, [(TraceKind.LOOP, 0, 0x6000, 1, head, 1, 1)])
+    with pytest.raises(TraceFileError, match="expected a known loop ender"):
+        list(read(bad))
+
+
+def test_a_loop_record_reaching_before_the_trace_start_or_a_rebase_starts_there(
+    tmp_path: Path,
+) -> None:
+    head = 0x0800_0400
+    rows: list[Row] = [
+        (TraceKind.LOOP, 0, 0x3000, 40, head, 7, 0xFFFF_FFFF),
+        (TraceKind.TIME, 1, 0, 0, 10, 0, 0),
+        (TraceKind.LOOP, 0, 0x4000, 25, head, 3, 900),
+    ]
+    path = tmp_path / "early.pctr"
+    write(path, rows)
+    assert list(read(path)) == [
+        Loop(ORIGIN + 40, head, head, 7, 40, LoopEnder.END, 0),
+        Rebase(10),
+        Loop(35, head, head, 3, 25, LoopEnder.REBASE, 0),
+    ]
+    out = tmp_path / "early.json"
+    to_chrome(path, out)
+    events: list[dict[str, object]] = json.loads(out.read_text())["traceEvents"]
+    loops = [event for event in events if event.get("tid") == 9 and event["ph"] == "X"]
+    assert [(event["ts"], event["dur"]) for event in loops] == [(ORIGIN, 40), (10, 25)]
+
+
 def test_compressed_files_read_the_same(tmp_path: Path) -> None:
     rows, expected = synthetic(2_000, seed=3)
     path = tmp_path / "t.pctr"
@@ -190,7 +257,7 @@ def test_malformed_files(tmp_path: Path) -> None:
     with pytest.raises(TraceFileError, match="offset 0: expected the PCTR magic"):
         list(read(magic))
     unknown = tmp_path / "unknown.pctr"
-    unknown.write_bytes(data[:8] + bytes([11]) + data[9:])
+    unknown.write_bytes(data[:8] + bytes([12]) + data[9:])
     with pytest.raises(TraceFileError, match="offset 8: expected a known record kind"):
         list(read(unknown))
     with pytest.raises(FileNotFoundError):
@@ -238,7 +305,7 @@ def test_chrome_json(tmp_path: Path) -> None:
     events: list[dict[str, object]] = document["traceEvents"]
     assert document["otherData"] == {"clock": "instructions"}
     metadata = [event for event in events if event["ph"] == "M"]
-    assert len(metadata) == 9
+    assert len(metadata) == 10
     body = [event for event in events if event["ph"] != "M"]
     still_open = 0
     for record in expected[1:]:

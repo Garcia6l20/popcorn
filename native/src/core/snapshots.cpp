@@ -340,7 +340,11 @@ void machine::restore_checked(core::snapshot const& saved, bool apply)
     return;
   }
 
-  auto& run   = *run_;
+  auto& run = *run_;
+  if(run.loop_reports != 0)
+  {
+    run.end_loop_run(loop_ender::rebase);
+  }
   run.invalid = true;
   run.restore_memory(plan.memory);
   if(plan.registers.empty())

@@ -1,5 +1,6 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/trace.hpp>
 
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
@@ -13,8 +14,15 @@
 #include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <limits>
+#include <memory>
+#include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -366,4 +374,552 @@ TEST_CASE("a masked call running another loop does not restart the paused poll")
   REQUIRE(rest.stopped.has_value());
   CHECK(rest.stopped->reason == stop_reason::spin);
   CHECK(first.executed.value + rest.executed.value == uninterrupted);
+}
+
+namespace
+{
+struct stamped
+{
+  icount             at{};
+  core::trace_record record{};
+};
+
+struct loop_log
+{
+  std::vector<stamped> records{};
+  icount               now{};
+
+  [[nodiscard]] auto loops() const -> std::vector<stamped>
+  {
+    return records
+         | std::views::filter(
+               [](stamped const& entry) { return entry.record.kind == core::trace_kind::loop; })
+         | std::ranges::to<std::vector>();
+  }
+};
+
+auto listen(fixture const& f, core::trace_kinds kinds = {core::trace_kind::loop})
+    -> std::pair<std::shared_ptr<loop_log>, core::hook_handle>
+{
+  auto log    = std::make_shared<loop_log>();
+  log->now    = f.target->virtual_clock().now();
+  auto handle = f.target->add_trace_sink(kinds, [log](std::span<core::trace_record const> batch) {
+    for(auto const& record : batch)
+    {
+      if(record.kind == core::trace_kind::time)
+      {
+        log->now =
+            icount{std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32};
+      }
+      else
+      {
+        log->now.value += record.dt;
+      }
+      log->records.push_back({.at = log->now, .record = record});
+    }
+  });
+  return {log, std::move(handle)};
+}
+
+auto head_of(std::string_view entry, address offset) -> address
+{
+  return (sym("spin", entry) & ~address{1}) + offset;
+}
+
+auto ender_of(core::trace_record const& record) -> core::loop_ender
+{
+  return static_cast<core::loop_ender>(record.aux >> core::trace_loop_ender_shift);
+}
+
+auto start_of(stamped const& entry) -> icount
+{
+  return icount{entry.at.value - entry.record.payload[2]};
+}
+
+auto budget(std::uint64_t instructions) -> core::slice_request
+{
+  core::slice_request request = long_request();
+  request.max_instructions    = icount{instructions};
+  return request;
+}
+
+void write_flag(fixture const& f, std::uint32_t value)
+{
+  REQUIRE(
+      core::machine_internals::services(*f.target).write(
+          flag, 4, value, popcorn::initiator::debugger));
+}
+}
+
+TEST_CASE(
+    "a fixed-point poll reports one run from its first identical pass, "
+    "ended by turning reports off")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  auto const from = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(3001)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 1);
+  auto const& run = loops.front();
+  CHECK(run.record.payload[0] == head_of("wait_ready", 2));
+  CHECK(run.record.flags == 0);
+  CHECK(ender_of(run.record) == core::loop_ender::end);
+  CHECK(run.at.value == from.value + 3001);
+  CHECK(start_of(run).value == from.value + 13);
+  CHECK(run.record.payload[1] == 995);
+  CHECK(run.record.payload[2] == 3 * 995 + 3);
+  CHECK(f.target->loop_reports() == 0);
+}
+
+TEST_CASE("loop reports never stop the run and a run below the report threshold writes nothing")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  {
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(1000);
+    CHECK_FALSE(f.run(budget(100'000)).stopped.has_value());
+    f.target->set_loop_reports(0);
+    sink.reset();
+    REQUIRE(log->loops().size() == 1);
+    CHECK(log->loops().front().record.payload[1] > 33'000);
+  }
+  start(f, "wait_ready");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1000);
+  REQUIRE_FALSE(f.run(budget(3 * 1000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  CHECK(log->loops().empty());
+}
+
+TEST_CASE("the spin stop and its instruction count are the same with loop reports on")
+{
+  for(auto const reports : {0u, 1u, 5000u})
+  {
+    CAPTURE(reports);
+    auto f = booted(1000);
+    start(f, "wait_ready");
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(reports);
+    auto const before  = f.target->virtual_clock().now();
+    auto const stopped = f.run_to_stop(long_request());
+    CHECK(stopped.reason == stop_reason::spin);
+    CHECK(f.target->virtual_clock().now().value - before.value == 4 + 3 * 1004);
+  }
+}
+
+TEST_CASE("a countdown makes progress every pass and reports no run")
+{
+  for(auto const* const entry : {"delay", "delay_r4"})
+  {
+    CAPTURE(entry);
+    auto f = booted(0);
+    start(f, entry);
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(1);
+    CHECK(f.run_to_stop(long_request()).reason == stop_reason::user);
+    f.target->set_loop_reports(0);
+    sink.reset();
+    CHECK(log->loops().empty());
+  }
+}
+
+TEST_CASE("a loop storing a constant to RAM each pass reports its passes")
+{
+  auto f = booted(0);
+  start(f, "store_forever");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(2000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  REQUIRE(log->loops().size() == 1);
+  CHECK(log->loops().front().record.payload[0] == head_of("store_forever", 4));
+  CHECK(log->loops().front().record.payload[1] > 900);
+}
+
+TEST_CASE("a poll whose read value changes ends its run there and starts another")
+{
+  auto f = booted(0);
+  start(f, "poll_value");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  auto const changed = f.target->virtual_clock().now();
+  write_flag(f, 1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 2);
+  CHECK(ender_of(loops[0].record) == core::loop_ender::progress);
+  CHECK(loops[0].at.value > changed.value);
+  CHECK(loops[0].at.value - changed.value <= 3);
+  CHECK(ender_of(loops[1].record) == core::loop_ender::end);
+  CHECK(start_of(loops[1]).value == loops[0].at.value + 3);
+  CHECK(loops[0].record.payload[0] == loops[1].record.payload[0]);
+}
+
+TEST_CASE("an exception entry ends the run at the entry and the next run starts after the return")
+{
+  auto f = booted(0);
+  start(f, "wait_ready_ticking");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(60'000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() > 100);
+  for(std::size_t at = 0; at + 1 < loops.size(); ++at)
+  {
+    CAPTURE(at);
+    CHECK(ender_of(loops[at].record) == core::loop_ender::exception);
+    CHECK((loops[at].record.aux & 0xfffu) == 0);
+    CHECK(start_of(loops[at + 1]).value > loops[at].at.value);
+    CHECK(loops[at].record.payload[2] < 500);
+  }
+  CHECK(ender_of(loops.back().record) == core::loop_ender::end);
+}
+
+TEST_CASE("a loop left for a sleep ends its run where the sleep starts")
+{
+  auto f = booted(0);
+  start(f, "poll_then_sleep");
+  auto [log, sink] = listen(f, {core::trace_kind::loop, core::trace_kind::sleep});
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  write_flag(f, 1);
+  core::slice_request request{
+      .wall_budget = std::chrono::seconds{60},
+      .until_time  = popcorn::vtime{f.target->virtual_clock().time().ps + 1'000'000'000}};
+  f.run(request);
+  sink.reset();
+  auto const& records = log->records;
+  REQUIRE(records.size() == 2);
+  CHECK(ender_of(records[0].record) == core::loop_ender::sleep);
+  CHECK(records[1].record.kind == core::trace_kind::sleep);
+  CHECK(records[1].at.value - records[1].record.payload[0] == records[0].at.value);
+}
+
+TEST_CASE("removing a sink writes the open run to it alone, and the run goes on for the others")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [kept, kept_sink]       = listen(f);
+  auto [removed, removed_sink] = listen(f);
+  f.target->set_loop_reports(1);
+  auto const from = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  removed_sink.reset();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  auto const off = f.target->virtual_clock().now();
+  f.target->set_loop_reports(0);
+  kept_sink.reset();
+  REQUIRE(removed->loops().size() == 1);
+  REQUIRE(kept->loops().size() == 1);
+  CHECK(ender_of(removed->loops().front().record) == core::loop_ender::end);
+  CHECK(removed->loops().front().at.value == from.value + 1000);
+  CHECK(start_of(removed->loops().front()).value == from.value + 13);
+  CHECK(start_of(kept->loops().front()).value == from.value + 13);
+  CHECK(kept->loops().front().at == off);
+}
+
+TEST_CASE("a reset or a restore ends the open run before the count moves")
+{
+  for(auto const restore : {false, true})
+  {
+    CAPTURE(restore);
+    auto f = booted(0);
+    start(f, "wait_ready");
+    auto const saved = f.target->snapshot();
+    auto [log, sink] = listen(f, {core::trace_kind::loop, core::trace_kind::time});
+    f.target->set_loop_reports(1);
+    auto const from = f.target->virtual_clock().now();
+    REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+    if(restore)
+    {
+      f.target->restore(saved);
+    }
+    else
+    {
+      f.target->reset();
+    }
+    f.target->set_loop_reports(0);
+    sink.reset();
+    auto const& records = log->records;
+    REQUIRE(records.size() >= 2);
+    CHECK(records[0].record.kind == core::trace_kind::loop);
+    CHECK(ender_of(records[0].record) == core::loop_ender::rebase);
+    CHECK(records[0].at.value == from.value + 1000);
+    CHECK(start_of(records[0]).value == from.value + 13);
+    CHECK(records[1].record.kind == core::trace_kind::time);
+    CHECK((records[1].record.flags & core::trace_rebase_flag) != 0);
+  }
+}
+
+TEST_CASE("a host call ends the open run at its start")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  auto const from = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  popcorn::arch::call_frame const frame{
+      .entry = sym("spin", "delay"), .return_sentinel = 0x3000'0000};
+  REQUIRE(f.target->call(frame, icount{50}).stopped.reason == stop_reason::budget);
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 2);
+  CHECK(ender_of(loops[0].record) == core::loop_ender::call);
+  CHECK(loops[0].at.value == from.value + 1000);
+  CHECK(start_of(loops[0]).value == from.value + 13);
+  CHECK(start_of(loops[1]).value > from.value + 1050);
+}
+
+TEST_CASE("stepped slices stamp loop runs at the counts of a budget run")
+{
+  auto const exactly = [](fixture const& f, std::uint64_t instructions, std::uint64_t slice) {
+    for(std::uint64_t done = 0; done < instructions; done += slice)
+    {
+      auto request               = long_request();
+      request.exact_instructions = icount{std::min(slice, instructions - done)};
+      auto const ran             = f.run(request);
+      REQUIRE(ran.stopped.has_value());
+      REQUIRE(ran.stopped->reason == stop_reason::budget);
+    }
+  };
+  for(auto const slice : {7u, 300u})
+  {
+    CAPTURE(slice);
+    {
+      auto f = booted(0);
+      start(f, "wait_ready");
+      auto [log, sink] = listen(f);
+      f.target->set_loop_reports(1);
+      auto const from = f.target->virtual_clock().now();
+      exactly(f, 3001, slice);
+      f.target->set_loop_reports(0);
+      sink.reset();
+      auto const loops = log->loops();
+      REQUIRE(loops.size() == 1);
+      CHECK(loops.front().at.value == from.value + 3001);
+      CHECK(start_of(loops.front()).value == from.value + 13);
+      CHECK(loops.front().record.payload[1] == 995);
+    }
+    auto f = booted(0);
+    start(f, "poll_value");
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(1);
+    exactly(f, 3000, slice);
+    auto const changed = f.target->virtual_clock().now();
+    write_flag(f, 1);
+    exactly(f, 3000, slice);
+    f.target->set_loop_reports(0);
+    sink.reset();
+    auto const loops = log->loops();
+    REQUIRE(loops.size() == 2);
+    CHECK(ender_of(loops[0].record) == core::loop_ender::progress);
+    CHECK(loops[0].at.value == changed.value + 4);
+    CHECK(start_of(loops[1]).value == loops[0].at.value + 3);
+  }
+}
+
+TEST_CASE("a run inside a host call ends where the call stops, and the caller's run goes on after")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  auto const from = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  popcorn::arch::call_frame const frame{
+      .entry = sym("spin", "wait_ready"), .return_sentinel = 0x3000'0000};
+  REQUIRE(f.target->call(frame, icount{1000}).stopped.reason == stop_reason::budget);
+  auto const stopped = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 3);
+  CHECK(ender_of(loops[0].record) == core::loop_ender::call);
+  CHECK(loops[0].at.value == from.value + 1000);
+  CHECK(ender_of(loops[1].record) == core::loop_ender::call);
+  CHECK(loops[1].record.payload[0] == head_of("wait_ready", 2));
+  CHECK(loops[1].at == stopped);
+  CHECK(start_of(loops[1]).value > from.value + 1000);
+  CHECK(loops[1].record.payload[1] > 300);
+  CHECK(ender_of(loops[2].record) == core::loop_ender::end);
+  CHECK(start_of(loops[2]).value >= stopped.value);
+}
+
+TEST_CASE("loop reports at spin_threshold 0 never stop a pass count at its largest value")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(100)).stopped.has_value());
+  auto& loop = core::machine_internals::spin(*f.target).loop();
+  REQUIRE(loop.count > 20);
+  loop.count = std::numeric_limits<std::uint32_t>::max() - 2;
+  CHECK_FALSE(f.run(budget(30)).stopped.has_value());
+  f.target->set_loop_reports(0);
+}
+
+TEST_CASE("a poll that drops the value it read ends its run when that value changes")
+{
+  auto f = booted(0);
+  start(f, "poll_discard");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  auto const changed = f.target->virtual_clock().now();
+  write_flag(f, 1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  REQUIRE(loops.size() == 2);
+  CHECK(loops[0].record.payload[0] == head_of("poll_discard", 2));
+  CHECK(ender_of(loops[0].record) == core::loop_ender::progress);
+  CHECK(loops[0].at.value > changed.value);
+  CHECK(loops[0].at.value - changed.value <= 3);
+  CHECK(ender_of(loops[1].record) == core::loop_ender::end);
+}
+
+TEST_CASE("a poll left on its last pass reports the code from the exit to its ender in its run")
+{
+  auto f = booted(0);
+  start(f, "poll_exit_tail");
+  auto [log, sink] = listen(f, {core::trace_kind::loop, core::trace_kind::sleep});
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  write_flag(f, 1);
+  core::slice_request request{
+      .wall_budget = std::chrono::seconds{60},
+      .until_time  = popcorn::vtime{f.target->virtual_clock().time().ps + 1'000'000'000}};
+  f.run(request);
+  sink.reset();
+  auto const& records = log->records;
+  REQUIRE(records.size() == 2);
+  auto const& run = records[0];
+  CHECK(ender_of(run.record) == core::loop_ender::sleep);
+  CHECK(run.record.payload[0] == head_of("poll_exit_tail", 4));
+  CHECK(run.record.payload[2] == 3 * run.record.payload[1] + 3 + 40 + 1);
+  CHECK(records[1].record.kind == core::trace_kind::sleep);
+  CHECK(records[1].at.value - records[1].record.payload[0] == run.at.value);
+}
+
+TEST_CASE("a loop whose last block starts 254 bytes past its head reports the offset in flags")
+{
+  for(auto const* const entry : {"widest_loop", "too_wide_loop"})
+  {
+    CAPTURE(entry);
+    auto f = booted(0);
+    start(f, entry);
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(1);
+    REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+    f.target->set_loop_reports(0);
+    sink.reset();
+    if(std::string_view{entry} == "too_wide_loop")
+    {
+      CHECK(log->loops().empty());
+      continue;
+    }
+    REQUIRE(log->loops().size() == 1);
+    CHECK(log->loops().front().record.payload[0] == head_of(entry, 2));
+    CHECK(log->loops().front().record.flags == 254);
+  }
+}
+
+TEST_CASE("slice ends anywhere in a loop give the records of one slice")
+{
+  auto const records = [](std::uint64_t slice) {
+    auto f = booted(0);
+    start(f, "wait_ready_ticking");
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(1);
+    auto const target = f.target->virtual_clock().now().value + 6000;
+    for(auto now = f.target->virtual_clock().now().value; now < target;
+        now      = f.target->virtual_clock().now().value)
+    {
+      REQUIRE_FALSE(f.run(budget(std::min(slice, target - now))).stopped.has_value());
+    }
+    f.target->set_loop_reports(0);
+    sink.reset();
+    auto out = log->records
+             | std::views::transform([](stamped const& entry) {
+                 return std::tuple{entry.at.value,          entry.record.payload[0],
+                                   entry.record.payload[1], entry.record.payload[2],
+                                   entry.record.aux,        entry.record.flags};
+               })
+             | std::ranges::to<std::vector>();
+    REQUIRE_FALSE(out.empty());
+    auto const& last = out.back();
+    out.back()       = {
+        std::get<0>(last) - std::get<3>(last),
+        std::get<1>(last),
+        0,
+        0,
+        std::get<4>(last),
+        std::get<5>(last)};
+    return out;
+  };
+  auto const whole = records(6000);
+  REQUIRE(whole.size() > 8);
+  for(auto const slice : {1u, 2u, 7u, 499u, 1000u})
+  {
+    CAPTURE(slice);
+    CHECK(records(slice) == whole);
+  }
+}
+
+TEST_CASE("a run is reported from exactly the report threshold of passes")
+{
+  for(auto const& [threshold, reported] : {
+          std::pair{995u, true },
+          std::pair{996u, false}
+  })
+  {
+    CAPTURE(threshold);
+    auto f = booted(0);
+    start(f, "wait_ready");
+    auto [log, sink] = listen(f);
+    f.target->set_loop_reports(threshold);
+    REQUIRE_FALSE(f.run(budget(3001)).stopped.has_value());
+    f.target->set_loop_reports(0);
+    sink.reset();
+    CHECK(log->loops().size() == (reported ? 1u : 0u));
+  }
+}
+
+TEST_CASE("a handler loop left by its return ends its run at the return")
+{
+  auto f = booted(0);
+  install_tick(f, "tick_wait_flag");
+  start(f, "wait_ready_ticking");
+  auto [log, sink] = listen(f);
+  f.target->set_loop_reports(1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  write_flag(f, 1);
+  REQUIRE_FALSE(f.run(budget(3000)).stopped.has_value());
+  f.target->set_loop_reports(0);
+  sink.reset();
+  auto const loops = log->loops();
+  auto const head  = head_of("tick_wait_flag", 2);
+  auto const found = std::ranges::find_if(
+      loops, [head](stamped const& entry) { return entry.record.payload[0] == head; });
+  REQUIRE(found != loops.end());
+  CHECK(ender_of(found->record) == core::loop_ender::progress);
+  CHECK(found->record.payload[1] > 100);
 }

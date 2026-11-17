@@ -63,6 +63,19 @@ struct pctr_payload
  *   from there on, low word first.
  * - cut: written to sinks when the engine leaves a block before its end, after the block record,
  *   payload[0] the block's start, aux the instructions of the block that did not run.
+ * - loop: written to sinks while loop reports are on, see machine::set_loop_reports(), when a
+ *   run of identical passes of a loop ends. A pass runs from the loop head back to it with the
+ *   full register file and every MMIO read value equal to the pass before, RAM not compared.
+ *   payload[0] the head, payload[1] the passes, payload[2] the instructions from the start of
+ *   the first pass to the record, both capped at 0xffffffff. A run holds no exception entry and
+ *   no sleep, so below the cap it started at the record's count minus payload[2]. A slice end or
+ *   a cut record inside a run does not end it. The detector sees a run end only at a head
+ *   arrival, a back edge or one of the other enders, so a run whose code left the loop on its
+ *   last pass reaches to the next of them: payload[2] then also counts the code from the exit
+ *   to the record. flags the offset from the head of the highest
+ *   block start seen in the loop window since the head was taken, below loop_window_bytes. aux
+ *   the ender, trace_loop_ender() of a loop_ender and, for an exception entry, the number the
+ *   arch's irq record carries, 0 when the arch writes none.
  *
  * A register or symbol id of 0xffff or more is written as trace_id_overflow, see trace_id(), and
  * a reader resolves the record by its payload address instead.
@@ -80,6 +93,7 @@ enum class[[= reflex::derive{reflex::Format}]] trace_kind : std::uint8_t
   sleep[[= pctr_payload{1}]] = 8,
   clock[[= pctr_payload{2}]] = 9,
   cut[[= pctr_payload{1}]]   = 10,
+  loop[[= pctr_payload{3}]]  = 11,
 };
 
 static_assert(
@@ -144,6 +158,45 @@ inline constexpr std::uint8_t trace_rebase_flag = 0x01;
 
 /** @brief `flags` bit of a sleep record cut by removing the sink. */
 inline constexpr std::uint8_t trace_sleep_partial = 0x80;
+
+/** @brief Bytes after a loop head in which blocks belong to the loop. A loop record's flags
+ * hold the offset of a block start in this window. */
+inline constexpr std::uint32_t loop_window_bytes = 256;
+
+static_assert(loop_window_bytes - 1 <= 0xff, "a loop record's flags hold an offset in the window");
+
+/** @brief What ended a run of loop passes, the top bits of a loop record's aux. */
+enum class[[= reflex::derive{reflex::Format}]] loop_ender : std::uint8_t
+{
+  /** @brief A head arrival found a pass different from the one before, a back edge took
+   * another head, or a handler returned. */
+  progress = 0,
+  /** @brief An exception was entered, its number in the low bits of aux. */
+  exception = 1,
+  /** @brief The core went to sleep or was held. */
+  sleep = 2,
+  /** @brief Loop reports were turned off or the sink was removed, with the run still open. */
+  end = 3,
+  /** @brief A reset or a restore moved the instruction count with the run still open. */
+  rebase = 4,
+  /** @brief A host call started, or ended with a run of its own still open. */
+  call = 5,
+};
+
+/** @brief Shift of the loop_ender in a loop record's aux. */
+inline constexpr unsigned trace_loop_ender_shift = 12;
+
+/**
+ * @brief aux of a loop record.
+ * @param ender What ended the run.
+ * @param exception Exception number for loop_ender::exception, below 4096, 0 otherwise.
+ */
+constexpr auto trace_loop_ender(loop_ender ender, std::uint32_t exception = 0) noexcept
+    -> std::uint16_t
+{
+  return static_cast<std::uint16_t>(
+      (std::uint32_t{std::to_underlying(ender)} << trace_loop_ender_shift) | (exception & 0xfffu));
+}
 
 /** @brief Size in bytes of the `.pctr` record header `<u8 kind, u8 flags, u16 aux, u32 dt>`. */
 inline constexpr std::size_t pctr_header_size = 8;

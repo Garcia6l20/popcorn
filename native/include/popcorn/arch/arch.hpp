@@ -377,8 +377,9 @@ public:
    *        a valid EXC_RETURN, with @p frame_return a valid EXC_RETURN too, not necessarily the
    *        same, since a handler such as an RTOS context switch may return another one. The
    *        machine tells the frames apart by stack pointer. Called before on_interrupt(), with
-   *        the core registers still as the function left them, and only while a return hook
-   *        waits.
+   *        the core registers still as the function left them, while a return hook waits. While
+   *        loop reports are on, also with the pc as @p frame_return, to tell a handler return
+   *        from a pended exception.
    * @param intno Engine exception number, as on_interrupt() gets it.
    * @param frame_return Return address a waiting frame got at entry.
    * @return Whether the frame returns here. The default reports no such return.

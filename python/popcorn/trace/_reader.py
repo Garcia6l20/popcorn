@@ -18,6 +18,8 @@ from popcorn.trace._records import (
     Cut,
     Initiator,
     Irq,
+    Loop,
+    LoopEnder,
     Mem,
     Mmio,
     Rebase,
@@ -42,6 +44,8 @@ _DMA: Final = 0x20
 _SIZE: Final = 0x1F
 _REBASE: Final = 0x01
 _PARTIAL: Final = 0x80
+_LOOP_ENDER_SHIFT: Final = 12
+_LOOP_EXCEPTION: Final = 0xFFF
 
 
 def _initiator(flags: int) -> Initiator:
@@ -207,6 +211,22 @@ def _records(stream: _Stream) -> Iterator[Record]:
             case TraceKind.CUT:
                 time += dt
                 yield Cut(time, payload[0], aux)
+            case TraceKind.LOOP:
+                time += dt
+                try:
+                    ender = LoopEnder(aux >> _LOOP_ENDER_SHIFT)
+                except ValueError:
+                    raise stream.fail(at, "a known loop ender") from None
+                floor = time if base is None else min(base, time)
+                yield Loop(
+                    time,
+                    payload[0],
+                    payload[0] + flags,
+                    payload[1],
+                    min(payload[2], time - floor),
+                    ender,
+                    aux & _LOOP_EXCEPTION,
+                )
 
 
 def _body(stream: _Stream, stack: ExitStack) -> Iterator[Record]:

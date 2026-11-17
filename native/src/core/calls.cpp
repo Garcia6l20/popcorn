@@ -76,6 +76,10 @@ void machine::begin_call(arch::call_frame const& frame)
   }
   saved_call saved{.frame = frame, .registers = read_registers(engine_.get(), arch_->registers())};
   arch_->save(saved.arch_state);
+  if(run_->loop_reports != 0)
+  {
+    run_->end_loop_run(loop_ender::call);
+  }
   arch_->prepare_call(frame);
   run_->coverage.has_previous = false;
   saved.frames                = run_->frames.size();
@@ -88,6 +92,10 @@ void machine::begin_call(arch::call_frame const& frame)
 auto machine::end_call() -> std::uint64_t
 {
   require_stopped(*this);
+  if(run_->loop_reports != 0)
+  {
+    run_->end_loop_run(loop_ender::call);
+  }
   auto       saved = *std::exchange(run_->call, std::nullopt);
   auto const value = saved.returned ? arch_->call_result(saved.frame) : std::uint64_t{0};
   write_registers(engine_.get(), arch_->registers(), std::move(saved.registers));

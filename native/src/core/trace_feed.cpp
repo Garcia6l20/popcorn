@@ -290,6 +290,43 @@ void machine::run_state::end_sleep(std::uint16_t woke_by)
       address{}, false, now);
 }
 
+auto machine::run_state::loop_record(
+    spin_state::loop_state const& loop,
+    loop_ender                    ender,
+    std::uint32_t                 exception,
+    icount                        at) -> trace_record
+{
+  auto const span = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      at.value - loop.run_start.value, std::numeric_limits<std::uint32_t>::max()));
+  return {
+      .kind    = trace_kind::loop,
+      .flags   = static_cast<std::uint8_t>(loop.run_last - loop.run_head),
+      .aux     = trace_loop_ender(ender, exception),
+      .payload = {loop.run_head, loop.run_passes, span},
+  };
+}
+
+void machine::run_state::end_loop_run(
+    spin_state::loop_state& loop,
+    loop_ender              ender,
+    std::uint32_t           exception,
+    icount                  at)
+{
+  loop.mark_valid = false;
+  if(not std::exchange(loop.run_open, false)
+     or not sinks_want_loop
+     or loop.run_passes < loop_reports)
+  {
+    return;
+  }
+  deliver(loop_record(loop, ender, exception, at), loop.run_head, true, at);
+}
+
+void machine::run_state::end_loop_run(loop_ender ender, std::uint32_t exception)
+{
+  end_loop_run(spin.loop(), ender, exception, owner.clock_.now());
+}
+
 void machine::run_state::emit_clock()
 {
   if(sinks_want_clock)
@@ -355,6 +392,7 @@ void machine::run_state::update_sink_hooks()
   sinks_want_sleep    = wanted(trace_kind::sleep);
   sinks_want_clock    = wanted(trace_kind::clock);
   sinks_want_cut      = wanted(trace_kind::cut);
+  sinks_want_loop     = loop_reports != 0 and wanted(trace_kind::loop);
   block_records       = sinks_want_block or ring_blocks;
   auto const want_mem = std::ranges::any_of(
       sinks, [](auto const& held) { return held.second->kinds.contains(trace_kind::mem); });
@@ -417,6 +455,15 @@ void machine::run_state::remove_sink(std::uint64_t id) noexcept
                             0, 0}
       },
           now, entry.batch);
+    }
+    if(auto const& loop = spin.loop(); sinks_want_loop
+                                       and loop.run_open
+                                       and loop.run_passes >= loop_reports
+                                       and entry.kinds.contains(trace_kind::loop)
+                                       and in_ranges(entry.ranges, loop.run_head))
+    {
+      auto const now = owner.clock_.now();
+      entry.stream.stamp(loop_record(loop, loop_ender::end, 0, now), now, entry.batch);
     }
     flush(entry);
   }

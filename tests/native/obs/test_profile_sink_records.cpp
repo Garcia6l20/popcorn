@@ -411,3 +411,91 @@ TEST_CASE("a block after a hold past the 32-bit dt range keeps its full distance
   CHECK(c.records.front().kind == core::trace_kind::time);
   CHECK(at - start.value >= 4'400'000'000);
 }
+
+TEST_CASE(
+    "loop records aggregate by head: runs, passes, instructions, "
+    "the furthest block and the enders")
+{
+  auto const loop = [](address head, std::uint8_t last, std::uint32_t passes,
+                       std::uint32_t instructions, core::loop_ender ender,
+                       std::uint32_t exception = 0) {
+    return core::trace_record{
+        .kind    = core::trace_kind::loop,
+        .flags   = last,
+        .aux     = core::trace_loop_ender(ender, exception),
+        .dt      = instructions,
+        .payload = {head, passes, instructions},
+    };
+  };
+  auto const result = fed(
+      {loop(0x0800'0200, 4, 10, 31, core::loop_ender::exception, 15),
+       loop(0x0800'0100, 0, 3, 9, core::loop_ender::progress),
+       loop(0x0800'0200, 254, 5, 16, core::loop_ender::exception, 15),
+       loop(0x0800'0200, 2, 1, 4, core::loop_ender::sleep),
+       loop(0x0800'0100, 0, 7, 22, core::loop_ender::rebase),
+       loop(0x0800'0100, 0, 2, 7, core::loop_ender::end),
+       loop(0x0800'0100, 0, 1, 3, core::loop_ender::call)});
+  REQUIRE(result.loops.size() == 2);
+  auto const& low = result.loops[0];
+  CHECK(low.head == 0x0800'0100);
+  CHECK(low.last == 0x0800'0100);
+  CHECK(low.runs == 4);
+  CHECK(low.passes == 13);
+  CHECK(low.instructions == 41);
+  CHECK(low.enders == std::array<std::uint64_t, 6>{1, 0, 0, 1, 1, 1});
+  auto const& high = result.loops[1];
+  CHECK(high.head == 0x0800'0200);
+  CHECK(high.last == 0x0800'02fe);
+  CHECK(high.runs == 3);
+  CHECK(high.passes == 16);
+  CHECK(high.instructions == 51);
+  CHECK(high.enders == std::array<std::uint64_t, 6>{0, 2, 1, 0, 0, 0});
+  CHECK(result.instructions == 0);
+}
+
+TEST_CASE("a loop run reaching before the sink's start or its last rebase counts from there")
+{
+  auto const loop = [](std::uint32_t dt, std::uint32_t instructions) {
+    return core::trace_record{
+        .kind    = core::trace_kind::loop,
+        .aux     = core::trace_loop_ender(core::loop_ender::end),
+        .dt      = dt,
+        .payload = {0x0800'0100, 7, instructions},
+    };
+  };
+  auto const result = fed({
+      loop(40, 0xffff'ffff),
+      core::trace_record{
+                         .kind = core::trace_kind::time, .flags = core::trace_rebase_flag, .payload = {10, 0}},
+      loop(25, 900)
+  });
+  REQUIRE(result.loops.size() == 1);
+  CHECK(result.loops.front().runs == 2);
+  CHECK(result.loops.front().instructions == 40 + 25);
+}
+
+TEST_CASE("the FreeRTOS idle loop is one engine loop from prvCheckTasksWaitingTermination")
+{
+  auto     f = spi_machine();
+  profiled p{*f->target};
+  f->target->set_loop_reports(1);
+  f->run_for(100 * ms_ps);
+  f->target->set_loop_reports(0);
+  auto const result = p.take();
+  auto const check  = sym("spi_flash", "prvCheckTasksWaitingTermination") & ~address{1};
+  for(auto const& loop : result.loops)
+  {
+    CAPTURE(loop.head);
+    CHECK(loop.last >= loop.head);
+    CHECK(loop.last - loop.head < core::loop_window_bytes);
+  }
+  auto const idle = std::ranges::find(result.loops, check, &obs::profile_loop::head);
+  REQUIRE(idle != result.loops.end());
+  CHECK(idle->head == 0x0800'e00c);
+  CHECK(idle->last == 0x0800'e05c);
+  CHECK(idle->runs == 171);
+  CHECK(idle->passes == 1'046'932);
+  CHECK(idle->instructions == 11'517'562);
+  CHECK(idle->enders == std::array<std::uint64_t, 6>{0, 171, 0, 0, 0, 0});
+  CHECK(result.instructions == 15'829'458);
+}

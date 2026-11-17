@@ -16,6 +16,7 @@ from popcorn.trace._records import (
     Clock,
     Cut,
     Irq,
+    Loop,
     Mem,
     Mmio,
     Rebase,
@@ -39,6 +40,7 @@ _THREADS: Final = {
     TraceKind.SLEEP: (7, "sleep"),
     TraceKind.CLOCK: (8, "clock"),
     TraceKind.CUT: (1, "blocks"),
+    TraceKind.LOOP: (9, "loops"),
 }
 _REASONS: Final = ("sleep", "WFI", "WFE", "sleep on exit")
 _KIND: Final[dict[type[Record], TraceKind]] = {
@@ -51,6 +53,7 @@ _KIND: Final[dict[type[Record], TraceKind]] = {
     Sleep: TraceKind.SLEEP,
     Clock: TraceKind.CLOCK,
     Cut: TraceKind.CUT,
+    Loop: TraceKind.LOOP,
     Rebase: TraceKind.STOP,
 }
 
@@ -142,6 +145,24 @@ def _events(record: Record, open_irqs: dict[int, int]) -> list[Event]:
             return [_instant(record, f"{record.hz} Hz", {"hz": record.hz})]
         case Cut():
             return [_instant(record, "cut", {"pc": record.pc, "unrun": record.unrun})]
+        case Loop():
+            return [
+                {
+                    "name": f"loop 0x{record.head:08x}",
+                    "ph": "X",
+                    "ts": record.time - record.instructions,
+                    "dur": record.instructions,
+                    "pid": _PID,
+                    "tid": _THREADS[TraceKind.LOOP][0],
+                    "args": {
+                        "head": record.head,
+                        "last": record.last,
+                        "passes": record.passes,
+                        "ender": record.ender.name.lower(),
+                        "exception": record.exception,
+                    },
+                }
+            ]
         case Rebase():
             return [_instant(record, "rebase", {}, scope="g")]
 

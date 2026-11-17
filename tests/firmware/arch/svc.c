@@ -226,6 +226,17 @@ __attribute__((noipa)) void spin_svc(void)
   __asm__ volatile("bkpt #1" ::: "memory");
 }
 
+__attribute__((naked)) void poll_then_svc(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "svc #9\n"
+                   "bkpt #1\n"
+                   ".ltorg\n");
+}
+
 __attribute__((noipa)) void spin_svc_handler(void)
 {
   pend(5);

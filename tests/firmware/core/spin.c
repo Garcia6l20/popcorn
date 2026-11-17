@@ -208,6 +208,91 @@ __attribute__((naked)) void tick_hang(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void poll_value(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #7\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_then_sleep(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "wfi\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void widest_loop(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: ldr r0, [r1, #4]\n"
+                   "b.n 2f\n"
+                   ".space 250\n"
+                   "2: b.n 1b\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void too_wide_loop(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: ldr r0, [r1, #4]\n"
+                   "b.n 2f\n"
+                   ".space 252\n"
+                   "2: b.n 1b\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void delay_r4(void)
+{
+  __asm__ volatile("ldr r4, =1000000\n"
+                   "1: subs r4, #1\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void tick_wait_flag(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_discard(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "1: ldr r2, [r1]\n"
+                   "movs r2, #0\n"
+                   "b 1b\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void poll_exit_tail(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0x40010008\n"
+                   "1: ldr r0, [r1]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   ".rept 40\n"
+                   "nop\n"
+                   ".endr\n"
+                   "wfi\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   __asm__ volatile("bkpt #0" ::: "memory");
@@ -216,7 +301,7 @@ __attribute__((naked)) void tick_hang(void)
   }
 }
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[33] = {
+__attribute__((section(".isr_vector"), used)) static const void* const vectors[41] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)tick_reads,
@@ -233,4 +318,12 @@ __attribute__((section(".isr_vector"), used)) static const void* const vectors[3
     [30] = (const void*)wake_then_poll_hung,
     [31] = (const void*)wake_then_wait_model,
     [32] = (const void*)nested_poll,
+    [33] = (const void*)poll_value,
+    [34] = (const void*)poll_then_sleep,
+    [35] = (const void*)widest_loop,
+    [36] = (const void*)too_wide_loop,
+    [37] = (const void*)delay_r4,
+    [38] = (const void*)tick_wait_flag,
+    [39] = (const void*)poll_discard,
+    [40] = (const void*)poll_exit_tail,
 };

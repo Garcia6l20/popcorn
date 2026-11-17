@@ -11,8 +11,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -46,6 +49,7 @@ enum class leg
   ring_blocks,
   probe,
   spin,
+  loop_reports,
 };
 
 auto fn(std::string_view name) -> address
@@ -72,8 +76,10 @@ auto skips(arch_fixture const& f) -> std::uint64_t
 
 struct spinning
 {
-  arch_fixture                      f;
-  std::optional<core::probe_handle> probe{};
+  arch_fixture                                     f;
+  std::optional<core::probe_handle>                probe{};
+  std::shared_ptr<std::vector<core::trace_record>> records{};
+  core::hook_handle                                sink{};
 };
 
 auto spinning_at(address loop, leg how) -> spinning
@@ -114,6 +120,15 @@ auto spinning_at(address loop, leg how) -> spinning
       break;
     case leg::probe:
       s.probe = f.target->add_probe(loop);
+      break;
+    case leg::loop_reports:
+      s.records = std::make_shared<std::vector<core::trace_record>>();
+      s.sink    = f.target->add_trace_sink(
+          {core::trace_kind::loop, core::trace_kind::irq},
+          [records = s.records](std::span<core::trace_record const> batch) {
+            records->insert(records->end(), batch.begin(), batch.end());
+          });
+      f.target->set_loop_reports(1);
       break;
     default:
       break;
@@ -218,10 +233,14 @@ TEST_CASE("a b . skipped to each event and bound gives the outputs of the run ex
   for(auto const loop : {narrow_loop, wide_loop})
   {
     CAPTURE(loop);
-    auto const fast = run_phases(loop, leg::fast);
-    auto const slow = run_phases(loop, leg::coverage);
+    auto const fast     = run_phases(loop, leg::fast);
+    auto const slow     = run_phases(loop, leg::coverage);
+    auto const reported = run_phases(loop, leg::loop_reports);
     CHECK(fast.skips > 0);
     CHECK(slow.skips == 0);
+    CHECK(reported.skips == 0);
+    CHECK(reported.phases == slow.phases);
+    CHECK(reported.entries == slow.entries);
     REQUIRE(fast.phases.size() == slow.phases.size());
     for(std::size_t index = 0; index < fast.phases.size(); ++index)
     {
@@ -249,6 +268,39 @@ TEST_CASE("a b . skipped to each event and bound gives the outputs of the run ex
     CHECK(fast.entries.size() >= 5);
     CHECK(fast.entries == slow.entries);
   }
+}
+
+TEST_CASE("a b . under a ticking SysTick reports one run per tick, ended at the SysTick entry")
+{
+  auto s = spinning_at(narrow_loop, leg::loop_reports);
+  s.f.set("basepri", 0);
+  REQUIRE(run_once(s.f, {.budget_left = icount{20'003}}).reason == stop_reason::budget);
+  s.f.target->set_loop_reports(0);
+  s.sink.reset();
+  auto const& records = *s.records;
+  auto        ended   = 0;
+  for(std::size_t at = 0; at < records.size(); ++at)
+  {
+    auto const& record = records[at];
+    if(record.kind != core::trace_kind::loop
+       or record.aux >> core::trace_loop_ender_shift
+              != std::to_underlying(core::loop_ender::exception))
+    {
+      continue;
+    }
+    CAPTURE(at);
+    ++ended;
+    CHECK(record.payload[0] == narrow_loop);
+    CHECK(record.flags == 0);
+    CHECK(record.payload[1] + 1 == record.payload[2]);
+    CHECK((record.aux & 0xfffu) == 15);
+    REQUIRE(at + 1 < records.size());
+    CHECK(records[at + 1].kind == core::trace_kind::irq);
+    CHECK(records[at + 1].flags == 1);
+    CHECK(records[at + 1].aux == 15);
+    CHECK(records[at + 1].dt == 0);
+  }
+  CHECK(ended >= 4);
 }
 
 TEST_CASE("a b . with the tick unmasked is skipped by the budget, as the live hook skips it")

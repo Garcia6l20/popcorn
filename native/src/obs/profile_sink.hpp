@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <meta>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -229,6 +230,29 @@ struct profile_clock
   friend auto operator==(profile_clock const&, profile_clock const&) -> bool = default;
 };
 
+/** @brief Runs of identical passes of one loop, from loop records, by head. */
+struct profile_loop
+{
+  /** @brief Loop head. */
+  address head{};
+  /** @brief Highest block start of the loop over its runs. */
+  address last{};
+  /** @brief Runs reported. */
+  std::uint64_t runs{};
+  /** @brief Identical passes over the runs. */
+  std::uint64_t passes{};
+  /** @brief Instructions of time the runs covered since the sink's start or its last rebase.
+   * A run reaches to its ender, so a run whose code left the loop before its ender also covers
+   * the code from the exit to the ender. */
+  std::uint64_t instructions{};
+  /** @brief Runs by core::loop_ender. core::loop_ender::call is a host call, core::loop_ender::end
+   * the end of the reports or of the sink. */
+  std::array<std::uint64_t, std::meta::enumerators_of(^^core::loop_ender).size()> enders{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_loop const&, profile_loop const&) -> bool = default;
+};
+
 /** @brief Aggregates of a profile_sink. */
 struct profile_result
 {
@@ -279,15 +303,18 @@ struct profile_result
   std::uint64_t unmatched_returns{};
   /** @brief Calls past profile_options::max_call_depth. */
   std::uint64_t deep_calls{};
+  /** @brief Loops by head, ascending, from loop records. */
+  std::vector<profile_loop> loops{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_result const&, profile_result const&) -> bool = default;
 };
 
 /**
- * @brief Trace sink keeping aggregates of block, mmio, irq, sleep, clock and cut records, with no
- *        file: per block pc, per exception number, per register, the sleeps, the core rates and
- *        the gaps between records. Time is the instruction count the records are stamped with.
+ * @brief Trace sink keeping aggregates of block, mmio, irq, sleep, clock, cut and loop records,
+ *        with no file: per block pc, per exception number, per register, per loop head, the
+ *        sleeps, the core rates and the gaps between records. Time is the instruction count the
+ *        records are stamped with.
  *
  * A block record carries the instruction count of the whole block. A cut record that follows it,
  * for a block the engine left before its end, takes the instructions that did not run back.
@@ -324,12 +351,16 @@ struct profile_result
  * entry node. Shapes are cached per pc and instruction count: code rewritten after its first run
  * keeps its first shape.
  *
+ * A loop record adds its run to the loop of its head: runs, passes, instructions, the enders and
+ * the furthest block start. Loop records are not time spans of their own: their instructions are
+ * also in the block records.
+ *
  * mmio records of DMA and debugger accesses, flagged core::trace_dma_flag and
  * core::trace_debugger_flag, are counted apart from the CPU's. Memory grows with distinct block
  * pcs, exception numbers and registers, the open frames, the saved contexts, one per distinct
  * exception frame address of a suspended or deleted context, the entries inside a burst window
  * and the write logs, each log bounded by profile_options::write_log_limit. Neither copyable nor
- * movable: sink() captures it.
+ * movable: sink() captures it. Loops add one entry per distinct loop head.
  */
 class profile_sink
 {
@@ -337,7 +368,8 @@ public:
   /** @brief Kinds the sink reads. */
   static constexpr core::trace_kinds kinds{core::trace_kind::block, core::trace_kind::mmio,
                                            core::trace_kind::irq,   core::trace_kind::sleep,
-                                           core::trace_kind::clock, core::trace_kind::cut};
+                                           core::trace_kind::clock, core::trace_kind::cut,
+                                           core::trace_kind::loop};
 
   /**
    * @brief Creates an empty sink.
@@ -434,6 +466,7 @@ private:
 
   void time(icount to, bool rebase);
   void sleep(core::trace_record const& record);
+  void loop(core::trace_record const& record);
   void cut_block(core::trace_record const& record);
   void cut();
   void block(core::trace_record const& record);
@@ -497,6 +530,7 @@ private:
   std::uint64_t                                        calls_{};
   std::uint64_t                                        unmatched_returns_{};
   std::uint64_t                                        deep_calls_{};
+  std::map<address, profile_loop>                      loops_{};
 };
 
 /**

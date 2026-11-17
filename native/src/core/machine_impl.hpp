@@ -577,7 +577,7 @@ void coverage_state::count(address addr, std::uint32_t insns)
 struct spin_state
 {
   /** @brief Bytes after a loop head in which blocks and MMIO reads belong to the loop. */
-  static constexpr address loop_window = 256;
+  static constexpr address loop_window = loop_window_bytes;
   /** @brief MMIO reads kept per iteration: past them the iteration is not comparable. */
   static constexpr std::size_t max_reads = 64;
   /** @brief Depths tracked apart, deeper nesting shares the last level. */
@@ -625,6 +625,20 @@ struct spin_state
     std::uint32_t count = 0;
     /** @brief Whether this run of iterations already raised its spin stop. */
     bool reported = false;
+    /** @brief Instruction count at the start of the last head arrival compared. */
+    icount mark{};
+    /** @brief Whether mark starts a pass with no exception entry since, so it can open a run. */
+    bool mark_valid = false;
+    /** @brief Whether a run of loop passes is open for loop reports. */
+    bool run_open = false;
+    /** @brief Instruction count at the start of the open run's first pass. */
+    icount run_start{};
+    /** @brief Passes counted since the open run started. */
+    std::uint32_t run_passes = 0;
+    /** @brief Head of the open run. */
+    address run_head{};
+    /** @brief Highest block start of the loop window at the open run's last counted pass. */
+    address run_last{};
 
     /** @brief Restarts the count, the loop made progress or slept. */
     void progress() noexcept
@@ -642,6 +656,8 @@ struct spin_state
       last           = {};
       known          = false;
       comparable     = true;
+      mark_valid     = false;
+      run_open       = false;
       progress();
       reads.clear();
       reading.clear();
@@ -706,6 +722,16 @@ struct spin_state
   void progress() noexcept
   {
     loop().progress();
+  }
+
+  /** @brief Forgets the run and mark of every level, keeping the loops tracked. */
+  void forget_runs() noexcept
+  {
+    for(auto& level : levels)
+    {
+      level.mark_valid = false;
+      level.run_open   = false;
+    }
   }
 
   /** @brief Forgets every tracked loop. */
@@ -855,6 +881,9 @@ struct slice_end
 /** @brief Run state of a machine: slice bounds, deferred requests, hooks and exception slot. */
 struct machine::run_state
 {
+  /** @brief spin_stop of a machine whose spin_threshold is 0. */
+  static constexpr std::uint64_t no_spin_stop = std::uint64_t{1} << 32;
+
   /** @brief Blocks between two wall clock reads, reading it every block costs 20 ns. */
   static constexpr std::uint32_t wall_check_blocks = 256;
 
@@ -1312,8 +1341,13 @@ struct machine::run_state
   /** @brief Whether an access in the engine run asked the engine to stop right after its
    * instruction, set by request_precise_exit() and taken by take_precise_exit(). */
   bool precise_exit = false;
-  /** @brief Whether spin detection runs, machine_options::spin_threshold above 0. */
+  /** @brief Whether spin detection runs: a spin threshold or loop reports are on. */
   bool spin_on = false;
+  /** @brief Fewest passes of a reported loop run, 0 while loop reports are off. */
+  std::uint32_t loop_reports = 0;
+  /** @brief Identical passes that request a spin stop: machine_options::spin_threshold, or no
+   * count when it is 0: one past the largest count, which a pass count never reaches. */
+  std::uint64_t spin_stop = no_spin_stop;
   /** @brief Spin detection state. */
   spin_state spin{};
   /** @brief Events dispatched at one instruction count, beyond which the run stops: a handler
@@ -1340,6 +1374,8 @@ struct machine::run_state
   bool sinks_want_clock = false;
   /** @brief Whether some sink selects cut records. */
   bool sinks_want_cut = false;
+  /** @brief Whether loop reports are on and some sink selects loop records. */
+  bool sinks_want_loop = false;
   /** @brief Instruction count where the core went to sleep and arch::idle_reason() then, while
    * it sleeps. Set by the slice loop, cleared at the wake, a reset and a restore. */
   std::optional<std::pair<icount, std::uint8_t>> asleep_since{};
@@ -1997,10 +2033,45 @@ struct machine::run_state
 
   /**
    * @brief Tracks loops at a block starting at @p addr: at a backward branch within 256 bytes,
-   *        compares the finished iteration with the previous one and requests a spin stop after
-   *        machine_options::spin_threshold iterations without progress.
+   *        compares the finished iteration with the previous one, counts runs of identical
+   *        passes for loop reports, and requests a spin stop after
+   *        machine_options::spin_threshold iterations without progress, never at threshold 0.
    */
   void spin_block(address addr);
+
+  /**
+   * @brief At a head arrival compared by spin_block(), stamped at the start of the block: counts
+   *        the pass into the open run, or opens a run when it counted a pass from a valid mark,
+   *        or ends the open run when it counted none. Then marks the arrival.
+   * @param counted Whether the arrival counted an identical pass.
+   */
+  void loop_head_reached(spin_state::loop_state& loop, bool counted);
+
+  /**
+   * @brief Closes the open run of @p loop, writing its loop record to the sinks selecting loop
+   *        records when it holds at least loop_reports passes.
+   * @param ender What ended the run.
+   * @param exception Exception number for loop_ender::exception.
+   * @param at Instruction count the record is stamped at.
+   */
+  void end_loop_run(
+      spin_state::loop_state& loop,
+      loop_ender              ender,
+      std::uint32_t           exception,
+      icount                  at);
+
+  /** @brief The loop record of the open run of @p loop, ended by @p ender at @p at. */
+  [[nodiscard]] static auto loop_record(
+      spin_state::loop_state const& loop,
+      loop_ender                    ender,
+      std::uint32_t                 exception,
+      icount                        at) -> trace_record;
+
+  /**
+   * @brief Closes the run open at the current exception depth, see end_loop_run(), stamped at
+   *        the machine's instruction count.
+   */
+  void end_loop_run(loop_ender ender, std::uint32_t exception = 0);
 
   /** @brief Whether a pending event belongs to the model of a peripheral the loop polls. */
   [[nodiscard]] auto model_due() const -> bool;
@@ -2669,6 +2740,12 @@ struct machine::run_state
 /** @brief Read access to a machine's run state for native tests and benches. */
 struct machine_internals
 {
+  /** @brief The spin detection state of @p target. */
+  [[nodiscard]] static auto spin(machine& target) noexcept -> spin_state&
+  {
+    return target.run_->spin;
+  }
+
   /** @brief The engine work counters of @p target. */
   [[nodiscard]] static auto counters(machine const& target) noexcept -> run_counters const&
   {
