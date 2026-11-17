@@ -822,21 +822,24 @@ public:
   [[nodiscard]] auto ring_blocks() const noexcept -> bool;
 
   /**
-   * @brief Turns loop reports on or off, off by default. While on, the spin detector runs
-   *        whatever machine_options::spin_threshold is, and each run of identical loop passes
-   *        that ends after at least @p passes passes writes a loop record to the trace sinks
-   *        selecting trace_kind::loop. The spin stop keeps its own threshold, spin_threshold, and
-   *        stays off at 0. Turning reports off writes the open run with loop_ender::end. A loop
-   *        whose inner loop branches back to its own start twice or more per pass from inside
-   *        the inner loop reports no run, as machine_options::spin_threshold says. Machine
-   *        configuration: not in snapshots, kept across restore().
-   * @param passes Fewest passes a reported run has, 0 to turn reports off.
+   * @brief Sets the embedder's own request for loop reports, none by default. Loop reports run
+   *        at loop_reports(), the lowest of this request and the loop passes of the attached
+   *        sinks, see add_trace_sink(). While on, the spin detector runs whatever
+   *        machine_options::spin_threshold is, and each run of identical loop passes that ends
+   *        after at least loop_reports() passes writes a loop record to the trace sinks selecting
+   *        trace_kind::loop. The spin stop keeps its own threshold, spin_threshold, and stays off
+   *        at 0. Turning reports off writes the open run with loop_ender::end. A loop whose inner
+   *        loop branches back to its own start twice or more per pass from inside the inner loop
+   *        reports no run, as machine_options::spin_threshold says. Machine configuration: not in
+   *        snapshots, kept across restore().
+   * @param passes Fewest passes of a reported run this request asks for, 0 for no request.
    * @throws machine_running while a slice runs, handlers included, and from a trace sink while
    *         it is called.
    */
   void set_loop_reports(std::uint32_t passes);
 
-  /** @brief Fewest passes of a reported loop run, 0 while loop reports are off. */
+  /** @brief Fewest passes of a reported loop run: the lowest non-zero request of
+   * set_loop_reports() and of the attached sinks, 0 while none asks. */
   [[nodiscard]] auto loop_reports() const noexcept -> std::uint32_t;
 
   /**
@@ -848,14 +851,23 @@ public:
    * @param ranges Code ranges whose execution is traced, empty for everywhere. A record belongs
    *        to a range when the pc that caused it does. Sleep, clock and time records account for
    *        time, not code, and go to the sink whatever its ranges.
-   * @return Handle removing the sink.
-   * @throws std::invalid_argument when @p sink is empty.
+   * @param loop_passes Fewest passes of a reported loop run the sink asks for while attached, 0
+   *        for no request. Loop reports run at the lowest request, see set_loop_reports(), and
+   *        follow it again when the sink is removed. The sink receives the reported runs of at
+   *        least @p loop_passes passes, whatever lower requests are attached, and every reported
+   *        run with no request.
+   * @return Handle removing the sink. Destroying the handle inside a slice removes the sink at
+   *         the slice end, so @p sink must own what it calls until it is destroyed.
+   * @throws std::invalid_argument when @p sink is empty, or @p loop_passes is not 0 and @p kinds
+   *         lacks trace_kind::loop.
    * @throws machine_running while a slice runs, handlers included, and from a trace sink while
    *         it is called.
    */
-  [[nodiscard]] auto
-      add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<address_range> ranges = {})
-          -> hook_handle;
+  [[nodiscard]] auto add_trace_sink(
+      trace_kinds                kinds,
+      trace_sink                 sink,
+      std::vector<address_range> ranges      = {},
+      std::uint32_t              loop_passes = 0) -> hook_handle;
 
   /**
    * @brief Receives the machine's log records, such as unmodelled peripheral accesses.

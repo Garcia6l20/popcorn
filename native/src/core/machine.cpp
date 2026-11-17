@@ -437,22 +437,8 @@ void machine::set_loop_reports(std::uint32_t passes)
   {
     throw machine_running("a trace sink is being called");
   }
-  if(passes == 0 and run_->loop_reports != 0)
-  {
-    run_->end_loop_run(loop_ender::end);
-  }
-  auto const was_on  = run_->spin_on;
-  auto const was_off = run_->loop_reports == 0;
-  run_->loop_reports = passes;
-  run_->spin_on      = options_.spin_threshold != 0 or passes != 0;
-  if(run_->spin_on != was_on)
-  {
-    run_->spin.clear();
-  }
-  else if(was_off and passes != 0)
-  {
-    run_->spin.forget_runs();
-  }
+  run_->requested_loop_reports = passes;
+  run_->apply_loop_reports();
   run_->update_sink_hooks();
 }
 

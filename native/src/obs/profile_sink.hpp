@@ -3,6 +3,7 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <array>
 #include <cstddef>
@@ -362,7 +363,7 @@ struct profile_result
  * and the write logs, each log bounded by profile_options::write_log_limit. Neither copyable nor
  * movable: sink() captures it. Loops add one entry per distinct loop head.
  */
-class profile_sink
+class POPCORN_API profile_sink
 {
 public:
   /** @brief Kinds the sink reads. */
@@ -540,5 +541,5 @@ private:
  *        be read or decoded is block_exit::other.
  * @param target Machine.
  */
-auto machine_code_reader(core::machine& target) -> code_reader;
+POPCORN_API auto machine_code_reader(core::machine& target) -> code_reader;
 }

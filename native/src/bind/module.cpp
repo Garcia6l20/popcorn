@@ -1,6 +1,7 @@
 // false positive on std::optional<std::string> move-assign in nanobind def_rw, PR 80635
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 
+#include "../obs/profile_sink.hpp"
 #include "description.hpp"
 #include "devices.hpp"
 #include "errors.hpp"
@@ -21,6 +22,7 @@
 
 #include <reflex/py.hpp>
 
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
@@ -113,6 +115,17 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::irq_desc>("IrqDesc");
   m.bind<popcorn::core_desc>("CoreDesc");
   m.bind<popcorn::part_description>("PartDescription");
+  m.bind_enum<popcorn::obs::frame_kind>("ProfileFrameKind");
+  m.bind<popcorn::obs::profile_frame>("ProfileFrame");
+  m.bind<popcorn::obs::profile_block>("ProfileBlock");
+  m.bind<popcorn::obs::profile_gaps>("ProfileGaps");
+  m.bind<popcorn::obs::profile_exception>("ProfileException");
+  m.bind<popcorn::obs::profile_register>("ProfileRegister");
+  m.bind<popcorn::obs::profile_write>("ProfileWrite");
+  m.bind<popcorn::obs::profile_write_log>("ProfileWriteLog");
+  m.bind<popcorn::obs::profile_clock>("ProfileClock");
+  m.bind<popcorn::obs::profile_loop>("ProfileLoop");
+  m.bind<popcorn::obs::profile_result>("ProfileResult");
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
   popcorn::bind::detail::bind_plugins(m.handle);

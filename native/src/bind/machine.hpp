@@ -1796,6 +1796,33 @@ public:
       ring_blocks() const -> bool;
 
   /**
+   * @brief Sets the embedder's loop report request, see core::machine::set_loop_reports().
+   * @param passes Fewest passes of a reported run asked for, 0 for no request.
+   * @throws machine_running while the machine runs, handlers included.
+   */
+  [[= py::doc{
+      "Ask for loop reports with their fewest passes, or withdraw the request with 0."}]] void
+      set_loop_reports(std::uint32_t passes);
+
+  /**
+   * @brief Fewest passes of a reported loop run, the lowest request of set_loop_reports() and
+   *        of the open profiles, 0 while none asks.
+   * @throws machine_running while the machine runs, outside its handlers.
+   */
+  [[= py::doc{"Fewest passes of a reported loop run, the lowest request, 0 while none "
+              "asks."}]] [[nodiscard]] auto loop_reports() const -> std::uint32_t;
+
+  /**
+   * @brief Adds a profile sink fed until the handle closes. A non-zero settings.loop_reports is
+   *        the sink's loop report request, withdrawn when the sink is removed, by the close or by
+   *        the last share of the handle dropped.
+   * @param settings Options of the sink.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Add a profile sink, fed until the handle closes."}]] auto
+      open_profile(profile_settings const& settings) -> profile_handle;
+
+  /**
    * @brief Forwards the machine's log records to Python. The machine's thread queues each record
    *        with its virtual time and no GIL, at most 4096 of them, later ones counted. A thread
    *        holding the GIL and no host mutex forwards the queue in order, through @p emit: the

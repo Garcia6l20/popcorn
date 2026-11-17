@@ -319,7 +319,14 @@ void machine::run_state::end_loop_run(
   {
     return;
   }
-  deliver(loop_record(loop, ender, exception, at), loop.run_head, true, at);
+  auto const record = loop_record(loop, ender, exception, at);
+  for(auto* const entry : sinks_of_kind[std::to_underlying(trace_kind::loop)])
+  {
+    if(loop.run_passes >= entry->loop_passes and in_ranges(entry->ranges, loop.run_head))
+    {
+      deliver_to(*entry, record, at);
+    }
+  }
 }
 
 void machine::run_state::end_loop_run(loop_ender ender, std::uint32_t exception)
@@ -431,6 +438,38 @@ void machine::run_state::update_sink_hooks()
   sink_mem_active = true;
 }
 
+void machine::run_state::apply_loop_reports()
+{
+  auto passes = requested_loop_reports;
+  for(auto const& [id, entry] : sinks)
+  {
+    if(entry->loop_passes != 0 and (passes == 0 or entry->loop_passes < passes))
+    {
+      passes = entry->loop_passes;
+    }
+  }
+  if(passes == loop_reports)
+  {
+    return;
+  }
+  if(passes == 0)
+  {
+    end_loop_run(loop_ender::end);
+  }
+  auto const was_on  = spin_on;
+  auto const was_off = loop_reports == 0;
+  loop_reports       = passes;
+  spin_on            = owner.options_.spin_threshold != 0 or passes != 0;
+  if(spin_on != was_on)
+  {
+    spin.clear();
+  }
+  else if(was_off)
+  {
+    spin.forget_runs();
+  }
+}
+
 void machine::run_state::remove_sink(std::uint64_t id) noexcept
 {
   auto const found = sinks.find(id);
@@ -459,6 +498,7 @@ void machine::run_state::remove_sink(std::uint64_t id) noexcept
     if(auto const& loop = spin.loop(); sinks_want_loop
                                        and loop.run_open
                                        and loop.run_passes >= loop_reports
+                                       and loop.run_passes >= entry.loop_passes
                                        and entry.kinds.contains(trace_kind::loop)
                                        and in_ranges(entry.ranges, loop.run_head))
     {
@@ -471,6 +511,12 @@ void machine::run_state::remove_sink(std::uint64_t id) noexcept
   {}
   forget_sink(found->second.get());
   sinks.erase(found);
+  try
+  {
+    apply_loop_reports();
+  }
+  catch(...)
+  {}
   try
   {
     update_sink_hooks();
@@ -511,8 +557,11 @@ void machine::run_state::on_sink_access(
   });
 }
 
-auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<address_range> ranges)
-    -> hook_handle
+auto machine::add_trace_sink(
+    trace_kinds                kinds,
+    trace_sink                 sink,
+    std::vector<address_range> ranges,
+    std::uint32_t              loop_passes) -> hook_handle
 {
   require_stopped(*this);
   if(hooks_->delivering != 0)
@@ -523,13 +572,18 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
   {
     throw std::invalid_argument("add_trace_sink needs a sink to call");
   }
+  if(loop_passes != 0 and not kinds.contains(trace_kind::loop))
+  {
+    throw std::invalid_argument("add_trace_sink asks for loop reports only with loop records");
+  }
   auto const id    = ++hooks_->last_id;
   auto       entry = std::make_unique<run_state::sink_entry>(run_state::sink_entry{
-      .kinds  = kinds,
-      .sink   = std::move(sink),
-      .ranges = std::move(ranges),
-      .batch  = {},
-      .stream = {.last = clock_.now(), .rebased = false},
+      .kinds       = kinds,
+      .sink        = std::move(sink),
+      .ranges      = std::move(ranges),
+      .loop_passes = loop_passes,
+      .batch       = {},
+      .stream      = {.last = clock_.now(), .rebased = false},
   });
   entry->batch.reserve(run_state::sink_batch);
   if(kinds.contains(trace_kind::clock))
@@ -543,12 +597,19 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
   run_->sinks.emplace(id, std::move(entry));
   try
   {
+    run_->apply_loop_reports();
     run_->update_sink_hooks();
   }
   catch(...)
   {
     run_->forget_sink(run_->sinks.at(id).get());
     run_->sinks.erase(id);
+    try
+    {
+      run_->apply_loop_reports();
+    }
+    catch(...)
+    {}
     throw;
   }
   return hook_handle{hooks_, id};

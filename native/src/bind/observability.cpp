@@ -2,18 +2,27 @@
 #include "machine.hpp"
 #include "python_callable.hpp"
 
+#include "../obs/owned_sink.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
+#include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/obs/collect.hpp>
 #include <popcorn/obs/coverage.hpp>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/array.h>
+#include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
 
 #include <bit>
 #include <cstddef>
 #include <format>
+#include <memory>
 #include <meta>
+#include <optional>
 #include <ranges>
 #include <utility>
 #include <vector>
@@ -95,7 +104,7 @@ auto kinds_of(std::vector<std::uint8_t> const& values) -> core::trace_kinds
 }
 
 trace_handle::state::state(
-    std::unique_ptr<obs::pctr_writer> written,
+    std::shared_ptr<obs::pctr_writer> written,
     core::hook_handle                 feeding,
     detail::host_ref                  owner) noexcept
     : writer{std::move(written)}, sink{std::move(feeding)}, host{std::move(owner)}
@@ -113,7 +122,7 @@ trace_handle::state::~state()
 }
 
 trace_handle::trace_handle(
-    std::unique_ptr<obs::pctr_writer> writer,
+    std::shared_ptr<obs::pctr_writer> writer,
     core::hook_handle                 sink,
     detail::host_ref                  host) noexcept
     : state_{std::make_shared<state>(std::move(writer), std::move(sink), std::move(host))}
@@ -170,6 +179,86 @@ auto trace_handle::records() const noexcept -> std::uint64_t
 auto trace_handle::size() const noexcept -> std::uint64_t
 {
   return state_->writer->bytes();
+}
+
+profile_handle::state::state(
+    std::shared_ptr<obs::profile_sink> fed,
+    core::hook_handle                  feeding,
+    detail::host_ref                   owner) noexcept
+    : sink{std::move(fed)}, hook{std::move(feeding)}, host{std::move(owner)}
+{}
+
+profile_handle::state::~state()
+{
+  if(hook.active())
+  {
+    detail::retire(host, [feeding = std::move(hook), fed = std::move(sink)] mutable {
+      feeding.reset();
+      fed.reset();
+    });
+  }
+}
+
+void profile_handle::state::finish()
+{
+  hook.reset();
+  result = sink->result();
+}
+
+profile_handle::profile_handle(
+    std::shared_ptr<obs::profile_sink> sink,
+    core::hook_handle                  hook,
+    detail::host_ref                   host)
+    : state_{std::make_shared<state>(std::move(sink), std::move(hook), std::move(host))}
+{}
+
+void profile_handle::close()
+{
+  contract_assert(state_ != nullptr);
+  auto& profiled = *state_;
+  {
+    nb::gil_scoped_release const released;
+    std::scoped_lock const       lock{profiled.close_mutex};
+    if(profiled.result)
+    {
+      return;
+    }
+  }
+  detail::host_access(profiled.host, [&profiled] {
+    nb::gil_scoped_release const released;
+    std::scoped_lock const       lock{profiled.close_mutex};
+    if(not profiled.result)
+    {
+      profiled.finish();
+    }
+  });
+}
+
+auto profile_handle::command_close() -> access_op
+{
+  return detail::machine_op([profiled = state_](core::machine&) {
+    std::scoped_lock const lock{profiled->close_mutex};
+    if(not profiled->result)
+    {
+      profiled->finish();
+    }
+  });
+}
+
+auto profile_handle::closed() const -> bool
+{
+  std::scoped_lock const lock{state_->close_mutex};
+  return state_->result.has_value();
+}
+
+auto profile_handle::result() const -> obs::profile_result
+{
+  std::scoped_lock const lock{state_->close_mutex};
+  if(not state_->result)
+  {
+    throw machine_running("the profile is open: close it before reading its result");
+  }
+  return *state_->result;
 }
 
 auto machine_handle::function_ranges(std::vector<std::string> const& names) const
@@ -240,8 +329,8 @@ auto machine_handle::open_trace(
   auto const selected = kinds_of(kinds);
   auto       native   = native_ranges(ranges);
   return access([&](core::machine& target) {
-    auto writer = obs::pctr_writer_for(target, path);
-    auto sink   = target.add_trace_sink(selected, writer->sink(), std::move(native));
+    std::shared_ptr<obs::pctr_writer> writer = obs::pctr_writer_for(target, path);
+    auto sink = target.add_trace_sink(selected, obs::owned_sink(writer), std::move(native));
     return trace_handle{std::move(writer), std::move(sink), slot_};
   });
 }
@@ -268,6 +357,34 @@ void machine_handle::write_ring(std::string const& path) const
 void machine_handle::clear_ring()
 {
   access([](core::machine& target) { target.trace().clear(target.virtual_clock().now()); });
+}
+
+void machine_handle::set_loop_reports(std::uint32_t passes)
+{
+  access([passes](core::machine& target) { target.set_loop_reports(passes); });
+}
+
+auto machine_handle::loop_reports() const -> std::uint32_t
+{
+  return access([](core::machine& target) { return target.loop_reports(); });
+}
+
+auto machine_handle::open_profile(profile_settings const& settings) -> profile_handle
+{
+  return access([&](core::machine& target) {
+    obs::profile_options options{
+        .burst_window     = icount{settings.burst_window},
+        .logged_registers = settings.logged_registers,
+        .write_log_limit  = static_cast<std::size_t>(settings.write_log_limit),
+        .code = settings.call_stacks ? obs::machine_code_reader(target) : obs::code_reader{},
+        .max_call_depth = settings.max_call_depth,
+    };
+    auto sink =
+        std::make_shared<obs::profile_sink>(target.virtual_clock().now(), std::move(options));
+    auto hook = target.add_trace_sink(
+        obs::profile_sink::kinds, obs::owned_sink(sink), {}, settings.loop_reports);
+    return profile_handle{std::move(sink), std::move(hook), slot_};
+  });
 }
 
 void machine_handle::set_ring_blocks(bool on)

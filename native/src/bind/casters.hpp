@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include <popcorn/core/types.hpp>
+
 #include <nanobind/stl/string.h>
 
 #include <string>
@@ -56,6 +58,28 @@ template <> struct type_caster<popcorn::bind::detail::lenient_text>
   {
     return PyUnicode_DecodeUTF8(
         text.bytes.data(), static_cast<Py_ssize_t>(text.bytes.size()), "surrogateescape");
+  }
+};
+
+/** @brief An instruction count is a Python int. */
+template <> struct type_caster<popcorn::icount>
+{
+  NB_TYPE_CASTER(popcorn::icount, const_name("int"))
+
+  auto from_python(handle src, uint8_t flags, cleanup_list* cleanup) noexcept -> bool
+  {
+    make_caster<std::uint64_t> count;
+    if(not count.from_python(src, flags, cleanup))
+    {
+      return false;
+    }
+    value = popcorn::icount{count.value};
+    return true;
+  }
+
+  static auto from_cpp(popcorn::icount count, rv_policy, cleanup_list*) noexcept -> handle
+  {
+    return PyLong_FromUnsignedLongLong(count.value);
   }
 };
 

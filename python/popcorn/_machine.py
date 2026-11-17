@@ -105,9 +105,11 @@ from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import (
     LogForwarder,
     MachineCoverage,
+    ProfileRecording,
     Ranges,
     Ring,
     TraceRecording,
+    open_profile,
     open_trace,
 )
 from popcorn._option_bytes import OptionBytes
@@ -1471,6 +1473,86 @@ class Machine:
     def _close_trace(self, recording: TraceRecording) -> None:
         if self.busy and not self._handle.owns_engine():
             self._post(recording.close_command())
+            return
+        recording.close()
+
+    @contextlib.contextmanager
+    def _profile(
+        self,
+        *,
+        call_stacks: bool = False,
+        loop_reports: int = 0,
+        burst_window: int = 0,
+        logged_registers: Iterable[int] = (),
+        write_log_limit: int = 4096,
+        max_call_depth: int = 256,
+    ) -> Generator[ProfileRecording]:
+        """Feed a native profile sink while the block runs, `Machine.profile`'s hook.
+
+        Entered parked only. With `loop_reports`, the sink asks for loop reports while attached:
+        they run at the lowest request of the open profiles and of the machine's own. Leaving the
+        block removes the sink, which gets an open loop run as an END record and withdraws its
+        request, then takes its aggregates. Parked that happens at once. Inside a free run it is
+        posted and runs at the next boundary: read `result` after the run halts or after
+        `wait_closed()`.
+
+        Args:
+            call_stacks: Whether the call stack tracker runs.
+            loop_reports: Fewest passes of a reported loop run the sink asks for while the
+                block runs, 0 for no request.
+            burst_window: Instructions of the exception burst window, 0 for none.
+            logged_registers: Flat register ids whose CPU writes are logged one by one.
+            write_log_limit: Writes kept per logged register.
+            max_call_depth: Most call frames the tracker keeps.
+
+        Raises:
+            ValueError: An option is negative or too large.
+            ConfigError: The machine is a member of a live linked system, `members.<name>`.
+            MachineRunning: The machine is busy, outside its handlers.
+        """
+        limits = {
+            "loop_reports": (loop_reports, 0xFFFF_FFFF),
+            "burst_window": (burst_window, 0xFFFF_FFFF_FFFF_FFFF),
+            "write_log_limit": (write_log_limit, 0xFFFF_FFFF_FFFF_FFFF),
+            "max_call_depth": (max_call_depth, 0xFFFF_FFFF),
+        }
+        for name, (value, top) in limits.items():
+            if not 0 <= value <= top:
+                raise ValueError(f"{name} must lie in [0, {top}], not {value}")
+        registers = list(logged_registers)
+        if any(not 0 <= register <= 0xFFFF for register in registers):
+            raise ValueError(f"logged_registers must be flat register ids, not {registers}")
+        owner = self._system
+        if owner is not None and owner() is not None:
+            key = f"members.{self._name}"
+            raise ConfigError(
+                f"{key}: a profile covers one lone machine, not a member of a linked system",
+                key=key,
+                expected="a machine in no linked system",
+            )
+        self._require_stopped()
+        recording = open_profile(
+            self._handle,
+            call_stacks=call_stacks,
+            loop_reports=loop_reports,
+            burst_window=burst_window,
+            logged_registers=registers,
+            write_log_limit=write_log_limit,
+            max_call_depth=max_call_depth,
+        )
+        try:
+            yield recording
+        except BaseException as error:
+            try:
+                self._close_profile(recording)
+            except Exception as close_error:
+                error.add_note(f"closing the profile also failed: {close_error}")
+            raise
+        self._close_profile(recording)
+
+    def _close_profile(self, recording: ProfileRecording) -> None:
+        if self.busy and not self._handle.owns_engine():
+            recording.posted(self._post(recording.close_command()))
             return
         recording.close()
 

@@ -1109,6 +1109,8 @@ struct machine::run_state
     trace_sink sink{};
     /** @brief Code ranges whose records are delivered, empty for everywhere. */
     std::vector<address_range> ranges{};
+    /** @brief Fewest passes of a reported loop run the sink asks for, 0 for none. */
+    std::uint32_t loop_passes = 0;
     /** @brief Records not delivered yet. */
     std::vector<trace_record> batch{};
     /** @brief Buffer of the batch being delivered, swapped with batch at each delivery so
@@ -1344,8 +1346,11 @@ struct machine::run_state
   bool precise_exit = false;
   /** @brief Whether spin detection runs: a spin threshold or loop reports are on. */
   bool spin_on = false;
-  /** @brief Fewest passes of a reported loop run, 0 while loop reports are off. */
+  /** @brief Fewest passes of a reported loop run, 0 while loop reports are off: the lowest
+   * non-zero of requested_loop_reports and the sinks' loop_passes. */
   std::uint32_t loop_reports = 0;
+  /** @brief Loop reports machine::set_loop_reports() asks for, 0 for none. */
+  std::uint32_t requested_loop_reports = 0;
   /** @brief Identical passes that request a spin stop: machine_options::spin_threshold, or no
    * count when it is 0: one past the largest count, which a pass count never reaches. */
   std::uint64_t spin_stop = no_spin_stop;
@@ -2102,6 +2107,9 @@ struct machine::run_state
 
   /** @brief Installs or removes the hooks that feed the selected kinds, between slices. */
   void update_sink_hooks();
+  /** @brief Sets loop_reports from the requests, ending the open run when they all went, and
+   * starts or clears the spin detector with it. */
+  void apply_loop_reports();
 
   /** @brief Delivers a full batch, its failure kept as the slice's failure inside the engine. */
   void flush_full(sink_entry& entry);

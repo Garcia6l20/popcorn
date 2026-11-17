@@ -10,8 +10,24 @@ from pathlib import Path
 from popcorn import _core
 from popcorn._enums import StopReason
 from popcorn._image import Image, Location
+from popcorn._refs import Pending
 from popcorn.coverage import Coverage
-from popcorn.trace import Block, Call, Irq, Mem, Mmio, Record, Stop, TraceKind, read
+from popcorn.trace import (
+    Block,
+    Call,
+    Clock,
+    Cut,
+    Irq,
+    Loop,
+    Mem,
+    Mmio,
+    Rebase,
+    Record,
+    Sleep,
+    Stop,
+    TraceKind,
+    read,
+)
 from popcorn.units import VirtualTime
 
 _LOG = logging.getLogger("popcorn")
@@ -170,6 +186,82 @@ def open_trace(
     return TraceRecording(native, target)
 
 
+class ProfileRecording:
+    """A native profile sink fed by a machine, from `Machine._profile`, then its aggregates.
+
+    Leaving the block removes the sink, which withdraws its loop report request, and takes the
+    aggregates, on the machine's thread. Inside a free run that happens at the next boundary:
+    `result` is readable once `closed` is True, after the run halts or once `wait_closed()`
+    returned.
+    """
+
+    __slots__ = ("_closing", "_native")
+
+    def __init__(self, native: _core.ProfileHandle) -> None:
+        """Wrap a native profile. `Machine._profile` builds it."""
+        self._native = native
+        self._closing: Pending[tuple[object, VirtualTime]] | None = None
+
+    @property
+    def closed(self) -> bool:
+        """Whether the aggregates were taken."""
+        return self._native.closed()
+
+    @property
+    def result(self) -> _core.ProfileResult:
+        """The aggregates taken at the close.
+
+        Raises:
+            MachineRunning: The profile is open, or its close is still queued on a free run.
+        """
+        return self._native.result()
+
+    async def wait_closed(self) -> None:
+        """Wait for a close posted to a free run. Returns at once when no close is queued."""
+        closing, self._closing = self._closing, None
+        if closing is not None:
+            await closing
+
+    def close_command(self) -> _core.AccessOp:
+        """`close` as a native command a running machine runs at a block boundary."""
+        return self._native.command_close()
+
+    def posted(self, closing: Pending[tuple[object, VirtualTime]]) -> None:
+        """Keep the close posted to a free run, for `wait_closed`."""
+        self._closing = closing
+
+    def close(self) -> None:
+        """Remove the sink, which withdraws its loop report request, and take the aggregates,
+        what leaving the `with` block does on a parked machine.
+
+        Raises:
+            MachineRunning: Called from a handler of a running slice.
+            MachineClosed: The machine was closed.
+        """
+        self._native.close()
+
+
+def open_profile(
+    handle: _core.MachineHandle,
+    *,
+    call_stacks: bool,
+    loop_reports: int,
+    burst_window: int,
+    logged_registers: Iterable[int],
+    write_log_limit: int,
+    max_call_depth: int,
+) -> ProfileRecording:
+    """Start a profile for `Machine._profile`."""
+    settings = _core.ProfileOptions()
+    settings.call_stacks = call_stacks
+    settings.loop_reports = loop_reports
+    settings.burst_window = burst_window
+    settings.logged_registers = list(logged_registers)
+    settings.write_log_limit = write_log_limit
+    settings.max_call_depth = max_call_depth
+    return ProfileRecording(handle.open_profile(settings))
+
+
 class Ring:
     """The always-on trace ring of a machine, `m.ring`: its most recent records."""
 
@@ -265,6 +357,8 @@ class Ring:
                 return f"call  {symbol or self._locate(pc)} r0={r0:#x}"
             case Stop(_, pc, reason):
                 return f"stop  {StopReason(reason).name} at {self._locate(pc)}"
+            case Sleep() | Clock() | Cut() | Loop() | Rebase():
+                return type(record).__name__.lower()
 
 
 def _checked_flag(on: object) -> bool:

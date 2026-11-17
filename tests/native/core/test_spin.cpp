@@ -18,6 +18,7 @@
 #include <memory>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -398,26 +399,31 @@ struct loop_log
   }
 };
 
-auto listen(fixture const& f, core::trace_kinds kinds = {core::trace_kind::loop})
-    -> std::pair<std::shared_ptr<loop_log>, core::hook_handle>
+auto listen(
+    fixture const&    f,
+    core::trace_kinds kinds  = {core::trace_kind::loop},
+    std::uint32_t     passes = 0) -> std::pair<std::shared_ptr<loop_log>, core::hook_handle>
 {
   auto log    = std::make_shared<loop_log>();
   log->now    = f.target->virtual_clock().now();
-  auto handle = f.target->add_trace_sink(kinds, [log](std::span<core::trace_record const> batch) {
-    for(auto const& record : batch)
-    {
-      if(record.kind == core::trace_kind::time)
-      {
-        log->now =
-            icount{std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32};
-      }
-      else
-      {
-        log->now.value += record.dt;
-      }
-      log->records.push_back({.at = log->now, .record = record});
-    }
-  });
+  auto handle = f.target->add_trace_sink(
+      kinds,
+      [log](std::span<core::trace_record const> batch) {
+        for(auto const& record : batch)
+        {
+          if(record.kind == core::trace_kind::time)
+          {
+            log->now =
+                icount{std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32};
+          }
+          else
+          {
+            log->now.value += record.dt;
+          }
+          log->records.push_back({.at = log->now, .record = record});
+        }
+      },
+      {}, passes);
   return {log, std::move(handle)};
 }
 
@@ -629,6 +635,104 @@ TEST_CASE("removing a sink writes the open run to it alone, and the run goes on 
   CHECK(start_of(removed->loops().front()).value == from.value + 13);
   CHECK(start_of(kept->loops().front()).value == from.value + 13);
   CHECK(kept->loops().front().at == off);
+}
+
+TEST_CASE("loop reports run at the lowest request of the machine and the attached sinks")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [coarse, coarse_sink] = listen(f, {core::trace_kind::loop}, 3);
+  CHECK(f.target->loop_reports() == 3);
+  auto [fine, fine_sink] = listen(f, {core::trace_kind::loop}, 1);
+  CHECK(f.target->loop_reports() == 1);
+  f.target->set_loop_reports(5);
+  CHECK(f.target->loop_reports() == 1);
+  fine_sink.reset();
+  CHECK(f.target->loop_reports() == 3);
+  f.target->set_loop_reports(2);
+  CHECK(f.target->loop_reports() == 2);
+  f.target->set_loop_reports(0);
+  CHECK(f.target->loop_reports() == 3);
+  f.target->set_loop_reports(5);
+  coarse_sink.reset();
+  CHECK(f.target->loop_reports() == 5);
+  f.target->set_loop_reports(0);
+  CHECK(f.target->loop_reports() == 0);
+}
+
+TEST_CASE("removing the last sink that asks ends the open run for the sinks that stay")
+{
+  auto f = booted(0);
+  start(f, "wait_ready");
+  auto [kept, kept_sink]   = listen(f);
+  auto [asker, asker_sink] = listen(f, {core::trace_kind::loop}, 1);
+  auto const from          = f.target->virtual_clock().now();
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  asker_sink.reset();
+  CHECK(f.target->loop_reports() == 0);
+  REQUIRE_FALSE(f.run(budget(1000)).stopped.has_value());
+  kept_sink.reset();
+  REQUIRE(asker->loops().size() == 1);
+  REQUIRE(kept->loops().size() == 1);
+  CHECK(ender_of(kept->loops().front().record) == core::loop_ender::end);
+  CHECK(kept->loops().front().at.value == from.value + 1000);
+  CHECK(start_of(kept->loops().front()).value == from.value + 13);
+  CHECK(asker->loops().front().at.value == from.value + 1000);
+}
+
+TEST_CASE("a sink sees the runs of its own passes only, whatever lower requests are attached")
+{
+  struct seen
+  {
+    icount        at{};
+    std::uint32_t passes{};
+    std::uint16_t aux{};
+
+    auto operator==(seen const&) const -> bool = default;
+  };
+  auto const runs = [](std::uint32_t beside) {
+    auto f = booted(0);
+    start(f, "poll_value");
+    auto [coarse, coarse_sink] = listen(f, {core::trace_kind::loop}, 50);
+    auto [fine, fine_sink]     = beside != 0 ? listen(f, {core::trace_kind::loop}, beside)
+                                             : listen(f, {core::trace_kind::cut});
+    for(std::uint32_t value = 1; value <= 12; ++value)
+    {
+      write_flag(f, value + 10);
+      REQUIRE_FALSE(f.run(budget(3 * (value % 4) + 4)).stopped.has_value());
+    }
+    REQUIRE_FALSE(f.run(budget(300)).stopped.has_value());
+    write_flag(f, 30);
+    REQUIRE_FALSE(f.run(budget(90)).stopped.has_value());
+    coarse_sink.reset();
+    fine_sink.reset();
+    auto const of = [](loop_log const& log) {
+      return log.loops()
+           | std::views::transform([](stamped const& entry) {
+               return seen{
+                   .at = entry.at, .passes = entry.record.payload[1], .aux = entry.record.aux};
+             })
+           | std::ranges::to<std::vector>();
+    };
+    return std::pair{of(*coarse), of(*fine)};
+  };
+  auto const [alone, nothing]     = runs(0);
+  auto const [beside, short_ones] = runs(1);
+  CHECK(nothing.empty());
+  CHECK(std::ranges::count_if(short_ones, [](seen const& run) { return run.passes < 50; }) >= 9);
+  CHECK(std::ranges::all_of(alone, [](seen const& run) { return run.passes >= 50; }));
+  CHECK(alone.size() == 1);
+  CHECK(beside == alone);
+}
+
+TEST_CASE("a sink asking for loop reports without loop records is refused and asks nothing")
+{
+  auto f = booted(0);
+  CHECK_THROWS_AS(
+      std::ignore = f.target->add_trace_sink(
+          {core::trace_kind::block}, [](std::span<core::trace_record const>) {}, {}, 1),
+      std::invalid_argument);
+  CHECK(f.target->loop_reports() == 0);
 }
 
 TEST_CASE("a reset or a restore ends the open run before the count moves")

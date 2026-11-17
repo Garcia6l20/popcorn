@@ -1,3 +1,4 @@
+#include "owned_sink.hpp"
 #include "profile_rig.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -702,4 +703,55 @@ TEST_CASE("a profile sink leaves a concurrent trace file, the ring and the stop 
   CHECK(ring == plain_ring);
   CHECK(file == plain_file);
   CHECK(not file.empty());
+}
+
+TEST_CASE("a profile sink whose handle a handler drops inside a slice lives until the slice end")
+{
+  auto f    = tim_machine();
+  auto sink = std::make_shared<obs::profile_sink>(f->target->virtual_clock().now());
+  std::weak_ptr<obs::profile_sink> const watched = sink;
+  std::optional<core::hook_handle>       hook{
+      f->target->add_trace_sink(obs::profile_sink::kinds, obs::owned_sink(sink), {}, 1)};
+  std::vector<bool> alive_after_drop;
+  auto const        intercept = f->target->add_intercept(
+      sym("tim_ticks", "TIM2_IRQHandler"), [&](core::intercept_call const&) {
+        if(hook)
+        {
+          hook.reset();
+          sink.reset();
+          alive_after_drop.push_back(not watched.expired());
+        }
+        return core::intercept_result::proceed();
+      });
+  f->run_for(3 * ms_ps);
+  CHECK(alive_after_drop == std::vector{true});
+  CHECK(watched.expired());
+  CHECK(f->target->loop_reports() == 0);
+}
+
+TEST_CASE("a trace writer whose handle a handler drops inside a slice writes until the slice end")
+{
+  auto const path = scratch("dropped_in_slice.pctr");
+  {
+    auto                                  f       = tim_machine();
+    std::shared_ptr<obs::pctr_writer>     writer  = obs::pctr_writer_for(*f->target, path);
+    std::weak_ptr<obs::pctr_writer> const watched = writer;
+    std::optional<core::hook_handle>      hook{f->target->add_trace_sink(
+        {core::trace_kind::block, core::trace_kind::irq}, obs::owned_sink(writer))};
+    std::vector<bool>                     alive_after_drop;
+    auto const                            intercept = f->target->add_intercept(
+        sym("tim_ticks", "TIM2_IRQHandler"), [&](core::intercept_call const&) {
+          if(hook)
+          {
+            hook.reset();
+            writer.reset();
+            alive_after_drop.push_back(not watched.expired());
+          }
+          return core::intercept_result::proceed();
+        });
+    f->run_for(3 * ms_ps);
+    CHECK(alive_after_drop == std::vector{true});
+    CHECK(watched.expired());
+  }
+  CHECK(file_bytes(path).size() > 16);
 }
