@@ -249,13 +249,17 @@ struct pwr_variant
  *        `VOSRDY` and `ACTVOSRDY` only. A machine with no RCC model never raises `BOOSTRDY`.
  *
  *        Regulator selection, RM0456 10.5 and 10.10.3: on a U5 package with the SMPS, the part
- *        names ending in Q, PWR_SVMSR.REGS takes the value of PWR_CR3.REGSEL after the DS13737
- *        Table 75 typical transition time of the range ACTVOS gives at the REGSEL write, 14 to
- *        17 us. Every reset clears both, the regulator being the LDO. On a package without the
- *        SMPS REGSEL is reserved: REGS stays 0, and a firmware write that changes REGSEL from 0
- *        to 1 logs one warning per machine life. Under strict_peripherals that write raises
- *        model_error and `PWR_CR3` keeps its value before the write. Otherwise REGSEL holds the
- *        written value.
+ *        names ending in Q, PWR_SVMSR.REGS takes the value of PWR_CR3.REGSEL after the time from
+ *        the store issue to the first REGS read with the new value, measured on an STM32U575ZITxQ,
+ *        2026-11-17: 11.3 us to the SMPS in range 4, 15.5 us in ranges 3 to 1, 13.5 us to the LDO
+ *        in every range. Every other U5 package with the SMPS takes the same table, inferred. No
+ *        constant fits every board row: the polls bracket 14.5 to 18.0 us from the store for the
+ *        SMPS to LDO change at 4 MHz and 13.1 to 13.7 us at 48 MHz, so the error is 1 to 4.5 us at
+ *        4 MHz for that change and 0 to 3.2 us for the LDO to SMPS change in range 4. Every reset
+ *        clears both, the regulator being the LDO. On a package without the SMPS REGSEL is
+ *        reserved: REGS stays 0, and a firmware write that changes REGSEL from 0 to 1 logs one
+ *        warning per machine life. Under strict_peripherals that write raises model_error and
+ *        `PWR_CR3` keeps its value before the write. Otherwise REGSEL holds the written value.
  *
  *        USB supply, RM0456 10.4.6 and 10.10.5: `PWR_SVMCR.USV` declares VDDUSB valid. The
  *        OTG_FS model reads it through usb_supply_source and is told of every change through
@@ -355,10 +359,11 @@ struct pwr_variant
  *
  * @group u5 rule "STM32U5 PWR_CR3 and supply selection"
  * - STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value of
- *   `PWR_CR3.REGSEL` after the typical transition time of DS13737 Table 75 for the range ACTVOS
- *   gives at the REGSEL write: LDO to SMPS 14, 17, 16 and 16 us in range 4 to 1, SMPS to LDO 16,
- *   15, 14 and 14 us. The figures are the DS13737 typical values, applied to every U5 SMPS part.
- *   Every reset sets both to 0, the LDO.
+ *   `PWR_CR3.REGSEL` after the time from the store issue to the first REGS read with the new value:
+ *   LDO to SMPS 11.3 us in range 4 and 15.5 us in ranges 3 to 1, SMPS to LDO 13.5 us in every
+ *   range, measured on an STM32U575ZITxQ, 2026-11-17. Every other U5 package with the SMPS takes
+ *   the table, inferred. The delay measured depends on HCLK, so no constant fits every board
+ *   row. Every reset sets both to 0, the LDO.
  * - STM32U5 packages without the SMPS: REGSEL is reserved, RM0456 10.10.3, and REGS stays 0. A
  *   firmware write that changes REGSEL from 0 to 1 logs one warning per machine life. Under
  *   `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
@@ -830,14 +835,15 @@ constexpr pwr_variant u5_pwr{
     .unmodelled            = u5_unmodelled,
 };
 
-/** @brief DS13737 Rev 10 Table 75, typical tSMPS and tLDO at 3 V and 25 C, to the REGS change. */
+/** @brief Time from the PWR_CR3 store issue to the first REGS read with the new value, per ACTVOS
+ *         code, measured on an STM32U575ZITxQ. */
 constexpr regulator_switch u5_regulator_switch{
     .to_smps =
-        {std::chrono::microseconds{14}, std::chrono::microseconds{17},
-                  std::chrono::microseconds{16}, std::chrono::microseconds{16}},
+        {std::chrono::nanoseconds{11'300}, std::chrono::nanoseconds{15'500},
+                  std::chrono::nanoseconds{15'500}, std::chrono::nanoseconds{15'500}},
     .to_ldo =
-        {std::chrono::microseconds{16}, std::chrono::microseconds{15},
-                  std::chrono::microseconds{14}, std::chrono::microseconds{14}},
+        {std::chrono::nanoseconds{13'500}, std::chrono::nanoseconds{13'500},
+                  std::chrono::nanoseconds{13'500}, std::chrono::nanoseconds{13'500}},
 };
 
 constexpr pwr_variant u5_smps_pwr = [] {

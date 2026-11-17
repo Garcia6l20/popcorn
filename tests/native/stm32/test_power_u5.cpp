@@ -444,6 +444,9 @@ constexpr auto hal_clear_regsel = std::to_array<std::uint16_t>(
     {0x6803, 0xf023, 0x0302, 0x6003, 0x680b, 0xf013, 0x0f02, 0xd001, 0x3a01, 0xd1f9, 0xbe00});
 constexpr std::uint32_t hal_timeout_at_msis_4mhz = 50 * (4'000'000 / 1000) / 1000 + 1;
 constexpr std::uint64_t us_ps                    = 1'000'000;
+constexpr std::uint64_t smps_range_4_ps          = 11'300'000;
+constexpr std::uint64_t smps_higher_ranges_ps    = 15'500'000;
+constexpr std::uint64_t ldo_ps                   = 13'500'000;
 
 auto u575_with_smps() -> popcorn::part_description
 {
@@ -526,11 +529,11 @@ struct supply_rig
     return due;
   }
 
-  void range_1() const
+  void range(std::uint32_t actvos) const
   {
-    write("PWR_VOSR", 3u << 16);
+    write("PWR_VOSR", actvos << 16);
     run_until(now() + 60 * us_ps);
-    REQUIRE(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+    REQUIRE(field(f, "PWR_SVMSR", "ACTVOS") == actvos);
     REQUIRE(pending_pwr().empty());
   }
 
@@ -564,43 +567,46 @@ TEST_CASE(
   CHECK(r.hal_config_supply(hal_set_regsel) != 0);
   CHECK(r.regs() == 1);
   CHECK(field(r.f, "PWR_CR3", "REGSEL") == 1);
-  CHECK(r.now() - start >= 14 * us_ps);
-  CHECK(r.now() - start < 18 * us_ps);
+  CHECK(r.now() - start >= smps_range_4_ps);
+  CHECK(r.now() - start < 15 * us_ps);
+  auto const cleared = r.now();
   CHECK(r.hal_config_supply(hal_clear_regsel) != 0);
+  CHECK(r.now() - cleared >= ldo_ps);
+  CHECK(r.now() - cleared < 17 * us_ps);
   CHECK(r.regs() == 0);
   CHECK(field(r.f, "PWR_CR3", "REGSEL") == 0);
 }
 
 TEST_CASE(
-    "DS13737 Table 75: the REGS change is due tSMPS or tLDO after the REGSEL write, by ACTVOS")
+    "measured on an STM32U575ZITxQ: the REGS change is due 11.3, 15.5 or 13.5 us after the REGSEL "
+    "write, by ACTVOS and direction")
 {
   supply_rig r{u575_with_smps()};
   auto const idle = r.pending_pwr();
   REQUIRE(idle.empty());
-  auto written = r.now();
   r.write("PWR_CR3", 2);
-  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + 14 * us_ps});
-  CHECK(r.regs() == 0);
-  r.run_until(written + 13 * us_ps);
-  CHECK(r.regs() == 0);
-  r.run_until(written + 14 * us_ps);
-  CHECK(r.regs() == 1);
-  written = r.now();
-  r.write("PWR_CR3", 0);
-  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + 16 * us_ps});
-  r.run_until(written + 16 * us_ps);
-  CHECK(r.regs() == 0);
-  r.range_1();
-  written = r.now();
-  r.write("PWR_CR3", 2);
-  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + 16 * us_ps});
-  r.run_until(written + 16 * us_ps);
-  CHECK(r.regs() == 1);
-  written = r.now();
-  r.write("PWR_CR3", 0);
-  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + 14 * us_ps});
-  r.run_until(written + 14 * us_ps);
-  CHECK(r.regs() == 0);
+  for(std::uint32_t actvos = 0; actvos < 4; ++actvos)
+  {
+    CAPTURE(actvos);
+    auto const smps_ps = actvos == 0 ? smps_range_4_ps : smps_higher_ranges_ps;
+    if(actvos != 0)
+    {
+      r.range(actvos);
+    }
+    auto written = r.now();
+    r.write("PWR_CR3", 2);
+    CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + smps_ps});
+    CHECK(r.regs() == 0);
+    r.run_until(written + smps_ps - us_ps);
+    CHECK(r.regs() == 0);
+    r.run_until(written + smps_ps);
+    CHECK(r.regs() == 1);
+    written = r.now();
+    r.write("PWR_CR3", 0);
+    CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + ldo_ps});
+    r.run_until(written + ldo_ps);
+    CHECK(r.regs() == 0);
+  }
 }
 
 TEST_CASE("a REGSEL write superseding a pending switch drops the earlier REGS change")
@@ -612,7 +618,7 @@ TEST_CASE("a REGSEL write superseding a pending switch drops the earlier REGS ch
   r.write("PWR_CR3", 0);
   r.run_until(start + 8 * us_ps);
   r.write("PWR_CR3", 2);
-  r.run_until(start + 14 * us_ps);
+  r.run_until(start + 18 * us_ps);
   CHECK(r.regs() == 0);
   r.run_until(start + 22 * us_ps);
   CHECK(r.regs() == 1);
@@ -629,7 +635,7 @@ TEST_CASE("a system reset with a switch to SMPS pending leaves REGSEL and REGS 0
   r.run_until(r.now() + 30 * us_ps);
   CHECK(r.regs() == 0);
   r.write("PWR_CR3", 2);
-  r.run_until(r.now() + 14 * us_ps);
+  r.run_until(r.now() + smps_range_4_ps);
   CHECK(r.regs() == 1);
   r.f.target->reset(popcorn::reset_kind::software);
   CHECK(field(r.f, "PWR_CR3", "REGSEL") == 0);
@@ -640,7 +646,7 @@ TEST_CASE("a power-on reset after a switch to SMPS leaves REGSEL and REGS 0, the
 {
   supply_rig r{u575_with_smps()};
   r.write("PWR_CR3", 2);
-  r.run_until(r.now() + 14 * us_ps);
+  r.run_until(r.now() + smps_range_4_ps);
   REQUIRE(r.regs() == 1);
   r.f.target->reset(popcorn::reset_kind::power_on);
   CHECK(field(r.f, "PWR_CR3", "REGSEL") == 0);
@@ -824,8 +830,8 @@ TEST_CASE("a snapshot taken while REGS is pending restores the switch at its due
   r.f.target->restore(saved);
   CHECK(field(r.f, "PWR_CR3", "REGSEL") == 1);
   CHECK(r.regs() == 0);
-  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + 14 * us_ps});
-  r.run_until(written + 14 * us_ps);
+  CHECK(r.pending_pwr() == std::vector<std::uint64_t>{written + smps_range_4_ps});
+  r.run_until(written + smps_range_4_ps);
   CHECK(r.regs() == 1);
 }
 
