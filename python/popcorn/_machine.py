@@ -144,6 +144,7 @@ from popcorn.units import VirtualDuration, VirtualTime
 if TYPE_CHECKING:
     from popcorn._system import System
     from popcorn.image.dwarf import DebugInfo, DebugType, TypeId
+    from popcorn.profiling import Analysis, Profile
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
@@ -1477,12 +1478,55 @@ class Machine:
         recording.close()
 
     @contextlib.contextmanager
+    def profile(self, *analyses: Analysis | str) -> Generator[Profile]:
+        """Profile the firmware while the block runs: `popcorn.profiling.ALL` analyses when none
+        is named.
+
+            async def main() -> None:
+                with m.profile("hotspots", "irq") as profile:
+                    await m.run(for_=ms(100))
+                print(profile.report().text())
+
+            asyncio.run(main())
+
+        A native sink counts the machine's blocks, exceptions, sleeps, register accesses and
+        loop runs, nothing crosses to Python per record, and the user's coverage and traces are
+        left as they are. "hotspots" adds the call stack tracker, "irq" a burst window of
+        `popcorn.profiling.BURST_WINDOW_PS`, 1 ms of virtual time at any core rate, "loops" asks
+        for loop reports of at least `popcorn.profiling.MIN_PASSES` passes while the block runs.
+        Names come from the function symbols of the loaded and symbols-only images and from the
+        description, read at the entry.
+
+        Entered parked only. Leaving the block takes the counts at once while parked, and at the
+        next block boundary inside a free run: call `report()` after the run halts or after
+        `await profile.wait_closed()`.
+
+        Raises:
+            ValueError: An analysis name is unknown.
+            ConfigError: The machine is a member of a live linked system, `members.<name>`.
+            MachineRunning: The machine is busy, outside its handlers.
+        """
+        from popcorn.profiling import BURST_WINDOW_PS, MIN_PASSES, Analysis, Profile, selected
+        from popcorn.profiling._symbols import Names
+
+        chosen = selected(analyses)
+        self._require_stopped()
+        burst = BURST_WINDOW_PS if Analysis.IRQ in chosen else 0
+        passes = MIN_PASSES if Analysis.LOOPS in chosen else 0
+        names = Names(self._images, self._description)
+        from_reset = self._handle.instructions() == 0
+        with self._profile(
+            call_stacks=Analysis.HOTSPOTS in chosen, loop_reports=passes, burst_window_ps=burst
+        ) as recording:
+            yield Profile(recording, names, chosen, from_reset=from_reset, min_passes=passes)
+
+    @contextlib.contextmanager
     def _profile(
         self,
         *,
         call_stacks: bool = False,
         loop_reports: int = 0,
-        burst_window: int = 0,
+        burst_window_ps: int = 0,
         logged_registers: Iterable[int] = (),
         write_log_limit: int = 4096,
         max_call_depth: int = 256,
@@ -1500,7 +1544,7 @@ class Machine:
             call_stacks: Whether the call stack tracker runs.
             loop_reports: Fewest passes of a reported loop run the sink asks for while the
                 block runs, 0 for no request.
-            burst_window: Instructions of the exception burst window, 0 for none.
+            burst_window_ps: Picoseconds of the exception burst window, 0 for none.
             logged_registers: Flat register ids whose CPU writes are logged one by one.
             write_log_limit: Writes kept per logged register.
             max_call_depth: Most call frames the tracker keeps.
@@ -1512,7 +1556,7 @@ class Machine:
         """
         limits = {
             "loop_reports": (loop_reports, 0xFFFF_FFFF),
-            "burst_window": (burst_window, 0xFFFF_FFFF_FFFF_FFFF),
+            "burst_window_ps": (burst_window_ps, 0xFFFF_FFFF_FFFF_FFFF),
             "write_log_limit": (write_log_limit, 0xFFFF_FFFF_FFFF_FFFF),
             "max_call_depth": (max_call_depth, 0xFFFF_FFFF),
         }
@@ -1535,7 +1579,7 @@ class Machine:
             self._handle,
             call_stacks=call_stacks,
             loop_reports=loop_reports,
-            burst_window=burst_window,
+            burst_window_ps=burst_window_ps,
             logged_registers=registers,
             write_log_limit=write_log_limit,
             max_call_depth=max_call_depth,

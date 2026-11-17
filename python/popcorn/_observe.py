@@ -246,7 +246,7 @@ def open_profile(
     *,
     call_stacks: bool,
     loop_reports: int,
-    burst_window: int,
+    burst_window_ps: int,
     logged_registers: Iterable[int],
     write_log_limit: int,
     max_call_depth: int,
@@ -255,7 +255,7 @@ def open_profile(
     settings = _core.ProfileOptions()
     settings.call_stacks = call_stacks
     settings.loop_reports = loop_reports
-    settings.burst_window = burst_window
+    settings.burst_window_ps = burst_window_ps
     settings.logged_registers = list(logged_registers)
     settings.write_log_limit = write_log_limit
     settings.max_call_depth = max_call_depth

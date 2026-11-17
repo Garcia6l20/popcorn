@@ -41,11 +41,9 @@ constexpr auto shape_key(address pc, std::uint32_t instructions) noexcept -> std
   return std::uint64_t{pc} << 32 | instructions;
 }
 
-void add_gap(profile_gaps& into, std::uint64_t length) noexcept
+constexpr auto span_ps(std::uint64_t instructions, std::uint64_t hz) noexcept -> std::uint64_t
 {
-  ++into.count;
-  into.total += length;
-  into.longest = std::max(into.longest, length);
+  return hz == 0 ? 0 : vtime_from_instructions(instructions, hz).ps;
 }
 
 auto sorted_registers(auto const& table) -> std::vector<profile_register>
@@ -103,10 +101,7 @@ void profile_sink::feed(std::span<core::trace_record const> records)
         sleep(record);
         break;
       case core::trace_kind::clock:
-        clocks_.push_back(
-            {.at      = now_,
-             .segment = cuts_,
-             .hz      = std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32});
+        clock(std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32);
         break;
       case core::trace_kind::cut:
         cut_block(record);
@@ -133,16 +128,69 @@ void profile_sink::time(icount to, bool rebase)
     now_     = to;
     return;
   }
+  close_clock_span();
+  marks_.clear();
   now_  = to;
   base_ = to;
   cut();
+}
+
+void profile_sink::clock(std::uint64_t hz)
+{
+  close_clock_span();
+  clock_elapsed_ = elapsed_;
+  marks_.push_back({.at = now_, .ps = ps_at(now_), .hz = hz});
+  clocks_.push_back({.at = now_, .segment = cuts_, .hz = hz});
+}
+
+void profile_sink::close_clock_span()
+{
+  if(marks_.empty())
+  {
+    return;
+  }
+  auto& last        = clocks_.back();
+  last.instructions = elapsed_ - clock_elapsed_;
+  last.ps           = span_ps(last.instructions, last.hz);
+}
+
+auto profile_sink::ps_at(icount at) const -> std::uint64_t
+{
+  if(marks_.empty())
+  {
+    return 0;
+  }
+  auto const found = at >= marks_.back().at
+                       ? marks_.end()
+                       : std::ranges::upper_bound(marks_, at, {}, &rate_mark::at);
+  if(found == marks_.begin())
+  {
+    return marks_.front().ps;
+  }
+  auto const& mark = *std::prev(found);
+  return mark.ps + span_ps(at.value - mark.at.value, mark.hz);
+}
+
+auto profile_sink::ps_between(icount from, icount to) const -> std::uint64_t
+{
+  return to > from ? ps_at(to) - ps_at(from) : 0;
+}
+
+void profile_sink::add_gap(profile_gaps& into, icount from, icount to) const
+{
+  auto const length = to.value - from.value;
+  auto const ps     = ps_between(from, to);
+  ++into.count;
+  into.total += length;
+  into.longest = std::max(into.longest, length);
+  into.total_ps += ps;
+  into.longest_ps = std::max(into.longest_ps, ps);
 }
 
 void profile_sink::sleep(core::trace_record const& record)
 {
   auto const start =
       std::max(icount{now_.value - std::min<std::uint64_t>(now_.value, record.payload[0])}, base_);
-  auto const length = now_.value - start.value;
   gap_before(start, other_gaps_);
   exit_at_.reset();
   auto const reason = static_cast<std::size_t>(record.flags & ~core::trace_sleep_partial & 0xff);
@@ -154,10 +202,10 @@ void profile_sink::sleep(core::trace_record const& record)
   {
     ++partial_sleeps_;
   }
-  add_gap(sleeps_, length);
+  add_gap(sleeps_, start, now_);
   if(record.aux != 0)
   {
-    add_gap(exceptions_[record.aux].totals.wakes, length);
+    add_gap(exceptions_[record.aux].totals.wakes, start, now_);
   }
 }
 
@@ -168,7 +216,9 @@ void profile_sink::loop(core::trace_record const& record)
   entry.last  = std::max(entry.last, record.payload[0] + record.flags);
   entry.runs += 1;
   entry.passes += record.payload[1];
-  entry.instructions += std::min<std::uint64_t>(record.payload[2], now_.value - base_.value);
+  auto const covered = std::min<std::uint64_t>(record.payload[2], now_.value - base_.value);
+  entry.instructions += covered;
+  entry.ps += ps_between(icount{now_.value - covered}, now_);
   if(auto const ender = std::size_t{record.aux} >> core::trace_loop_ender_shift;
      ender < entry.enders.size())
   {
@@ -235,7 +285,7 @@ void profile_sink::gap_before(icount start, profile_gaps& into)
 {
   if(start > last_end_)
   {
-    add_gap(into, start.value - last_end_.value);
+    add_gap(into, last_end_, start);
   }
   last_end_ = std::max(last_end_, now_);
 }
@@ -558,14 +608,14 @@ void profile_sink::irq(core::trace_record const& record)
     }
     frames_.push_back({.number = number, .entered = now_});
     totals.max_depth = std::max(totals.max_depth, static_cast<std::uint32_t>(frames_.size()));
-    if(options_.burst_window.value != 0)
+    if(options_.burst_window_ps != 0)
     {
-      while(not state.window.empty()
-            and now_.value - state.window.front().value >= options_.burst_window.value)
+      auto const at = ps_at(now_);
+      while(not state.window.empty() and at - state.window.front() >= options_.burst_window_ps)
       {
         state.window.pop_front();
       }
-      state.window.push_back(now_);
+      state.window.push_back(at);
       totals.burst = std::max<std::uint64_t>(totals.burst, state.window.size());
     }
     return;
@@ -579,14 +629,19 @@ void profile_sink::irq(core::trace_record const& record)
   }
   auto const closed = frames_.back();
   frames_.pop_back();
-  auto const inclusive = now_.value - closed.entered.value;
-  auto&      totals    = exceptions_[number].totals;
+  auto const inclusive    = now_.value - closed.entered.value;
+  auto const inclusive_ps = ps_between(closed.entered, now_);
+  auto&      totals       = exceptions_[number].totals;
   totals.inclusive += inclusive;
   totals.self += inclusive - closed.nested;
   totals.longest = std::max(totals.longest, inclusive);
+  totals.inclusive_ps += inclusive_ps;
+  totals.self_ps += inclusive_ps - closed.nested_ps;
+  totals.longest_ps = std::max(totals.longest_ps, inclusive_ps);
   if(not frames_.empty())
   {
     frames_.back().nested += inclusive;
+    frames_.back().nested_ps += inclusive_ps;
   }
 }
 
@@ -665,6 +720,16 @@ auto profile_sink::result() const -> profile_result
       out.code.push_back(
           {.pc = slot.pc, .entries = slot.entries, .instructions = slot.instructions});
     }
+  }
+  if(not marks_.empty())
+  {
+    auto& last        = out.clocks.back();
+    last.instructions = elapsed_ - clock_elapsed_;
+    last.ps           = span_ps(last.instructions, last.hz);
+  }
+  for(auto const& held : out.clocks)
+  {
+    out.elapsed_ps += held.ps;
   }
   std::ranges::sort(out.code, {}, &profile_block::pc);
   out.loops = loops_ | std::views::values | std::ranges::to<std::vector>();

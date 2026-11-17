@@ -101,8 +101,8 @@ private:
 /** @brief Options of a profile, see obs::profile_options. */
 struct[[= py::rename{"ProfileOptions"}]] profile_settings
 {
-  /** @brief Instructions of the burst window, 0 for none. */
-  std::uint64_t burst_window{};
+  /** @brief Picoseconds of the burst window, 0 for none. */
+  std::uint64_t burst_window_ps{};
   /** @brief Flat register ids whose CPU writes are logged. */
   std::vector<std::uint16_t> logged_registers{};
   /** @brief Writes kept per logged register. */

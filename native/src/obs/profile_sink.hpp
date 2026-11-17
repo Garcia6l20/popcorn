@@ -53,9 +53,10 @@ using code_reader = std::move_only_function<block_shape(address pc, std::uint32_
 /** @brief Options of a profile_sink. */
 struct profile_options
 {
-  /** @brief Length in instructions of the sliding window profile_exception::burst counts entries
-   * in, 0 for no burst count. */
-  icount burst_window{};
+  /** @brief Length in picoseconds of the sliding window profile_exception::burst counts entries
+   * in, 0 for no burst count. Entry times are converted with the clock records, so the window
+   * keeps its length across a core rate change. */
+  std::uint64_t burst_window_ps{};
   /** @brief Flat register ids whose CPU writes are kept one by one in profile_result::write_logs.
    */
   std::vector<std::uint16_t> logged_registers{};
@@ -126,17 +127,21 @@ struct profile_gaps
   std::uint64_t count{};
   /** @brief Instructions of time in them. */
   std::uint64_t total{};
-  /** @brief Longest gap. */
+  /** @brief Longest gap in instructions of time. */
   std::uint64_t longest{};
+  /** @brief Picoseconds in them. */
+  std::uint64_t total_ps{};
+  /** @brief Longest gap in picoseconds. */
+  std::uint64_t longest_ps{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_gaps const&, profile_gaps const&) -> bool = default;
 };
 
 /**
- * @brief Entries and time of one exception number. Times are instruction counts, sleeps
- *        included. Inclusive runs from the entry record to the matching exit record, self is
- *        inclusive less the inclusive time of the exceptions that preempted it.
+ * @brief Entries and time of one exception number. Times are instruction counts and
+ *        picoseconds, sleeps included. Inclusive runs from the entry record to the matching exit
+ *        record, self is inclusive less the inclusive time of the exceptions that preempted it.
  */
 struct profile_exception
 {
@@ -148,6 +153,12 @@ struct profile_exception
   std::uint64_t self{};
   /** @brief Longest inclusive time of one frame. */
   std::uint64_t longest{};
+  /** @brief inclusive in picoseconds. */
+  std::uint64_t inclusive_ps{};
+  /** @brief self in picoseconds. */
+  std::uint64_t self_ps{};
+  /** @brief Longest inclusive time of one frame in picoseconds. */
+  std::uint64_t longest_ps{};
   /** @brief Most frames open at once at one of its entries, itself included. */
   std::uint32_t max_depth{};
   /** @brief Entries of other exceptions while this one was the innermost frame, by number. */
@@ -156,7 +167,7 @@ struct profile_exception
    * record between. An entry that wakes the core after a sleep on exit is a wake, not a tail
    * chain. */
   std::uint64_t tail_chained{};
-  /** @brief Most entries inside one profile_options::burst_window, 0 without a window. */
+  /** @brief Most entries inside one profile_options::burst_window_ps, 0 without a window. */
   std::uint64_t burst{};
   /** @brief Frames a cut closed, see profile_sink. */
   std::uint64_t cut{};
@@ -226,6 +237,11 @@ struct profile_clock
   std::uint64_t segment{};
   /** @brief Instructions per second. */
   std::uint64_t hz{};
+  /** @brief Instructions of profile_result::elapsed that passed while the rate held, up to the
+   * next clock record or to the last record. */
+  std::uint64_t instructions{};
+  /** @brief instructions in picoseconds at hz, rounded down. */
+  std::uint64_t ps{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_clock const&, profile_clock const&) -> bool = default;
@@ -246,6 +262,8 @@ struct profile_loop
    * A run reaches to its ender, so a run whose code left the loop before its ender also covers
    * the code from the exit to the ender. */
   std::uint64_t instructions{};
+  /** @brief instructions in picoseconds, each run converted with the clock records it spans. */
+  std::uint64_t ps{};
   /** @brief Runs by core::loop_ender. core::loop_ender::call is a host call, core::loop_ender::end
    * the end of the reports or of the sink. */
   std::array<std::uint64_t, std::meta::enumerators_of(^^core::loop_ender).size()> enders{};
@@ -262,6 +280,8 @@ struct profile_result
   /** @brief Instruction time the records covered, the sum of every forward step between
    * consecutive records, from start to the last record. Steps across a cut are left out. */
   std::uint64_t elapsed{};
+  /** @brief elapsed in picoseconds, the sum of profile_clock::ps over clocks. */
+  std::uint64_t elapsed_ps{};
   /** @brief Records received, time records excluded. */
   std::uint64_t records{};
   /** @brief Block records. */
@@ -315,7 +335,7 @@ struct profile_result
  * @brief Trace sink keeping aggregates of block, mmio, irq, sleep, clock, cut and loop records,
  *        with no file: per block pc, per exception number, per register, per loop head, the
  *        sleeps, the core rates and the gaps between records. Time is the instruction count the
- *        records are stamped with.
+ *        records are stamped with, and in picoseconds from the clock records.
  *
  * A block record carries the instruction count of the whole block. A cut record that follows it,
  * for a block the engine left before its end, takes the instructions that did not run back.
@@ -324,6 +344,13 @@ struct profile_result
  * earliest. A gap runs from the end of the previous block, exception or sleep record, or from the
  * start for the first record, to the start of the next one. So instructions, sleeps and gaps sum
  * to elapsed, and a profile opened during a sleep counts the rest of it as a sleep.
+ *
+ * Every time total has a picosecond companion. A span is converted piecewise with the clock
+ * records of its segment, so a span across a rate change counts each part at its own rate. A
+ * point in time is the picoseconds of the segment's first clock record plus, per later clock
+ * record, its rate times its instructions, rounded down per clock span: a span differs from the
+ * machine clock by less than 1 ps per clock record it covers. Without a clock record in the
+ * segment, picoseconds are 0.
  *
  * A time record flagged core::trace_rebase_flag, written for a reset or a restore, cuts the
  * stream: open frames are closed as cut, gaps count from the new base, the tail-chain and burst
@@ -451,12 +478,20 @@ private:
     std::uint16_t number{};
     icount        entered{};
     std::uint64_t nested{};
+    std::uint64_t nested_ps{};
   };
 
   struct exception_state
   {
-    profile_exception  totals{};
-    std::deque<icount> window{};
+    profile_exception         totals{};
+    std::deque<std::uint64_t> window{};
+  };
+
+  struct rate_mark
+  {
+    icount        at{};
+    std::uint64_t ps{};
+    std::uint64_t hz{};
   };
 
   struct register_state
@@ -465,20 +500,25 @@ private:
     std::optional<std::uint32_t> last_written{};
   };
 
-  void time(icount to, bool rebase);
-  void sleep(core::trace_record const& record);
-  void loop(core::trace_record const& record);
-  void cut_block(core::trace_record const& record);
-  void cut();
-  void block(core::trace_record const& record);
-  void irq(core::trace_record const& record);
-  void mmio(core::trace_record const& record);
-  void gap_before(icount start, profile_gaps& into);
-  auto count_block(address pc, std::uint32_t instructions) -> std::size_t;
-  void grow();
-  auto shape_of(std::size_t at, std::uint32_t instructions) -> block_shape;
-  void track(std::size_t at, std::uint32_t instructions);
-  void walk(std::uint32_t instructions, block_shape const& shape, address pc);
+  void               time(icount to, bool rebase);
+  void               clock(std::uint64_t hz);
+  void               close_clock_span();
+  [[nodiscard]] auto ps_at(icount at) const -> std::uint64_t;
+  [[nodiscard]] auto ps_between(icount from, icount to) const -> std::uint64_t;
+  void               sleep(core::trace_record const& record);
+  void               loop(core::trace_record const& record);
+  void               cut_block(core::trace_record const& record);
+  void               cut();
+  void               block(core::trace_record const& record);
+  void               irq(core::trace_record const& record);
+  void               mmio(core::trace_record const& record);
+  void               gap_before(icount start, profile_gaps& into);
+  void               add_gap(profile_gaps& into, icount from, icount to) const;
+  auto               count_block(address pc, std::uint32_t instructions) -> std::size_t;
+  void               grow();
+  auto               shape_of(std::size_t at, std::uint32_t instructions) -> block_shape;
+  void               track(std::size_t at, std::uint32_t instructions);
+  void               walk(std::uint32_t instructions, block_shape const& shape, address pc);
   auto child(std::uint32_t parent, frame_kind kind, std::uint32_t key) -> std::uint32_t;
   void push_call(address next, address function);
   void pop_to(address pc);
@@ -496,6 +536,7 @@ private:
   icount                                               base_;
   std::optional<icount>                                exit_at_{};
   std::uint64_t                                        elapsed_{};
+  std::uint64_t                                        clock_elapsed_{};
   std::uint64_t                                        records_{};
   std::uint64_t                                        blocks_{};
   std::uint64_t                                        instructions_{};
@@ -514,6 +555,7 @@ private:
   std::array<std::uint64_t, 4>                         sleep_reasons_{};
   std::uint64_t                                        partial_sleeps_{};
   std::vector<profile_clock>                           clocks_{};
+  std::vector<rate_mark>                               marks_{};
   std::vector<profile_write_log>                       write_logs_{};
   std::unordered_map<std::uint64_t, block_shape>       shapes_{};
   std::vector<profile_frame>                           nodes_{};

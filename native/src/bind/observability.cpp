@@ -373,7 +373,7 @@ auto machine_handle::open_profile(profile_settings const& settings) -> profile_h
 {
   return access([&](core::machine& target) {
     obs::profile_options options{
-        .burst_window     = icount{settings.burst_window},
+        .burst_window_ps  = settings.burst_window_ps,
         .logged_registers = settings.logged_registers,
         .write_log_limit  = static_cast<std::size_t>(settings.write_log_limit),
         .code = settings.call_stacks ? obs::machine_code_reader(target) : obs::code_reader{},

@@ -236,12 +236,109 @@ TEST_CASE("the burst is the most entries inside one sliding window")
     records.push_back(enter(30, dt));
     records.push_back(leave(30, 0));
   }
-  CHECK(fed(records, {.burst_window = icount{30}}).exceptions.at(30).burst == 5);
-  CHECK(fed(records, {.burst_window = icount{20}}).exceptions.at(30).burst == 4);
-  CHECK(fed(records, {.burst_window = icount{15}}).exceptions.at(30).burst == 3);
-  CHECK(fed(records, {.burst_window = icount{1}}).exceptions.at(30).burst == 1);
-  CHECK(fed(records, {.burst_window = icount{200}}).exceptions.at(30).burst == 9);
+  records.insert(records.begin(), clocked(popcorn::ps_per_second));
+  CHECK(fed(records, {.burst_window_ps = 30}).exceptions.at(30).burst == 5);
+  CHECK(fed(records, {.burst_window_ps = 20}).exceptions.at(30).burst == 4);
+  CHECK(fed(records, {.burst_window_ps = 15}).exceptions.at(30).burst == 3);
+  CHECK(fed(records, {.burst_window_ps = 1}).exceptions.at(30).burst == 1);
+  CHECK(fed(records, {.burst_window_ps = 200}).exceptions.at(30).burst == 9);
   CHECK(fed(records).exceptions.at(30).burst == 0);
+}
+
+TEST_CASE("the burst window keeps its length in picoseconds across a rate change")
+{
+  std::vector<core::trace_record> records{clocked(4'000'000)};
+  for(std::uint32_t const dt : {0u, 5u, 5u})
+  {
+    records.push_back(enter(30, dt));
+    records.push_back(leave(30, 0));
+  }
+  records.push_back(clocked(160'000'000));
+  for(std::uint32_t const dt : {100u, 100u, 100u})
+  {
+    records.push_back(enter(31, dt));
+    records.push_back(leave(31, 0));
+  }
+  auto const result = fed(records, {.burst_window_ps = 1'000'000});
+  CHECK(result.exceptions.at(30).burst == 1);
+  CHECK(result.exceptions.at(31).burst == 2);
+}
+
+TEST_CASE("time totals in picoseconds convert each part of a span at its own rate")
+{
+  auto const result = fed({
+      clocked(4'000'000),
+      enter(30, 10),
+      clocked(160'000'000, 10),
+      leave(30, 30),
+      slept(20, 20, 31),
+      core::trace_record{
+                         .kind    = core::trace_kind::loop,
+                         .aux     = core::trace_loop_ender(core::loop_ender::end),
+                         .payload = {0x0800'0100, 7, 60},
+                         },
+      clocked(4'000'000),
+  });
+  CHECK(result.elapsed == 70);
+  CHECK(result.elapsed_ps == 5'312'500);
+  REQUIRE(result.clocks.size() == 3);
+  CHECK(result.clocks[2].instructions == 0);
+  CHECK(result.clocks[0].instructions == 20);
+  CHECK(result.clocks[0].ps == 5'000'000);
+  CHECK(result.clocks[1].instructions == 50);
+  CHECK(result.clocks[1].ps == 312'500);
+  CHECK(
+      result.other_gaps
+      == obs::profile_gaps{
+          .count = 2, .total = 50, .longest = 40, .total_ps = 5'187'500, .longest_ps = 2'687'500});
+  auto const& handler = result.exceptions.at(30);
+  CHECK(handler.inclusive == 40);
+  CHECK(handler.inclusive_ps == 2'687'500);
+  CHECK(handler.self_ps == 2'687'500);
+  CHECK(handler.longest_ps == 2'687'500);
+  CHECK(
+      result.sleeps
+      == obs::profile_gaps{
+          .count = 1, .total = 20, .longest = 20, .total_ps = 125'000, .longest_ps = 125'000});
+  CHECK(result.exceptions.at(31).wakes.total_ps == 125'000);
+  REQUIRE(result.loops.size() == 1);
+  CHECK(result.loops[0].instructions == 60);
+  CHECK(result.loops[0].ps == 2'812'500);
+}
+
+TEST_CASE("a restore back in time converts the new segment with its own clock records")
+{
+  auto const result = fed({
+      clocked(4'000'000),
+      clocked(160'000'000, 2),
+      clocked(4'000'000, 8),
+      time_to(1005),
+      clocked(4'000'000),
+      enter(30, 2),
+      clocked(160'000'000, 3),
+      leave(30, 10),
+  });
+  CHECK(result.cuts == 1);
+  CHECK(result.elapsed == 25);
+  CHECK(result.elapsed_ps == 500'000 + 50'000 + 1'250'000 + 62'500);
+  CHECK(result.exceptions.at(30).inclusive_ps == 3 * 250'000 + 10 * 6'250);
+}
+
+TEST_CASE("a preempting exception's picoseconds leave the preempted one's self time")
+{
+  auto const  result = fed({
+      clocked(4'000'000),
+      enter(30, 0),
+      clocked(160'000'000, 4),
+      enter(40, 0),
+      leave(40, 16),
+      leave(30, 16),
+  });
+  auto const& outer  = result.exceptions.at(30);
+  auto const& inner  = result.exceptions.at(40);
+  CHECK(inner.inclusive_ps == 100'000);
+  CHECK(outer.inclusive_ps == 1'000'000 + 200'000);
+  CHECK(outer.self_ps == 1'000'000 + 100'000);
 }
 
 TEST_CASE("an entry with no exit is open at the end and adds no time")
@@ -413,7 +510,7 @@ TEST_CASE(
     "the timer example sleeps 3000 times between TIM2 interrupts in 3 s, the last cut at the end")
 {
   auto     f = tim_machine();
-  profiled p{*f->target, {.burst_window = icount{4'000}}};
+  profiled p{*f->target, {.burst_window_ps = ms_ps}};
   f->run_for(3'000 * ms_ps);
   auto const  result = p.take();
   auto const& tim2   = result.exceptions.at(tim2_exception);
@@ -450,7 +547,7 @@ TEST_CASE("the FreeRTOS example runs 15829458 instructions in 100 ms, blocks as 
 {
   auto f = spi_machine();
   f->target->enable_coverage({});
-  profiled p{*f->target, {.burst_window = icount{160'000}}};
+  profiled p{*f->target, {.burst_window_ps = ms_ps}};
   f->run_for(100 * ms_ps);
   auto const result   = p.take();
   auto const coverage = f->target->coverage();
@@ -574,7 +671,7 @@ TEST_CASE("a restore back and a restore forward each cut the profile")
 TEST_CASE("a restore forward by less than one window restarts the burst count")
 {
   auto       f = tim_machine();
-  profiled   p{*f->target, {.burst_window = icount{40'000}}};
+  profiled   p{*f->target, {.burst_window_ps = 10 * ms_ps}};
   auto const origin = f->target->snapshot();
   f->run_for(5 * ms_ps);
   auto const ahead = f->target->snapshot();

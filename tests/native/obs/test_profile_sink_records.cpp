@@ -206,6 +206,81 @@ TEST_CASE("clock records give the end time across the PLL switch")
   CHECK(ps == f->now().ps);
 }
 
+TEST_CASE("the clock spans of a profile split its elapsed time by rate across the PLL switch")
+{
+  auto       f     = spi_machine();
+  auto const start = f->now();
+  profiled   p{*f->target};
+  f->run_for(5 * ms_ps);
+  auto const result = p.take();
+  REQUIRE(result.clocks.size() >= 2);
+  CHECK(result.clocks.front().hz == 4'000'000);
+  CHECK(result.clocks.back().hz == 160'000'000);
+  std::uint64_t instructions = 0;
+  std::uint64_t ps           = 0;
+  for(auto const& clock : result.clocks)
+  {
+    CHECK(clock.instructions > 0);
+    CHECK(clock.ps == popcorn::vtime_from_instructions(clock.instructions, clock.hz).ps);
+    instructions += clock.instructions;
+    ps += clock.ps;
+  }
+  CHECK(instructions == result.elapsed);
+  CHECK(ps == f->now().ps - start.ps);
+  CHECK(result.elapsed_ps == ps);
+}
+
+TEST_CASE("a reset at 160 MHz inside a profile splits its clock spans at the reset")
+{
+  auto f = spi_machine();
+  f->run_for(5 * ms_ps);
+  REQUIRE(f->target->virtual_clock().instruction_hz() == 160'000'000);
+  auto const start = f->now();
+  profiled   p{*f->target};
+  f->run_for(ms_ps);
+  auto const before = f->now();
+  f->target->reset();
+  f->run_for(ms_ps / 2);
+  auto const after  = f->now();
+  auto const result = p.take();
+  REQUIRE(result.cuts == 1);
+  REQUIRE(result.clocks.size() == 2);
+  auto const& high = result.clocks[0];
+  auto const& low  = result.clocks[1];
+  CHECK(high.segment == 0);
+  CHECK(high.hz == 160'000'000);
+  CHECK(low.segment == 1);
+  CHECK(low.hz == 4'000'000);
+  CHECK(high.ps == before.ps - start.ps);
+  CHECK(high.instructions * 6'250 == high.ps);
+  CHECK(low.ps == after.ps);
+  CHECK(low.instructions * 250'000 == low.ps);
+  CHECK(high.instructions + low.instructions == result.elapsed);
+  CHECK(result.elapsed_ps == (before.ps - start.ps) + after.ps);
+}
+
+TEST_CASE("clock spans across resets sum to the elapsed time, one span per segment")
+{
+  auto     f = tim_machine();
+  profiled p{*f->target};
+  f->run_for(ms_ps);
+  f->target->reset();
+  f->run_for(ms_ps / 2);
+  f->target->reset();
+  f->run_for(ms_ps / 4);
+  auto const result = p.take();
+  REQUIRE(result.cuts == 2);
+  REQUIRE(result.clocks.size() == 3);
+  std::uint64_t instructions = 0;
+  for(auto const& [index, clock] : std::views::enumerate(result.clocks))
+  {
+    CHECK(clock.segment == static_cast<std::uint64_t>(index));
+    CHECK(clock.instructions > 0);
+    instructions += clock.instructions;
+  }
+  CHECK(instructions == result.elapsed);
+}
+
 TEST_CASE("a reset with no record after it still cuts, and two resets cut twice")
 {
   auto     f = tim_machine();

@@ -117,6 +117,15 @@ inline auto
   };
 }
 
+inline auto clocked(std::uint64_t hz, std::uint32_t dt = 0) -> core::trace_record
+{
+  return {
+      .kind    = core::trace_kind::clock,
+      .dt      = dt,
+      .payload = {static_cast<std::uint32_t>(hz), static_cast<std::uint32_t>(hz >> 32), 0},
+  };
+}
+
 inline auto cut_at(address pc, std::uint16_t unrun) -> core::trace_record
 {
   return {

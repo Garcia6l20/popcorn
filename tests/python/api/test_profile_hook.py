@@ -58,7 +58,7 @@ def native(m: popcorn.Machine) -> _core.MachineHandle:
 def test_a_parked_profile_takes_its_aggregates_at_the_exit() -> None:
     m = spinning()
     start = m.instructions
-    with profiled(m, loop_reports=1, burst_window=10_000) as profile:
+    with profiled(m, loop_reports=1, burst_window_ps=10_000_000_000) as profile:
         assert native(m).loop_reports() == 1
         assert not profile.closed
         with pytest.raises(popcorn.MachineRunning):
@@ -133,21 +133,24 @@ def loops_of(result: _core.ProfileResult) -> list[tuple[int, int, int, int, list
 
 
 def test_a_profile_counts_the_runs_of_its_own_request_whatever_lower_requests_exist() -> None:
-    def changing(beside: int) -> tuple[_core.ProfileResult, _core.ProfileResult]:
+    def changing(beside: bool) -> tuple[_core.ProfileResult, _core.ProfileResult | None]:
         m = spinning("poll_value")
-        native(m).set_loop_reports(beside)
-        with profiled(m, loop_reports=1) as fine, profiled(m, loop_reports=50) as coarse:
+        with contextlib.ExitStack() as stack:
+            fine = stack.enter_context(profiled(m, loop_reports=1)) if beside else None
+            coarse = stack.enter_context(profiled(m, loop_reports=50))
             for value in range(11, 23):
                 m.periph.TESTDEV.RW.poke(value)
                 asyncio.run(m.run(budget=3 * (value % 4) + 4))
             asyncio.run(m.run(budget=300))
             m.periph.TESTDEV.RW.poke(30)
             asyncio.run(m.run(budget=90))
-        return fine.result, coarse.result
+        return coarse.result, None if fine is None else fine.result
 
-    fine, alone = changing(0)
-    _, beside = changing(1)
-    assert fine.loops[0].runs > alone.loops[0].runs
+    alone, nothing = changing(False)
+    beside, fine = changing(True)
+    assert nothing is None
+    assert fine is not None
+    assert fine.loops[0].runs > beside.loops[0].runs
     assert alone.loops[0].passes >= 50 * alone.loops[0].runs
     assert loops_of(beside) == loops_of(alone)
 
@@ -160,7 +163,7 @@ def test_a_dropped_profile_withdraws_its_loop_report_request() -> None:
             native(m),
             call_stacks=False,
             loop_reports=1,
-            burst_window=0,
+            burst_window_ps=0,
             logged_registers=(),
             write_log_limit=16,
             max_call_depth=8,
@@ -192,7 +195,7 @@ def test_a_profile_dropped_unclosed_from_a_handler_inside_a_slice_goes_at_the_sl
             native(m),
             call_stacks=True,
             loop_reports=1,
-            burst_window=0,
+            burst_window_ps=0,
             logged_registers=(),
             write_log_limit=16,
             max_call_depth=8,
@@ -244,7 +247,7 @@ def test_a_close_from_a_handler_is_refused_and_changes_nothing() -> None:
         native(m),
         call_stacks=False,
         loop_reports=1,
-        burst_window=0,
+        burst_window_ps=0,
         logged_registers=(),
         write_log_limit=16,
         max_call_depth=8,
@@ -318,7 +321,7 @@ def test_a_profile_refuses_bad_options() -> None:
     options: list[dict[str, Any]] = [
         {"loop_reports": -1},
         {"loop_reports": 1 << 32},
-        {"burst_window": -1},
+        {"burst_window_ps": -1},
         {"write_log_limit": -1},
         {"max_call_depth": 1 << 32},
         {"logged_registers": [1 << 16]},
@@ -381,7 +384,7 @@ def test_a_profile_keeps_no_machine_alive() -> None:
         native(m),
         call_stacks=True,
         loop_reports=1,
-        burst_window=0,
+        burst_window_ps=0,
         logged_registers=(),
         write_log_limit=16,
         max_call_depth=8,
