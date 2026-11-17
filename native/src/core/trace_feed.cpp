@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <format>
 #include <limits>
+#include <meta>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -97,9 +99,68 @@ void machine::run_state::dt_stream::stamp(
     out.push_back(time_record(now));
     last = now;
   }
-  record.dt = static_cast<std::uint32_t>(now.value - last.value);
+  auto const dt = static_cast<std::uint32_t>(now.value - last.value);
   out.push_back(record);
-  last = now;
+  out.back().dt = dt;
+  last          = now;
+}
+
+inline void
+    machine::run_state::deliver(trace_record const& record, address pc, bool ranged, icount now)
+{
+  auto const& wanted = sinks_of_kind[std::to_underlying(record.kind)];
+  if(wanted.empty()) [[likely]]
+  {
+    return;
+  }
+  std::optional<delivery_scope> scope;
+  for(auto* const entry : wanted)
+  {
+    if(ranged and not in_ranges(entry->ranges, pc))
+    {
+      continue;
+    }
+    entry->stream.stamp(record, now, entry->batch);
+    if(entry->batch.size() >= sink_batch) [[unlikely]]
+    {
+      if(not scope)
+      {
+        scope.emplace(*owner.hooks_);
+      }
+      flush_full(*entry);
+    }
+  }
+}
+
+void machine::run_state::flush_full(sink_entry& entry)
+{
+  if(in_engine)
+  {
+    guarded([&] {
+      flush(entry);
+      return false;
+    });
+  }
+  else
+  {
+    flush(entry);
+  }
+}
+
+void machine::run_state::deliver_to(sink_entry& entry, trace_record const& record, icount now)
+{
+  entry.stream.stamp(record, now, entry.batch);
+  if(entry.batch.size() >= sink_batch)
+  {
+    delivery_scope const scope{*owner.hooks_};
+    flush_full(entry);
+  }
+}
+
+auto machine::run_state::in_block_ranges(std::span<address_range const> ranges, address pc) noexcept
+    -> bool
+{
+  return in_ranges(ranges, pc);
 }
 
 void machine::run_state::emit(trace_record const& record, address pc, bool ring)
@@ -113,38 +174,7 @@ void machine::run_state::emit_at(trace_record const& record, address pc, bool ri
   {
     owner.trace_.append(record, now);
   }
-  if(sinks.empty()) [[likely]]
-  {
-    return;
-  }
   deliver(record, pc, true, now);
-}
-
-void machine::run_state::deliver(trace_record const& record, address pc, bool ranged, icount now)
-{
-  delivery_scope const scope{*owner.hooks_};
-  for(auto const& [id, entry] : sinks)
-  {
-    if(not entry->kinds.contains(record.kind) or (ranged and not in_ranges(entry->ranges, pc)))
-    {
-      continue;
-    }
-    entry->stream.stamp(record, now, entry->batch);
-    if(entry->batch.size() >= sink_batch)
-    {
-      if(in_engine)
-      {
-        guarded([&] {
-          flush(*entry);
-          return false;
-        });
-      }
-      else
-      {
-        flush(*entry);
-      }
-    }
-  }
 }
 
 void machine::run_state::trace_mmio(
@@ -179,9 +209,30 @@ void machine::run_state::flush(sink_entry& entry)
     return;
   }
   delivery_scope const scope{*owner.hooks_};
-  auto const           batch = std::exchange(entry.batch, {});
-  entry.batch.reserve(sink_batch);
-  entry.sink(batch);
+  if(entry.delivering)
+  {
+    auto const batch = std::exchange(entry.batch, {});
+    entry.batch.reserve(sink_batch);
+    entry.sink(batch);
+    return;
+  }
+  std::swap(entry.batch, entry.spare);
+  entry.batch.clear();
+  if(entry.batch.capacity() < sink_batch)
+  {
+    entry.batch.reserve(sink_batch);
+  }
+  entry.delivering = true;
+  try
+  {
+    entry.sink(entry.spare);
+  }
+  catch(...)
+  {
+    entry.delivering = false;
+    throw;
+  }
+  entry.delivering = false;
 }
 
 void machine::run_state::flush_sinks()
@@ -271,12 +322,35 @@ void machine::run_state::leave_record(address pc)
       from, false);
 }
 
+void machine::run_state::forget_sink(sink_entry const* entry) noexcept
+{
+  for(auto& list : sinks_of_kind)
+  {
+    std::erase(list, entry);
+  }
+}
+
 void machine::run_state::update_sink_hooks()
 {
   auto const wanted = [this](trace_kind kind) {
     return std::ranges::any_of(
         sinks, [kind](auto const& held) { return held.second->kinds.contains(kind); });
   };
+  for(auto& list : sinks_of_kind)
+  {
+    list.clear();
+  }
+  for(auto const& [id, entry] : sinks)
+  {
+    template for(constexpr auto e :
+                 std::define_static_array(std::meta::enumerators_of(^^trace_kind)))
+    {
+      if(entry->kinds.contains([:e:]))
+      {
+        sinks_of_kind[std::to_underlying([:e:])].push_back(entry.get());
+      }
+    }
+  }
   sinks_want_block    = wanted(trace_kind::block);
   sinks_want_sleep    = wanted(trace_kind::sleep);
   sinks_want_clock    = wanted(trace_kind::clock);
@@ -348,6 +422,7 @@ void machine::run_state::remove_sink(std::uint64_t id) noexcept
   }
   catch(...)
   {}
+  forget_sink(found->second.get());
   sinks.erase(found);
   try
   {
@@ -393,6 +468,10 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
     -> hook_handle
 {
   require_stopped(*this);
+  if(hooks_->delivering != 0)
+  {
+    throw machine_running("a trace sink is being called");
+  }
   if(not sink)
   {
     throw std::invalid_argument("add_trace_sink needs a sink to call");
@@ -421,6 +500,7 @@ auto machine::add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<add
   }
   catch(...)
   {
+    run_->forget_sink(run_->sinks.at(id).get());
     run_->sinks.erase(id);
     throw;
   }

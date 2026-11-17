@@ -562,16 +562,59 @@ void machine::run_state::count_block() noexcept
 
 void machine::run_state::record_block() noexcept
 {
-  guarded([this] {
-    trace_record record{
-        .kind = trace_kind::block, .payload = {block_pc, 0, 0}
-    };
-    record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(block_size, 0xffff));
-    emit(record, block_pc, ring_blocks);
-    if(sinks_want_cut)
+  auto const now = owner.clock_.now();
+  auto const aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(block_size, 0xffff));
+  if(sinks_want_cut)
+  {
+    open_record_pc    = block_pc;
+    open_record_insns = aux;
+  }
+  if(ring_blocks) [[unlikely]]
+  {
+    record_block_slow(nullptr, now, aux);
+  }
+  for(auto* const entry : sinks_of_kind[std::to_underlying(trace_kind::block)])
+  {
+    if(not entry->ranges.empty() and not in_block_ranges(entry->ranges, block_pc))
     {
-      open_record_pc    = block_pc;
-      open_record_insns = record.aux;
+      continue;
+    }
+    auto&      stream = entry->stream;
+    auto&      batch  = entry->batch;
+    auto const dt     = now.value - stream.last.value;
+    if(dt <= std::numeric_limits<std::uint32_t>::max()
+       and not stream.rebased
+       and batch.size() + 1 < sink_batch) [[likely]]
+    {
+      batch.push_back({
+          .kind    = trace_kind::block,
+          .aux     = aux,
+          .dt      = static_cast<std::uint32_t>(dt),
+          .payload = {block_pc, 0, 0}
+      });
+      stream.last = now;
+      continue;
+    }
+    record_block_slow(entry, now, aux);
+  }
+}
+
+void machine::run_state::record_block_slow(
+    sink_entry*   entry,
+    icount        now,
+    std::uint16_t aux) noexcept
+{
+  trace_record const record{
+      .kind = trace_kind::block, .aux = aux, .payload = {block_pc, 0, 0}
+  };
+  guarded([&] {
+    if(entry == nullptr)
+    {
+      owner.trace_.append(record, now);
+    }
+    else
+    {
+      deliver_to(*entry, record, now);
     }
     return false;
   });

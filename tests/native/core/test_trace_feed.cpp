@@ -527,3 +527,74 @@ TEST_CASE("ring_blocks is refused from a handler and kept across a restore")
   REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
   CHECK_FALSE(ring_blocks_of(f).empty());
 }
+
+TEST_CASE("a sink called outside a slice cannot add a sink, and adding works after the call")
+{
+  fixture f{m33(), "periph", {}};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  int                              refused   = 0;
+  std::size_t                      delivered = 0;
+  std::optional<core::hook_handle> added;
+  auto const                       sink =
+      f.target->add_trace_sink({trace_kind::mmio}, [&](std::span<trace_record const> batch) {
+        delivered += batch.size();
+        try
+        {
+          added =
+              f.target->add_trace_sink({trace_kind::mmio}, [](std::span<trace_record const>) {});
+        }
+        catch(popcorn::machine_running const&)
+        {
+          ++refused;
+        }
+      });
+  auto&                     services = f.module->attached_services();
+  std::array<std::byte, 64> bytes{};
+  for(int round = 0; round < 300; ++round)
+  {
+    REQUIRE(services.read_block(0x4001'0000, bytes, popcorn::initiator::dma));
+  }
+  CHECK(refused == 1);
+  CHECK(delivered == 4096);
+  CHECK_FALSE(added.has_value());
+  collector                        seen;
+  std::optional<core::hook_handle> later =
+      f.target->add_trace_sink({trace_kind::mmio}, seen.sink());
+  REQUIRE(services.read_block(0x4001'0000, bytes, popcorn::initiator::dma));
+  later.reset();
+  CHECK(seen.records.size() == 16);
+}
+
+TEST_CASE("a block after an intercept that returns from a longer block is stamped back in time")
+{
+  fixture f{m33(), "intercepts", {}};
+  REQUIRE(f.run_to_stop().reason == stop_reason::reset_request);
+  auto const hook =
+      f.target->add_intercept(sym("intercepts", "six"), [](core::intercept_call const&) {
+        return core::intercept_result::returns(
+            arch::call_arg{.kind = arch::value_kind::i32, .bits = 0});
+      });
+  f.set("pc", sym("intercepts", "loop_six"));
+  f.set("r4", 3);
+  collector                        seen;
+  auto const                       start = f.target->virtual_clock().now();
+  std::optional<core::hook_handle> sink =
+      f.target->add_trace_sink({trace_kind::block}, seen.sink());
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  sink.reset();
+  auto        at        = start;
+  std::size_t backwards = 0;
+  for(auto const& record : seen.records)
+  {
+    if(record.kind == trace_kind::time)
+    {
+      auto const to = icount{record.payload[0] | std::uint64_t{record.payload[1]} << 32};
+      backwards += to < at ? 1 : 0;
+      at = to;
+      continue;
+    }
+    at = icount{at.value + record.dt};
+  }
+  CHECK(backwards == 3);
+  CHECK(seen.end_of_stream(start) == f.target->virtual_clock().now());
+}

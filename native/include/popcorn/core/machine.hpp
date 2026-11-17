@@ -828,7 +828,8 @@ public:
    *        time, not code, and go to the sink whatever its ranges.
    * @return Handle removing the sink.
    * @throws std::invalid_argument when @p sink is empty.
-   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_running while a slice runs, handlers included, and from a trace sink while
+   *         it is called.
    */
   [[nodiscard]] auto
       add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<address_range> ranges = {})

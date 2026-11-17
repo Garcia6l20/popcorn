@@ -1081,6 +1081,11 @@ struct machine::run_state
     std::vector<address_range> ranges{};
     /** @brief Records not delivered yet. */
     std::vector<trace_record> batch{};
+    /** @brief Buffer of the batch being delivered, swapped with batch at each delivery so
+     * neither is reallocated. */
+    std::vector<trace_record> spare{};
+    /** @brief Whether the sink is being called, spare then holds the batch it reads. */
+    bool delivering = false;
     /** @brief dt stamping of the sink's stream. */
     dt_stream stream{};
   };
@@ -1253,6 +1258,9 @@ struct machine::run_state
   controller_reentry controller_guard{};
   /** @brief Trace sinks by handle id. */
   std::map<std::uint64_t, std::unique_ptr<sink_entry>> sinks{};
+  /** @brief The sinks selecting each kind, by kind value, in handle id order. Rebuilt by
+   * update_sink_hooks(). */
+  std::array<std::vector<sink_entry*>, 32> sinks_of_kind{};
 
   /** @brief Whether an attached trace sink selects call records, whose symbol ids follow the
    * symbol index of when it was attached. */
@@ -1969,9 +1977,10 @@ struct machine::run_state
 
   /**
    * @brief Stamps @p record at @p now into every sink selecting its kind, only those whose
-   *        ranges hold @p pc when @p ranged.
+   *        ranges hold @p pc when @p ranged. Defined in trace_feed.cpp and callable only there.
    */
-  void deliver(trace_record const& record, address pc, bool ranged, icount now);
+  [[gnu::always_inline]] inline void
+      deliver(trace_record const& record, address pc, bool ranged, icount now);
 
   /**
    * @brief Records an MMIO access: to the ring for a CPU access, to the sinks for any, with
@@ -2021,6 +2030,18 @@ struct machine::run_state
 
   /** @brief Installs or removes the hooks that feed the selected kinds, between slices. */
   void update_sink_hooks();
+
+  /** @brief Delivers a full batch, its failure kept as the slice's failure inside the engine. */
+  void flush_full(sink_entry& entry);
+
+  /** @brief Stamps @p record into one sink at @p now, delivering the batch when it is full. */
+  void deliver_to(sink_entry& entry, trace_record const& record, icount now);
+
+  /** @brief Whether @p pc lies in one of @p ranges. */
+  static auto in_block_ranges(std::span<address_range const> ranges, address pc) noexcept -> bool;
+
+  /** @brief Takes @p entry out of sinks_of_kind. */
+  void forget_sink(sink_entry const* entry) noexcept;
 
   /** @brief Removes a sink, delivering its batch first, its failure dropped. */
   void remove_sink(std::uint64_t id) noexcept;
@@ -2298,6 +2319,11 @@ struct machine::run_state
   /** @brief Emits the block record of the block at block_pc, under the guard, off the hot
    * path. */
   [[gnu::noinline]] void record_block() noexcept;
+
+  /** @brief The block record of record_block() for the ring, with a null @p entry, or for one
+   * sink whose stream needs a time record first or whose batch is full. */
+  [[gnu::noinline, gnu::cold]] void
+      record_block_slow(sink_entry* entry, icount now, std::uint16_t aux) noexcept;
 
   /** @brief After a trap hook resumed: whether it left a deliverable exception pending, then
    * marked as a block-boundary stop so the loop enters the handler. A fetch abort forms no

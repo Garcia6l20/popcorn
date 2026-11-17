@@ -7,6 +7,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <ranges>
 #include <span>
@@ -290,7 +291,8 @@ TEST_CASE("a ranged sink gets the clock and sleep records whatever its ranges")
     spi->run_for(5 * ms_ps);
     c.handle.reset();
     auto const clocks = c.of(core::trace_kind::clock);
-    REQUIRE(clocks.size() >= 2);
+    REQUIRE(clocks.size() == 2);
+    CHECK(hz_of(clocks.front()) == 4'000'000);
     CHECK(hz_of(clocks.back()) == 160'000'000);
   }
   auto     tim = tim_machine();
@@ -319,7 +321,8 @@ TEST_CASE("a sleep on exception exit ends with the next entry, not tail-chained"
   c.handle.reset();
   auto const  result = p.take();
   auto const& tim2   = result.exceptions.at(tim2_exception);
-  CHECK(result.sleep_reasons[3] >= 9);
+  CHECK(result.sleep_reasons == std::array<std::uint64_t, 4>{0, 1, 0, 10});
+  CHECK(result.partial_sleeps == 1);
   CHECK(tim2.tail_chained == 0);
   CHECK(tim2.wakes.count == tim2.entries);
   auto const exit = std::ranges::find_if(c.records, [](core::trace_record const& r) {
@@ -364,4 +367,47 @@ TEST_CASE("DMA accesses are counted apart from the CPU's")
   {
     CHECK(reg.reads + reg.writes > 0);
   }
+}
+
+TEST_CASE("a block sink gets batches of at most 4096 records during a long slice")
+{
+  auto                     f = spi_machine();
+  std::vector<std::size_t> sizes;
+  auto const               handle = f->target->add_trace_sink(
+      {core::trace_kind::block},
+      [&sizes](std::span<core::trace_record const> batch) { sizes.push_back(batch.size()); });
+  f->run_for(2 * ms_ps);
+  REQUIRE(sizes.size() > 2);
+  CHECK(sizes.front() == 4096);
+  CHECK(std::ranges::max(sizes) == 4096);
+}
+
+TEST_CASE("a block after a hold past the 32-bit dt range keeps its full distance")
+{
+  auto f = tim_machine();
+  place(*f, {0xb672, 0xe7fe});
+  auto const cr1 = f->target->mem().read(tim2_cnt - 0x24, 4);
+  REQUIRE(cr1.has_value());
+  REQUIRE(f->target->mem().write(tim2_cnt - 0x24, 4, *cr1 & ~1u));
+  auto const start = f->target->virtual_clock().now();
+  captured   c{*f->target, {core::trace_kind::block}};
+  f->target->hold_core(true);
+  f->run_for(1100 * 1000 * ms_ps, icount{5'000'000'000});
+  f->target->hold_core(false);
+  f->run_for(ms_ps / 1000);
+  c.handle.reset();
+  REQUIRE(not c.records.empty());
+  auto at = start.value;
+  for(auto const& record : c.records)
+  {
+    if(record.kind == core::trace_kind::time)
+    {
+      at = std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32;
+      continue;
+    }
+    at += record.dt;
+    break;
+  }
+  CHECK(c.records.front().kind == core::trace_kind::time);
+  CHECK(at - start.value >= 4'400'000'000);
 }
