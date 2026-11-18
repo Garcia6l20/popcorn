@@ -195,6 +195,14 @@ A C++ model and a C++ device from a native plugin: the RNG and an SPI ADC, HAL. 
 
 --8<-- "stm32u575/native_plugin/README.md:3:6"
 
+## Profiling
+
+### idle_profile
+
+Idle time from FreeRTOS with and without WFI in the idle hook, a status-register poll and a RAM flag poll, HAL init, LL timers. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32u575/idle_profile).
+
+--8<-- "stm32u575/idle_profile/README.md:3:13"
+
 ## TrustZone
 
 ### trustzone

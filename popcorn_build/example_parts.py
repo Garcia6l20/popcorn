@@ -212,6 +212,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
     ),
+    "stm32u575/idle_profile": ExampleParts(
+        "STM32U575QGIx", (), pins=(), adc_channels=(), flash_kib=None
+    ),
     "stm32u575/iwdg": ExampleParts(
         "STM32U575QGIx", ("STM32U575CGUxQ",), pins=(), adc_channels=(), flash_kib=None
     ),
