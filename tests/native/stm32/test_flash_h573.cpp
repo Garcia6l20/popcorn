@@ -2651,7 +2651,10 @@ TEST_CASE(
     r.f.set("r1", 0x12);
     r.f.set("pc", sym(firmware, "store_byte"));
     auto const stopped = r.f.run_to_stop({.max_instructions = icount{2000}});
-    CHECK(stopped.reason != stop_reason::user);
+    CHECK(stopped.reason == stop_reason::fault);
+    CHECK(r.word(0xe000'ed28) == 0x8200u);
+    CHECK(r.word(0xe000'ed2c) == (1u << 30));
+    CHECK(r.word(0xe000'ed38) == otp_base + 8);
     CHECK(flags(r) == 0);
     r.wait_idle();
     CHECK(r.word(otp_base + 8) == 0xffff'ffffu);
@@ -2792,13 +2795,17 @@ TEST_CASE("every reset kind and a power cycle keep the OTP arrays, a power cut d
   }
   r.unlock();
   r.control(pg);
+  r.call("store_half", {otp_base + 8, 0x1111});
+  r.wait_idle();
+  auto const programmed = otp_state(r);
   r.call("store_half", {otp_base + 8, 0x1234});
   REQUIRE(r.status("BSY") == 1);
   r.f.target->power_cycle();
-  CHECK(r.word(otp_base + 8) == 0xffff'ffffu);
+  CHECK((r.word(otp_base + 8) & 0xffff) == 0x1111);
   auto const cut = otp_state(r);
-  CHECK(cut.otp_programmed == before.otp_programmed);
-  CHECK(cut.otp_bad == before.otp_bad);
+  CHECK(cut.otp_programmed == programmed.otp_programmed);
+  CHECK(cut.otp_bad == programmed.otp_bad);
+  CHECK(cut.torn.empty());
   CHECK(cut.running == 0);
 }
 
@@ -2902,7 +2909,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a 32-bit store at an offset of 2 in the OTP programs the two half-words it covers, pinned")
+    "inferred: a 32-bit store at an offset of 2 in the OTP programs the two half-words it covers")
 {
   rig r;
   r.unlock();
@@ -2914,4 +2921,25 @@ TEST_CASE(
   CAPTURE(r.word(otp_base + 4));
   CHECK(r.word(otp_base) == 0x1234'ffffu);
   CHECK(r.word(otp_base + 4) == 0xffff'5678u);
+}
+
+TEST_CASE(
+    "inferred: a 16-bit store at an odd address in the OTP is a bus error, BusFault precise with "
+    "its address, nothing written and no flag")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base + 8, 0x1234}, icount{2'000'000});
+  r.wait_idle();
+  r.clear();
+  r.f.set("r0", otp_base + 0x11);
+  r.f.set("r1", 0x1234);
+  r.f.set("pc", sym(firmware, "store_half"));
+  auto const stopped = r.f.run_to_stop({.max_instructions = icount{2000}});
+  CHECK(stopped.reason == stop_reason::fault);
+  CHECK(r.word(0xe000'ed28) == 0x8200u);
+  CHECK(r.word(0xe000'ed38) == otp_base + 0x11);
+  CHECK(flags(r) == 0);
+  CHECK(r.word(otp_base + 0x10) == 0xffff'ffffu);
 }

@@ -2193,15 +2193,15 @@ static_assert(flag_matches_roles(
  * - OTP, RM0481 7.3.7 and 7.3.9: a 16-bit or 32-bit store to 0x08FFF000 to 0x08FFF7FF with PG set
  *   programs one or two half-words of 16 bits, with no write buffer, for the quad_word_program time
  *   per half-word, DS14121 Table 52 states 31 us for 16 bits, the 32-bit double is inferred. A
- *   store of another size is a bus error, RM0481 Table 81 footnote 1 and 7.3.9, where 7.3.7 says
- *   byte writes are ignored. A store with PG clear, with SER, BER or MER set, with an error flag
- *   pending or while the main write buffer is open sets PGSERR and writes nothing, 7.9.4, the open
- *   buffer rule stated for a 16-bit store and inferred for a 32-bit one. A Secure store sets the
- *   Secure WRPERR and attempts the ILAFM event, Table 81 and 7.9.11. A half-word is programmed
- *   when firmware programmed it or it reads other than 0xFFFF, inferred. A program of a programmed
- *   half-word writes the old data ANDed with the new and marks the half-word ECC-bad, inferred,
- *   the data and the mark are the model's reading of "an ECC error is generated and is therefore
- *   not supported" in 7.3.9.
+ *   byte store is a bus error, RM0481 Table 81 footnote 1 and 7.3.9, where 7.3.7 says
+ *   byte writes are ignored. A store at an odd address is a bus error, inferred. A store with PG
+ * clear, with SER, BER or MER set, with an error flag pending or while the main write buffer is
+ * open sets PGSERR and writes nothing, 7.9.4, the open buffer rule stated for a 16-bit store and
+ * inferred for a 32-bit one. A Secure store sets the Secure WRPERR and attempts the ILAFM event,
+ * Table 81 and 7.9.11. A half-word is programmed when firmware programmed it or it reads other than
+ * 0xFFFF, inferred. A program of a programmed half-word writes the old data ANDed with the new and
+ * marks the half-word ECC-bad, inferred, the data and the mark are the model's reading of "an ECC
+ * error is generated and is therefore not supported" in 7.3.9.
  *
  * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
  * and FLASH_SR, no TrustZone and no block registers.
@@ -2345,8 +2345,10 @@ static_assert(flag_matches_roles(
  * @group h5 rule "OTP, RM0481 7.3.9"
  * - A 16-bit or 32-bit store with PG set programs one or two half-words, each store starts a
  *   program. BSY is held for 31 us per half-word, DS14121 Table 52, the 32-bit double inferred.
- * - A store of another size is a bus error, Table 81 footnote 1 and 7.3.9. Section 7.3.7 says
- *   such writes are ignored, the model follows the two sections Table 81 names.
+ * - A byte store is a bus error, Table 81 footnote 1 and 7.3.9. Section 7.3.7 says such writes
+ *   are ignored, the model follows the two sections Table 81 names. A store at an odd address is
+ *   a bus error, inferred.
+ * - A 32-bit store at an offset of 2 in a word programs the two half-words it covers, inferred.
  * - A store with PG clear, with SER, BER or MER set, with an error flag pending or with the main
  *   write buffer open sets PGSERR and writes nothing, 7.9.4. The open buffer is stated for a
  *   16-bit store and inferred for a 32-bit one.
@@ -2355,6 +2357,8 @@ static_assert(flag_matches_roles(
  *   the old data ANDed with the new and marks it ECC-bad, with no flag, inferred.
  *
  * @group h5 deviation "Differs from RM0481"
+ * - A 64-bit store to the OTP area reaches the model as two 32-bit stores and programs four
+ *   half-words, where silicon gives a bus error, Table 81 footnote 1.
  * - A Secure load of the OTP area returns the data where RM0481 Table 81 gives zeros and an
  *   illegal access event, and the ILAFM of a Secure store raises nothing without a TZIC flash
  *   source. An 8-bit or 64-bit load of the OTP area is a bus error on silicon, 7.3.4 step 6, and
@@ -4585,7 +4589,7 @@ auto flash_model<Traits>::on_memory_write(
 {
   if constexpr(Traits::otp_kind == otp_program::half_word)
   {
-    if(in_otp(physical(region, addr)) and size != 2 and size != 4)
+    if(in_otp(physical(region, addr)) and (size == 1 or (addr & 1u) != 0))
     {
       return std::unexpected{bus_error::denied};
     }
@@ -4917,7 +4921,7 @@ template <typename Traits> void flash_model<Traits>::program_otp()
 {
   if constexpr(Traits::otp_kind == otp_program::half_word)
   {
-    if(state_.otp_programmed.empty())
+    if(state_.otp_programmed.size() != otp_half_words / 32)
     {
       state_.otp_programmed.assign(otp_half_words / 32, 0);
       state_.otp_bad.assign(otp_half_words / 32, 0);
