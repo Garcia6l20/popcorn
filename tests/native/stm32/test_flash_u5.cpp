@@ -3344,3 +3344,13 @@ TEST_CASE(
   REQUIRE(again.nmi_eccr.size() == 1);
   CHECK(again.eccr() == (eccd | 0x40u));
 }
+
+TEST_CASE("a CPU load of a virgin U5 OTP quad-word reports nothing, no ECCD and no NMI")
+{
+  flash_rig rig;
+  rig.handle_nmi();
+  rig.load(otp_nonsecure);
+  CHECK(rig.word(sym("flash_ll", "words")) == 0xffff'ffffu);
+  CHECK(rig.nmi_eccr.empty());
+  CHECK(rig.eccr() == 0);
+}

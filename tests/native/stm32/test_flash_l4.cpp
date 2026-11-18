@@ -1938,6 +1938,13 @@ TEST_CASE(
   }
 }
 
+TEST_CASE("a CPU load of a virgin L4 OTP double word reports nothing, no ECCD and no NMI")
+{
+  rig r;
+  CHECK(r.load(otp + 8) == rig::loaded{~0u, 0, 0});
+  CHECK(r.read("ECCR") == 0);
+}
+
 TEST_CASE(
     "RM0351 3.3.1: a FSTPG store to the OTP sets WRPERR and FASTERR and writes nothing, a store to "
     "the option bytes next to it is no OTP store and sets WRPERR alone, inferred")

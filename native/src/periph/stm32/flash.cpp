@@ -4415,8 +4415,13 @@ template <typename Traits> void flash_model<Traits>::watch_otp()
 {
   if constexpr(Traits::otp_kind == otp_program::half_word)
   {
-    ctx_.services.watch_reads(
-        Traits::otp_area.first, Traits::otp_area.last - Traits::otp_area.first + 1, true);
+    if(std::ranges::any_of(ctx_.part.regions, [this](region_desc const& region) {
+         return region.controller == desc_.name and is_otp_region(region);
+       }))
+    {
+      ctx_.services.watch_reads(
+          Traits::otp_area.first, Traits::otp_area.last - Traits::otp_area.first + 1, true);
+    }
   }
 }
 
@@ -5520,7 +5525,6 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   delay_logged_.clear();
   sync_watches();
   update_pcrop();
-  watch_otp();
 }
 
 template <typename Traits> void flash_model<Traits>::on_clock_change()

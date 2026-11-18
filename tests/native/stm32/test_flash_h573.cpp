@@ -3322,3 +3322,132 @@ TEST_CASE("a DMA load of a virgin OTP word reports like a CPU load")
   CHECK(s.peek("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
   CHECK(s.peek("FLASH_ECCDR") == 0xffffu);
 }
+
+namespace
+{
+auto nmi_line(rig const& r) -> bool
+{
+  auto const  saved  = r.f.target->snapshot();
+  auto const& images = saved.data().peripherals;
+  auto const  found =
+      std::ranges::find(images, std::string_view{"FLASH"}, &core::peripheral_image::peripheral);
+  REQUIRE(found != images.end());
+  return found->nmi_level != 0;
+}
+
+void guest_load_double(rig const& r, address from)
+{
+  constexpr address stub = 0x2000'0600;
+  REQUIRE(r.f.target->mem().write(stub, 4, 0x0b00'ed90).has_value());
+  REQUIRE(r.f.target->mem().write(stub + 4, 4, 0xe7fe'be01).has_value());
+  r.f.set("r0", from);
+  r.f.set("pc", stub | 1u);
+  auto const until = vtime{r.f.target->virtual_clock().time().ps + us};
+  static_cast<void>(
+      r.f.target->run_slice({.max_instructions = icount{1'000'000}, .until_time = until}));
+}
+}
+
+TEST_CASE("a DAP load of a virgin OTP word reports like a CPU load")
+{
+  rig                      r;
+  std::array<std::byte, 4> bytes{};
+  REQUIRE(r.f.target->mem(false).read_block(otp_base + 0x10, bytes).has_value());
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  CHECK(r.read("FLASH_ECCDR") == 0xffffu);
+}
+
+TEST_CASE(
+    "every reset kind clears FLASH_ECCDETR and FLASH_ECCDR and lowers the NMI, the OTP arrays stay")
+{
+  for(auto const kind :
+      {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::watchdog,
+       popcorn::reset_kind::option_load, popcorn::reset_kind::power_on})
+  {
+    CAPTURE(kind);
+    rig r;
+    r.unlock();
+    r.control(pg);
+    r.call("store_half", {otp_base, 0x1234});
+    r.wait_idle();
+    auto const before = otp_state(r);
+    load_log(r, otp_base + 0x10);
+    REQUIRE(r.read("FLASH_ECCDETR") != 0);
+    REQUIRE(nmi_line(r));
+    r.f.target->reset(kind);
+    CHECK(r.read("FLASH_ECCDETR") == 0);
+    CHECK(r.read("FLASH_ECCDR") == 0);
+    CHECK_FALSE(nmi_line(r));
+    auto const after = otp_state(r);
+    CHECK(after.otp_programmed == before.otp_programmed);
+    CHECK(after.otp_bad == before.otp_bad);
+  }
+}
+
+TEST_CASE(
+    "a snapshot with the NMI active keeps the line, one holding a torn half-word reports on a "
+    "load after the restore")
+{
+  rig r;
+  load_log(r, otp_base + 0x10);
+  REQUIRE(nmi_line(r));
+  rig other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(r.f.target->snapshot().data()))});
+  CHECK(nmi_line(other));
+
+  rig cut;
+  cut.unlock();
+  cut.control(pg);
+  cut.store_words(otp_base + 0x30, {0x5678'1234});
+  REQUIRE(cut.status("BSY") == 1);
+  cut.run_for(46 * us);
+  cut.f.target->power_cycle();
+  rig restored;
+  restored.f.target->restore(
+      core::snapshot{
+          core::decode_snapshot(core::encode_snapshot(cut.f.target->snapshot().data()))});
+  restored.call("read_word", {static_cast<std::uint32_t>(otp_base + 0x30)});
+  CHECK(restored.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x703u));
+}
+
+TEST_CASE(
+    "an 8-bit and a 64-bit load of the OTP warn once for both, a strict machine raises "
+    "model_error on each")
+{
+  rig r;
+  guest_load_byte(r, otp_base + 8);
+  guest_load_double(r, otp_base + 0x10);
+  CHECK(r.warnings("FLASH_ECCDETR") == 1);
+  for(bool const byte : {true, false})
+  {
+    rig strict{{}, firmware, true};
+    if(byte)
+    {
+      CHECK_THROWS_AS(guest_load_byte(strict, otp_base + 8), popcorn::model_error);
+    }
+    else
+    {
+      CHECK_THROWS_AS(guest_load_double(strict, otp_base + 0x10), popcorn::model_error);
+    }
+  }
+}
+
+TEST_CASE(
+    "an H5 description whose OTP region has no FLASH controller builds and resets, the OTP read "
+    "watch is installed only with the controller")
+{
+  auto desc = h573();
+  for(auto& region : desc.regions)
+  {
+    if(region.name == "OTP_NS")
+    {
+      region.controller.reset();
+    }
+  }
+  stm32_fixture bare{desc, firmware, options_for({})};
+  REQUIRE(bare.run_to_stop().reason == stop_reason::user);
+  rig r;
+  CHECK(r.f.target->controller_watches() == bare.target->controller_watches() + 1);
+  CHECK(r.f.target->controller_watch_hooks() == bare.target->controller_watch_hooks() + 2);
+}
