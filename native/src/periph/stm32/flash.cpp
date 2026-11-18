@@ -2060,12 +2060,12 @@ static_assert(flag_matches_roles(
  * for the quad-word time. A quad-word with any bit at 0 sets PROGERR, also for zero data, and
  * keeps its bytes. SIZERR, PGAERR and PGSERR apply as in the main memory, and no erase reaches the
  * OTP area. With TrustZone a Secure store sets the Secure WRPERR and raises the TZIC `FLASHIE`
- * event, and writes nothing. Inferred: a store to the 512 bytes past the OTP area, in the 1 KB
- * of each OTP region, sets the Non-secure WRPERR and writes nothing. A burst over a programmed
- * quad-word sets PROGERR and programs none of its 8 quad-words. The times are those of the main
- * memory, as DS13737 has no OTP row. A power cut during an OTP program tears the quad-word as in
- * the main memory, and a CPU or DMA load of it is a double error with BK_ECC 0 and ADDR_ECC the
- * quad-word's byte offset in the OTP area.
+ * event, and writes nothing. A store to the 512 bytes past the OTP area, in the 1 KB of each OTP
+ * region, sets the Non-secure WRPERR and writes nothing, inferred. A burst over a programmed
+ * quad-word sets PROGERR and programs none of its 8 quad-words, and the times are those of the
+ * main memory, as DS13737 has no OTP row, inferred. A power cut during an OTP program tears the
+ * quad-word as in the main memory, and a CPU or DMA load of it is a double error with BK_ECC 0 and
+ * ADDR_ECC the quad-word's byte offset in the OTP area, inferred.
  *
  * Latency, RM0456 7.3.3: FLASH_ACR.LATENCY is compared with Table 54, or Table 55 with LPM set,
  * for HCLK and the voltage range PWR_SVMSR.ACTVOS applies, on a FLASH_ACR write, an HCLK change

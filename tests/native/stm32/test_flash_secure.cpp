@@ -1184,8 +1184,9 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a Non-secure store through the Secure OTP alias, which the model's services take as the "
-    "transaction's attribute, programs the same bytes as the Non-secure address")
+    "model-level pin of the attribute rule: a Non-secure store through the Secure OTP alias "
+    "programs the Non-secure bytes, silicon refuses it at the IDAU before the FLASH, the Secure "
+    "store case above is the Table 71 rule")
 {
   rig const r{true};
   r.unlock(false);

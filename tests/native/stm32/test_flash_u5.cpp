@@ -3223,6 +3223,13 @@ TEST_CASE(
   CHECK(rig.words(otp_nonsecure, 32) == data);
   rig.control(0);
   rig.clear_errors();
+  rig.control(pg | bwr);
+  rig.store_words(otp_nonsecure, std::vector<std::uint32_t>(32, 0));
+  rig.wait_idle();
+  CHECK(rig.status("PROGERR") == 1);
+  CHECK(rig.words(otp_nonsecure, 32) == data);
+  rig.control(0);
+  rig.clear_errors();
   rig.control(pg);
   rig.store_words(otp_nonsecure + 0x100 + 3 * 16, {7, 7, 7, 7});
   rig.wait_idle();
@@ -3236,7 +3243,9 @@ TEST_CASE(
   CHECK(std::ranges::count(mixed, 0xffff'ffffu) == 28);
 }
 
-TEST_CASE("RM0456 7.3.9: MER2 and PER over several pages leave the OTP bytes unchanged")
+TEST_CASE(
+    "RM0456 7.3.9: MER2 and PER of both banks erase their sentinels and leave the OTP bytes "
+    "unchanged, MER1 is not run as it erases the firmware the rig runs from")
 {
   periph::stm32::board board;
   board.flash.page_erase = std::chrono::microseconds{50};
@@ -3246,23 +3255,24 @@ TEST_CASE("RM0456 7.3.9: MER2 and PER over several pages leave the OTP bytes unc
   rig.program(otp_nonsecure, {1, 2, 3, 4});
   rig.control(0);
   auto const before = rig.words(otp_nonsecure, otp_area_size / 4);
-  auto const check  = [&](std::uint32_t control) {
+  auto const check  = [&](std::uint32_t control, address sentinel) {
     CAPTURE(control);
+    CAPTURE(sentinel);
+    rig.program(sentinel, {5, 6, 7, 8});
+    rig.control(0);
+    REQUIRE(rig.words(sentinel, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
     rig.control(control | strt);
     rig.wait_idle();
     rig.control(0);
+    CHECK(rig.words(sentinel, 4) == erased(4));
     rig.clear_errors();
     CHECK(rig.words(otp_nonsecure, otp_area_size / 4) == before);
   };
-  for(auto const control : {mer2, per | bker, per | bker | pnb(127), per | pnb(127)})
-  {
-    check(control);
-  }
-  for(std::uint32_t page = 31; page < 128; page += 32)
-  {
-    check(per | pnb(page));
-    check(per | bker | pnb(page));
-  }
+  check(mer2, last_page);
+  check(per | bker | pnb(63), last_page);
+  check(per | bker | pnb(15), bank2 + 15 * page_bytes);
+  check(per | pnb(47), 0x0800'0000 + 47 * page_bytes);
+  check(per | pnb(31), 0x0800'0000 + 31 * page_bytes);
 }
 
 TEST_CASE(
