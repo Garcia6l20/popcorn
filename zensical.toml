@@ -17,6 +17,7 @@ nav = [
     "guide/faults.md",
     "guide/systems.md",
     "guide/snapshots.md",
+    "guide/otp.md",
     "guide/hooks.md",
     "guide/python_models.md",
     "guide/uart_devices.md",

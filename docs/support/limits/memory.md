@@ -15,3 +15,5 @@
   flash.
 - With `swap_bank` address 0 also maps the main flash. On silicon the system memory stays aliased
   at 0 with BFB2 set, RM0351 9.2.1, and with nBFB2 0, RM0038 Table 6.
+- The OTP areas, `0x0BFA0000` of the STM32U5, `0x08FFF000` of the STM32H5 and `0x1FFF7000` of the STM32L4, are
+  provisioned by the host and programmed by firmware through the FLASH interface, see [OTP](../../guide/otp.md).
