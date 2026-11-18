@@ -2220,8 +2220,9 @@ static_assert(flag_matches_roles(
  *   than 0xFFFF, inferred. A program of a programmed half-word writes the old data ANDed with
  *   the new and marks the half-word ECC-bad, inferred, the data and the mark are the model's
  *   reading of "an ECC error is generated and is therefore not supported" in 7.3.9. A CPU or DMA
- *   load of an ECC-bad or virgin half-word sets ECCD, OTP_ECC and FLASH_ECCDR and takes the NMI,
- *   ADDR_ECC from 0x700 inferred, and a power cut tears the half-word in flight, inferred.
+ *   load of an ECC-bad or virgin half-word sets ECCD, OTP_ECC and FLASH_ECCDR and takes the NMI
+ *   unless SBS_ECCNMIR masks it, ADDR_ECC from 0x700 inferred, and a power cut tears the
+ *   half-word in flight, inferred.
  *
  * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
  * and FLASH_SR, no TrustZone and no block registers.
@@ -4425,7 +4426,7 @@ void flash_model<Traits>::record_double_error(ecc_place place, bool otp, std::ui
 
 template <typename Traits> auto flash_model<Traits>::ecc_nmi_masked() -> bool
 {
-  if(not mask_linked_)
+  if(not mask_linked_ and not ctx_.peers.all().empty())
   {
     mask_linked_ = true;
     for(auto* const peer : ctx_.peers.all())

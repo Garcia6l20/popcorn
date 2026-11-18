@@ -1,16 +1,15 @@
 from pathlib import Path
 
-import popcorn
-from popcorn import StopReason
-from popcorn.stm32 import mcu
+import pytest
 
-ROOT = Path(__file__).parents[3]
-FLASH_U5 = ROOT / "tests/firmware/periph/prebuilt/flash_ll.elf"
-FLASH_H5 = ROOT / "tests/firmware/periph/prebuilt/h573/flash_ll.elf"
+PREBUILT = Path(__file__).parents[3] / "tests/firmware/periph/prebuilt"
 
 
 def test_the_host_provisions_the_otp_with_a_plain_write() -> None:
     # --8<-- [start:provision]
+    import popcorn
+    from popcorn.stm32 import mcu
+
     machine = popcorn.Machine(mcu("STM32U575QGIx"))
     machine.reset()
     OTP = 0x0BFA_0000
@@ -22,10 +21,14 @@ def test_the_host_provisions_the_otp_with_a_plain_write() -> None:
     # --8<-- [end:provision]
 
 
-async def test_a_u5_firmware_programs_a_quad_word_once() -> None:
+async def test_a_u5_firmware_programs_a_quad_word_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(PREBUILT)
     # --8<-- [start:u5]
+    import popcorn
+    from popcorn.stm32 import mcu
+
     description = mcu("STM32U575QGIx")
-    machine = popcorn.Machine(description, image=popcorn.Image.elf(FLASH_U5))
+    machine = popcorn.Machine(description, image=popcorn.Image.elf("flash_ll.elf"))
     machine.reset()
     await machine.run(until="main", budget=1_000_000)
 
@@ -51,10 +54,17 @@ async def test_a_u5_firmware_programs_a_quad_word_once() -> None:
     # --8<-- [end:u5]
 
 
-async def test_an_h5_virgin_read_is_an_ecc_error_the_firmware_can_mask() -> None:
+async def test_an_h5_virgin_read_is_an_ecc_error_the_firmware_can_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PREBUILT / "h573")
     # --8<-- [start:h5]
+    import popcorn
+    from popcorn import StopReason
+    from popcorn.stm32 import mcu
+
     description = mcu("STM32H573IITxQ")
-    machine = popcorn.Machine(description, image=popcorn.Image.elf(FLASH_H5))
+    machine = popcorn.Machine(description, image=popcorn.Image.elf("flash_ll.elf"))
     machine.reset()
     stop = await machine.run(until="main", budget=1_000_000)
     assert stop.reason is StopReason.ADDRESS

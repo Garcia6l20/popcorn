@@ -1,6 +1,6 @@
 # One-time programmable memory
 
-The OTP area of the STM32U5, STM32H5 and STM32L4 is erased at power-on, written by the host at
+The OTP area of the STM32U5, STM32H5 and STM32L4 reads erased on a new machine, is written by the host at
 any time, and programmed by firmware through the FLASH interface once per unit. The content and
 the H5 bookkeeping survive every reset, a power cycle and a snapshot restore.
 
@@ -18,7 +18,7 @@ the H5 bookkeeping survive every reset, a power cycle and a snapshot restore.
 
 `machine.mem.write` writes the OTP with no flag, no lock and no ECC bookkeeping. On the U5 the
 Secure alias reads the same bytes. On the H5 a half-word the host wrote with data other than
-`0xFFFF` counts as programmed, so a later firmware program of it is a rewrite.
+`0xFFFF` counts as programmed, so a later firmware program of it is a rewrite, inferred.
 
 ## Program from firmware on the U5
 
@@ -28,13 +28,13 @@ Secure alias reads the same bytes. On the H5 a half-word the host wrote with dat
 
 With `PG` set in `FLASH_NSCR`, four word stores at a 16-byte aligned address program a quad-word
 for the quad-word program time, and a burst of eight quad-words programs 128 bytes. A quad-word
-with any bit at 0 sets `PROGERR` and keeps its bytes, also for zero data. A Secure store sets the
+with any bit at 0 sets `PROGERR` and keeps its bytes, also for zero data. With TrustZone a Secure store sets the
 Secure `WRPERR`, raises `FLASHIE` and writes nothing. A store to the 512 bytes past the OTP area
 sets the Non-secure `WRPERR`, inferred. `SIZERR`, `PGAERR` and `PGSERR` apply as for the main
 memory and no erase reaches the OTP.
 
-The L4 programs a double word of the OTP the same way with `PG`, once, and a `FSTPG` store to it
-sets `WRPERR`.
+The L4 programs a double word of the OTP the same way with `PG`, once, inferred, and a `FSTPG` store to
+it sets `WRPERR`, inferred.
 
 ## Program and read on the H5
 
@@ -51,9 +51,9 @@ Setting a bit of `FLASH_OTPBLR_PRG` and then `OPTSTRT` locks the 64-byte block i
 reaches the read-only `FLASH_OTPBLR_CUR`, never clears, and a store to the block sets `WRPERR`.
 
 A CPU, DMA or debug port load of a half-word that was never programmed, or that was programmed
-twice, sets `ECCD`, `OTP_ECC`, `ADDR_ECC` and `FLASH_ECCDR.DATA_ECC` and raises the NMI.
+twice, inferred, sets `ECCD`, `OTP_ECC`, `ADDR_ECC` and `FLASH_ECCDR.DATA_ECC` and raises the NMI.
 `ADDR_ECC` counts 16-byte units and runs from `0x700`, inferred. Setting
-`SBS_ECCNMIR.ECCNMI_MASK_EN` records the error without the NMI, which is what a firmware that
+`SBS_ECCNMIR.ECCNMI_MASK_EN` records the error without the NMI, `ECCD` kept, inferred, which is what a firmware that
 tests a half-word for virgin does first. A power cut during an OTP program tears the half-word in
 flight, inferred.
 
