@@ -5407,7 +5407,6 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   delay_logged_.clear();
   sync_watches();
   update_pcrop();
-  poke_otp_lock();
 }
 
 template <typename Traits> void flash_model<Traits>::on_clock_change()

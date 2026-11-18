@@ -3041,8 +3041,8 @@ TEST_CASE(
   r.write("FLASH_OTPBLR_PRG", 0);
   CHECK(r.read("FLASH_OTPBLR_PRG") == 0x21u);
   for(auto const kind :
-      {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::option_load,
-       popcorn::reset_kind::power_on})
+      {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::watchdog,
+       popcorn::reset_kind::option_load, popcorn::reset_kind::power_on})
   {
     r.f.target->reset(kind);
     CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
@@ -3099,6 +3099,52 @@ TEST_CASE("the OTP block lock registers raise no model_error under strict_periph
   r.write("FLASH_OPTCR", optstrt);
   CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
   CHECK(r.warnings("FLASH_OTPBLR_PRG") == 0);
+}
+
+TEST_CASE(
+    "a firmware write of FLASH_OTPBLR_PRG and FLASH_OTPBLR_CUR is served, the coverage report "
+    "lists neither as storage_only")
+{
+  rig r;
+  r.unlock();
+  r.unlock_options();
+  r.f.target->enable_coverage({}, true);
+  constexpr address stub = 0x2000'0600;
+  REQUIRE(r.f.target->mem().write(stub, 4, 0xbe01'6001).has_value());
+  REQUIRE(r.f.target->mem().write(stub + 4, 4, 0xbe01'601a).has_value());
+  r.f.set("r0", r.at("FLASH_OTPBLR_PRG"));
+  r.f.set("r1", 1u << 5);
+  r.f.set("pc", stub | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  r.f.set("r3", r.at("FLASH_OTPBLR_CUR"));
+  r.f.set("r2", 0);
+  r.f.set("pc", (stub + 4) | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x20u);
+  CHECK(r.f.target->coverage().unmodelled.empty());
+}
+
+TEST_CASE(
+    "a snapshot with a PRG bit written and not latched restores into a fresh machine, OPTSTRT "
+    "there latches it and locks the block")
+{
+  rig r;
+  r.unlock();
+  r.unlock_options();
+  r.write("FLASH_OTPBLR_PRG", 1u << 5);
+  REQUIRE(r.read("FLASH_OTPBLR_CUR") == 0);
+  auto const taken = r.f.target->snapshot();
+  rig        other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  CHECK(other.read("FLASH_OTPBLR_PRG") == 0x20u);
+  CHECK(other.read("FLASH_OTPBLR_CUR") == 0);
+  other.write("FLASH_OPTCR", optstrt);
+  CHECK(other.read("FLASH_OTPBLR_CUR") == 0x20u);
+  other.control(pg);
+  other.call("store_half", {block5, 0x2222});
+  other.wait_idle();
+  CHECK(other.status("WRPERR") == 1);
 }
 
 TEST_CASE(
