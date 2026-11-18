@@ -67,3 +67,28 @@ def test_a_cpu_store_to_the_otp_without_pg_sets_pgserr_and_a_program_with_pg_wor
     assert asyncio.run(m.call("wait_idle", budget=1_000_000)).stop.reason is StopReason.USER
     assert m.mem.read(OTP, 8) == bytes.fromhex("34127856ffffffff")
     assert m.periph.FLASH.FLASH_NSSR.PGSERR == 0
+
+
+@pytest.mark.parametrize("part", H5_PARTS)
+def test_a_locked_otp_block_refuses_a_cpu_store_with_wrperr(part: str) -> None:
+    """RM0481 7.11.29 and 7.11.30: a PRG bit latched by OPTSTRT locks its 64-byte block."""
+    description, m = booted(part)
+    words = m.sym("words")
+    m.mem.u32[words] = 0x5678_1234
+    m.mem.u32[register(description, "FLASH_NSKEYR")] = KEY1
+    m.mem.u32[register(description, "FLASH_NSKEYR")] = KEY2
+    m.mem.u32[register(description, "FLASH_OPTKEYR")] = 0x0819_2A3B
+    m.mem.u32[register(description, "FLASH_OPTKEYR")] = 0x4C5D_6E7F
+    m.mem.u32[register(description, "FLASH_OTPBLR_PRG")] = 1 << 5
+    assert m.periph.FLASH.FLASH_OTPBLR_CUR.LOCKBL == 0
+    m.mem.u32[register(description, "FLASH_OPTCR")] = 1 << 1
+    assert m.periph.FLASH.FLASH_OTPBLR_CUR.LOCKBL == 1 << 5
+    m.mem.u32[register(description, "FLASH_NSCR")] = PG
+    copy(m, OTP + 5 * 64, words, 1)
+    assert m.periph.FLASH.FLASH_NSSR.WRPERR == 1
+    assert m.mem.read(OTP + 5 * 64, 4) == b"\xff" * 4
+    m.mem.u32[register(description, "FLASH_NSCCR")] = 0xFFFF_FFFF
+    copy(m, OTP + 6 * 64, words, 1)
+    assert asyncio.run(m.call("wait_idle", budget=1_000_000)).stop.reason is StopReason.USER
+    assert m.periph.FLASH.FLASH_NSSR.WRPERR == 0
+    assert m.mem.read(OTP + 6 * 64, 4) == bytes.fromhex("34127856")

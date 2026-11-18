@@ -2590,6 +2590,7 @@ struct otp_flash_state
   std::vector<std::uint32_t>    wrp_active{};
   std::vector<std::uint32_t>    otp_programmed{};
   std::vector<std::uint32_t>    otp_bad{};
+  std::uint32_t                 otp_lock{};
 };
 
 auto otp_state(rig const& r) -> otp_flash_state
@@ -2963,4 +2964,159 @@ TEST_CASE("a restored OTP vector of the wrong size is rebuilt before the next pr
   CHECK(after.otp_programmed.size() == 32);
   CHECK(after.otp_bad.size() == 32);
   CHECK((r.word(otp_base + 0x500) & 0xffff) == 0x4321);
+}
+
+namespace
+{
+constexpr std::uint32_t block5 = otp_base + 5 * 64;
+
+void lock_blocks(rig const& r, std::uint32_t bits)
+{
+  if(r.field("FLASH_OPTCR", "OPTLOCK") == 1)
+  {
+    r.unlock_options();
+  }
+  r.write("FLASH_OTPBLR_PRG", bits);
+  r.write("FLASH_OPTCR", optstrt);
+}
+}
+
+TEST_CASE(
+    "RM0481 7.11.30 and 7.4.3: a PRG bit written with OPTLOCK clear reaches CUR at OPTSTRT, a "
+    "store to its block sets WRPERR and writes nothing, the neighbours program")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {block5 + 0x40, 0x1111});
+  r.wait_idle();
+  r.unlock_options();
+  r.write("FLASH_OTPBLR_PRG", (1u << 5) | (1u << 6));
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0);
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0x60u);
+  r.clear();
+  for(address const at : {block5, block5 + 0x3e, block5 + 0x40, block5 + 0x7e})
+  {
+    CAPTURE(at);
+    r.call("store_half", {at, 0x2222});
+    r.wait_idle();
+    CHECK(r.status("WRPERR") == 1);
+    r.clear();
+  }
+  CHECK(r.word(block5) == 0xffff'ffffu);
+  CHECK((r.word(block5 + 0x40) & 0xffff) == 0x1111);
+  for(address const at : {block5 - 2, block5 + 0x80})
+  {
+    r.call("store_half", {at, 0x3333});
+    r.wait_idle();
+    CHECK(r.status("WRPERR") == 0);
+    CHECK((r.word(at & ~3u) >> (8 * (at & 2))) % 0x10000 == 0x3333);
+  }
+  r.store_words(block5 + 0x3c, {0x4444'5555});
+  r.wait_idle();
+  CHECK(r.status("WRPERR") == 1);
+  CHECK(r.word(block5 + 0x3c) == 0xffff'ffffu);
+  r.clear();
+  r.store_words(block5 - 2, {0x6666'7777});
+  r.wait_idle();
+  CHECK(r.status("WRPERR") == 1);
+  CHECK((r.word(block5 - 4) >> 16) == 0x3333u);
+  CHECK((r.word(block5) & 0xffff) == 0xffffu);
+}
+
+TEST_CASE(
+    "RM0481 7.11.29 and 7.11.30: a lock never clears, CUR takes no write, every reset kind keeps "
+    "it and PRG reads it after, inferred")
+{
+  rig r;
+  r.unlock();
+  lock_blocks(r, 1u << 5);
+  lock_blocks(r, 0);
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
+  r.write("FLASH_OTPBLR_CUR", 0);
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
+  r.write("FLASH_OTPBLR_PRG", 0x1u);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x21u);
+  r.write("FLASH_OTPBLR_PRG", 0);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x21u);
+  for(auto const kind :
+      {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::option_load,
+       popcorn::reset_kind::power_on})
+  {
+    r.f.target->reset(kind);
+    CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
+    CHECK(r.read("FLASH_OTPBLR_PRG") == 0x20u);
+  }
+  r.f.target->power_cycle();
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x20u);
+}
+
+TEST_CASE(
+    "RM0481 7.4: a PRG write with OPTLOCK set is ignored, a locked block still reads and a host "
+    "write to it lands")
+{
+  rig r;
+  r.unlock();
+  r.unlock_options();
+  r.write("FLASH_OTPBLR_PRG", 1u << 5);
+  r.write("FLASH_OPTCR", optstrt);
+  r.write("FLASH_OPTCR", 1);
+  REQUIRE(r.field("FLASH_OPTCR", "OPTLOCK") == 1);
+  r.write("FLASH_OTPBLR_PRG", 1u << 7);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x20u);
+  REQUIRE(r.f.target->mem().write(block5 + 8, 2, 0x1234).has_value());
+  CHECK((r.word(block5 + 8) & 0xffff) == 0x1234);
+  CHECK(r.word(block5) == 0xffff'ffffu);
+}
+
+TEST_CASE("RM0481 7.4: a refused OPTSTRT leaves CUR and the lock unchanged and PRG as written")
+{
+  rig r;
+  r.unlock();
+  r.call("store_half", {sector2, 0x1234});
+  REQUIRE(r.status("PGSERR") == 1);
+  r.unlock_options();
+  r.write("FLASH_OTPBLR_PRG", 1u << 5);
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0);
+  CHECK(r.read("FLASH_OTPBLR_PRG") == 0x20u);
+  r.clear();
+  r.control(pg);
+  r.call("store_half", {block5, 0x2222});
+  r.wait_idle();
+  CHECK(r.status("WRPERR") == 0);
+  CHECK((r.word(block5) & 0xffff) == 0x2222);
+}
+
+TEST_CASE("the OTP block lock registers raise no model_error under strict_peripherals")
+{
+  rig r{{}, firmware, true};
+  r.unlock();
+  r.unlock_options();
+  r.write("FLASH_OTPBLR_PRG", 1u << 5);
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.read("FLASH_OTPBLR_CUR") == 0x20u);
+  CHECK(r.warnings("FLASH_OTPBLR_PRG") == 0);
+}
+
+TEST_CASE(
+    "a snapshot with a lock set restores into a fresh machine with CUR reading the lock and a "
+    "store to the block still setting WRPERR")
+{
+  rig r;
+  r.unlock();
+  lock_blocks(r, 1u << 5);
+  auto const taken = r.f.target->snapshot();
+  rig        other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  CHECK(other.read("FLASH_OTPBLR_CUR") == 0x20u);
+  CHECK(otp_state(other).otp_lock == 0x20u);
+  other.control(pg);
+  other.call("store_half", {block5, 0x2222});
+  other.wait_idle();
+  CHECK(other.status("WRPERR") == 1);
+  CHECK(other.word(block5) == 0xffff'ffffu);
 }

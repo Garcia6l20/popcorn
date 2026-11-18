@@ -91,6 +91,7 @@ struct flash_state
   std::vector<std::uint32_t>              wrp_active{};
   std::vector<std::uint32_t>              otp_programmed{};
   std::vector<std::uint32_t>              otp_bad{};
+  std::uint32_t                           otp_lock{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -870,6 +871,8 @@ struct u5_flash
   };
   /** @brief Registers firmware writes for OPTSTRT besides option_registers. */
   static constexpr std::array<std::string_view, 0> option_staging_registers{};
+  /** @brief No OTP block lock registers. */
+  static constexpr std::array<std::string_view, 0> otp_lock_registers{};
   /** @brief Write protection registers, bank 1 area A and B, then bank 2. */
   static constexpr std::array<wrp_names, 4> wrp_registers{
       {
@@ -1266,6 +1269,10 @@ struct h5_flash
       "FLASH_SECWM1R_PRG",
       "FLASH_SECWM2R_PRG",
   };
+  /** @brief FLASH_OTPBLR_PRG and FLASH_OTPBLR_CUR, the OTP block lock, RM0481 7.11.29 and 7.11.30.
+   */
+  static constexpr std::array<std::string_view, 2> otp_lock_registers{
+      "FLASH_OTPBLR_PRG", "FLASH_OTPBLR_CUR"};
   /** @brief _PRG registers firmware writes for OPTSTRT, RM0481 7.4.3. */
   static constexpr std::array<std::string_view, 8> option_staging_registers{
       "FLASH_OPTSR_PRG",   "FLASH_OPTSR2_PRG",  "FLASH_NSBOOTR_PRG", "FLASH_BOOTR_PRG",
@@ -1736,6 +1743,8 @@ struct l4_flash
   static constexpr std::array<std::string_view, 0> secure_option_registers{};
   /** @brief No staging register. */
   static constexpr std::array<std::string_view, 0> option_staging_registers{};
+  /** @brief No OTP block lock registers. */
+  static constexpr std::array<std::string_view, 0> otp_lock_registers{};
   /** @brief Option registers OPTSTRT programs and the option byte loader loads, RM0351 3.4.2:
    *         FLASH_OPTR, then per bank PCROPxSR, PCROPxER, WRPxAR and WRPxBR. */
   static constexpr std::array<wrp_names, 9> wrp_registers{
@@ -2329,8 +2338,7 @@ static_assert(flag_matches_roles(
  * @group h5 unmodelled "Not modelled on the STM32H5"
  * - OBK key storage, the high-cycle data area and read-only area programming. Their registers
  *   are storage.
- * - FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
- *   OTPBLR_CUR locks no OTP block.
+ * - FLASH_OPSR is storage and never reports an interrupted operation.
  * - The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
  *   whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
  *   warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
@@ -2341,6 +2349,17 @@ static_assert(flag_matches_roles(
  * off, RM0481 7.6.2 and Table 72 note 1. A closed sector reads zero to a load, a fetch from it is a
  * BusFault, and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area at
  * HDPL 3. Without TrustZone the rule needs machine option bytes, which set the HDP areas.
+ *
+ * @group h5 rule "OTP block lock, RM0481 7.11.29 and 7.11.30"
+ * - A bit of FLASH_OTPBLR_PRG can be set while FLASH_NSCR.OPTLOCK is clear and its FLASH_OTPBLR_CUR
+ *   bit is 0, a bit never clears and a write with OPTLOCK set is ignored, RM0481 7.4. OPTSTRT
+ *   latches PRG into FLASH_OTPBLR_CUR, which is read only. A failed OPTSTRT leaves both as they
+ *   are.
+ * - A 16-bit or 32-bit store to a locked 32-half-word block, 64 bytes from 0x08FFF000, sets WRPERR
+ *   and writes nothing, whether the block holds data or not, RM0481 7.3.9. An unaligned 32-bit
+ *   store that spans two blocks is refused whole when either is locked, inferred.
+ * - Every reset keeps the lock and FLASH_OTPBLR_PRG reads the lock after it, inferred, RM0481 gives
+ *   the reset value as 0xXXXXXXXX.
  *
  * @group h5 rule "OTP, RM0481 7.3.9"
  * - A 16-bit or 32-bit store with PG set programs one or two half-words, each store starts a
@@ -2363,10 +2382,11 @@ static_assert(flag_matches_roles(
  *   illegal access event, and the ILAFM of a Secure store raises nothing without a TZIC flash
  *   source. An 8-bit or 64-bit load of the OTP area is a bus error on silicon, 7.3.4 step 6, and
  *   returns the data.
- * - OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers at once, with no
- *   BSY. The other _PRG registers are storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and
- *   FLASH_SECWM2R_PRG, which read 0 and ignore writes while TrustZone is off. A write to a storage
- *   register logs a warning once at the next OPTSTRT.
+ * - OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers and latches
+ *   FLASH_OTPBLR_PRG into FLASH_OTPBLR_CUR at once, with no BSY. The other _PRG registers are
+ *   storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and FLASH_SECWM2R_PRG, which read 0 and
+ *   ignore writes while TrustZone is off. A write to a storage register logs a warning once at the
+ *   next OPTSTRT.
  * - Without machine option bytes the OPTSR, OPTSR2, NSBOOTR, SECWM and HDP _CUR registers read the
  *   delivery values of RM0481 Table 55, FLASH_SECBOOTR_CUR reads 0 on the bus while TrustZone is
  *   off, and the WRP _CUR registers read 0xFFFFFFFF. With them every reset loads the encoded
@@ -2665,6 +2685,8 @@ public:
   void               secure_clear_written(std::uint32_t old, std::uint32_t now);
   void               option_control_written(std::uint32_t old, std::uint32_t now);
   void               staging_written(std::uint32_t old, std::uint32_t now);
+  void               otp_lock_written(std::uint32_t old, std::uint32_t now);
+  void               poke_otp_lock();
   void               ecc_written(std::uint32_t old, std::uint32_t now);
   void               option_written(std::uint32_t old, std::uint32_t now);
   void               wrp_written(std::uint32_t old, std::uint32_t now);
@@ -2929,6 +2951,15 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
     if(find_register(desc, name) != nullptr)
     {
       table.push_back({name, &flash_model<Traits>::staging_written});
+    }
+  }
+  if constexpr(Traits::otp_lock_registers.size() == 2)
+  {
+    if(find_register(desc, Traits::otp_lock_registers[0]) != nullptr
+       and find_register(desc, Traits::otp_lock_registers[1]) != nullptr)
+    {
+      table.push_back({Traits::otp_lock_registers[0], &flash_model<Traits>::otp_lock_written});
+      table.push_back({Traits::otp_lock_registers[1], nullptr});
     }
   }
   if(std::ranges::all_of(Traits::wrp_registers, [&desc](wrp_names const& names) {
@@ -3505,12 +3536,14 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   auto       wrp_active     = std::move(state_.wrp_active);
   auto       otp_programmed = std::move(state_.otp_programmed);
   auto       otp_bad        = std::move(state_.otp_bad);
+  auto const otp_lock       = state_.otp_lock;
   state_                    = {};
   state_.generation         = generation + 1;
   state_.torn               = std::move(torn);
   state_.wrp                = std::move(wrp);
   state_.otp_programmed     = std::move(otp_programmed);
   state_.otp_bad            = std::move(otp_bad);
+  state_.otp_lock           = otp_lock;
   state_.wrp_active         = loads_options(kind) ? state_.wrp : std::move(wrp_active);
   update_pcrop();
   option_changed_.clear();
@@ -3522,6 +3555,7 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
     regs.poke(offset, value);
   }
   poke_wrp();
+  poke_otp_lock();
   if(auto const swap = unit_.find(unit_role::option_swap))
   {
     update(regs, *swap, swapped_ ? 1 : 0);
@@ -3599,6 +3633,26 @@ void flash_model<Traits>::staging_written(std::uint32_t old, std::uint32_t now)
   if(now != old and not std::ranges::contains(option_changed_, written_word_))
   {
     option_changed_.push_back(written_word_);
+  }
+}
+
+template <typename Traits>
+void flash_model<Traits>::otp_lock_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(written_word_, option_locked() ? old : old | (now & ~state_.otp_lock));
+}
+
+template <typename Traits> void flash_model<Traits>::poke_otp_lock()
+{
+  if constexpr(Traits::otp_lock_registers.size() == 2)
+  {
+    for(auto const name : Traits::otp_lock_registers)
+    {
+      if(has_register(name))
+      {
+        regs_.poke(reg(name).offset, state_.otp_lock);
+      }
+    }
   }
 }
 
@@ -3773,6 +3827,14 @@ template <typename Traits> void flash_model<Traits>::program_options()
   }
   state_.wrp = std::move(requested);
   write_option_area();
+  if constexpr(Traits::otp_lock_registers.size() == 2)
+  {
+    if(has_register(Traits::otp_lock_registers[0]))
+    {
+      state_.otp_lock |= regs_.peek(reg(Traits::otp_lock_registers[0]).offset);
+      poke_otp_lock();
+    }
+  }
   if constexpr(Traits::option_reload_on_start)
   {
     state_.wrp_active = state_.wrp;
@@ -4966,6 +5028,14 @@ void flash_model<Traits>::otp_halfword_store(
     bool          secure,
     std::uint32_t control)
 {
+  for(auto at = addr; at < addr + size; at += 2)
+  {
+    if((state_.otp_lock >> ((at - Traits::otp_area.first) / 64) & 1u) != 0)
+    {
+      fail(secure, set_role::protection_error);
+      return;
+    }
+  }
   if(field_of(secure, set_role::program).of(control) == 0
      or Traits::erase_selected([&](set_role role) { return value_of(secure, role, control); })
      or errors_pending(secure)
@@ -5337,6 +5407,7 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   delay_logged_.clear();
   sync_watches();
   update_pcrop();
+  poke_otp_lock();
 }
 
 template <typename Traits> void flash_model<Traits>::on_clock_change()
