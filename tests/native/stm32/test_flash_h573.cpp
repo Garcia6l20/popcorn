@@ -3451,3 +3451,15 @@ TEST_CASE(
   CHECK(r.f.target->controller_watches() == bare.target->controller_watches() + 1);
   CHECK(r.f.target->controller_watch_hooks() == bare.target->controller_watch_hooks() + 2);
 }
+
+TEST_CASE(
+    "a FLASH peripheral reset held by the bus clears ECCD and its record and lowers the NMI line")
+{
+  rig r;
+  load_log(r, otp_base + 0x10);
+  REQUIRE(r.read("FLASH_ECCDETR") != 0);
+  REQUIRE(nmi_line(r));
+  core::machine_internals::services(*r.f.target).hold_in_reset("FLASH", true);
+  CHECK(r.read("FLASH_ECCDETR") == 0);
+  CHECK_FALSE(nmi_line(r));
+}
