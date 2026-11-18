@@ -100,10 +100,8 @@ the DMA has moved that result.
 ## Model limits
 
 - Conversions never overlap: each rank starts when the one before ends.
-- One-shot DMA, DMNGT 01, re-arms only on a CPU write taking ADSTART from 0 to 1, never on a
-  trigger. Results after the last DMA transfer still land in ADC_DR.
-- AWDFILT1 with DMA does not gate the DMA requests by the window. It logs once and is a model
-  error with strict peripherals.
+- One-shot DMA, DMNGT 01, clears ADSTART at the last DMA transfer and re-arms only on a CPU write
+  taking ADSTART from 0 to 1, never on a trigger. ADC_DR keeps its value until then.
 - An ADC clock outside 5 to 55 MHz keeps its computed timing and logs a warning at each enable.
 - The trigger latency for ADC12_CCR.PRESC 3 and up is 3 x D + 1 ADC cycles for a divider D, a
   value the datasheet does not give.

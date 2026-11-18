@@ -1578,7 +1578,9 @@ TEST_CASE("an overrun blocks the DMA requests until OVR is cleared, then the lat
   CHECK(buffer_words(f, 2) == scan_codes(1, 2));
 }
 
-TEST_CASE("DMNGT 01 stops at the channel's last transfer until an ADSTART 0 to 1 write")
+TEST_CASE(
+    "measured on an STM32U575ZITxQ: DMNGT 01 clears ADSTART at the last transfer, an ADSTP then an "
+    "ADSTART 0 to 1 write re-arms")
 {
   adc_fixture const f;
   downstream_scan(f, ovrmod | dmngt_oneshot);
@@ -1594,7 +1596,7 @@ TEST_CASE("DMNGT 01 stops at the channel's last transfer until an ADSTART 0 to 1
   f.run_until(start + 2 * scan_ps);
   CHECK(f.isr("EOC") == 0);
   CHECK(f.isr("EOS") == 0);
-  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.cr("ADSTART") == 0);
   CHECK(f.read("ADC_DR") == scan_code(4));
 
   clear_dma_flags(f);
@@ -1880,7 +1882,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "after a DMNGT 01 end, a TIM15 trigger starts a sequence that leaves ADC_DR frozen and issues "
+    "measured on an STM32U575ZITxQ: after a DMNGT 01 end a TIM15 trigger starts nothing and issues "
     "no request")
 {
   adc_fixture const f;
@@ -1892,12 +1894,12 @@ TEST_CASE(
   f.run_until(update + scan_eoc(4) + 2 * us);
   CHECK(dma_flag(f, "TCF") == 1);
   CHECK(f.field("GPDMA1", "GPDMA_C1CR", "EN") == 0);
-  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.cr("ADSTART") == 0);
   clear_dma_flags(f);
   f.write("GPDMA1", "GPDMA_C1BR1", 20);
   f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
-  f.run_until(update + tim15_period + latency + scan_ps);
-  CHECK(f.isr("EOS") == 1);
+  f.run_until(update + 2 * tim15_period + latency + scan_ps);
+  CHECK(f.isr("EOS") == 0);
   CHECK(f.isr("EOC") == 0);
   CHECK(f.isr("OVR") == 0);
   CHECK(f.read("ADC_DR") == scan_code(4));
@@ -1906,6 +1908,128 @@ TEST_CASE(
       buffer_words(f, 6)
       == std::vector<std::uint32_t>{
           scan_code(0), scan_code(1), scan_code(2), scan_code(3), scan_code(4), 0});
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: CONT 1 after a DMNGT 01 end converts nothing")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot | cont);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  CHECK(f.cr("ADSTART") == 0);
+  clear_dma_flags(f);
+  f.run_until(f.now() + 10 * scan_ps);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.read("ADC_DR") == scan_code(4));
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: an ADC_CFGR1 write after a DMNGT 01 end does not re-arm")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  clear_dma_flags(f);
+  f.write("GPDMA1", "GPDMA_C1BR1", 20);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+  f.write("ADC1", "ADC_CFGR1", ovrmod | dmngt_oneshot | res12);
+  f.run_until(f.now() + 2 * scan_ps);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 20);
+  CHECK(f.read("ADC_DR") == scan_code(4));
+}
+
+TEST_CASE("an ADSTP after a DMNGT 01 end is no model_error under strict peripherals")
+{
+  adc_fixture const f{u575(), {}, true, true};
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  REQUIRE(f.cr("ADSTART") == 0);
+  CHECK_NOTHROW(f.write("ADC1", "ADC_CR", advregen | aden | adstp));
+  f.run_until(f.now() + scan_ps);
+  CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE("a snapshot after a DMNGT 01 end restores ADSTART 0 and the re-arm")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc_fixture const& g) {
+    CHECK(g.cr("ADSTART") == 0);
+    CHECK(g.read("ADC_DR") == scan_code(4));
+    g.run_until(g.now() + 2 * scan_ps);
+    CHECK(g.isr("EOC") == 0);
+    auto const again = start_scan(g);
+    g.run_until(again + scan_eoc(0) + us);
+    CHECK(g.read("ADC_DR") == scan_code(0));
+  };
+  check(f);
+  f.target->restore(saved);
+  check(f);
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(other);
+}
+
+TEST_CASE(
+    "a snapshot after a DMNGT 01 end with results left in the FIFO keeps the request off, "
+    "fresh or restored")
+{
+  adc_fixture const f;
+  downstream_scan(f, dmngt_oneshot);
+  single_dma(f, 8, dma_enable | dma_suspend);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+  f.run_until(f.now() + 5 * us);
+  REQUIRE(dma_flag(f, "TCF") == 1);
+  REQUIRE(f.cr("ADSTART") == 0);
+  REQUIRE(f.isr("EOC") == 1);
+  CHECK(buffer_words(f, 3) == std::vector<std::uint32_t>{scan_code(0), scan_code(1), 0});
+  auto const saved = f.target->snapshot();
+  auto const check = [&](adc_fixture const& g) {
+    clear_dma_flags(g);
+    g.write("GPDMA1", "GPDMA_C1BR1", 8);
+    g.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+    g.write("ADC1", "ADC_ISR", ovr);
+    g.run_until(g.now() + 5 * us);
+    CHECK(g.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 8);
+    CHECK(g.read("ADC_DR") == scan_code(2));
+  };
+  check(f);
+  f.target->restore(saved);
+  check(f);
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(other);
+}
+
+TEST_CASE("the DMNGT 01 end reached in single instruction slices gives the same stop")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  auto const until = start + scan_eoc(4) + 2 * us;
+  while(f.now() < until)
+  {
+    static_cast<void>(f.run({.max_instructions = icount{1}, .until_time = vtime{until}}));
+  }
+  CHECK(dma_flag(f, "TCF") == 1);
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(f.read("ADC_DR") == scan_code(4));
 }
 
 TEST_CASE("an ADSTART 0 to 1 write after a DMNGT 01 end ends the freeze of ADC_DR")
@@ -2246,7 +2370,9 @@ TEST_CASE("the compared value is the result before alignment: RES 14 as is, RES 
   CHECK(watched(f, 5, uv_for_code14(101u << 6), 16) == awd1);
 }
 
-TEST_CASE("AWDFILT1 n flags from the n + 1-th consecutive out-of-window result, in-window restarts")
+TEST_CASE(
+    "measured on an STM32U575ZITxQ, one rank: AWDFILT1 n flags from the n + 1-th consecutive "
+    "out-of-window result, in-window restarts")
 {
   adc_fixture const f;
   f.enable();
@@ -2261,11 +2387,60 @@ TEST_CASE("AWDFILT1 n flags from the n + 1-th consecutive out-of-window result, 
   {
     CHECK(watched(f, 5, out_of_window) == 0);
   }
-  CHECK(watched(f, 6, in_window) == 0);
   CHECK(watched(f, 5, out_of_window) == awd1);
   CHECK(watched(f, 5, out_of_window) == awd1);
   CHECK(watched(f, 5, in_window) == 0);
   CHECK(watched(f, 5, out_of_window) == 0);
+}
+
+TEST_CASE(
+    "AWDFILT1 counts the guarded channel only, an unguarded in-window result of another sequence "
+    "neither counts nor resets")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en | awd1sgl | awd1ch(5));
+  f.write("ADC1", "ADC_HTR1", awdfilt1(3) | 8000);
+  for(int round = 0; round < 3; ++round)
+  {
+    CHECK(watched(f, 5, out_of_window) == 0);
+  }
+  CHECK(watched(f, 6, in_window) == 0);
+  CHECK(watched(f, 5, out_of_window) == awd1);
+}
+
+TEST_CASE(
+    "the model's deviation from an STM32U575ZITxQ at AWDFILT1 3: a two-rank scan, AWD1SGL rank 1 "
+    "and an unguarded rank 2 both out of window, flags at the fourth sequence")
+{
+  for(auto const& [filter, first] : {
+          std::pair{0u, 1},
+          std::pair{3u, 4}
+  })
+  {
+    CAPTURE(filter);
+    adc_fixture const f{u575(), {}, true, true};
+    downstream_scan(f, ovrmod | dmngt_circular | awd1en | awd1sgl | awd1ch(5));
+    f.write("ADC1", "ADC_SQR1", 1u | (5u << 6) | (6u << 12));
+    f.write("ADC1", "ADC_HTR1", awdfilt1(filter) | 2000);
+    downstream_dma(f);
+    std::optional<int> flagged;
+    for(int sequence = 1; sequence <= 20; ++sequence)
+    {
+      CAPTURE(sequence);
+      static_cast<void>(start_scan(f));
+      f.run_until(f.now() + scan_eoc(4));
+      REQUIRE(f.cr("ADSTART") == 0);
+      REQUIRE(f.isr("EOS") == 1);
+      f.write("ADC1", "ADC_ISR", 1u << 3);
+      if(not flagged and f.isr("AWD1") == 1)
+      {
+        flagged = sequence;
+      }
+    }
+    CHECK(flagged == first);
+    CHECK(buffer_words(f, 2) == std::vector{scan_code(3), scan_code(4)});
+  }
 }
 
 TEST_CASE("AWDFILT1 7 saturates its count at 8: every result from the eighth on flags, no wrap")
@@ -2374,32 +2549,85 @@ TEST_CASE("a snapshot with two out-of-window results counted flags the third, in
   CHECK(watched(other, 5, out_of_window) == awd1);
 }
 
-TEST_CASE("AWDFILT1 with AWD1EN and a DMA mode logs once at the start, a model_error when strict")
+TEST_CASE(
+    "measured on an STM32U575ZITxQ: AWD1 never gates the DMA of DMNGT 11, every result reaches the "
+    "buffer, nothing is logged")
 {
+  struct window
   {
-    adc_fixture const             f;
-    std::vector<core::log_record> logged;
-    auto const                    sink = recorder(f, logged);
-    f.enable();
-    f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
-    f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
-    CHECK(watched(f, 5, in_window) == 0);
-    f.write("ADC1", "ADC_CFGR1", res12 | awd1en | dmngt_circular);
-    CHECK(watched(f, 5, in_window) == 0);
-    CHECK(watched(f, 5, in_window) == 0);
-    REQUIRE(logged.size() == 1);
-    CHECK(logged[0].reg == "ADC_HTR1");
-    CHECK(logged[0].message.contains("AWDFILT1"));
+    std::uint32_t low;
+    std::uint32_t high;
+  };
+  for(auto const filter : {0u, 3u})
+  {
+    for(auto const single : {false, true})
+    {
+      for(auto const [low, high] : {
+              window{0,    16383},
+              window{0,    0    },
+              window{4095, 4095 }
+      })
+      {
+        CAPTURE(filter);
+        CAPTURE(single);
+        CAPTURE(low);
+        CAPTURE(high);
+        auto const                    out = high < 16383 or low > 0;
+        adc_fixture const             f{u575(), {}, true, true};
+        std::vector<core::log_record> logged;
+        auto const                    sink = recorder(f, logged);
+        downstream_scan(
+            f, ovrmod | cont | dmngt_circular | awd1en | (single ? awd1sgl | awd1ch(5) : 0u));
+        f.write("ADC1", "ADC_LTR1", low);
+        f.write("ADC1", "ADC_HTR1", awdfilt1(filter) | high);
+        downstream_dma(f);
+        auto const start = start_scan(f);
+        for(std::uint32_t round = 0; round < 5; ++round)
+        {
+          CAPTURE(round);
+          f.run_until(start + round * scan_ps);
+          drive_scan_inputs(f, round);
+          f.run_until(start + round * scan_ps + scan_eoc(9) + 2 * us);
+          CHECK(buffer_words(f, 10) == scan_codes(0, 10, round));
+        }
+        CHECK(f.isr("AWD1") == (out ? 1u : 0u));
+        CHECK(logged.empty());
+      }
+    }
   }
-  adc_fixture const f{u575(), {}, true, true};
-  f.enable();
-  f.write("ADC1", "ADC_CFGR1", res12 | awd1en | dmngt_circular);
-  f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
-  f.write("ADC1", "ADC_SQR1", 5u << 6);
-  CHECK_THROWS_AS(
-      static_cast<void>(
-          f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
-      popcorn::model_error);
+}
+
+TEST_CASE(
+    "measured on an STM32U575ZITxQ: AWD1 never gates the DMA of DMNGT 11 on one AWD1SGL rank, "
+    "every result reaches the buffer")
+{
+  constexpr std::uint64_t conversion_cycles = scan_eoc_cycles[3] - scan_eoc_cycles[2];
+  for(auto const filter : {0u, 3u})
+  {
+    for(auto const& [low, high] : {
+            std::pair{0u,    4095u},
+            std::pair{0u,    0u   },
+            std::pair{4095u, 4095u}
+    })
+    {
+      CAPTURE(filter);
+      CAPTURE(low);
+      CAPTURE(high);
+      adc_fixture const             f{u575(), {}, true, true};
+      std::vector<core::log_record> logged;
+      auto const                    sink = recorder(f, logged);
+      downstream_scan(f, ovrmod | cont | dmngt_circular | awd1en | awd1sgl | awd1ch(5));
+      f.write("ADC1", "ADC_SQR1", 5u << 6);
+      f.write("ADC1", "ADC_LTR1", low);
+      f.write("ADC1", "ADC_HTR1", awdfilt1(filter) | high);
+      downstream_dma(f);
+      auto const start = start_scan(f);
+      f.run_until(start + 20 * conversion_cycles * adc_cycle_ps);
+      CHECK(buffer_words(f, 10) == std::vector<std::uint32_t>(10, scan_code(3)));
+      CHECK(f.isr("AWD1") == (high == 0 or low > 0 ? 1u : 0u));
+      CHECK(logged.empty());
+    }
+  }
 }
 
 TEST_CASE(

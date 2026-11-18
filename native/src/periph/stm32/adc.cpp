@@ -280,21 +280,22 @@ struct u5_adc
   using injected_enum = void;
   using state         = adc_state;
 
-  static constexpr std::string_view unit_name           = "ADC";
-  static constexpr std::string_view config              = "ADC_CFGR1";
-  static constexpr std::string_view common_unit         = "ADC12";
-  static constexpr std::string_view common_register     = "ADC12_CCR";
-  static constexpr std::string_view common_vrefint      = "VREFEN";
-  static constexpr std::string_view common_sensor       = "VSENSESEL";
-  static constexpr std::string_view common_prescaler    = "PRESC";
-  static constexpr std::string_view common_clock_mode   = {};
-  static constexpr std::string_view common_dual         = "DUAL";
-  static constexpr bool             dual_optional       = true;
-  static constexpr std::string_view common_status       = {};
-  static constexpr bool             regulator_flag      = true;
-  static constexpr std::size_t      result_depth        = 8;
-  static constexpr bool             overrun_flush       = false;
-  static constexpr bool             dma_end_stops       = false;
+  static constexpr std::string_view unit_name         = "ADC";
+  static constexpr std::string_view config            = "ADC_CFGR1";
+  static constexpr std::string_view common_unit       = "ADC12";
+  static constexpr std::string_view common_register   = "ADC12_CCR";
+  static constexpr std::string_view common_vrefint    = "VREFEN";
+  static constexpr std::string_view common_sensor     = "VSENSESEL";
+  static constexpr std::string_view common_prescaler  = "PRESC";
+  static constexpr std::string_view common_clock_mode = {};
+  static constexpr std::string_view common_dual       = "DUAL";
+  static constexpr bool             dual_optional     = true;
+  static constexpr std::string_view common_status     = {};
+  static constexpr bool             regulator_flag    = true;
+  static constexpr std::size_t      result_depth      = 8;
+  static constexpr bool             overrun_flush     = false;
+  /** @brief The end of a one-shot DMA transfer clears ADSTART, measured on an STM32U575ZITxQ. */
+  static constexpr bool             dma_end_stops       = true;
   static constexpr bool             dma_end_freezes     = true;
   static constexpr bool             trigger_waits_edge  = false;
   static constexpr ready_pair       ready_cycles        = std::nullopt;
@@ -315,7 +316,6 @@ struct u5_adc
   static constexpr std::string_view ratio_field         = "OSR";
   static constexpr std::string_view filter_register     = "ADC_HTR1";
   static constexpr std::string_view filter_field        = "AWDFILT1";
-  static constexpr bool             filter_gates_dma    = true;
   static constexpr bool             preselection        = true;
   static constexpr bool             gain                = true;
   static constexpr bool             left_shift          = true;
@@ -443,7 +443,6 @@ struct h5_adc
   static constexpr std::string_view ratio_field         = "OVSR";
   static constexpr std::string_view filter_register     = "ADC_TR1";
   static constexpr std::string_view filter_field        = "AWDFILT";
-  static constexpr bool             filter_gates_dma    = false;
   static constexpr bool             preselection        = false;
   static constexpr bool             gain                = false;
   static constexpr bool             left_shift          = false;
@@ -588,7 +587,6 @@ struct l4_adc
   static constexpr std::string_view ratio_field         = "OVSR";
   static constexpr std::string_view filter_register     = {};
   static constexpr std::string_view filter_field        = {};
-  static constexpr bool             filter_gates_dma    = false;
   static constexpr bool             preselection        = false;
   static constexpr bool             gain                = false;
   static constexpr bool             left_shift          = false;
@@ -1092,15 +1090,16 @@ struct adc_clock
  *        at its arrival, so its conversion starts at its own time and the held edges then find
  *        the ADC busy.
  *        ADSTART stays set at the end of a sequence or subgroup, RM0456
- *        33.4.16, and clears with ADSTP or ADDIS only. ADC1 tells the selected signal's source
- *        when its listening starts or stops. The `timx_ocy` selections of RM0456 Table 307 and
- *        RM0481 Table 282 take the timer's `timx_ccy`, its capture/compare event pulse, as the LL
- *        driver names them "channel y event (capture compare)", inferred. The EXTI lines 11 and
- *        15 have no source on these families. A selection no model produces, the reserved EXTSEL
- *        17 and 22 to 31 included, logs a warning once per selection when ADC1 starts listening
- *        to it, a model_error under strict_peripherals, and no conversion starts. A
- *        config_error or model_error the per-sequence checks raise at a trigger surfaces from
- *        the source's event or register access that gave the edge.
+ *        33.4.16, and clears with ADSTP, ADDIS or the end of a DMNGT 01 transfer. ADC1 tells
+ *        the selected signal's source when its listening starts or stops. The `timx_ocy`
+ *        selections of RM0456 Table 307 and RM0481 Table 282 take the timer's `timx_ccy`, its
+ *        capture/compare event pulse, as the LL driver names them "channel y event (capture
+ *        compare)", inferred. The EXTI lines 11 and 15 have no source on these families. A
+ *        selection no model produces, the reserved EXTSEL 17 and 22 to 31 included, logs a
+ *        warning once per selection when ADC1 starts listening to it, a model_error under
+ *        strict_peripherals, and no conversion starts. A config_error or model_error the
+ *        per-sequence checks raise at a trigger surfaces from the source's event or register
+ *        access that gave the edge.
  *
  *        ADSTP and ADDIS drop a conversion in progress and reset the sequence to rank 0.
  *        Without a kernel clock a conversion waits for one, logged once. Each ADEN rising edge
@@ -1114,12 +1113,13 @@ struct adc_clock
  *        debugger read pops nothing. DMNGT 01 and 11 hold the `adc1_dma` request high while a
  *        result is unread and OVR is clear. Under DMNGT 01, once the GPDMA channel serving that
  *        request completes, the conversion in progress is dropped, the sequence resets to rank
- *        0, ADSTART stays set, and no request rises until an ADC_CR write takes ADSTART from 0
- *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. A hardware trigger
- *        then starts sequences without a request, and ADC_DR stays frozen, RM0456 33.4.26 "The
- *        content of the ADC data register is frozen": a result after the DMA end leaves ADC_DR,
- *        EOC, OVR and the FIFO as they are and sets EOS at the end of the sequence, as on the L4,
- *        the EOC, OVR and EOS part inferred. ADSTART going from 0 to 1 ends the freeze. DMNGT 10,
+ *        0 and ADSTART clears. No conversion runs afterwards, a hardware trigger starts nothing,
+ *        also with CONT 1, and ADC_DR, EOC, OVR and the FIFO keep their values, RM0456 33.4.26
+ *        "The content of the ADC data register is frozen", until an ADC_CR write takes ADSTART
+ *        from 0 to 1. A hardware trigger and an ADC_CFGR1 write do not re-arm, and an ADSTP then
+ *        an ADSTART 0 to 1 transfers again. Measured on ADC1 of an STM32U575ZITxQ, 2026-11-17,
+ *        with ADC_DR observed with ADSTART 0. That the ADSTART write alone re-arms, without the
+ *        ADSTP, is inferred. ADC2 and the other STM32U5 parts take the rule, inferred. DMNGT 10,
  *        the MDF path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its
  *        ADC_IER enable.
  *
@@ -1167,11 +1167,13 @@ struct adc_clock
  *        out-of-window result sets AWDx at its EOC, before the result lands, so a result an
  *        overrun discards still sets it. AWD1 counts consecutive out-of-window results of its
  *        guarded channels, saturating at 8, and sets AWD1 at each result once the count exceeds
- *        AWDFILT1: AWDFILT1 n flags from the n + 1-th on. An in-window result restarts the count.
- *        A changed input alone sets nothing. JAWD1EN guards the injected group, which never
- *        converts. AWDFILT1 with AWD1EN and DMNGT set gates the DMA requests by the window on
- *        hardware: not modelled, logged once at the sequence start, a model_error under
- *        strict_peripherals.
+ *        AWDFILT1: AWDFILT1 n flags from the n + 1-th consecutive out-of-window result of its
+ *        guarded channel, measured on an STM32U575ZITxQ for one rank. ADC2, the other STM32U5
+ *        parts and the STM32H5 AWDFILT take it, inferred. An in-window result
+ *        restarts the count. On a scan with an unguarded rank the model counts the guarded
+ *        channel only, and an STM32U575ZITxQ raised no AWD1 at AWDFILT1 3 in that case. A changed
+ *        input alone sets nothing. JAWD1EN guards the injected group, which never converts. AWD1
+ *        never gates the DMA requests, measured on an STM32U575ZITxQ with DMNGT 11.
  *
  *        ADC1 and ADC2 of the STM32H5, RM0481 section 28, run the same sequencer, triggers, DMA
  *        requests, oversampler and watchdogs with these differences. Codes have 12 bits, V x 4096 /
@@ -1189,8 +1191,8 @@ struct adc_clock
  *        28.4.26. A result that finds the FIFO full sets OVR and leaves the head only. While OVR
  *        stays set, a result lands when the FIFO is empty and is discarded otherwise, as measured
  *        on an STM32H573. DMAEN 1 holds the `adc<n>_dma` request, DMACFG 0 one-shot and DMACFG 1
- *        circular, as DMNGT 01 and 11 do. The end of a one-shot transfer clears ADSTART and stops
- *        the conversions, as measured on an STM32H573. The oversampling ratio is 2 to the OVSR + 1,
+ *        circular, as DMNGT 01 and 11 do, and the end of a one-shot transfer clears ADSTART as on
+ *        the STM32U5, measured on an STM32H573. The oversampling ratio is 2 to the OVSR + 1,
  *        the result is truncated to 16 bits after the shift, RM0481 28.4.29. ALIGN 1 left-aligns
  *        ADC_DR, a 6-bit code on the byte, RM0481 28.4.26, while ROVSE and JOVSE are clear. The
  *        watchdogs compare the 12-bit raw code before alignment, AWD1 with LT1 and HT1, AWD2 and
@@ -1346,7 +1348,6 @@ struct adc_clock
  * - Auto-delayed conversions, `ADC_CFGR1.AUTDLY`.
  * - The low frequency trigger mode, `ADC_CFGR2.LFTRIG`.
  * - The MDF data path, `ADC_CFGR1.DMNGT` 10.
- * - DMA requests gated by the AWD1 window, `AWDFILT1` with `DMNGT`.
  * - Left shift, gain compensation and offset of the result.
  * - Bulb sampling, `ADC_CFGR2.BULB`.
  * - The sampling time control trigger mode, `ADC_CFGR2.SMPTRIG` with `SWTRIG`.
@@ -1376,6 +1377,12 @@ struct adc_clock
  *   write takes effect from the next conversion, inferred. The result code, its alignment and
  *   the watchdog compares read the stored RES of the moment they are computed, inferred.
  *
+ * @group u5,h5 rule "AWDFILT1 on a scan"
+ * - AWD1 counts the consecutive out-of-window results of its guarded channels only. On a two-rank
+ *   scan with AWD1SGL on rank 1 and both ranks out of window, the model flags AWD1 at the fourth
+ *   sequence under AWDFILT1 3, and an STM32U575ZITxQ raised no AWD1 there, measured 2026-11-17.
+ *   The STM32H5 AWDFILT counts the same way, inferred.
+ *
  * @group h5 rule "On the STM32H5, RM0481 section 28"
  * - The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
  *   independently. `ADC_CDR` is storage. `ADC_CSR` reads the `ADC_ISR` bits 10:0 of ADC1 at its
@@ -1401,8 +1408,10 @@ struct adc_clock
  * - The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
  *   measured on an STM32H573 with CONT 1. ADSTART is 0 afterwards, so no conversion runs, a
  *   hardware trigger starts none, and `ADC_DR`, EOC, OVR and the FIFO keep their values until
- *   ADSTART goes 0 to 1, which RM0481 28.4.26 "The content of the ADC data register is frozen"
- *   agrees with, inferred.
+ *   ADSTART goes 0 to 1, as measured on an STM32H573, 2026-11-17: `ADC_DR` read 0xFFF 1 ms and
+ *   2 ms after PA0 was driven low, and an ADSTP then an ADSTART transfers again. RM0481 28.4.26
+ *   "The content of the ADC data register is frozen" agrees. The freeze under a running
+ *   conversion is unobservable there.
  * - At CKMODE 00 a trigger waits for the next ADC clock edge, and tLATR is 4.5 ADC clock cycles
  *   from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
  *   DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
@@ -1617,7 +1626,6 @@ class adc_model final : public dispatch_model<adc_model<Traits>, typename Traits
                         public internal_analog_listener
 {
   using base = dispatch_model<adc_model<Traits>, typename Traits::state>;
-  static_assert(not Traits::filter_gates_dma or not Traits::filter_field.empty());
   using base::claims;
   using base::ctx_;
   using base::desc_;
@@ -1870,7 +1878,6 @@ private:
   bool                                             left_shift_logged_{};
   bool                                             offset_logged_{};
   bool                                             gain_logged_{};
-  bool                                             watchdog_filter_dma_logged_{};
   bool                                             preselection_logged_{};
   bool                                             option_switch_logged_{};
   bool                                             clock_mode_logged_{};
@@ -2932,17 +2939,6 @@ template <typename Traits> void adc_model<Traits>::prepare()
     {
       check_automatic();
       prepare_injected();
-    }
-  }
-  if constexpr(Traits::filter_gates_dma)
-  {
-    if(get(regs_, watchdog1_) != 0
-       and get(regs_, *watchdog1_filter_) != 0
-       and dma() != dma_mode::off)
-    {
-      unmodelled(
-          watchdog_filter_dma_logged_, "ADC_HTR1",
-          "AWDFILT1 with DMNGT: DMA requests gated by the AWD1 window");
     }
   }
   for(std::size_t rank = 0; rank < length(); ++rank)
