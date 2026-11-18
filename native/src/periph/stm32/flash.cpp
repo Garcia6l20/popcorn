@@ -1,3 +1,4 @@
+#include "ecc_nmi_mask.hpp"
 #include "family_names.hpp"
 #include "flash_rows.hpp"
 #include "gtzc.hpp"
@@ -2393,6 +2394,10 @@ static_assert(flag_matches_roles(
  *   load that covers two half-words reports the lower one that qualifies. Once ECCD is set a new
  *   error updates nothing, and writing 1 to ECCD clears OTP_ECC and DATA_ECC with it, DATA_ECC
  *   inferred.
+ * - SBS_ECCNMIR.ECCNMI_MASK_EN set stops the NMI of the OTP double error, RM0481 7.9.10 and
+ *   14.5.19. ECCD and the record stay set under the mask, and the bit is read when the error
+ *   occurs, so a later write does not lower an NMI already raised, both inferred. A torn main
+ *   memory word always raises the NMI. Without an SBS model the NMI is not masked.
  * - A power cut during an OTP program programs the half-words done, tears the next one, which
  *   reads the old data ANDed with the new and is marked ECC-bad, and keeps the rest, inferred.
  *
@@ -2782,6 +2787,7 @@ private:
   };
   [[nodiscard]] auto        ecc_place_of(std::uint32_t line) const -> ecc_place;
   void                      record_double_error(ecc_place place, bool otp, std::uint32_t data);
+  [[nodiscard]] auto        ecc_nmi_masked() -> bool;
   void                      otp_read(std::uint32_t at, std::uint8_t size);
   void                      watch_otp();
   void                      tear_otp();
@@ -2884,6 +2890,8 @@ private:
   extension_flash_state                                             extension_;
   illegal_access_controller*                                        events_{};
   bool                                                              events_linked_{};
+  bool                                                              mask_linked_{};
+  ecc_nmi_mask_source const*                                        mask_source_{};
   mutable temporal_isolation const*                                 isolation_{};
   mutable bool                                                      isolation_resolved_{};
   std::unique_ptr<hide_filter>                                      hide_filter_;
@@ -4408,7 +4416,28 @@ void flash_model<Traits>::record_double_error(ecc_place place, bool otp, std::ui
     update(regs_, *field, data);
   }
   update(regs_, unit_[unit_role::ecc_detect], 1);
+  if(otp and ecc_nmi_masked())
+  {
+    return;
+  }
   ctx_.nmi.raise();
+}
+
+template <typename Traits> auto flash_model<Traits>::ecc_nmi_masked() -> bool
+{
+  if(not mask_linked_)
+  {
+    mask_linked_ = true;
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto const* const source = dynamic_cast<ecc_nmi_mask_source const*>(peer))
+      {
+        mask_source_ = source;
+        break;
+      }
+    }
+  }
+  return mask_source_ != nullptr and mask_source_->ecc_nmi_masked();
 }
 
 template <typename Traits> void flash_model<Traits>::watch_otp()

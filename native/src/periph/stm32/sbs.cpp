@@ -1,3 +1,4 @@
+#include "ecc_nmi_mask.hpp"
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
 #include "sbs_rows.hpp"
@@ -102,11 +103,14 @@ constexpr std::uint8_t                 top_level    = 3;
  *   MCLR and IPMEE clear on a written 1. IPMEE stays 0, the erase after a tamper or a product state
  *   regression is outside the model. The power-on value and the MCLR clear are read on an
  *   STM32H573.
- * - Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR` and `SBS_MESR` is storage: the
- *   functions of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, compensation cell, Class B and lock
- *   registers are not modelled. Coverage reports a firmware access to them as `storage_only`. A
- *   firmware write that lands on one logs one `model_warning` per register. Under `strict` it
- *   raises `ModelError` before the store. Firmware reads are silent.
+ * - `SBS_ECCNMIR.ECCNMI_MASK_EN` set stops the NMI of a double ECC error on an OTP load, RM0481
+ *   7.9.10 and 14.5.19. The FLASH model reads the bit when the error occurs, so a later write
+ *   does not lower an NMI already raised, and ECCD stays set under the mask, both inferred.
+ * - Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR`, `SBS_MESR` and `SBS_ECCNMIR`
+ *   is storage: the functions of the debug, RSS, EPOCH, FPU interrupt, compensation cell, Class B
+ *   and lock registers are not modelled. Coverage reports a firmware access to them as
+ *   `storage_only`. A firmware write that lands on one logs one `model_warning` per register.
+ *   Under `strict` it raises `ModelError` before the store. Firmware reads are silent.
  * - `SBS_PMCR` takes every access. RM0481 14.5.9 makes its PBx_FMP bits Secure with their GPIOB
  *   pin, ANASWVDD and IO_ANA_BOOST_EN with ADC12SEC and ETH_SEL_PHY with ETHSEC.
  * - HDPL starts at HDPL1 after every reset, the level of a user flash boot. The RSS boot at HDPL0
@@ -114,7 +118,8 @@ constexpr std::uint8_t                 top_level    = 3;
  */
 class sbs final : public dispatch_model<sbs, sbs_state>,
                   public temporal_isolation,
-                  public trustzone_aware
+                  public trustzone_aware,
+                  public ecc_nmi_mask_source
 {
 public:
   sbs(model_context& ctx, peripheral_desc const& desc);
@@ -127,6 +132,7 @@ public:
   [[nodiscard]] auto isolation_level() const -> std::uint8_t override;
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
+  [[nodiscard]] auto ecc_nmi_masked() const -> bool override;
 
   void increment_written(std::uint32_t old, std::uint32_t now);
   void erase_status_written(std::uint32_t old, std::uint32_t now);
@@ -142,6 +148,7 @@ private:
   field_ref                    level_;
   field_ref                    fpu_;
   field_ref                    erase_done_;
+  field_ref                    ecc_mask_;
   std::uint32_t                erase_flags_{};
   reg_ref                      security_;
   std::uint32_t                always_secure_{};
@@ -176,8 +183,8 @@ sbs::sbs(model_context& ctx, peripheral_desc const& desc)
 },
       regs_{ctx.regs}, increment_{field("SBS_HDPLCR", "INCR_HDPL")},
       level_{field("SBS_HDPLSR", "HDPL")}, fpu_{field("SBS_SECCFGR", "FPUSEC")},
-      erase_done_{field("SBS_MESR", "MCLR")}, security_{reg("SBS_SECCFGR")},
-      always_secure_{reg("SBS_RSSCMDR").offset},
+      erase_done_{field("SBS_MESR", "MCLR")}, ecc_mask_{field("SBS_ECCNMIR", "ECCNMI_MASK_EN")},
+      security_{reg("SBS_SECCFGR")}, always_secure_{reg("SBS_RSSCMDR").offset},
       secure_privileged_{reg("SBS_EPOCHSELCR").offset, reg("SBS_ECCNMIR").offset},
       debug_{reg("SBS_DBGCR").offset, reg("SBS_DBGLOCKR").offset},
       isolation_words_{increment_.offset, level_.offset},
@@ -291,7 +298,13 @@ auto sbs::storage_only(std::uint32_t offset) const -> bool
 {
   return offset != security_.offset
      and offset != erase_done_.offset
+     and offset != ecc_mask_.offset
      and not std::ranges::contains(isolation_words_, offset);
+}
+
+auto sbs::ecc_nmi_masked() const -> bool
+{
+  return get(regs_, ecc_mask_) != 0;
 }
 
 auto sbs::secure_word() const -> std::uint32_t

@@ -3463,3 +3463,125 @@ TEST_CASE(
   CHECK(r.read("FLASH_ECCDETR") == 0);
   CHECK_FALSE(nmi_line(r));
 }
+
+namespace
+{
+void mask_nmi(rig const& r, std::uint32_t value)
+{
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB3ENR", "SBSEN"}
+  });
+  auto const& desc  = r.f.target->peripheral("SBS").description();
+  auto const  found = popcorn::find_register(desc, "SBS_ECCNMIR");
+  REQUIRE(found != nullptr);
+  REQUIRE(r.f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+}
+
+auto nmi_active(rig const& r) -> bool
+{
+  auto const  saved  = r.f.target->snapshot();
+  auto const& images = saved.data().peripherals;
+  auto const  found =
+      std::ranges::find(images, std::string_view{"FLASH"}, &core::peripheral_image::peripheral);
+  REQUIRE(found != images.end());
+  return found->nmi_level != 0;
+}
+
+auto nmi_taken(std::vector<std::uint32_t> const& log) -> bool
+{
+  return std::ranges::contains(log, nmi_mark);
+}
+}
+
+TEST_CASE(
+    "RM0481 14.5.19: with ECCNMI_MASK_EN set a virgin OTP load records ECCD, OTP_ECC and DATA_ECC "
+    "and raises no NMI, with it clear the NMI is taken")
+{
+  rig r;
+  mask_nmi(r, 1);
+  auto const log = load_log(r, otp_base + 0x10);
+  CHECK_FALSE(nmi_taken(log));
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  CHECK(r.read("FLASH_ECCDR") == 0xffffu);
+  CHECK_FALSE(nmi_active(r));
+  rig clear;
+  mask_nmi(clear, 0);
+  CHECK(nmi_taken(load_log(clear, otp_base + 0x10)));
+}
+
+TEST_CASE("RM0481 7.9.10: a torn main-memory quad-word load with the mask set still raises the NMI")
+{
+  rig r;
+  mask_nmi(r, 1);
+  r.unlock();
+  r.control(pg);
+  r.store_words(sector2, {1, 2, 3, 4});
+  REQUIRE(r.status("BSY") == 1);
+  r.run_for(15 * us);
+  r.f.target->power_cycle();
+  mask_nmi(r, 1);
+  REQUIRE(r.f.run_to_stop().reason == stop_reason::user);
+  CHECK(nmi_taken(load_log(r, sector2)));
+}
+
+TEST_CASE(
+    "inferred: the mask written while ECCD is set and the NMI active does not lower it, clearing "
+    "ECCD does, a system reset clears the mask")
+{
+  rig r;
+  load_log(r, otp_base + 0x10);
+  REQUIRE(nmi_active(r));
+  mask_nmi(r, 1);
+  CHECK(nmi_active(r));
+  r.write("FLASH_ECCDETR", eccd);
+  CHECK_FALSE(nmi_active(r));
+  r.f.target->reset(popcorn::reset_kind::software);
+  REQUIRE(r.f.run_to_stop().reason == stop_reason::user);
+  CHECK(nmi_taken(load_log(r, otp_base + 0x10)));
+}
+
+TEST_CASE(
+    "a firmware write of SBS_ECCNMIR is served, absent from the storage_only coverage list, a "
+    "write of SBS_PMCR still is storage_only")
+{
+  rig r;
+  popcorn::testing::enable_clocks(
+      *r.f.target, {
+                       {"APB3ENR", "SBSEN"}
+  });
+  r.f.target->enable_coverage({}, true);
+  auto const&       desc = r.f.target->peripheral("SBS").description();
+  constexpr address stub = 0x2000'0600;
+  REQUIRE(r.f.target->mem().write(stub, 4, 0xbe01'6001).has_value());
+  r.f.set("r0", desc.base + popcorn::find_register(desc, "SBS_ECCNMIR")->offset);
+  r.f.set("r1", 1);
+  r.f.set("pc", stub | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  CHECK(r.f.target->coverage().unmodelled.empty());
+  r.f.set("r0", desc.base + popcorn::find_register(desc, "SBS_PMCR")->offset);
+  r.f.set("pc", stub | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  CHECK(r.f.target->coverage().unmodelled.size() == 1);
+}
+
+TEST_CASE(
+    "a snapshot with the mask set restores into a fresh machine that raises no NMI on a virgin "
+    "load, a machine with no SBS peer raises it")
+{
+  rig r;
+  mask_nmi(r, 1);
+  auto const taken = r.f.target->snapshot();
+  rig        other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  CHECK_FALSE(nmi_taken(load_log(other, otp_base + 0x10)));
+  auto options = options_for({});
+  options.models.erase("SBS");
+  stm32_fixture bare{h573(), firmware, std::move(options)};
+  REQUIRE(bare.run_to_stop().reason == stop_reason::user);
+  bare.set("r0", otp_base + 0x10);
+  bare.set("pc", sym(firmware, "read_word"));
+  REQUIRE(bare.run_to_stop().reason == stop_reason::user);
+  CHECK(nmi_taken(bare.log()));
+}

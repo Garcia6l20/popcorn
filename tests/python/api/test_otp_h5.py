@@ -24,6 +24,11 @@ def register(description: popcorn.PartDescription, name: str) -> int:
     return unit.base + unit.register(name).offset
 
 
+def register_of(description: popcorn.PartDescription, unit: str, name: str) -> int:
+    peripheral = next(p for p in description.peripherals if p.name == unit)
+    return peripheral.base + peripheral.register(name).offset
+
+
 def booted(part: str) -> tuple[popcorn.PartDescription, Machine]:
     description = mcu(part)
     m = Machine(description, image=popcorn.Image.elf(FLASH_ELF))
@@ -113,4 +118,21 @@ def test_a_firmware_load_of_virgin_otp_raises_the_nmi_and_a_host_write_suppresse
     assert m.periph.FLASH.FLASH_ECCDETR.ECCD == 1
     assert m.periph.FLASH.FLASH_ECCDETR.OTP_ECC == 1
     assert m.periph.FLASH.FLASH_ECCDETR.ADDR_ECC == 0x700
+    assert m.periph.FLASH.FLASH_ECCDR.DATA_ECC == 0xFFFF
+
+
+@pytest.mark.parametrize("part", H5_PARTS)
+def test_a_masked_virgin_otp_load_leaves_the_run_going_with_eccd_readable(part: str) -> None:
+    """RM0481 14.5.19: with ECCNMI_MASK_EN set the load records ECCD and takes no NMI."""
+    description, m = booted(part)
+    m.periph.RCC.RCC_APB3ENR.SBSEN = 1
+    m.mem.u32[register_of(description, "SBS", "SBS_ECCNMIR")] = 1
+    words = m.sym("words")
+    result = asyncio.run(
+        m.call("copy_words", words, OTP + 0x20, 1, budget=100_000, interrupts=True)
+    )
+    assert result.stop.reason is StopReason.USER
+    assert m.mem.u32[words] == 0xFFFF_FFFF
+    assert m.periph.FLASH.FLASH_ECCDETR.ECCD == 1
+    assert m.periph.FLASH.FLASH_ECCDETR.ADDR_ECC == 0x702
     assert m.periph.FLASH.FLASH_ECCDR.DATA_ECC == 0xFFFF
