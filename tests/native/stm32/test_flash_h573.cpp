@@ -2943,3 +2943,24 @@ TEST_CASE(
   CHECK(flags(r) == 0);
   CHECK(r.word(otp_base + 0x10) == 0xffff'ffffu);
 }
+
+TEST_CASE("a restored OTP vector of the wrong size is rebuilt before the next program indexes it")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x1234});
+  r.wait_idle();
+  auto state = otp_state(r);
+  state.otp_programmed.resize(1);
+  state.otp_bad.resize(1);
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(state);
+  r.f.target->model("FLASH")->load(bytes);
+  r.call("store_half", {otp_base + 0x500, 0x4321});
+  r.wait_idle();
+  auto const after = otp_state(r);
+  CHECK(after.otp_programmed.size() == 32);
+  CHECK(after.otp_bad.size() == 32);
+  CHECK((r.word(otp_base + 0x500) & 0xffff) == 0x4321);
+}

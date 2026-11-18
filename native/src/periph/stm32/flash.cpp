@@ -2195,13 +2195,13 @@ static_assert(flag_matches_roles(
  *   per half-word, DS14121 Table 52 states 31 us for 16 bits, the 32-bit double is inferred. A
  *   byte store is a bus error, RM0481 Table 81 footnote 1 and 7.3.9, where 7.3.7 says
  *   byte writes are ignored. A store at an odd address is a bus error, inferred. A store with PG
- * clear, with SER, BER or MER set, with an error flag pending or while the main write buffer is
- * open sets PGSERR and writes nothing, 7.9.4, the open buffer rule stated for a 16-bit store and
- * inferred for a 32-bit one. A Secure store sets the Secure WRPERR and attempts the ILAFM event,
- * Table 81 and 7.9.11. A half-word is programmed when firmware programmed it or it reads other than
- * 0xFFFF, inferred. A program of a programmed half-word writes the old data ANDed with the new and
- * marks the half-word ECC-bad, inferred, the data and the mark are the model's reading of "an ECC
- * error is generated and is therefore not supported" in 7.3.9.
+ *   clear, with SER, BER or MER set, with an error flag pending or while the main write buffer is
+ *   open sets PGSERR and writes nothing, 7.9.4, the open buffer rule stated for a 16-bit store and
+ *   inferred for a 32-bit one. A Secure store sets the Secure WRPERR and attempts the ILAFM event,
+ *   Table 81 and 7.9.11. A half-word is programmed when firmware programmed it or it reads other
+ *   than 0xFFFF, inferred. A program of a programmed half-word writes the old data ANDed with
+ *   the new and marks the half-word ECC-bad, inferred, the data and the mark are the model's
+ *   reading of "an ECC error is generated and is therefore not supported" in 7.3.9.
  *
  * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
  * and FLASH_SR, no TrustZone and no block registers.
