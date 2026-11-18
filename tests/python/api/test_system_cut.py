@@ -532,7 +532,9 @@ def test_a_stopped_break_takes_the_later_end_s_system_time(pair: Build, swap: bo
     assert stop.member == ("b" if swap else "a")
     tap = system.tap("a.USART1")
     later = max(system.time_of("a"), system.time_of("b"))
-    assert system.time_of("a") != system.time_of("b")
+    stopper = "b" if swap else "a"
+    assert system.time_of("a") == system.time_of("b")
+    assert system.time_of(stopper) == system.to_system(stopper, stop.stops[stopper].time)
     assert tap.break_line() == later
     assert tap.restore_line() == later
     with pytest.raises(ValueError, match="no cut is open"):

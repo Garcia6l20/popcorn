@@ -640,11 +640,12 @@ class System:
         the latest member's system time at construction, so ten `run(for_=ms(10))` equal one
         `run(for_=ms(100))`. Leaving a free run, `halt()` or the exit of `running()`, moves the
         target to the latest member system time at the halt point, and `for_` counts from
-        there. A member stop never moves the target: where it leaves the members depends on the
-        quantum. Each member stops at the first block boundary at or after the target, an idle
-        or halted one exactly at it.
+        there. A member stop never moves the target. Each member stops at the first block
+        boundary at or after the target, an idle or halted one exactly at it.
         A member stop on the way, FAULT, a breakpoint or a reset under `on_member_reset="stop"`,
-        ends the run there: the member waits at its stop, the others where the run left them.
+        ends the run there: the member waits at its stop, a halted member and a member asleep
+        below it stand at it, the others where the run left them, a position that depends on
+        the quantum.
         The next `run` releases it halted: its core executes nothing in system runs until its
         next goal or reset. A member released from its own goal's stop runs on from that stop.
 

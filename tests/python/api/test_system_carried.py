@@ -5,6 +5,7 @@ member threads."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import weakref
@@ -13,7 +14,7 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn import Stop, StopReason, System, UartLink
+from popcorn import Stop, StopReason, System, SystemStop, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .conftest import collected
@@ -309,6 +310,174 @@ def test_an_idle_member_with_a_goal_stops_exactly_at_the_target(
         return system.time_of("a"), b.time
 
     across(pair, body, b_entry="idle")
+
+
+MEMBER_STOPS = [
+    pytest.param("link_tx", {"until": "wait_complete"}, 578_250_000, id="on-grid"),
+    pytest.param("link_tx_mid_switch", {"until": "wait_complete"}, 1_532_225_000, id="off-grid"),
+    pytest.param("link_tx", {"for_": us(600)}, 600_000_000, id="window-edge"),
+]
+
+
+@pytest.mark.parametrize(("a_entry", "goal", "stop_ps"), MEMBER_STOPS)
+def test_a_goal_owning_sleeper_stands_exactly_at_another_member_s_stop(
+    pair: Build, a_entry: str, goal: dict[str, Any], stop_ps: int
+) -> None:
+    async def body(system: System) -> object:
+        a, b = system.members["a"], system.members["b"]
+        async with asyncio.timeout(5):
+            sleeping = asyncio.create_task(b.run(for_=ms(5)))
+            try:
+                a_stop = await a.run(**goal)
+                assert system.to_system("a", a_stop.time) == VirtualTime(stop_ps)
+                at = system.time_of("b")
+                assert at == VirtualTime(stop_ps)
+            except BaseException:
+                sleeping.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeping
+                raise
+            a.halt()
+            b_stop = await sleeping
+        assert b_stop.reason is StopReason.TIME
+        assert system.to_system("b", b_stop.time) == VirtualTime(ms(5).ps)
+        return point(a_stop), at, point(b_stop)
+
+    across(pair, body, a_entry=a_entry, b_entry="idle")
+
+
+def test_a_goal_owning_sleeper_whose_goal_ends_first_stops_at_its_goal_time(pair: Build) -> None:
+    async def body(system: System) -> object:
+        a, b = system.members["a"], system.members["b"]
+        async with asyncio.timeout(5):
+            a_stop, b_stop = await asyncio.gather(a.run(until="wait_complete"), b.run(for_=us(300)))
+        assert (a_stop.reason, b_stop.reason) == (StopReason.ADDRESS, StopReason.TIME)
+        assert system.to_system("b", b_stop.time) == VirtualTime(us(300).ps)
+        assert system.time_of("b") == VirtualTime(578_250_000)
+        assert system.to_system("a", a_stop.time) == VirtualTime(578_250_000)
+        return point(a_stop), point(b_stop), system.time_of("b")
+
+    across(pair, body, a_entry="link_tx", b_entry="idle")
+
+
+def test_a_sleeper_whose_goal_ends_after_the_stop_in_its_window_stands_at_the_stop(
+    pair: Build,
+) -> None:
+    async def body(system: System) -> object:
+        a, b = system.members["a"], system.members["b"]
+        async with asyncio.timeout(5):
+            sleeping = asyncio.create_task(b.run(for_=VirtualDuration(579_500_000)))
+            try:
+                a_stop = await a.run(until="wait_complete")
+                assert system.to_system("a", a_stop.time) == VirtualTime(578_250_000)
+                at = system.time_of("b")
+                assert at == VirtualTime(578_250_000)
+            except BaseException:
+                sleeping.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeping
+                raise
+            a.halt()
+            b_stop = await sleeping
+        assert b_stop.reason is StopReason.TIME
+        assert system.to_system("b", b_stop.time) == VirtualTime(579_500_000)
+        return point(a_stop), at, point(b_stop)
+
+    across(pair, body, a_entry="link_tx", b_entry="idle")
+
+
+@pytest.mark.parametrize(
+    ("a_entry", "stop_ps"),
+    [
+        pytest.param("link_tx", 1_826_800_000, id="on-grid"),
+        pytest.param("link_tx_mid_switch", None, id="off-grid"),
+    ],
+)
+def test_a_sleeping_member_of_a_system_run_stands_exactly_at_another_member_s_stop(
+    pair: Build, a_entry: str, stop_ps: int | None
+) -> None:
+    async def body(system: System) -> object:
+        async with asyncio.timeout(5):
+            stop = await system.run(for_=ms(3))
+        assert stop.member == "a"
+        at = system.to_system("a", stop.stops["a"].time)
+        if stop_ps is None:
+            assert at.ps % 250_000 != 0
+        else:
+            assert at == VirtualTime(stop_ps)
+        assert system.time_of("b") == at
+        return stop.reason, at
+
+    across(pair, body, a_entry=a_entry, b_entry="idle")
+
+
+def test_a_system_run_ends_exactly_at_its_time_with_a_member_asleep(pair: Build) -> None:
+    async def body(system: System) -> object:
+        async with asyncio.timeout(5):
+            stop = await system.run(for_=VirtualDuration(500_250_000))
+        assert stop.reason is StopReason.TIME
+        assert VirtualTime(500_250_000) <= system.time_of("a") < VirtualTime(501_250_000)
+        assert system.time_of("b") == VirtualTime(500_250_000)
+        return stop.reason, system.time_of("a"), system.time_of("b")
+
+    across(pair, body, a_entry="link_tx", b_entry="idle")
+
+
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
+def test_a_sleeper_carried_past_the_stop_by_a_peripheral_event_stands_past_it(
+    pair: Build, slice_instructions: int, third: VirtualDuration | None
+) -> None:
+    system = pair(
+        slice_instructions, third, a_entry="link_tx", b_entry="idle", b_models={"TIM6": Ticker}
+    )
+
+    async def body() -> SystemStop:
+        async with asyncio.timeout(5):
+            return await system.run(for_=ms(3))
+
+    stop = asyncio.run(body())
+    assert stop.member == "a"
+    stopped = system.to_system("a", stop.stops["a"].time)
+    assert stopped == VirtualTime(1_826_800_000)
+    quantum = (third or L).ps
+    barrier = -(-stopped.ps // quantum) * quantum
+    period = us(ticker(system.members["b"]).period_us).ps
+    tick = tick_due(system, "b", system.to_local("b", stopped).ps // period + 1)
+    if tick <= barrier:
+        assert tick <= system.time_of("b").ps <= barrier
+    else:
+        assert system.time_of("b") == stopped
+
+
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
+def test_a_sleeper_carried_past_the_stop_by_a_posted_callback_stands_past_it(
+    pair: Build, slice_instructions: int, third: VirtualDuration | None
+) -> None:
+    system = pair(slice_instructions, third, a_entry="link_tx", b_entry="idle")
+    b = system.members["b"]
+    stopped = VirtualTime(1_826_800_000)
+    stamp = VirtualTime(stopped.ps + us(1).ps)
+    ran: list[VirtualTime] = []
+    posted = b.loop.post(lambda: ran.append(b.time), at=system.to_local("b", stamp))
+
+    async def body() -> SystemStop:
+        async with asyncio.timeout(5):
+            stop = await system.run(for_=ms(3))
+            at = system.time_of("b")
+            await to(system, VirtualTime(stamp.ps + us(5).ps))
+            await posted
+        quantum = (third or L).ps
+        barrier = -(-stopped.ps // quantum) * quantum
+        if stamp.ps <= barrier:
+            assert stamp <= at <= VirtualTime(barrier)
+        else:
+            assert at == stopped
+        return stop
+
+    stop = asyncio.run(body())
+    assert stop.member == "a"
+    assert system.to_system("a", stop.stops["a"].time) == stopped
+    assert len(ran) == 1
 
 
 def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_goal(

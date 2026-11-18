@@ -233,8 +233,8 @@ class SystemStop:
             member stop, the point where every member was quiescent for IDLE.
         stops: Each member's own stop at the end of the run, keyed by name. For TIME and IDLE
             every member's, a TIME or IDLE stop at its position. For a member stop only that
-            member's: the others stand where the run left them, a position that depends on the
-            quantum.
+            member's: a halted member and a member asleep below the stop stand at it, the
+            others where the run left them, a position that depends on the quantum.
     """
 
     reason: StopReason

@@ -379,8 +379,10 @@ public:
 
   /**
    * @brief System time of member @p member, parked. After a pause that delivered a member
-   *        stop at P, a member whose goal runs and whose core sleeps below P stands at P. A
-   *        member past P stands where it stopped.
+   *        stop at P, a member whose core sleeps below P, in its own goal or in a resume with a
+   *        system_until, stands at P. A member that passed P in the window of the stop, on its
+   *        own instructions, on a peripheral event or on a host callback stamped there, stands
+   *        where the run left it, a position that depends on the quantum.
    * @throws machine_running while a resume is in flight.
    */
   [[nodiscard]] auto time_of(held_system const& held, std::size_t member) const -> sys_time

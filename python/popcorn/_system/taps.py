@@ -146,8 +146,9 @@ class UartTap:
 
     - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone
       but a callback of another machine, see the last item. Now is the later of the two ends'
-      system times, `System.time_of`. After a run a member stop ended at P, a member that runs
-      a goal and sleeps below P stands at P. A member that ran past P stands where the run left
+      system times, `System.time_of`. After a member stop at P, a member that sleeps below P,
+      in its own goal or in a system run, stands at P. A member that passed P, on its own
+      instructions, on a peripheral event or on a posted callback, stands where the run left
       it, a position that depends on the quantum, and so does now. `cut` accepts a start from
       now on.
     - While the system runs, between two pauses of `running()` too, or with a member goal

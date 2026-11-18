@@ -319,12 +319,17 @@ struct world
     sys->start(held, offsets);
   }
 
-  auto resume(std::int64_t until) -> core::pause
+  auto resume(std::int64_t until, std::optional<std::chrono::seconds> limit = {}) -> core::pause
   {
-    core::host_future<core::pause> pending;
-    {
+    auto const pending = [&] {
       auto const held = sys->lock();
-      pending         = sys->resume(held, core::sys_time{until});
+      return sys->resume(held, core::sys_time{until});
+    }();
+    if(limit and not pending.wait_for(*limit))
+    {
+      sys->request_pause();
+      static_cast<void>(pending.get());
+      FAIL("no pause within the wall-time limit");
     }
     auto stopped = pending.get();
     pauses.push_back(stopped);
@@ -1099,7 +1104,8 @@ TEST_CASE("an injection queued while every member sleeps is received, then the s
     w.add("link_rx");
     w.link(0, 1, latency_20);
     w.host(how);
-    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    auto const first = w.resume(600 * us_ps, std::chrono::seconds{60});
+    REQUIRE(first.reason == core::pause_reason::system_time);
     core::host_future<core::goal_reached> listening;
     {
       auto const held = w.sys->lock();
@@ -1108,10 +1114,15 @@ TEST_CASE("an injection queued while every member sleeps is received, then the s
       std::vector<std::uint16_t> const data{0x7e};
       REQUIRE(w.wires[0]->inject(data, at, std::nullopt).has_value());
     }
-    core::host_future<core::pause> pending;
-    {
+    auto const pending = [&] {
       auto const held = w.sys->lock();
-      pending         = w.sys->resume(held);
+      return w.sys->resume(held);
+    }();
+    if(not pending.wait_for(std::chrono::seconds{60}))
+    {
+      w.sys->request_pause();
+      static_cast<void>(pending.get());
+      FAIL("no pause within the wall-time limit");
     }
     auto const stopped = pending.get();
     CHECK(stopped.reason == core::pause_reason::idle);
@@ -1121,6 +1132,50 @@ TEST_CASE("an injection queued while every member sleeps is received, then the s
         std::ranges::count_if(
             got, [](entry const& one) { return one.kind == link_byte and one.data == 0x7e; })
         == 1);
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a member with a time goal asleep below another member's stop stands exactly at it")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("link_tx_mid_switch");
+    w.add("idle");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    core::host_future<core::goal_reached> sending;
+    core::host_future<core::goal_reached> sleeping;
+    core::host_future<core::pause>        pending;
+    {
+      auto const held = w.sys->lock();
+      sending         = w.sys->post_goal(held, 0, {.until = sym("usart_ll", "wait_complete")});
+      sleeping        = w.sys->post_goal(held, 1, {.until_time = core::sys_time{5 * ms_ps}});
+      pending         = w.sys->resume(held);
+    }
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    auto const reached = sending.get();
+    CHECK(reached.stopped.reason == stop_reason::address);
+    CHECK(reached.at.ps % (us_ps / 4) != 0);
+    {
+      auto const held = w.sys->lock();
+      CHECK(w.sys->time_of(held, 1) == reached.at);
+      w.sys->release(held, 0, true);
+      pending = w.sys->resume(held);
+    }
+    CHECK(pending.get().reason == core::pause_reason::delivered);
+    auto const woke = sleeping.get();
+    CHECK(woke.stopped.reason == stop_reason::time);
+    CHECK(woke.at.ps == 5 * ms_ps);
     auto const seen = w.dump();
     if(reference)
     {

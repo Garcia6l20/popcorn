@@ -39,9 +39,12 @@ is the member's `Machine`, so `var`, `periph`, `reg` and the hooks work as on a 
 A member's `Machine.time` counts from its own reset. `system.time_of(name)` gives its system
 time, and `system.to_local()` and `system.to_system()` convert between the two.
 
-After a member stop at system time `P`, every other member that runs a goal and sleeps below
-`P` stands at `P`: its `system.time_of(name)` is `P`. A member that ran past `P`, busy or asleep,
-stands where it stopped, a position that depends on the quantum.
+After a member stop at system time `P`, every other member that sleeps below `P`, while it runs
+its own goal, such as `b.run(for_=ms(5))`, or as part of `system.run()`, stands at `P`: its
+`system.time_of(name)` is `P`, also when `P` falls inside a cycle of its core clock or its own goal
+ends after `P` in the same quantum. A member that passes `P` in the quantum of the stop, on its
+own instructions, on a peripheral event or on a callback posted to it with `loop.post(at=)`,
+stands where the run left it, a position that depends on the quantum.
 
 A member that has no goal while another one runs one is halted. Its core executes nothing, and
 its clocks, peripherals and DMA follow the system time. It stands exactly at the time the running

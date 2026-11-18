@@ -68,18 +68,27 @@ enum class phase : std::uint8_t
   after_b,
   idle_to,
   park,
+  catch_up,
   sleeping,
 };
 
 struct report
 {
-  sys_time           position{};
-  bool               done{};
-  bool               quiescent{};
-  bool               has_work{};
-  bool               clean{};
-  bool               quiet{};
-  std::vector<entry> found{};
+  sys_time             position{};
+  bool                 done{};
+  bool                 quiescent{};
+  bool                 has_work{};
+  bool                 clean{};
+  bool                 quiet{};
+  std::vector<entry>   found{};
+  std::optional<entry> ends{};
+};
+
+struct lag_move
+{
+  sys_time bound{};
+  bool     exact{};
+  sys_time to{};
 };
 
 struct decision
@@ -146,6 +155,7 @@ struct system::impl
     bool                                                                  released{};
     std::optional<sys_time>                                               held_to{};
     bool                                                                  resolved{};
+    std::optional<lag_move>                                               lag{};
     bool                                                                  failed{};
     bool                                                                  warned_reset{};
     report                                                                rep{};
@@ -166,6 +176,11 @@ struct system::impl
     [[nodiscard]] auto running() const noexcept -> bool
     {
       return goal and not resolved and not failed;
+    }
+
+    [[nodiscard]] auto timed() const noexcept -> bool
+    {
+      return goal and not goal->system and (goal->goal.until_time or goal->goal.cap);
     }
   };
 
@@ -270,7 +285,8 @@ public:
       switch(phase_)
       {
         case phase::begin:
-          phase_ = phase::run;
+          phase_   = phase::run;
+          lag_off_ = false;
           if(target.core_held() == one.goal.has_value())
           {
             target.hold_core(not one.goal);
@@ -307,6 +323,7 @@ public:
           {
             drain(sys_.chosen.window, sys_.chosen.barrier, sys_.chosen.next);
             one.rep.quiescent = false;
+            lag_off_          = false;
             phase_            = phase::run;
             continue;
           }
@@ -340,11 +357,19 @@ public:
               drain(sys_.chosen.window, sys_.chosen.barrier, sys_.chosen.next);
             }
             one.rep.quiescent = false;
+            lag_off_          = false;
             phase_            = phase::run;
             continue;
           }
-          phase_ = sys_.chosen.idle ? phase::idle_to : sys_.parks(one) ? phase::park : phase::begin;
+          phase_ = sys_.chosen.idle ? phase::idle_to
+                 : one.lag          ? phase::catch_up
+                 : sys_.parks(one)  ? phase::park
+                                    : phase::begin;
           moved_from_.reset();
+          if(phase_ == phase::catch_up)
+          {
+            aim_catch_up();
+          }
           if(phase_ == phase::begin)
           {
             return std::nullopt;
@@ -380,6 +405,18 @@ public:
           }
           phase_ = phase::begin;
           return std::nullopt;
+        case phase::catch_up:
+          if(moves_on(target, catch_to_))
+          {
+            window_ = sys_.window;
+            return request_to(catch_bound_, false, true, true, catch_exact_);
+          }
+          if(not one.goal or not one.resolved or position(target) >= one.lag->to)
+          {
+            one.lag.reset();
+          }
+          phase_ = phase::begin;
+          return std::nullopt;
       }
     }
   }
@@ -408,6 +445,11 @@ public:
     auto const& stopped = *result.stopped;
     if(stopped.reason == stop_reason::idle)
     {
+      if(lagging_ and not lags_at(target))
+      {
+        lag_off_ = true;
+        return;
+      }
       one.rep.quiescent = true;
       return;
     }
@@ -485,13 +527,18 @@ private:
     {
       return sys_.chosen.target;
     }
+    if(phase_ == phase::catch_up and at < catch_to_)
+    {
+      return catch_to_;
+    }
     return at;
   }
 
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
     auto& one = sys_.slots[index_];
-    if(one.failed and (phase_ == phase::park or phase_ == phase::idle_to))
+    if(one.failed
+       and (phase_ == phase::park or phase_ == phase::idle_to or phase_ == phase::catch_up))
     {
       return;
     }
@@ -549,7 +596,7 @@ private:
 
   void resolve_time(machine& target)
   {
-    auto const& one = sys_.slots[index_];
+    auto& one = sys_.slots[index_];
     if(not one.running())
     {
       return;
@@ -558,6 +605,61 @@ private:
     if(bound and position(target) >= bound->first and one.held_to and *one.held_to >= bound->first)
     {
       resolve(target, stop_here(target, stop_reason::time, bound->second ? "goal cap" : ""));
+      return;
+    }
+    if(bound and one.lag and one.lag->exact and one.lag->bound == bound->first)
+    {
+      auto       stopped   = stop_here(target, stop_reason::time, bound->second ? "goal cap" : "");
+      auto const local     = one.map.to_local(bound->first);
+      stopped.instructions = target.virtual_clock().to_icount(local);
+      stopped.time         = local;
+      one.rep.ends         = entry{
+          .at      = bound->first,
+          .member  = index_,
+          .kind    = entry_kind::stopped,
+          .stopped = std::move(stopped)};
+    }
+  }
+
+  [[nodiscard]] auto lags_at(machine const& target) -> bool
+  {
+    auto&       one   = sys_.slots[index_];
+    auto const& clock = target.virtual_clock();
+    auto const  local = one.map.to_local(lag_bound_);
+    auto const  count = clock.to_icount(local);
+    auto const  next  = target.next_event();
+    if(count.value <= clock.now().value or (next and *next <= count))
+    {
+      return false;
+    }
+    auto const epoch = clock.epoch_time();
+    auto const ended = vtime{
+        epoch.ps
+        + vtime_from_instructions(
+              count.value - clock.to_icount(epoch).value, clock.instruction_hz())
+              .ps};
+    one.lag = lag_move{
+        .bound = lag_bound_,
+        .exact = lag_exact_,
+        .to    = lag_exact_ ? lag_bound_ : one.map.to_system(ended)};
+    return true;
+  }
+
+  void aim_catch_up()
+  {
+    auto const& one  = sys_.slots[index_];
+    auto const& head = sys_.chosen.head;
+    catch_to_        = one.lag->to;
+    catch_bound_     = one.lag->bound;
+    catch_exact_     = one.lag->exact;
+    if(head
+       and head->kind == entry_kind::stopped
+       and head->member != index_
+       and head->at < catch_to_)
+    {
+      catch_to_    = head->at;
+      catch_bound_ = head->at;
+      catch_exact_ = true;
     }
   }
 
@@ -610,6 +712,7 @@ private:
       bool     exact        = false) -> slice_request
   {
     auto& one = sys_.slots[index_];
+    lagging_  = false;
     enter_windows();
     one.held_to = bound;
     held_last_  = hold;
@@ -686,15 +789,21 @@ private:
     {
       bound = earlier_of(bound, timed->first);
     }
-    auto const quiescent =
-        bound == sys_.pending and not timed and not sys_.until and not(at and *at <= bound);
     auto const stamped = at and *at <= bound;
     auto const final   = (sys_.until and bound == *sys_.until) or (timed and bound == timed->first);
+    auto const plain   = bound == sys_.pending and not timed and not sys_.until and not stamped;
+    auto const lags =
+        not plain and not stamped and not lag_off_ and (bound == sys_.pending or final);
+    one.lag.reset();
     if(at)
     {
       bound = earlier_of(bound, *at);
     }
-    return toward(target, bound, quiescent, final and not stamped);
+    auto request = toward(target, bound, plain or lags, final and not stamped);
+    lagging_     = request and lags and request->stop_quiescent;
+    lag_bound_   = bound;
+    lag_exact_   = final and not stamped;
+    return request;
   }
 
   auto toward(machine const& target, sys_time bound, bool quiescent, bool exact)
@@ -737,7 +846,7 @@ private:
       system::impl::completion const& complete) -> bool
   {
     auto& one          = sys_.slots[index_];
-    one.rep.position   = position(target);
+    one.rep.position   = one.lag ? one.lag->to : position(target);
     one.rep.done       = sys_.until and one.rep.position >= *sys_.until;
     auto const next    = target.next_event();
     auto const stamped = stamp_of(stamp);
@@ -806,6 +915,13 @@ private:
   std::uint64_t           window_{};
   vtime                   until_last_{};
   std::optional<sys_time> moved_from_{};
+  bool                    lagging_{};
+  bool                    lag_off_{};
+  sys_time                lag_bound_{};
+  bool                    lag_exact_{};
+  sys_time                catch_to_{};
+  sys_time                catch_bound_{};
+  bool                    catch_exact_{};
   std::atomic<bool>       aborted_{false};
 
   std::chrono::steady_clock::time_point left_{};
@@ -999,7 +1115,7 @@ auto system::impl::idle_entry() const -> std::optional<entry>
     return not one.failed
        and not one.resolved
        and one.rep.clean
-       and (not one.goal or one.rep.quiescent);
+       and (not one.goal or (one.rep.quiescent and not one.timed()));
   });
   if(not idle)
   {
@@ -1091,6 +1207,17 @@ void system::impl::complete_a() noexcept
   account();
   woke.store(false);
   merge_found();
+  for(auto& one : slots)
+  {
+    if(auto ends = std::exchange(one.rep.ends, std::nullopt))
+    {
+      if(held.empty() or not earlier(held.front(), *ends))
+      {
+        one.resolved = true;
+        held.insert(std::ranges::upper_bound(held, *ends, earlier), std::move(*ends));
+      }
+    }
+  }
   chosen = decision{.window = window, .barrier = pending, .next = {pending.ps + q.ps}};
   if(auto const head = best_entry())
   {
@@ -1433,6 +1560,7 @@ void system::withdraw(held_system const&, std::size_t member)
   auto const withdrawn = std::move(one.goal->promise);
   one.goal.reset();
   one.resolved = false;
+  one.lag.reset();
   std::ignore =
       withdrawn.fail(std::make_exception_ptr(operation_cancelled("the goal was withdrawn")));
 }
