@@ -10,6 +10,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <initializer_list>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -2530,7 +2532,7 @@ TEST_CASE("an H5 flash whose banks need more block registers than the H5 traits 
   auto desc = h573();
   for(auto& region : desc.regions)
   {
-    if(region.controller == "FLASH")
+    if(region.controller == "FLASH" and region.name.starts_with("Flash"))
     {
       region.size *= 2;
     }
@@ -2546,4 +2548,370 @@ TEST_CASE("an H5 flash whose banks need more block registers than the H5 traits 
   {
     CHECK(error.expected() == "8 block registers per bank, the traits hold 4");
   }
+}
+
+namespace
+{
+constexpr address       otp_base = 0x08ff'f000;
+constexpr std::uint32_t otp_half = 31 * us;
+
+auto flags(rig const& r) -> std::uint32_t
+{
+  return r.read("FLASH_NSSR") & all_errors;
+}
+
+struct otp_held_store
+{
+  std::uint32_t addr{};
+  std::uint8_t  size{};
+  std::uint32_t value{};
+  std::uint32_t control{};
+  bool          dma{};
+};
+
+struct otp_flash_state
+{
+  bool                          first_key{};
+  bool                          locked_up{};
+  bool                          option_first_key{};
+  bool                          option_locked_up{};
+  std::array<std::uint32_t, 32> buffer{};
+  std::uint32_t                 filled{};
+  bool                          burst{};
+  std::uint32_t                 buffer_addr{};
+  std::uint8_t                  running{};
+  std::uint32_t                 target{};
+  std::uint32_t                 length{};
+  std::uint32_t                 generation{};
+  std::vector<otp_held_store>   held{};
+  std::uint64_t                 due_ps{};
+  std::vector<std::uint32_t>    torn{};
+  std::vector<std::uint32_t>    wrp{};
+  std::vector<std::uint32_t>    wrp_active{};
+  std::vector<std::uint32_t>    otp_programmed{};
+  std::vector<std::uint32_t>    otp_bad{};
+};
+
+auto otp_state(rig const& r) -> otp_flash_state
+{
+  std::vector<std::byte> saved;
+  r.f.target->model("FLASH")->save(saved);
+  auto const state =
+      reflex::serde::bson::deserializer{std::span<std::byte const>{saved}}.load<otp_flash_state>();
+  std::vector<std::byte> redumped;
+  reflex::serde::bson::serializer{redumped}.dump(state);
+  REQUIRE(redumped == saved);
+  return state;
+}
+}
+
+TEST_CASE(
+    "RM0481 7.3.9: with PG a half-word store to the OTP programs one half-word for 31 us, a word "
+    "store two for 62 us inferred, EOP sets and WBNE stays clear")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  auto start = r.now();
+  r.call("store_half", {otp_base, 0x1234});
+  CHECK(r.status("BSY") == 1);
+  CHECK(r.status("WBNE") == 0);
+  r.wait_idle();
+  CHECK(r.now() - start >= otp_half);
+  CHECK(r.now() - start < otp_half + 5 * us);
+  CHECK((r.word(otp_base) & 0xffff) == 0x1234);
+  CHECK((r.word(otp_base) >> 16) == 0xffffu);
+  CHECK((r.read("FLASH_NSSR") & eop) != 0);
+  r.clear();
+  start = r.now();
+  r.store_words(otp_base + 4, {0xa1b2'c3d4});
+  r.wait_idle();
+  CHECK(r.now() - start >= 2 * otp_half);
+  CHECK(r.now() - start < 2 * otp_half + 5 * us);
+  CHECK(r.word(otp_base + 4) == 0xa1b2'c3d4u);
+  CHECK(flags(r) == 0);
+}
+
+TEST_CASE(
+    "RM0481 7.3.9 note and Table 81 footnote 1: a byte store to the OTP is a bus error, no flag, "
+    "nothing written, with BSY clear and with BSY set, 7.3.7 says ignored")
+{
+  for(bool const busy : {false, true})
+  {
+    CAPTURE(busy);
+    rig r;
+    r.unlock();
+    r.control(pg);
+    if(busy)
+    {
+      r.call("store_half", {otp_base, 0x1234});
+      REQUIRE(r.status("BSY") == 1);
+    }
+    r.f.set("r0", otp_base + 8);
+    r.f.set("r1", 0x12);
+    r.f.set("pc", sym(firmware, "store_byte"));
+    auto const stopped = r.f.run_to_stop({.max_instructions = icount{2000}});
+    CHECK(stopped.reason != stop_reason::user);
+    CHECK(flags(r) == 0);
+    r.wait_idle();
+    CHECK(r.word(otp_base + 8) == 0xffff'ffffu);
+  }
+}
+
+TEST_CASE(
+    "RM0481 7.9.4: an OTP store with PG clear, with SER, BER or MER set, with a flag pending or "
+    "with the main buffer open sets PGSERR and writes nothing, the open buffer inferred for a word")
+{
+  rig r;
+  r.unlock();
+  SUBCASE("PG clear")
+  {
+    r.call("store_half", {otp_base, 0x1234});
+  }
+  SUBCASE("SER")
+  {
+    r.control(pg | ser);
+    r.call("store_half", {otp_base, 0x1234});
+  }
+  SUBCASE("BER")
+  {
+    r.control(pg | ber);
+    r.call("store_half", {otp_base, 0x1234});
+  }
+  SUBCASE("MER")
+  {
+    r.control(pg | mer);
+    r.call("store_half", {otp_base, 0x1234});
+  }
+  SUBCASE("a flag pending")
+  {
+    r.call("store_half", {sector2, 0x12});
+    REQUIRE(flags(r) != 0);
+    r.control(pg);
+    r.call("store_half", {otp_base, 0x1234});
+  }
+  SUBCASE("the main buffer open, a half-word store")
+  {
+    r.control(pg);
+    r.call("store_half", {sector2, 0x1234});
+    REQUIRE(r.status("WBNE") == 1);
+    r.call("store_half", {otp_base, 0x1234});
+    CHECK(r.status("WBNE") == 0);
+  }
+  SUBCASE("the main buffer open, a word store")
+  {
+    r.control(pg);
+    r.call("store_half", {sector2, 0x1234});
+    REQUIRE(r.status("WBNE") == 1);
+    r.store_words(otp_base, {0x1234});
+  }
+  CHECK(r.status("PGSERR") == 1);
+  CHECK(r.status("BSY") == 0);
+  CHECK(r.word(otp_base) == 0xffff'ffffu);
+}
+
+TEST_CASE(
+    "inferred: programming a half-word again writes the old data ANDed with the new and marks it "
+    "bad, a first program of 0xFFFF marks it programmed only, no flag")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x1234});
+  r.wait_idle();
+  auto state = otp_state(r);
+  REQUIRE(state.otp_programmed.size() == 32);
+  CHECK(state.otp_programmed[0] == 1);
+  CHECK(state.otp_bad[0] == 0);
+  r.call("store_half", {otp_base, 0x00ff});
+  r.wait_idle();
+  CHECK((r.word(otp_base) & 0xffff) == 0x0034);
+  state = otp_state(r);
+  CHECK(state.otp_bad[0] == 1);
+  r.call("store_half", {otp_base + 2, 0xffff});
+  r.wait_idle();
+  state = otp_state(r);
+  CHECK(state.otp_programmed[0] == 3);
+  CHECK(state.otp_bad[0] == 1);
+  r.call("store_half", {otp_base + 2, 0x1234});
+  r.wait_idle();
+  state = otp_state(r);
+  CHECK(state.otp_bad[0] == 3);
+  CHECK(flags(r) == 0);
+}
+
+TEST_CASE("inferred: a half-word the host wrote is programmed, one the host left at 0xFFFF is not")
+{
+  rig r;
+  r.unlock();
+  REQUIRE(r.f.target->mem().write(otp_base, 2, 0x1234).has_value());
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x00ff});
+  r.wait_idle();
+  r.call("store_half", {otp_base + 2, 0x00ff});
+  r.wait_idle();
+  CHECK(r.word(otp_base) == 0x00ff'0034u);
+  auto const state = otp_state(r);
+  CHECK(state.otp_bad[0] == 1);
+  CHECK(state.otp_programmed[0] == 3);
+}
+
+TEST_CASE(
+    "inferred: a second OTP store issued while BSY is set is applied when BSY clears, in order")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.store_words(otp_base + 0x10, {0x1111'1111, 0x2222'2222, 0x3333'3333});
+  r.wait_idle();
+  CHECK(
+      r.words(otp_base + 0x10, 3)
+      == std::vector<std::uint32_t>{0x1111'1111, 0x2222'2222, 0x3333'3333});
+  CHECK(flags(r) == 0);
+}
+
+TEST_CASE("every reset kind and a power cycle keep the OTP arrays, a power cut drops the program")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base + 2, 0x1234});
+  r.wait_idle();
+  r.call("store_half", {otp_base + 2, 0x0f0f});
+  r.wait_idle();
+  auto const before = otp_state(r);
+  REQUIRE(before.otp_bad[0] == 2);
+  for(auto const kind :
+      {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::watchdog,
+       popcorn::reset_kind::option_load, popcorn::reset_kind::power_on})
+  {
+    r.f.target->reset(kind);
+    auto const after = otp_state(r);
+    CHECK(after.otp_programmed == before.otp_programmed);
+    CHECK(after.otp_bad == before.otp_bad);
+  }
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base + 8, 0x1234});
+  REQUIRE(r.status("BSY") == 1);
+  r.f.target->power_cycle();
+  CHECK(r.word(otp_base + 8) == 0xffff'ffffu);
+  auto const cut = otp_state(r);
+  CHECK(cut.otp_programmed == before.otp_programmed);
+  CHECK(cut.otp_bad == before.otp_bad);
+  CHECK(cut.running == 0);
+}
+
+TEST_CASE(
+    "a snapshot taken while an OTP program is BSY completes it after a restore into a fresh "
+    "machine, one taken after programs keeps both arrays")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x1234});
+  r.wait_idle();
+  r.call("store_half", {otp_base, 0x00ff});
+  r.wait_idle();
+  r.call("store_half", {otp_base + 4, 0xabcd});
+  REQUIRE(r.status("BSY") == 1);
+  auto const taken = r.f.target->snapshot();
+  r.wait_idle();
+  rig other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  CHECK(other.status("BSY") == 1);
+  CHECK(other.word(otp_base + 4) == 0xffff'ffffu);
+  other.wait_idle();
+  CHECK((other.word(otp_base + 4) & 0xffff) == 0xabcd);
+  auto const state = otp_state(other);
+  CHECK(state.otp_programmed[0] == 0x5);
+  CHECK(state.otp_bad[0] == 0x1);
+}
+
+TEST_CASE("OTP traffic leaves the 128-bit program of the main memory unchanged")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x1234});
+  r.wait_idle();
+  r.control(0);
+  r.program(sector2, pattern(4));
+  CHECK(r.words(sector2, 4) == pattern(4));
+  CHECK(flags(r) == 0);
+}
+
+TEST_CASE(
+    "RM0481 Table 81 and 7.9.3: with TrustZone a Secure store to the OTP sets the Secure WRPERR "
+    "and writes nothing, the Non-secure flags stay clear, a Non-secure store programs")
+{
+  secure_flash s;
+  s.unlock(true);
+  s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "PG"), secure_priv);
+  s.store(otp_base, {0x1234}, secure_priv);
+  s.settle();
+  CHECK((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "WRPERR")) != 0);
+  CHECK((s.peek("FLASH_NSSR") & all_errors) == 0);
+  CHECK(s.word(otp_base) == 0xffff'ffffu);
+  s.unlock(false);
+  s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "PG"), nonsecure_priv);
+  s.store(otp_base, {0x5678'1234}, nonsecure_priv);
+  s.settle();
+  CHECK(s.word(otp_base) == 0x5678'1234u);
+}
+
+TEST_CASE(
+    "R-plan M1: with TrustZone the OTP region has no page rule, a Secure and a Non-secure load of "
+    "it read the programmed data and the flash pages keep theirs")
+{
+  secure_flash      s;
+  auto const* const pages =
+      dynamic_cast<stm32::secure_page_controller*>(s.r.f.target->model("FLASH"));
+  REQUIRE(pages != nullptr);
+  for(address const at : {otp_base, otp_base + 0x7ff})
+  {
+    CAPTURE(at);
+    CHECK_FALSE(pages->page_secure(at).has_value());
+    CHECK_FALSE(pages->page_rule(at).has_value());
+  }
+  CHECK(pages->page_rule(0x0800'0000).has_value());
+  s.unlock(false);
+  s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "PG"), nonsecure_priv);
+  s.store(otp_base, {0x5678'1234}, nonsecure_priv);
+  s.settle();
+  CHECK(s.word(otp_base) == 0x5678'1234u);
+}
+
+TEST_CASE(
+    "R-plan M1: a machine with option bytes and no TrustZone installs the hide filter, an OTP "
+    "store programs and a CPU load of the OTP reads the data through it")
+{
+  stm32::board board;
+  board.flash.option_bytes = stm32::option_bytes{};
+  rig r{board};
+  r.unlock();
+  r.control(pg);
+  r.store_words(otp_base, {0x5678'1234});
+  r.wait_idle();
+  r.control(0);
+  CHECK(flags(r) == 0);
+  auto const dest = sym(firmware, "words");
+  r.call("copy_words", {static_cast<std::uint32_t>(dest), otp_base, 1});
+  CHECK(r.word(dest) == 0x5678'1234u);
+}
+
+TEST_CASE(
+    "a 32-bit store at an offset of 2 in the OTP programs the two half-words it covers, pinned")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.store_words(otp_base + 2, {0x5678'1234});
+  r.wait_idle();
+  CAPTURE(flags(r));
+  CAPTURE(r.word(otp_base));
+  CAPTURE(r.word(otp_base + 4));
+  CHECK(r.word(otp_base) == 0x1234'ffffu);
+  CHECK(r.word(otp_base + 4) == 0xffff'5678u);
 }

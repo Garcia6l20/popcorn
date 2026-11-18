@@ -45,6 +45,7 @@ constexpr std::uint32_t option_key2     = 0x4c5d'6e7f;
 constexpr std::uint32_t power_down_key1 = 0x0415'2637;
 constexpr std::uint32_t power_down_key2 = 0xfafb'fcfd;
 constexpr std::uint32_t buffer_words    = 32;
+constexpr std::uint32_t otp_half_words  = 1024;
 constexpr std::uint32_t operation_end   = 0;
 constexpr std::uint32_t row_timeout     = 1;
 
@@ -55,6 +56,7 @@ enum class operation : std::uint8_t
   page_erase,
   bank_erase,
   mass_erase,
+  otp_program,
 };
 
 struct held_store
@@ -87,6 +89,8 @@ struct flash_state
   std::vector<std::uint32_t>              torn{};
   std::vector<std::uint32_t>              wrp{};
   std::vector<std::uint32_t>              wrp_active{};
+  std::vector<std::uint32_t>              otp_programmed{};
+  std::vector<std::uint32_t>              otp_bad{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -413,15 +417,16 @@ class hide_filter final : public bus_firewall
 {
 public:
   hide_filter(
-      secure_page_controller const& pages,
-      std::span<region_desc const>  regions,
-      std::string_view              controller,
-      std::uint32_t                 sector)
+      secure_page_controller const&     pages,
+      std::span<region_desc const>      regions,
+      std::string_view                  controller,
+      std::uint32_t                     sector,
+      std::span<std::string_view const> skipped)
       : pages_{pages}, sector_{sector}
   {
     for(auto const& region : regions)
     {
-      if(region.controller == controller)
+      if(region.controller == controller and not std::ranges::contains(skipped, region.name))
       {
         windows_.push_back({.start = region.start, .size = region.size});
       }
@@ -1164,10 +1169,16 @@ constexpr std::uint32_t sector_top        = 0x7f;
 /** @brief STM32H5 FLASH traits, RM0481 section 7, each capability tied to its roles. */
 struct h5_flash
 {
-  /** @brief No OTP programming. */
-  static constexpr otp_program otp_kind = otp_program::none;
-  /** @brief No region holds an OTP area. */
-  static constexpr std::array<std::string_view, 0> otp_regions{};
+  /** @brief A 16-bit half-word of the OTP area programs per store, RM0481 7.3.9. */
+  static constexpr otp_program otp_kind = otp_program::half_word;
+  /** @brief The OTP area, RM0481 7.3.4 Table 49. */
+  static constexpr memory_extent otp_area{.first = 0x08ff'f000, .last = 0x08ff'f7ff};
+  /** @brief The OTP stores route to the OTP rules over the whole area. */
+  static constexpr memory_extent otp_window = otp_area;
+  /** @brief Regions that hold the OTP area, outside the page geometry of the flash. */
+  static constexpr std::array<std::string_view, 1> otp_regions{"OTP_NS"};
+  /** @brief A Secure store to the OTP area attempts the ILAFM event, RM0481 Table 81. */
+  static constexpr bool otp_secure_event = true;
   /** @brief No burst programming, RM0481 7.3.5. */
   static constexpr bool burst_write = false;
   /** @brief FW forces a partly filled write buffer out, RM0481 7.11.11. */
@@ -1382,6 +1393,16 @@ struct h5_flash
     return first_wait_states(vos_read_max_mhz[range - 1], hclk).transform([](std::uint32_t ws) {
       return ws / 2;
     });
+  }
+
+  /**
+   * @brief FLASH_ECCDETR.ADDR_ECC of a failing half-word of the OTP area, RM0481 Table 88: 16-byte
+   *        units counted from the 8-KB RO and OTP sector, 0x700 to 0x77F, inferred.
+   * @param offset Byte offset of the half-word from the start of the OTP area.
+   */
+  [[nodiscard]] static constexpr auto otp_ecc_address(std::uint32_t offset) -> std::uint32_t
+  {
+    return 0x700 + offset / 16;
   }
 
   /**
@@ -2169,6 +2190,18 @@ static_assert(flag_matches_roles(
  *   model_warning per HCLK, range and value since the last restore, model_error under
  *   strict_peripherals.
  * - Timings default to DS14121 Rev 5 Table 52, h5_flash_timing.
+ * - OTP, RM0481 7.3.7 and 7.3.9: a 16-bit or 32-bit store to 0x08FFF000 to 0x08FFF7FF with PG set
+ *   programs one or two half-words of 16 bits, with no write buffer, for the quad_word_program time
+ *   per half-word, DS14121 Table 52 states 31 us for 16 bits, the 32-bit double is inferred. A
+ *   store of another size is a bus error, RM0481 Table 81 footnote 1 and 7.3.9, where 7.3.7 says
+ *   byte writes are ignored. A store with PG clear, with SER, BER or MER set, with an error flag
+ *   pending or while the main write buffer is open sets PGSERR and writes nothing, 7.9.4, the open
+ *   buffer rule stated for a 16-bit store and inferred for a 32-bit one. A Secure store sets the
+ *   Secure WRPERR and attempts the ILAFM event, Table 81 and 7.9.11. A half-word is programmed
+ *   when firmware programmed it or it reads other than 0xFFFF, inferred. A program of a programmed
+ *   half-word writes the old data ANDed with the new and marks the half-word ECC-bad, inferred,
+ *   the data and the mark are the model's reading of "an ECC error is generated and is therefore
+ *   not supported" in 7.3.9.
  *
  * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
  * and FLASH_SR, no TrustZone and no block registers.
@@ -2294,7 +2327,7 @@ static_assert(flag_matches_roles(
  *   the privileged protection with TZEN = 0.
  *
  * @group h5 unmodelled "Not modelled on the STM32H5"
- * - OBK key storage, the high-cycle data area, OTP and read-only area programming. Their registers
+ * - OBK key storage, the high-cycle data area and read-only area programming. Their registers
  *   are storage.
  * - FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
  *   OTPBLR_CUR locks no OTP block.
@@ -2309,7 +2342,23 @@ static_assert(flag_matches_roles(
  * BusFault, and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area at
  * HDPL 3. Without TrustZone the rule needs machine option bytes, which set the HDP areas.
  *
+ * @group h5 rule "OTP, RM0481 7.3.9"
+ * - A 16-bit or 32-bit store with PG set programs one or two half-words, each store starts a
+ *   program. BSY is held for 31 us per half-word, DS14121 Table 52, the 32-bit double inferred.
+ * - A store of another size is a bus error, Table 81 footnote 1 and 7.3.9. Section 7.3.7 says
+ *   such writes are ignored, the model follows the two sections Table 81 names.
+ * - A store with PG clear, with SER, BER or MER set, with an error flag pending or with the main
+ *   write buffer open sets PGSERR and writes nothing, 7.9.4. The open buffer is stated for a
+ *   16-bit store and inferred for a 32-bit one.
+ * - A Secure store sets the Secure WRPERR and attempts the ILAFM event, Table 81 and 7.9.11.
+ * - A program of a half-word that is programmed, by firmware or by other data than 0xFFFF, writes
+ *   the old data ANDed with the new and marks it ECC-bad, with no flag, inferred.
+ *
  * @group h5 deviation "Differs from RM0481"
+ * - A Secure load of the OTP area returns the data where RM0481 Table 81 gives zeros and an
+ *   illegal access event, and the ILAFM of a Secure store raises nothing without a TZIC flash
+ *   source. An 8-bit or 64-bit load of the OTP area is a bus error on silicon, 7.3.4 step 6, and
+ *   returns the data.
  * - OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers at once, with no
  *   BSY. The other _PRG registers are storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and
  *   FLASH_SECWM2R_PRG, which read 0 and ignore writes while TrustZone is off. A write to a storage
@@ -2711,13 +2760,20 @@ private:
   void               illegal_access(std::string_view enable_field);
   [[nodiscard]] auto hsi16_held() const -> bool;
   void               program(bool secure);
-  void               hold_hsi16(bool held);
-  [[nodiscard]] auto wrp_programmed(std::size_t index) const -> std::uint32_t;
-  [[nodiscard]] auto option_loaded(std::uint32_t offset) const -> std::uint32_t;
-  [[nodiscard]] auto option_mask(std::uint32_t offset) const -> std::uint32_t;
-  void               warn_dropped_options();
-  [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
-  [[nodiscard]] auto info_refused(std::uint32_t at) const -> bool;
+  void               program_otp();
+  void               otp_halfword_store(
+      std::uint32_t addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bool          secure,
+      std::uint32_t control);
+  void                      hold_hsi16(bool held);
+  [[nodiscard]] auto        wrp_programmed(std::size_t index) const -> std::uint32_t;
+  [[nodiscard]] auto        option_loaded(std::uint32_t offset) const -> std::uint32_t;
+  [[nodiscard]] auto        option_mask(std::uint32_t offset) const -> std::uint32_t;
+  void                      warn_dropped_options();
+  [[nodiscard]] auto        wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
+  [[nodiscard]] auto        info_refused(std::uint32_t at) const -> bool;
   [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
   void                      poke_wrp();
   void                      load_options();
@@ -3061,8 +3117,8 @@ flash_model<Traits>::flash_model(
   swapped_ = words->swapped;
   if(Traits::hide_without_trustzone and not ctx.trustzone)
   {
-    hide_filter_ =
-        std::make_unique<hide_filter>(*this, ctx.part.regions, desc.name, Traits::page_bytes);
+    hide_filter_ = std::make_unique<hide_filter>(
+        *this, ctx.part.regions, desc.name, Traits::page_bytes, Traits::otp_regions);
     ctx.install_firewall(*hide_filter_);
   }
 }
@@ -3439,15 +3495,19 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
     auto const& described = describe(name);
     regs.poke(reg(name).offset, described.reset & described.reset_mask);
   }
-  auto const generation = state_.generation;
-  auto       torn       = std::move(state_.torn);
-  auto       wrp        = std::move(state_.wrp);
-  auto       wrp_active = std::move(state_.wrp_active);
-  state_                = {};
-  state_.generation     = generation + 1;
-  state_.torn           = std::move(torn);
-  state_.wrp            = std::move(wrp);
-  state_.wrp_active     = loads_options(kind) ? state_.wrp : std::move(wrp_active);
+  auto const generation     = state_.generation;
+  auto       torn           = std::move(state_.torn);
+  auto       wrp            = std::move(state_.wrp);
+  auto       wrp_active     = std::move(state_.wrp_active);
+  auto       otp_programmed = std::move(state_.otp_programmed);
+  auto       otp_bad        = std::move(state_.otp_bad);
+  state_                    = {};
+  state_.generation         = generation + 1;
+  state_.torn               = std::move(torn);
+  state_.wrp                = std::move(wrp);
+  state_.otp_programmed     = std::move(otp_programmed);
+  state_.otp_bad            = std::move(otp_bad);
+  state_.wrp_active         = loads_options(kind) ? state_.wrp : std::move(wrp_active);
   update_pcrop();
   option_changed_.clear();
   secure_ = {};
@@ -3878,7 +3938,11 @@ template <typename Traits> void flash_model<Traits>::power_cut()
   {
     return;
   }
-  state_.running   = static_cast<std::uint8_t>(operation::none);
+  state_.running = static_cast<std::uint8_t>(operation::none);
+  if(which == operation::otp_program)
+  {
+    return;
+  }
   auto const now   = ctx_.clock.since_power_on().ps;
   auto const total = static_cast<std::uint64_t>(duration_of(which, state_.length).count()) * 1000u;
   auto const left  = state_.due_ps > now ? state_.due_ps - now : 0;
@@ -3917,6 +3981,8 @@ auto flash_model<Traits>::duration_of(operation which, std::uint32_t length) con
       return length == Traits::program_bytes
                ? options_.quad_word_program.value_or(timing.quad_word_program)
                : options_.burst_program.value_or(timing.burst_program);
+    case operation::otp_program:
+      return options_.quad_word_program.value_or(timing.quad_word_program) * (length / 2);
     case operation::page_erase:
       return options_.page_erase.value_or(timing.page_erase);
     case operation::bank_erase:
@@ -4517,6 +4583,13 @@ auto flash_model<Traits>::on_memory_write(
     std::uint32_t      value,
     access_ctx         ctx) -> std::expected<void, bus_error>
 {
+  if constexpr(Traits::otp_kind == otp_program::half_word)
+  {
+    if(in_otp(physical(region, addr)) and size != 2 and size != 4)
+    {
+      return std::unexpected{bus_error::denied};
+    }
+  }
   auto const       secure = ctx_.trustzone and ctx.secure;
   held_store const one{
       .addr    = physical(region, addr),
@@ -4574,6 +4647,11 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
   {
     if(not otp_store_allowed(addr, secure, fast))
     {
+      return;
+    }
+    if constexpr(Traits::otp_kind == otp_program::half_word)
+    {
+      otp_halfword_store(addr, size, value, secure, control);
       return;
     }
   }
@@ -4835,6 +4913,67 @@ template <typename Traits> void flash_model<Traits>::program(bool secure)
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
 
+template <typename Traits> void flash_model<Traits>::program_otp()
+{
+  if constexpr(Traits::otp_kind == otp_program::half_word)
+  {
+    if(state_.otp_programmed.empty())
+    {
+      state_.otp_programmed.assign(otp_half_words / 32, 0);
+      state_.otp_bad.assign(otp_half_words / 32, 0);
+    }
+    std::array<std::byte, 4> bytes{};
+    auto const               current = std::span{bytes}.first(state_.length);
+    if(not ctx_.services.read_block(state_.target, current, initiator::debugger))
+    {
+      return;
+    }
+    for(std::uint32_t at = 0; at < state_.length; at += 2)
+    {
+      auto const half = (state_.target + at - Traits::otp_area.first) / 2;
+      auto const word = half / 32;
+      auto const mask = 1u << (half % 32);
+      auto const old  = static_cast<std::uint16_t>(
+          std::to_integer<unsigned>(current[at]) | std::to_integer<unsigned>(current[at + 1]) << 8);
+      auto const data = static_cast<std::uint16_t>(state_.buffer[0] >> (8 * at));
+      if((state_.otp_programmed[word] & mask) != 0 or old != 0xffff)
+      {
+        auto const merged = static_cast<std::uint16_t>(old & data);
+        current[at]       = static_cast<std::byte>(merged & 0xff);
+        current[at + 1]   = static_cast<std::byte>(merged >> 8);
+        state_.otp_bad[word] |= mask;
+      }
+      else
+      {
+        current[at]     = static_cast<std::byte>(data & 0xff);
+        current[at + 1] = static_cast<std::byte>(data >> 8);
+      }
+      state_.otp_programmed[word] |= mask;
+    }
+    static_cast<void>(ctx_.services.write_block(state_.target, current, initiator::debugger));
+  }
+}
+
+template <typename Traits>
+void flash_model<Traits>::otp_halfword_store(
+    std::uint32_t addr,
+    std::uint8_t  size,
+    std::uint32_t value,
+    bool          secure,
+    std::uint32_t control)
+{
+  if(field_of(secure, set_role::program).of(control) == 0
+     or Traits::erase_selected([&](set_role role) { return value_of(secure, role, control); })
+     or errors_pending(secure)
+     or state_.filled != 0)
+  {
+    fail(secure, set_role::sequence_error);
+    return;
+  }
+  state_.buffer[0] = value;
+  start(operation::otp_program, addr, size, secure);
+}
+
 template <typename Traits> void flash_model<Traits>::finish()
 {
   auto const which  = static_cast<operation>(state_.running);
@@ -4842,7 +4981,11 @@ template <typename Traits> void flash_model<Traits>::finish()
   state_.running    = static_cast<std::uint8_t>(operation::none);
   set_busy(false);
   auto const errors = errors_pending(secure);
-  if(which == operation::program)
+  if(which == operation::otp_program)
+  {
+    program_otp();
+  }
+  else if(which == operation::program)
   {
     program(secure);
   }

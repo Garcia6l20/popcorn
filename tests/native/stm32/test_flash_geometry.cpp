@@ -626,3 +626,20 @@ TEST_CASE(
     CHECK(pages->page_rule(u5_bank2 + 127 * page_bytes).has_value());
   }
 }
+
+TEST_CASE(
+    "a 1 MB H5 whose OTP region precedes Flash_NS keeps the bank geometry on the flash: a sector "
+    "erase of bank 2 still erases the right sector")
+{
+  rig const         r{otp_first(h5_1m()), h5_family, timed_board()};
+  constexpr address bank2_last = h5_bank2 + 63 * page_bytes;
+  constexpr address bank1_last = flash_start + 63 * page_bytes;
+  for(auto const line : {bank2_last, bank1_last, bank2_last - page_bytes})
+  {
+    r.program(line, pattern());
+  }
+  r.run(h5_ser | h5_bksel | h5_snb(63) | h5_strt);
+  CHECK(r.is_erased(bank2_last));
+  CHECK(r.holds(bank1_last));
+  CHECK(r.holds(bank2_last - page_bytes));
+}

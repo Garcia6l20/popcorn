@@ -160,8 +160,8 @@ pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC
 source = "RM0481 Rev 5, 58.11.6/58.11.7 SPI/I2S status register (SPI_SR) / SPI/I2S interrupt/status flags clear register (SPI_IFCR)"
 
 [memory]
-source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"
-controller = { Flash_NS = "FLASH", Flash_S = "FLASH" }
+source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, programmed in 16-bit units through the flash interface, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. 7.3.7, 7.3.9 and Table 81: the OTP area is programmed by 16-bit and 32-bit stores with FLASH_NSCR.PG set, so FLASH controls the OTP region too"
+controller = { Flash_NS = "FLASH", Flash_S = "FLASH", OTP_NS = "FLASH" }
 add = [
   { name = "OTP_NS", start = 0x08FFF000, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
   { name = "RO_NS", start = 0x08FFF800, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },

@@ -204,6 +204,7 @@ def test_the_regions_and_the_device_signature(h573_sources: Sources) -> None:
     assert (regions["SRAM_NS"].start, regions["SRAM_NS"].size) == (0x20000000, 0xA0000)
     assert (regions["OTP_NS"].start, regions["OTP_NS"].size) == (0x08FFF000, 0x800)
     assert regions["OTP_NS"].acc.write is False
+    assert regions["OTP_NS"].controller == "FLASH"
     assert (regions["RO_NS"].start, regions["RO_NS"].size) == (0x08FFF800, 0x800)
     assert regions["HIGH_CYCLE_FLASH_NS"].controller is None
     assert _region_bytes(description, "RO_NS", 0x00C, 2) == (2048).to_bytes(2, "little")
@@ -356,7 +357,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         resets_set=39,
         core_fields_set=1,
         regions_added=2,
-        controllers_set=2,
+        controllers_set=3,
         signature_words=6,
     )
     patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
