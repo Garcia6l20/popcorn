@@ -286,9 +286,11 @@ enum class unit_role : std::uint8_t
   option_error_irq,
   option_swap,
   power_down,
+  ecc_otp,
+  ecc_data,
 };
 
-constexpr std::array<named_field<unit_role>, 19> u5_unit_fields{
+constexpr std::array<named_field<unit_role>, 21> u5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {}},
@@ -309,10 +311,12 @@ constexpr std::array<named_field<unit_role>, 19> u5_unit_fields{
      {unit_role::option_error_irq, {}},
      {unit_role::option_swap, {}},
      {unit_role::power_down, {}},
+     {unit_role::ecc_otp, {}},
+     {unit_role::ecc_data, {}},
      }
 };
 
-constexpr std::array<named_field<unit_role>, 19> h5_unit_fields{
+constexpr std::array<named_field<unit_role>, 21> h5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {"FLASH_ACR", "WRHIGHFREQ"}},
@@ -333,6 +337,8 @@ constexpr std::array<named_field<unit_role>, 19> h5_unit_fields{
      {unit_role::option_error_irq, {"FLASH_NSCR", "OPTCHANGEERRIE"}},
      {unit_role::option_swap, {"FLASH_OPTCR", "SWAP_BANK"}},
      {unit_role::power_down, {}},
+     {unit_role::ecc_otp, {"FLASH_ECCDETR", "OTP_ECC"}},
+     {unit_role::ecc_data, {"FLASH_ECCDR", "DATA_ECC"}},
      }
 };
 
@@ -1555,7 +1561,7 @@ constexpr std::array<named_field<set_role>, 36> l4_set_fields{
      }
 };
 
-constexpr std::array<named_field<unit_role>, 19> l4_unit_fields{
+constexpr std::array<named_field<unit_role>, 21> l4_unit_fields{
     {
      {unit_role::latency, {"ACR", "LATENCY"}},
      {unit_role::programming_delay, {}},
@@ -1576,6 +1582,8 @@ constexpr std::array<named_field<unit_role>, 19> l4_unit_fields{
      {unit_role::option_error_irq, {}},
      {unit_role::option_swap, {}},
      {unit_role::power_down, {"ACR", "RUN_PD"}},
+     {unit_role::ecc_otp, {}},
+     {unit_role::ecc_data, {}},
      }
 };
 
@@ -2210,7 +2218,9 @@ static_assert(flag_matches_roles(
  *   Table 81 and 7.9.11. A half-word is programmed when firmware programmed it or it reads other
  *   than 0xFFFF, inferred. A program of a programmed half-word writes the old data ANDed with
  *   the new and marks the half-word ECC-bad, inferred, the data and the mark are the model's
- *   reading of "an ECC error is generated and is therefore not supported" in 7.3.9.
+ *   reading of "an ECC error is generated and is therefore not supported" in 7.3.9. A CPU or DMA
+ *   load of an ECC-bad or virgin half-word sets ECCD, OTP_ECC and FLASH_ECCDR and takes the NMI,
+ *   ADDR_ECC from 0x700 inferred, and a power cut tears the half-word in flight, inferred.
  *
  * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
  * and FLASH_SR, no TrustZone and no block registers.
@@ -2374,6 +2384,17 @@ static_assert(flag_matches_roles(
  * - A Secure store sets the Secure WRPERR and attempts the ILAFM event, Table 81 and 7.9.11.
  * - A program of a half-word that is programmed, by firmware or by other data than 0xFFFF, writes
  *   the old data ANDed with the new and marks it ECC-bad, with no flag, inferred.
+ * - A CPU, DMA or DAP load of an OTP half-word that is ECC-bad, or never programmed and reading
+ *   0xFFFF, sets ECCD, OTP_ECC, BK_ECC 0, ADDR_ECC and FLASH_ECCDR.DATA_ECC with the data read
+ *   and raises the NMI, RM0481 7.3.4, 7.3.8, 7.3.9 and 7.9.10. A half-word programmed 0xFFFF or
+ *   written by the host reads clean once programmed, and a host write of other data makes it
+ *   non-virgin, inferred. ADDR_ECC counts 16-byte units from the 8-KB RO and OTP sector, so the
+ *   OTP area gives 0x700 to 0x77F, inferred, Table 88 states the range 0x600 to 0x7FF only. A
+ *   load that covers two half-words reports the lower one that qualifies. Once ECCD is set a new
+ *   error updates nothing, and writing 1 to ECCD clears OTP_ECC and DATA_ECC with it, DATA_ECC
+ *   inferred.
+ * - A power cut during an OTP program programs the half-words done, tears the next one, which
+ *   reads the old data ANDed with the new and is marked ECC-bad, and keeps the rest, inferred.
  *
  * @group h5 deviation "Differs from RM0481"
  * - A 64-bit store to the OTP area reaches the model as two 32-bit stores and programs four
@@ -2760,6 +2781,10 @@ private:
     std::uint32_t address;
   };
   [[nodiscard]] auto        ecc_place_of(std::uint32_t line) const -> ecc_place;
+  void                      record_double_error(ecc_place place, bool otp, std::uint32_t data);
+  void                      otp_read(std::uint32_t at, std::uint8_t size);
+  void                      watch_otp();
+  void                      tear_otp();
   [[nodiscard]] static auto is_otp_region(region_desc const& region) -> bool;
   [[nodiscard]] static auto in_otp(std::uint32_t at) -> bool;
   [[nodiscard]] auto        otp_store_allowed(std::uint32_t at, bool secure, bool fast) -> bool;
@@ -2786,7 +2811,7 @@ private:
   void               illegal_access(std::string_view enable_field);
   [[nodiscard]] auto hsi16_held() const -> bool;
   void               program(bool secure);
-  void               program_otp();
+  void               program_otp(std::uint32_t units, bool tear);
   void               otp_halfword_store(
       std::uint32_t addr,
       std::uint8_t  size,
@@ -2840,6 +2865,7 @@ private:
   bool                                                              row_clock_logged_{};
   bool                                                              row_erase_logged_{};
   bool                                                              row_read_logged_{};
+  bool                                                              otp_load_logged_{};
   bool                                                              option_clock_logged_{};
   std::optional<core::clock_domain>                                 option_clock_;
   std::optional<std::pair<std::uint32_t, std::uint32_t>>            row_watch_;
@@ -3556,6 +3582,7 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   }
   poke_wrp();
   poke_otp_lock();
+  watch_otp();
   if(auto const swap = unit_.find(unit_role::option_swap))
   {
     update(regs, *swap, swapped_ ? 1 : 0);
@@ -4007,6 +4034,7 @@ template <typename Traits> void flash_model<Traits>::power_cut()
   state_.running = static_cast<std::uint8_t>(operation::none);
   if(which == operation::otp_program)
   {
+    tear_otp();
     return;
   }
   auto const now   = ctx_.clock.since_power_on().ps;
@@ -4337,6 +4365,14 @@ void flash_model<Traits>::on_memory_read(
       abort_row();
     }
   }
+  if constexpr(Traits::otp_kind == otp_program::half_word)
+  {
+    if(in_otp(at))
+    {
+      otp_read(at, size);
+      return;
+    }
+  }
   auto const first = at & ~(Traits::program_bytes - 1);
   auto const last  = (at + size - 1) & ~(Traits::program_bytes - 1);
   for(auto line = first; line <= last; line += Traits::program_bytes)
@@ -4350,16 +4386,72 @@ void flash_model<Traits>::on_memory_read(
 
 template <typename Traits> void flash_model<Traits>::report_double_error(std::uint32_t line)
 {
+  record_double_error(ecc_place_of(line), false, 0);
+}
+
+template <typename Traits>
+void flash_model<Traits>::record_double_error(ecc_place place, bool otp, std::uint32_t data)
+{
   if(get(regs_, unit_[unit_role::ecc_detect]) != 0
      or get(regs_, unit_[unit_role::ecc_correct]) != 0)
   {
     return;
   }
-  auto const place = ecc_place_of(line);
   update(regs_, unit_[unit_role::ecc_address], place.address);
   update(regs_, unit_[unit_role::ecc_bank], place.bank);
+  if(auto const field = unit_.find(unit_role::ecc_otp))
+  {
+    update(regs_, *field, otp ? 1 : 0);
+  }
+  if(auto const field = unit_.find(unit_role::ecc_data))
+  {
+    update(regs_, *field, data);
+  }
   update(regs_, unit_[unit_role::ecc_detect], 1);
   ctx_.nmi.raise();
+}
+
+template <typename Traits> void flash_model<Traits>::watch_otp()
+{
+  if constexpr(Traits::otp_kind == otp_program::half_word)
+  {
+    ctx_.services.watch_reads(
+        Traits::otp_area.first, Traits::otp_area.last - Traits::otp_area.first + 1, true);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::otp_read(std::uint32_t at, std::uint8_t size)
+{
+  if constexpr(Traits::otp_kind == otp_program::half_word)
+  {
+    if(size != 2 and size != 4)
+    {
+      auto const unit = unit_[unit_role::ecc_detect];
+      this->warn_once_or_refuse(
+          otp_load_logged_, register_of(Traits::unit_fields, unit_role::ecc_detect), unit.offset,
+          "an 8-bit or 64-bit load of the OTP area is an AHB bus error on silicon, RM0481 7.3.4 "
+          "step 6 and Table 81: the load returns its data");
+    }
+    auto const bit_of = [](std::vector<std::uint32_t> const& bits, std::uint32_t half) {
+      return half / 32 < bits.size() and (bits[half / 32] >> (half % 32) & 1u) != 0;
+    };
+    for(auto half = at & ~1u; half < at + size; half += 2)
+    {
+      std::array<std::byte, 2> bytes{};
+      if(not ctx_.services.read_block(half, bytes, initiator::debugger))
+      {
+        continue;
+      }
+      auto const unit = (half - Traits::otp_area.first) / 2;
+      auto const data = static_cast<std::uint32_t>(
+          std::to_integer<unsigned>(bytes[0]) | std::to_integer<unsigned>(bytes[1]) << 8);
+      if(bit_of(state_.otp_bad, unit)
+         or (data == 0xffff and not bit_of(state_.otp_programmed, unit)))
+      {
+        record_double_error(ecc_place_of(half), true, data);
+      }
+    }
+  }
 }
 
 template <typename Traits>
@@ -4979,7 +5071,7 @@ template <typename Traits> void flash_model<Traits>::program(bool secure)
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
 
-template <typename Traits> void flash_model<Traits>::program_otp()
+template <typename Traits> void flash_model<Traits>::program_otp(std::uint32_t units, bool tear)
 {
   if constexpr(Traits::otp_kind == otp_program::half_word)
   {
@@ -4996,13 +5088,18 @@ template <typename Traits> void flash_model<Traits>::program_otp()
     }
     for(std::uint32_t at = 0; at < state_.length; at += 2)
     {
+      auto const unit = at / 2;
+      if(unit > units or (unit == units and not tear))
+      {
+        break;
+      }
       auto const half = (state_.target + at - Traits::otp_area.first) / 2;
       auto const word = half / 32;
       auto const mask = 1u << (half % 32);
       auto const old  = static_cast<std::uint16_t>(
           std::to_integer<unsigned>(current[at]) | std::to_integer<unsigned>(current[at + 1]) << 8);
       auto const data = static_cast<std::uint16_t>(state_.buffer[0] >> (8 * at));
-      if((state_.otp_programmed[word] & mask) != 0 or old != 0xffff)
+      if(unit == units or (state_.otp_programmed[word] & mask) != 0 or old != 0xffff)
       {
         auto const merged = static_cast<std::uint16_t>(old & data);
         current[at]       = static_cast<std::byte>(merged & 0xff);
@@ -5018,6 +5115,22 @@ template <typename Traits> void flash_model<Traits>::program_otp()
     }
     static_cast<void>(ctx_.services.write_block(state_.target, current, initiator::debugger));
   }
+}
+
+template <typename Traits> void flash_model<Traits>::tear_otp()
+{
+  auto const units = state_.length / 2;
+  auto const now   = ctx_.clock.since_power_on().ps;
+  auto const total =
+      static_cast<std::uint64_t>(duration_of(operation::otp_program, state_.length).count())
+      * 1000u;
+  auto const left = state_.due_ps > now ? state_.due_ps - now : 0;
+  auto const full =
+      total == 0
+          ? units
+          : static_cast<std::uint32_t>(
+                static_cast<unsigned __int128>(units) * (total - std::min(total, left)) / total);
+  program_otp(full, true);
 }
 
 template <typename Traits>
@@ -5057,7 +5170,7 @@ template <typename Traits> void flash_model<Traits>::finish()
   auto const errors = errors_pending(secure);
   if(which == operation::otp_program)
   {
-    program_otp();
+    program_otp(state_.length / 2, false);
   }
   else if(which == operation::program)
   {
@@ -5407,6 +5520,7 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   delay_logged_.clear();
   sync_watches();
   update_pcrop();
+  watch_otp();
 }
 
 template <typename Traits> void flash_model<Traits>::on_clock_change()
@@ -5859,6 +5973,13 @@ void flash_model<Traits>::ecc_written(std::uint32_t old, std::uint32_t now)
     return;
   }
   ctx_.nmi.lower();
+  for(auto const role : {unit_role::ecc_otp, unit_role::ecc_data})
+  {
+    if(auto const field = unit_.find(role))
+    {
+      update(regs_, *field, 0);
+    }
+  }
   if constexpr(Traits::ecc_record_clears)
   {
     update(regs_, unit_[unit_role::ecc_address], 0);

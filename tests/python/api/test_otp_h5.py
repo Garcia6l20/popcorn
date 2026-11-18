@@ -92,3 +92,25 @@ def test_a_locked_otp_block_refuses_a_cpu_store_with_wrperr(part: str) -> None:
     assert asyncio.run(m.call("wait_idle", budget=1_000_000)).stop.reason is StopReason.USER
     assert m.periph.FLASH.FLASH_NSSR.WRPERR == 0
     assert m.mem.read(OTP + 6 * 64, 4) == bytes.fromhex("34127856")
+
+
+@pytest.mark.parametrize("part", H5_PARTS)
+def test_a_firmware_load_of_virgin_otp_raises_the_nmi_and_a_host_write_suppresses_it(
+    part: str,
+) -> None:
+    """RM0481 7.3.9: a CPU load of a virgin half-word sets ECCD with the data in FLASH_ECCDR, a
+    word the host provisioned first reads clean."""
+    _, m = booted(part)
+    words = m.sym("words")
+    m.mem.write(OTP + 0x40, b"\x34\x12\x78\x56")
+    result = asyncio.run(
+        m.call("copy_words", words, OTP + 0x40, 1, budget=100_000, interrupts=True)
+    )
+    assert result.stop.reason is StopReason.USER
+    assert m.mem.u32[words] == 0x5678_1234
+    assert m.periph.FLASH.FLASH_ECCDETR.ECCD == 0
+    asyncio.run(m.call("copy_words", words, OTP, 1, budget=100_000, interrupts=True))
+    assert m.periph.FLASH.FLASH_ECCDETR.ECCD == 1
+    assert m.periph.FLASH.FLASH_ECCDETR.OTP_ECC == 1
+    assert m.periph.FLASH.FLASH_ECCDETR.ADDR_ECC == 0x700
+    assert m.periph.FLASH.FLASH_ECCDR.DATA_ECC == 0xFFFF

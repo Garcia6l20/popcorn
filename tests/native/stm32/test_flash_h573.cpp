@@ -2774,7 +2774,9 @@ TEST_CASE(
   CHECK(flags(r) == 0);
 }
 
-TEST_CASE("every reset kind and a power cycle keep the OTP arrays, a power cut drops the program")
+TEST_CASE(
+    "every reset kind and a power cycle keep the OTP arrays, a power cut tears the half-word in "
+    "flight, inferred")
 {
   rig r;
   r.unlock();
@@ -2802,10 +2804,10 @@ TEST_CASE("every reset kind and a power cycle keep the OTP arrays, a power cut d
   r.call("store_half", {otp_base + 8, 0x1234});
   REQUIRE(r.status("BSY") == 1);
   r.f.target->power_cycle();
-  CHECK((r.word(otp_base + 8) & 0xffff) == 0x1111);
+  CHECK((r.word(otp_base + 8) & 0xffff) == (0x1111 & 0x1234));
   auto const cut = otp_state(r);
   CHECK(cut.otp_programmed == programmed.otp_programmed);
-  CHECK(cut.otp_bad == programmed.otp_bad);
+  CHECK(cut.otp_bad[0] == (programmed.otp_bad[0] | 1u << 4));
   CHECK(cut.torn.empty());
   CHECK(cut.running == 0);
 }
@@ -3165,4 +3167,158 @@ TEST_CASE(
   other.wait_idle();
   CHECK(other.status("WRPERR") == 1);
   CHECK(other.word(block5) == 0xffff'ffffu);
+}
+
+namespace
+{
+constexpr std::uint32_t otp_ecc = 1u << 24;
+
+auto load_log(rig const& r, address at) -> std::vector<std::uint32_t>
+{
+  r.call("read_word", {static_cast<std::uint32_t>(at)});
+  return r.f.log();
+}
+
+void guest_load_byte(rig const& r, address from)
+{
+  constexpr address stub = 0x2000'0600;
+  REQUIRE(r.f.target->mem().write(stub, 4, 0xE7FE'7801).has_value());
+  r.f.set("r0", from);
+  r.f.set("pc", stub | 1u);
+  auto const until = vtime{r.f.target->virtual_clock().time().ps + us};
+  static_cast<void>(
+      r.f.target->run_slice({.max_instructions = icount{1'000'000}, .until_time = until}));
+}
+}
+
+TEST_CASE(
+    "RM0481 7.3.9: a CPU load of a virgin OTP word sets ECCD, OTP_ECC and DATA_ECC, takes the NMI")
+{
+  for(auto const& [at, address_ecc] : {
+          std::pair{otp_base,         0x700u},
+          std::pair{otp_base + 0x7fc, 0x77fu}
+  })
+  {
+    CAPTURE(at);
+    rig        r;
+    auto const log = load_log(r, at);
+    REQUIRE(log.size() >= 2);
+    CHECK(log[log.size() - 2] == nmi_mark);
+    CHECK(log.back() == (eccd | otp_ecc | address_ecc));
+    CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | address_ecc));
+    CHECK(r.read("FLASH_ECCDR") == 0xffffu);
+  }
+}
+
+TEST_CASE(
+    "RM0481 7.9.10: a second virgin load with ECCD set updates nothing, writing 1 to ECCD clears "
+    "OTP_ECC, ADDR_ECC and DATA_ECC, the next virgin load reports again")
+{
+  rig r;
+  load_log(r, otp_base + 0x10);
+  REQUIRE(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  load_log(r, otp_base + 0x20);
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  r.write("FLASH_ECCDETR", eccd);
+  CHECK(r.read("FLASH_ECCDETR") == 0);
+  CHECK(r.read("FLASH_ECCDR") == 0);
+  load_log(r, otp_base + 0x20);
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x702u));
+}
+
+TEST_CASE(
+    "RM0481 7.3.8: a programmed half-word reads clean, also one programmed 0xFFFF and one the host "
+    "wrote, a rewritten one reports with DATA_ECC the data it reads, inferred")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base, 0x1234});
+  r.wait_idle();
+  r.call("store_half", {otp_base + 2, 0xffff});
+  r.wait_idle();
+  REQUIRE(r.f.target->mem().write(otp_base + 4, 2, 0x4321).has_value());
+  REQUIRE(r.f.target->mem().write(otp_base + 6, 2, 0x8765).has_value());
+  r.call("read_word", {static_cast<std::uint32_t>(otp_base)});
+  r.call("read_word", {static_cast<std::uint32_t>(otp_base + 4)});
+  CHECK(r.read("FLASH_ECCDETR") == 0);
+  r.call("store_half", {otp_base, 0x00ff});
+  r.wait_idle();
+  r.call("read_word", {static_cast<std::uint32_t>(otp_base)});
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x700u));
+  CHECK(r.read("FLASH_ECCDR") == 0x0034u);
+}
+
+TEST_CASE(
+    "a host read of a virgin OTP word reports nothing, a load over a programmed "
+    "and a virgin half-word reports the virgin one, over two virgin ones the first")
+{
+  rig r;
+  CHECK(r.word(otp_base) == 0xffff'ffffu);
+  CHECK(r.read("FLASH_ECCDETR") == 0);
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {otp_base + 0x20, 0x1234});
+  r.wait_idle();
+  load_log(r, otp_base + 0x20);
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x702u));
+  CHECK(r.read("FLASH_ECCDR") == 0xffffu);
+  r.write("FLASH_ECCDETR", eccd);
+  load_log(r, otp_base + 0x40);
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x704u));
+}
+
+TEST_CASE("R-plan m10: an 8-bit load of the OTP warns once, strict raises model_error")
+{
+  rig r;
+  guest_load_byte(r, otp_base + 8);
+  guest_load_byte(r, otp_base + 9);
+  CHECK(r.warnings("FLASH_ECCDETR") == 1);
+  rig strict{{}, firmware, true};
+  CHECK_THROWS_AS(guest_load_byte(strict, otp_base + 8), popcorn::model_error);
+}
+
+TEST_CASE(
+    "inferred H17: a power cut half way through a word store tears the second half-word, the "
+    "arrays persist")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.store_words(otp_base + 0x30, {0x5678'1234});
+  REQUIRE(r.status("BSY") == 1);
+  r.run_for(46 * us);
+  r.f.target->power_cycle();
+  CHECK((r.word(otp_base + 0x30) & 0xffff) == 0x1234);
+  CHECK((r.word(otp_base + 0x30) >> 16) == 0x5678u);
+  auto const state = otp_state(r);
+  CHECK(state.otp_programmed[0] == (3u << 24));
+  CHECK(state.otp_bad[0] == (2u << 24));
+  REQUIRE(r.f.run_to_stop().reason == stop_reason::user);
+  r.call("read_word", {static_cast<std::uint32_t>(otp_base + 0x30)});
+  CHECK(r.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x703u));
+}
+
+TEST_CASE("a snapshot with ECCD set restores into a fresh machine with its record and read watch")
+{
+  rig r;
+  load_log(r, otp_base + 0x10);
+  auto const taken = r.f.target->snapshot();
+  rig        other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  CHECK(other.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  CHECK(other.read("FLASH_ECCDR") == 0xffffu);
+  other.write("FLASH_ECCDETR", eccd);
+  load_log(other, otp_base + 0x30);
+  CHECK(other.read("FLASH_ECCDETR") == (eccd | otp_ecc | 0x703u));
+}
+
+TEST_CASE("a DMA load of a virgin OTP word reports like a CPU load")
+{
+  constexpr bus_attrs dma{.by = initiator::dma, .secure = false, .privileged = true};
+  secure_flash        s;
+  REQUIRE(s.bus().read(otp_base + 0x10, 4, dma).has_value());
+  CHECK(s.peek("FLASH_ECCDETR") == (eccd | otp_ecc | 0x701u));
+  CHECK(s.peek("FLASH_ECCDR") == 0xffffu);
 }
