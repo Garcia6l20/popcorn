@@ -102,6 +102,10 @@ plugin sets it per test, see [Testing with pytest](testing.md).
 | `WATCHPOINT` | A watch on a memory access stopped the run. |
 | `USER` | A `stop_when` predicate returned True, a handler stopped the run, or a BKPT ran. |
 
+`spin_threshold` stops a run with SPIN once a loop repeats the same pass that many times. The
+loops analysis of `Machine.profile` reports such loops without stopping the run, and leaves the
+SPIN stop of `spin_threshold` as it is. See [Profiling firmware](profiling.md).
+
 ### Reset requests
 
 `Machine(on_reset_request="reset")` applies a requested reset and the run goes on, `Machine.resets`

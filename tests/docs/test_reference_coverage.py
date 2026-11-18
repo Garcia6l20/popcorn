@@ -5,7 +5,7 @@ import popcorn
 import popcorn.plugin
 import popcorn.pytest
 
-SUBPACKAGES = {"popcorn.coverage.report"}
+SUBPACKAGES = {"popcorn.coverage.report", "popcorn.profiling"}
 PAGES = Path(__file__).parents[2] / "docs/reference/python"
 
 

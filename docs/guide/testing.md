@@ -313,6 +313,8 @@ path as its ANALYSES. A `@pytest.mark.popcorn(profile=("hotspots", "sleep"))` ma
 one test without the option, `profile=False` turns the option off for it and `profile=None`
 leaves it to the option.
 
+[Profiling firmware](profiling.md) explains the report and its analyses.
+
 Each machine writes one JSON report, `Report.to_json()`, to `popcorn-profile/<test>.<fixture>.json`
 in the rootdir, `machine_factory #<n>` in place of the fixture for factory machines. `<test>` is the
 node id with every character other than letters, digits, `_`, `.` and `-` replaced by `_`, cut to

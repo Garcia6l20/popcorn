@@ -11,3 +11,4 @@ private.
 - [Errors](errors.md): the exception tree.
 - [Descriptions](descriptions.md): `MachineDescription`, its parts and native plugins.
 - [pytest plugin](pytest.md): fixtures and settings.
+- [Profiling](profiling.md): `Machine.profile` reports, their tables and `diff`.
