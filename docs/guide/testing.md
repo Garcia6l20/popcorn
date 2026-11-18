@@ -55,6 +55,8 @@ trace ring.
   no limit. It counts instructions the core executes, not the time it sleeps in WFI or WFE, so a
   firmware that may sleep also needs `for_`. It never acts as a wall-clock timeout.
 - `strict`, whether a firmware access to an unmodelled peripheral raises `ModelError`.
+- `profile`, the analyses its machines are profiled with: an analysis name, a list of them, `True`
+  for every analysis or `False` for none. See [Profile a test](#profile-a-test).
 
 Put it on a module as `pytestmark = pytest.mark.popcorn(budget=...)`. The closest marker wins
 whole: a function's marker replaces its module's. On the command line, `--popcorn-budget` and
@@ -296,6 +298,40 @@ the uses per line, and one that applies no sidecar removes the one at its path.
 `mark` and `miss` make each machine record the CPU accesses per accessing instruction, about 20 ns
 per access to a peripheral register, boot accesses included, and the mode is part of the boot cache
 key. A line is marked when one of its instructions accessed an unmodelled register.
+
+## Profile a test
+
+```console
+$ pytest tests/test_spi.py --popcorn-profile
+$ pytest --popcorn-profile=hotspots,sleep tests/test_spi.py
+```
+
+`--popcorn-profile` profiles every machine fixture and `machine_factory` machine of every test, as
+`Machine.profile` does, with every analysis or the comma-separated ones named. Write it as
+`--popcorn-profile=ANALYSES` or last on the command line: a bare flag before a path takes the
+path as its ANALYSES. A `@pytest.mark.popcorn(profile=("hotspots", "sleep"))` marker does it for
+one test without the option, `profile=False` turns the option off for it and `profile=None`
+leaves it to the option.
+
+Each machine writes one JSON report, `Report.to_json()`, to `popcorn-profile/<test>.<fixture>.json`
+in the rootdir, `machine_factory #<n>` in place of the fixture for factory machines. `<test>` is the
+node id with every character other than letters, digits, `_`, `.` and `-` replaced by `_`, cut to
+150 characters, then `-` and 8 hex digits of a hash of the node id, as every node id holds `::`:
+`test_spi.py__test_calls-1a2b3c4d.spi.json`. The fixture name is replaced the same way, and the
+test's report section names the file. Read one back with `popcorn.profiling.Report.from_json`. The
+`popcorn_profile_dir` ini option moves the directory:
+
+```ini
+[pytest]
+popcorn_profile_dir = build/profiles
+```
+
+The report's text goes to the test's report sections, shown for a failing test or with `-rA`, and
+a failing test writes its profile too. Under xdist each worker writes the files of its own tests.
+
+A fixture machine starts from its boot snapshot, so its profile holds no boot: the timeline is
+empty and `from_reset` is False. System members are not profiled, and a marker `profile` on a test
+that uses a system fixture fails its setup.
 
 ## Boot cache
 

@@ -169,6 +169,7 @@ class PopcornSession:
     cache_hits: int = 0
     cache_dropped: int = 0
     rebuilds: int = 0
+    profiles: int = 0
     part_tests: set[str] = field(default_factory=set[str])
     _projects: dict[str, MachineDescription] = field(default_factory=dict[str, MachineDescription])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
@@ -607,6 +608,7 @@ def summary(session: PopcornSession) -> dict[str, object]:
         "cache_dropped": session.cache_dropped,
         "coverage_failures": list(session.coverage_failures),
         "part_tests": sorted(session.part_tests),
+        "profiles": session.profiles,
     }
 
 

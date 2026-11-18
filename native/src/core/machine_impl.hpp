@@ -1381,7 +1381,7 @@ struct machine::run_state
   /** @brief Whether some sink selects clock records. */
   bool sinks_want_clock = false;
   /** @brief Whether a reset moved the clock back and rebase_sinks() has not run yet: the models'
-   * resets deliver no domain rate then, the rebase sends every rate. */
+   * resets deliver no core or domain rate then, the rebase sends every rate. */
   bool rebase_pending = false;
   /** @brief Whether some sink selects cut records. */
   bool sinks_want_cut = false;
@@ -2013,7 +2013,9 @@ struct machine::run_state
    * @p woke_by the exception whose entry woke the core, 0 for none. */
   void end_sleep(std::uint16_t woke_by);
 
-  /** @brief A clock record with the core's instruction rate to the sinks selecting it. */
+  /** @brief A clock record with the core's instruction rate to the sinks selecting it.
+   *
+   * Skipped while a rebase is pending, which then sends the core rate itself. */
   void emit_clock();
 
   /** @brief Delivers a domain's rate to the sinks that asked for it, unless rebase_pending. */

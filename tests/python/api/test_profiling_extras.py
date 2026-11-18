@@ -10,11 +10,12 @@ import json
 import re
 import types
 import typing
+from pathlib import Path
 from typing import cast
 
 import popcorn
 import pytest
-from popcorn import _core
+from popcorn import _core, trace
 from popcorn.profiling import SCHEMA, Analysis, FrameKind, Report, diff
 from popcorn.profiling._diff import IDENTITY, MEASURES
 from popcorn.profiling._symbols import Names
@@ -92,6 +93,28 @@ def test_reloads_on_either_side_of_a_watchdog_reset_are_not_paired() -> None:
     assert dog.starts == 2
     assert dog.min_margin_ps == 398_998_750_000
     assert [gap.length_ps for gap in dog.gaps] == [TIMEOUT_PS]
+
+
+def test_a_reset_at_a_set_core_rate_sends_the_core_rate_after_the_rebase_only(
+    tmp_path: Path,
+) -> None:
+    m = booted(TIM.replace(core_hz=16_000_000))
+    asyncio.run(m.run(budget=50_000))
+    path = tmp_path / "reset.pctr"
+    with m.trace(trace.ALL, path), m.profile("sleep") as profile:
+        m.reset()
+        asyncio.run(m.run(budget=1_000))
+    rates = [
+        (type(record).__name__, record.time)
+        for record in trace.read(path)
+        if isinstance(record, trace.Clock | trace.Rebase)
+    ]
+    assert [name for name, _ in rates] == ["Clock", "Rebase", "Clock"]
+    assert rates[1:] == [("Rebase", 0), ("Clock", 0)]
+    report = profile.report()
+    assert report.cuts == 1
+    assert report.elapsed_ps == m.time.ps
+    assert sum(span.ps for span in report.clocks) == report.elapsed_ps
 
 
 def test_a_part_firmware_with_no_watchdog_reports_no_reload() -> None:

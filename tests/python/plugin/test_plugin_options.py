@@ -11,6 +11,7 @@ from .helpers import write_conftest
 pytest_plugins = ["pytester"]
 
 OPTIONS = (
+    "--popcorn-profile=[[]ANALYSES]",
     "--popcorn-cov",
     "--popcorn-cov-report=TYPE[[]:TARGET]",
     "--popcorn-cov-fail-under=PERCENT",
@@ -35,7 +36,7 @@ def test_help_lists_the_options(pytester: pytest.Pytester) -> None:
 def test_markers_lists_popcorn(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     result = pytester.runpytest("-p", "no:asyncio", "--markers")
-    result.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None):*"])
+    result.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None, profile=None):*"])
 
 
 def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
@@ -53,6 +54,8 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
                 budget=None,
                 ring=0,
                 ring_blocks=False,
+                profile=None,
+                profile_dir=request.config.rootpath / "popcorn-profile",
             )
         """)
     pytester.runpytest("-p", "no:asyncio").assert_outcomes(passed=1)

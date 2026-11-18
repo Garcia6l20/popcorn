@@ -345,7 +345,7 @@ void machine::run_state::end_loop_run(loop_ender ender, std::uint32_t exception)
 
 void machine::run_state::emit_clock()
 {
-  if(sinks_want_clock)
+  if(sinks_want_clock and not rebase_pending)
   {
     deliver(
         clock_record(owner.clock_.instruction_hz()), address{}, false,

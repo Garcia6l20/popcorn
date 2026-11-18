@@ -21,6 +21,7 @@ from popcorn import (
 )
 from popcorn._machine import check_machine_name
 from popcorn.pytest._options import UNSET, marker_options
+from popcorn.pytest._profile import ProfileRun, profiling
 from popcorn.pytest._report import (
     TraceOnFail,
     kept_ends,
@@ -35,20 +36,31 @@ from popcorn.pytest._session import Devices, Key, PopcornSession, Slot, popcorn_
 class _Factory:
     """Machines a fixture made for one test, parked and closed after it."""
 
-    def __init__(self, session: PopcornSession, item: pytest.Item, budget: int | None) -> None:
+    def __init__(
+        self,
+        session: PopcornSession,
+        item: pytest.Item,
+        budget: int | None,
+        profile: tuple[str, ...] | None = None,
+    ) -> None:
         self._session = session
         self._item = item
         self._budget = budget
+        self._profile = profile
         self._machines: list[tuple[str, Machine]] = []
+        self._profiles: dict[int, ProfileRun] = {}
 
     def close(self) -> None:
-        """Park every machine made, collect its coverage and close its pty bridges.
+        """Park every machine made, write its profile, collect its coverage and close its pty
+        bridges.
 
         What ended a free run by itself and never reached the test is raised, the first one,
-        after every machine is closed. The others are warned as unraisable.
+        after every machine is closed. The others are warned as unraisable. A profile that
+        fails to finish is raised the same way, after every machine is closed: its machine is
+        closed too, its coverage collected.
 
         Raises:
-            BaseException: What ended the first such free run.
+            BaseException: What ended the first such free run, or the first profile error.
         """
         ends: list[BaseException] = []
         for label, machine in self._machines:
@@ -56,10 +68,19 @@ class _Factory:
                 ends.append(ended)
                 if len(ends) > 1:
                     unclaimed(f"{label} of {self._item.nodeid}", ended)
+            profile = self._profiles.pop(id(machine), None)
+            try:
+                if profile is not None:
+                    profile.finish()
+            except Exception as error:
+                ends.append(error)
+                if len(ends) > 1:
+                    unclaimed(f"{label} of {self._item.nodeid}", error)
             self._session.collect(machine)
             machine._close_loop()  # pyright: ignore[reportPrivateUsage]
             machine.board.close()
         self._machines.clear()
+        self._profiles.clear()
         if ends:
             raise ends[0]
 
@@ -74,7 +95,13 @@ class _Factory:
         self._keep(machine, key, label, console)
         machine.restore(snapshot)
         machine.default_budget = self._budget
+        self._start_profile(machine, label)
         return machine
+
+    def _start_profile(self, machine: Machine, label: str) -> None:
+        profile = profiling(self._item, self._session, label, self._profile)
+        if profile is not None and profile.start(machine):
+            self._profiles[id(machine)] = profile
 
     def _track_failed(self, key: Key, label: str, console: MachineConsole | None) -> None:
         failed = self._session.failed_machine(key)
@@ -122,7 +149,7 @@ class MachineFactory(_Factory):
 
     def __init__(self, session: PopcornSession, test: ItemSettings, item: pytest.Item) -> None:
         """Make machines for the test `item` with `test` settings."""
-        super().__init__(session, item, test.budget)
+        super().__init__(session, item, test.budget, test.profile)
         self._strict = test.strict
 
     def __call__(
@@ -162,9 +189,10 @@ class MachineFactory(_Factory):
         console = description.config(config).console
         with _skipping_missing(self._session.project(key)):
             if not booted:
-                return self._keep(
-                    self._session.build(key, devices, name), key, self._label(), console
-                )
+                label = self._label()
+                machine = self._keep(self._session.build(key, devices, name), key, label, console)
+                self._start_profile(machine, label)
+                return machine
             if devices is not None:
                 key = self._session.device_key(key, devices)
             try:
@@ -277,16 +305,20 @@ class ItemSettings:
         strict: Whether unmodelled peripheral accesses raise, None for the `strict` of the
             selected config of each description.
         budget: The default instruction budget of its booted machines, None for unbounded.
+        profile: The analyses its machine fixtures and `machine_factory` machines are profiled
+            with, by value, None for no profile.
     """
 
     strict: bool | None
     budget: int | None
+    profile: tuple[str, ...] | None = None
 
 
 def item_settings(item: pytest.Item, session: PopcornSession) -> ItemSettings:
     """The settings of `item`: marker over command line, per setting.
 
     `--popcorn-strict` can only turn strictness on, `strict=False` in a marker turns it off.
+    A marker's `profile` replaces `--popcorn-profile`, `profile=False` turns it off.
 
     Raises:
         pytest.fail.Exception: The marker is malformed.
@@ -297,7 +329,8 @@ def item_settings(item: pytest.Item, session: PopcornSession) -> ItemSettings:
     if strict is None and settings.strict:
         strict = True
     budget = settings.budget if options.budget is UNSET else options.budget
-    return ItemSettings(strict, budget)
+    profile = settings.profile if options.profile is UNSET else options.profile
+    return ItemSettings(strict, budget, profile)
 
 
 @pytest.fixture(scope="session")
@@ -361,6 +394,9 @@ def lending(
     track(item, name, m, key, console)
     m.default_budget = test.budget
     settings = session.settings
+    profile = profiling(item, session, name, test.profile)
+    if profile is not None and not profile.start(m):
+        profile = None
     trace = None
     if settings.trace_on_fail:
         trace = TraceOnFail(item, trace_directory(request.config, settings.trace_dir), name)
@@ -371,12 +407,19 @@ def lending(
     held = ends[0] if ends else None
     for extra in ends[1:]:
         unclaimed(item.nodeid, extra)
-    closed = trace is None
+    profiled = profile is None
+    traced = trace is None
     try:
-        if trace is not None:
-            trace.finish()
-            closed = True
+        try:
+            if profile is not None:
+                profile.finish()
+                profiled = True
+        finally:
+            if trace is not None:
+                trace.finish()
+                traced = True
     finally:
+        closed = profiled and traced
         if not closed and held is not None:
             unclaimed(item.nodeid, held)
         if not closed or lent.spoiled():
@@ -485,6 +528,12 @@ async def linking(
         BaseException: What ended the first such free run, at exit.
     """
     item = item_of(request)
+    if marker_options(item).profile not in (UNSET, None):
+        pytest.fail(
+            f"@pytest.mark.popcorn profile covers machine fixtures and machine_factory machines, "
+            f"not the members of the system fixture {fixture}",
+            pytrace=False,
+        )
     factory = SystemFactory(session, item, fixture)
     settings = session.settings
     traces: list[TraceOnFail] = []

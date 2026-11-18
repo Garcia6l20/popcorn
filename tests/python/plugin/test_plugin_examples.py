@@ -37,4 +37,4 @@ def test_help_lists_the_options_and_marker(pytester: pytest.Pytester) -> None:
         ]
     )
     markers = pytester.runpytest("-p", "no:asyncio", "--markers")
-    markers.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None):*"])
+    markers.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None, profile=None):*"])

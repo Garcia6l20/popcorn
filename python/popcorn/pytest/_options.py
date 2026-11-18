@@ -12,7 +12,8 @@ import pytest
 from popcorn.coverage.report import UNMODELLED_MODES, ReportSpec, parse_spec
 
 DEFAULT_CACHE_MAX_AGE_DAYS = 7
-MARKER = "popcorn(budget=None, strict=None): popcorn machine settings for this test"
+MARKER = "popcorn(budget=None, strict=None, profile=None): popcorn machine settings for this test"
+PROFILE_DIR = "popcorn-profile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,10 @@ class Settings:
             `--popcorn-ring-blocks`.
         cache_max_age_days: Days a boot cache entry may go unused before the session-end sweep
             deletes it, 0 for no age limit, the `popcorn_cache_max_age_days` ini option.
+        profile: The analyses `--popcorn-profile` runs on every test's machines, by value, every
+            analysis for the bare flag, None without the option.
+        profile_dir: Where profiles go, the `popcorn_profile_dir` ini option resolved against
+            the rootdir, `<rootdir>/popcorn-profile` when it is empty.
     """
 
     trace_on_fail: bool
@@ -75,6 +80,8 @@ class Settings:
     cov_include: tuple[str, ...] = ()
     cov_omit: tuple[str, ...] = ()
     cov_unmodelled: str = "hit"
+    profile: tuple[str, ...] | None = None
+    profile_dir: Path | None = None
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -82,7 +89,7 @@ class Settings:
 
         Raises:
             pytest.UsageError: A coverage option is invalid, or given on the command line
-                without `--popcorn-cov`.
+                without `--popcorn-cov`, or `--popcorn-profile` names an unknown analysis.
         """
         here = config.invocation_params.dir
         trace = config.getoption("popcorn_trace_on_fail")
@@ -106,6 +113,9 @@ class Settings:
             cov_include=cov.include,
             cov_omit=cov.omit,
             cov_unmodelled=cov.unmodelled,
+            profile=_profile_option(config.getoption("popcorn_profile")),
+            profile_dir=config.rootpath
+            / (str(config.getini("popcorn_profile_dir")).strip() or PROFILE_DIR),
         )
 
 
@@ -178,6 +188,33 @@ def _coverage_settings(config: pytest.Config) -> _Coverage:
             config.getoption("popcorn_cov_unmodelled"), config.getini("popcorn_cov_unmodelled")
         ),
     )
+
+
+def analyses(names: tuple[str, ...]) -> tuple[str, ...]:
+    """The values of the analyses `names` select, every analysis for none.
+
+    Raises:
+        ValueError: A name is no analysis.
+    """
+    from popcorn.profiling import selected
+
+    return tuple(analysis.value for analysis in selected(names))
+
+
+def _profile_option(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, str):
+        return None
+    names = tuple(name.strip() for name in value.split(",") if name.strip())
+    try:
+        return analyses(names)
+    except ValueError as error:
+        hint = ""
+        if any("/" in name or name.endswith(".py") or "::" in name for name in names):
+            hint = (
+                ": write --popcorn-profile=ANALYSES or put the flag last, a bare flag before"
+                " a path takes the path as its ANALYSES"
+            )
+        raise pytest.UsageError(f"--popcorn-profile: {error}{hint}") from None
 
 
 def _unmodelled(option: object, ini: object) -> str:
@@ -280,7 +317,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "registers, default hit",
         default="",
     )
+    parser.addini(
+        "popcorn_profile_dir",
+        help="where --popcorn-profile and the profile marker keyword write, relative to the "
+        "rootdir, default popcorn-profile",
+        default="",
+    )
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
+    group.addoption(
+        "--popcorn-profile",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ANALYSES",
+        help="profile the machine fixtures and machine_factory machines of every test and write "
+        "one JSON report per machine to the popcorn_profile_dir ini option, popcorn-profile in "
+        "the rootdir by default. ANALYSES is a comma-separated list, every analysis when "
+        "omitted: write it as --popcorn-profile=ANALYSES",
+    )
     group.addoption(
         "--popcorn-cov",
         action="store_true",
@@ -416,7 +470,7 @@ class Unset(enum.Enum):
 
 UNSET = Unset.UNSET
 
-_KEYWORDS = ("budget", "strict")
+_KEYWORDS = ("budget", "strict", "profile")
 
 CONFIG = (
     "config is not a marker keyword: set it on the machine fixture, "
@@ -432,10 +486,13 @@ class MarkerOptions:
         budget: The default instruction budget, None for unbounded runs.
         strict: None or absent, the command line then the machine description; True or False
             overrides.
+        profile: The analyses to profile the test's machines with, by value, None for no
+            profile, `UNSET` for `--popcorn-profile`, also when the keyword is None.
     """
 
     budget: int | Unset | None = UNSET
     strict: bool | None = None
+    profile: tuple[str, ...] | Unset | None = UNSET
 
 
 def marker_options(item: pytest.Item) -> MarkerOptions:
@@ -466,7 +523,35 @@ def marker_options(item: pytest.Item) -> MarkerOptions:
         _refuse(f"budget is an int above 0 or None, not {budget!r}")
     if not (strict is None or isinstance(strict, bool)):
         _refuse(f"strict is a bool or None, not {strict!r}")
-    return MarkerOptions(budget=cast(int | Unset | None, budget), strict=strict)
+    return MarkerOptions(
+        budget=cast(int | Unset | None, budget),
+        strict=strict,
+        profile=_profile_keyword(marker.kwargs.get("profile", UNSET)),
+    )
+
+
+def _profile_keyword(value: object) -> tuple[str, ...] | Unset | None:
+    if value is UNSET or value is None:
+        return UNSET
+    if value is False:
+        return None
+    names: tuple[object, ...]
+    if value is True:
+        names = ()
+    elif isinstance(value, str):
+        names = (value,)
+    elif isinstance(value, (list, tuple)):
+        names = tuple(cast(list[object] | tuple[object, ...], value))
+    else:
+        _refuse(f"profile is a bool, an analysis name or a sequence of them, not {value!r}")
+    if not names and value is not True:
+        _refuse("profile names no analysis: use True for every one")
+    if not all(isinstance(name, str) for name in names):
+        _refuse(f"profile is a bool, an analysis name or a sequence of them, not {value!r}")
+    try:
+        return analyses(cast(tuple[str, ...], names))
+    except ValueError as error:
+        _refuse(f"profile: {error}")
 
 
 @pytest.hookimpl(tryfirst=True)

@@ -126,19 +126,19 @@ def trace_directory(config: pytest.Config, chosen: Path | None) -> Path:
     return config.rootpath / ".popcorn-traces"
 
 
-def file_name(item: pytest.Item) -> str:
+def file_name(item: pytest.Item, *, worker: bool = True) -> str:
     """A file name for the test `item`: its node id with other characters than letters, digits,
     `_`, `.` and `-` replaced, cut to `NAME_LENGTH`, then a hash of the node id when that changed
-    it, and the xdist worker id first."""
+    it, and with `worker` the xdist worker id first."""
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", item.nodeid)
     if name != item.nodeid or len(name) > NAME_LENGTH:
         digest = hashlib.sha256(item.nodeid.encode()).hexdigest()[:8]
         name = f"{name[:NAME_LENGTH]}-{digest}"
     workerinput: object = getattr(item.config, "workerinput", None)
-    if isinstance(workerinput, dict):
-        worker = cast(dict[str, object], workerinput).get("workerid")
-        if isinstance(worker, str):
-            name = f"{worker}-{name}"
+    if worker and isinstance(workerinput, dict):
+        workerid = cast(dict[str, object], workerinput).get("workerid")
+        if isinstance(workerid, str):
+            name = f"{workerid}-{name}"
     return name
 
 

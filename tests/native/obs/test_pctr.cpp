@@ -406,6 +406,41 @@ TEST_CASE("a clock domain's records stay out of the file and their time goes to 
   CHECK(file.records[4].time == 108 + std::uint64_t{0xffff'ffff} + 2);
 }
 
+TEST_CASE("a time record drops the time a clock domain's records carried and restarts the count")
+{
+  auto const       path = scratch("domains-time.pctr");
+  obs::pctr_writer writer{path, icount{100}, {}};
+  auto const       domain_clock = [](std::uint32_t dt) {
+    return trace_record{
+        .kind = trace_kind::clock, .aux = 1, .dt = dt, .payload = {32'000, 0, 0}
+    };
+  };
+  std::array const records{
+      domain_clock(5),
+      trace_record{.kind = trace_kind::time, .payload = {1'000, 0, 0}},
+      trace_record{.kind = trace_kind::block, .aux = 1, .dt = 3, .payload = {0x100, 0, 0}},
+      domain_clock(0xffff'ffff),
+      trace_record{.kind = trace_kind::block, .aux = 1, .dt = 2, .payload = {0x100, 0, 0}},
+  };
+  writer.write(records);
+  writer.close();
+  auto const file = decode(path);
+  auto const kinds =
+      file.records
+      | std::views::transform([](decoded_record const& entry) { return entry.record.kind; })
+      | std::ranges::to<std::vector>();
+  CHECK(
+      kinds
+      == std::vector{
+          trace_kind::time, trace_kind::time, trace_kind::block, trace_kind::time,
+          trace_kind::block});
+  CHECK(file.records[2].record.dt == 3);
+  CHECK(file.records[2].time == 1'003);
+  CHECK(file.records[3].time == 1'003 + std::uint64_t{0xffff'ffff} + 2);
+  CHECK(file.records[4].record.dt == 0);
+  CHECK(file.records[4].time == 1'003 + std::uint64_t{0xffff'ffff} + 2);
+}
+
 TEST_CASE("a writer added with a clock domain writes the core rates only")
 {
   fixture          f{m33(), "alu", {}};

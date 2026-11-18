@@ -112,6 +112,26 @@ Write it as `--popcorn-trace-on-fail=DIR` or last on the command line: a bare fl
 takes the path as its DIR. `machine_factory` machines are not traced. Kept traces are never
 pruned: `--cache-clear` removes those in the pytest cache.
 
+With `--popcorn-profile`, every machine fixture and `machine_factory` machine of every test is
+profiled with every analysis of `popcorn.profiling`, `--popcorn-profile=hotspots,sleep` names them.
+Write it as `--popcorn-profile=ANALYSES` or last on the command line: a bare flag before a path
+takes the path as its ANALYSES. The `profile` keyword of the `popcorn` marker sets it per test: an
+analysis name or a sequence of them, True for every analysis, False for none whatever the option,
+None for the option. The profile opens once the machine is restored, or built for
+`machine_factory(booted=False)`, and closes at teardown, after a failed test too. Each writes
+`Report.to_json()` to `<popcorn_profile_dir>/<test>.<fixture>.json`, `machine_factory #<n>` in place
+of the fixture for factory machines, and adds the report's text and the file's path to the test's
+report sections, shown for a failing test or with `-rA`. `<test>` is the node id with every
+character other than letters, digits, `_`, `.` and `-` replaced by `_`, cut to 150 characters, then
+`-` and 8 hex digits of a hash of the node id, as every node id holds `::`:
+`test_spi.py__test_calls-1a2b3c4d.spi.json`. The fixture name is replaced the same way. The
+`popcorn_profile_dir` ini option is relative to the rootdir, `popcorn-profile` by default. A file of
+the same name from an earlier session is replaced, other files are kept. The summary prints
+`popcorn: N profile(s) written to DIR`. Under xdist each worker writes the files of its own tests. A
+fixture machine starts from its boot snapshot, so its report holds no boot: `from_reset` is False
+and the timeline is empty. System members are not profiled, and a marker `profile` on a test using a
+system fixture fails its setup.
+
 `--popcorn-part=PART` builds every machine the plugin makes on the shipped part `PART`, the part of
 the selected config of each description replaced: machine fixtures, system members and
 `machine_factory` calls. A description that sets `description=` or `svd=` is refused. The report
@@ -250,7 +270,8 @@ Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture,
 Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-cov-report`,
 `--popcorn-cov-fail-under`, `--popcorn-cov-include`, `--popcorn-cov-omit`,
 `--popcorn-cov-unmodelled`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`,
-`--popcorn-budget`, `--popcorn-part`, `--popcorn-ring`, `--popcorn-ring-blocks`.
+`--popcorn-budget`, `--popcorn-part`, `--popcorn-ring`, `--popcorn-ring-blocks`,
+`--popcorn-profile[=ANALYSES]`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...
@@ -262,6 +283,8 @@ line, else the description:
 - `strict`: None or absent takes the command line, then the description. True or False overrides.
   `--popcorn-strict` turns strictness on, else `MachineDescription.strict` of the config
   applies. A `strict=` given to `machine_factory` overrides all three.
+- `profile`: `--popcorn-profile`, the analyses its machine fixtures and `machine_factory`
+  machines are profiled with, see above. False turns the option off for the test.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
   `wait_for` and `call`, never a wall-clock timeout. It counts instructions the core executes,
   not the time it sleeps in WFI or WFE. `budget=None` in a marker is unbounded.
@@ -283,6 +306,7 @@ pytest_plugins = [
     "popcorn.pytest._fixtures",
     "popcorn.pytest._report",
     "popcorn.pytest._coverage",
+    "popcorn.pytest._profile",
     "popcorn.pytest._plugins",
 ]
 
