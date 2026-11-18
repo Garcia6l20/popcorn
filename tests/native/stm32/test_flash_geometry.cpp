@@ -295,6 +295,15 @@ struct secure_rig
   }
 };
 
+auto otp_first(popcorn::part_description desc) -> popcorn::part_description
+{
+  std::ranges::stable_partition(desc.regions, [](popcorn::region_desc const& region) {
+    return region.name.starts_with("OTP");
+  });
+  REQUIRE(desc.regions.front().name.starts_with("OTP"));
+  return desc;
+}
+
 auto without_register(popcorn::part_description desc, std::string_view name)
     -> popcorn::part_description
 {
@@ -576,5 +585,44 @@ TEST_CASE(
   {
     CAPTURE(name);
     CHECK(builds(without_register(h5_1m(), name)) == not throws);
+  }
+}
+
+TEST_CASE(
+    "a 2 MB U5 whose OTP regions precede Flash_NS keeps the bank geometry on the flash: a page "
+    "erase of bank 2 still erases the right page")
+{
+  auto const        desc = otp_first(u5_2m());
+  rig const         r{desc, u5_family, timed_board()};
+  constexpr address bank2_last = u5_bank2 + 127 * page_bytes;
+  for(auto const line : {bank2_last, bank2_last - page_bytes, flash_start + 127 * page_bytes})
+  {
+    r.program(line, pattern());
+  }
+  r.run(u5_per | u5_bker | u5_pnb(127) | u5_strt);
+  CHECK(r.is_erased(bank2_last));
+  CHECK(r.holds(bank2_last - page_bytes));
+  CHECK(r.holds(flash_start + 127 * page_bytes));
+}
+
+TEST_CASE(
+    "a TrustZone 2 MB U5 gives no page rule to an OTP address in either alias, whatever the region "
+    "order, and its flash pages keep theirs")
+{
+  for(auto const& desc : {u5_2m(), otp_first(u5_2m())})
+  {
+    secure_rig const r{
+        desc, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+    };
+    auto const* const pages =
+        dynamic_cast<stm32::secure_page_controller*>(r.target->model("FLASH"));
+    REQUIRE(pages != nullptr);
+    for(address const at : {0x0bfa'0000u, 0x0bfa'01ffu, 0x0bfa'03ffu, 0x0ffa'0000u, 0x0ffa'03ffu})
+    {
+      CAPTURE(at);
+      CHECK_FALSE(pages->page_secure(at).has_value());
+      CHECK_FALSE(pages->page_rule(at).has_value());
+    }
+    CHECK(pages->page_rule(u5_bank2 + 127 * page_bytes).has_value());
   }
 }

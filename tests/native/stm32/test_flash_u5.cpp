@@ -3104,3 +3104,226 @@ TEST_CASE("the FLASH row of a part gives it a watermark width of 5 or 7 or 8 bit
     CHECK(plain.status("WRPERR") == 0);
   }
 }
+
+namespace
+{
+constexpr address       otp_nonsecure = 0x0bfa'0000;
+constexpr address       otp_alias     = 0x0ffa'0000;
+constexpr std::uint32_t otp_area_size = 0x200;
+}
+
+TEST_CASE(
+    "RM0456 7.3.7 step 5: with PG four word stores at the OTP base program the quad-word, EOP "
+    "sets, BSY is held for the quad-word time")
+{
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  rig.control(pg | eopie);
+  rig.store_words(otp_nonsecure, {0x11, 0x22, 0x33, 0x44});
+  rig.run_into(timing.quad_word_program, timing.quad_word_program / 2);
+  CHECK(rig.words(otp_nonsecure, 4) == erased(4));
+  rig.wait_idle();
+  CHECK(rig.words(otp_nonsecure, 4) == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44});
+  CHECK(rig.words(otp_alias, 4) == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x44});
+  CHECK(rig.status("EOP") == 1);
+  CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+}
+
+TEST_CASE(
+    "RM0456 Table 71: a second program of an OTP quad-word sets PROGERR and keeps the data, also "
+    "with zeros, the next quad-word programs")
+{
+  flash_rig rig;
+  rig.program(otp_nonsecure, {1, 2, 3, 4});
+  REQUIRE((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+  for(auto const& again : {
+          std::vector<std::uint32_t>{0,    0, 0, 0},
+          {1,    2, 3, 4},
+          {0xff, 2, 3, 4}
+  })
+  {
+    rig.program(otp_nonsecure, again);
+    CHECK(rig.status("PROGERR") == 1);
+    CHECK(rig.words(otp_nonsecure, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+    rig.control(0);
+    rig.clear_errors();
+  }
+  rig.program(otp_nonsecure + 16, {5, 6, 7, 8});
+  CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+  CHECK(rig.words(otp_nonsecure + 16, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+}
+
+TEST_CASE(
+    "RM0456 7.3.9 and 7.3.7: a half-word store to the OTP sets SIZERR, an unaligned first word "
+    "PGAERR, a store with PG clear PGSERR, nothing is written")
+{
+  flash_rig rig;
+  SUBCASE("SIZERR")
+  {
+    rig.control(pg);
+    rig.call("store_half", {otp_nonsecure, 0x1234});
+    CHECK(rig.status("SIZERR") == 1);
+  }
+  SUBCASE("PGAERR")
+  {
+    rig.control(pg);
+    rig.store_words(otp_nonsecure + 4, {1});
+    CHECK(rig.status("PGAERR") == 1);
+  }
+  SUBCASE("PGSERR")
+  {
+    rig.store_words(otp_nonsecure, {1});
+    CHECK(rig.status("PGSERR") == 1);
+  }
+  CHECK(rig.words(otp_nonsecure, 8) == erased(8));
+}
+
+TEST_CASE(
+    "inferred: a store to the OTP regions past byte 0x1FF sets WRPERR in the Non-secure status "
+    "and writes nothing")
+{
+  flash_rig rig;
+  for(address const at :
+      {otp_nonsecure + otp_area_size, otp_nonsecure + 0x3fc, otp_alias + otp_area_size,
+       otp_alias + 0x3fc})
+  {
+    CAPTURE(at);
+    rig.control(pg);
+    rig.store_words(at, {1});
+    CHECK(rig.status("WRPERR") == 1);
+    CHECK(rig.status("BSY") == 0);
+    rig.control(0);
+    rig.clear_errors();
+    CHECK(rig.words(otp_nonsecure + otp_area_size, 128) == erased(128));
+  }
+  rig.program(otp_nonsecure + otp_area_size - 16, {9, 9, 9, 9});
+  CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+  CHECK(rig.words(otp_nonsecure + otp_area_size - 16, 4) == std::vector<std::uint32_t>(4, 9));
+}
+
+TEST_CASE(
+    "RM0456 7.3.7 burst step 5 and inferred: a burst over the OTP programs 8 quad-words under the "
+    "burst time, a second burst or one over a programmed quad-word sets PROGERR and writes none")
+{
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     data = burst_data(0x300);
+  rig.control(pg | bwr);
+  rig.store_words(otp_nonsecure, data);
+  rig.run_into(timing.burst_program, timing.burst_program / 2);
+  CHECK(rig.words(otp_nonsecure, 32) == erased(32));
+  rig.wait_idle();
+  CHECK(rig.words(otp_nonsecure, 32) == data);
+  CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+  rig.control(0);
+  rig.control(pg | bwr);
+  rig.store_words(otp_nonsecure, burst_data(0x400));
+  rig.wait_idle();
+  CHECK(rig.status("PROGERR") == 1);
+  CHECK(rig.words(otp_nonsecure, 32) == data);
+  rig.control(0);
+  rig.clear_errors();
+  rig.control(pg);
+  rig.store_words(otp_nonsecure + 0x100 + 3 * 16, {7, 7, 7, 7});
+  rig.wait_idle();
+  rig.control(0);
+  rig.control(pg | bwr);
+  rig.store_words(otp_nonsecure + 0x100, burst_data(0x600));
+  rig.wait_idle();
+  CHECK(rig.status("PROGERR") == 1);
+  auto const mixed = rig.words(otp_nonsecure + 0x100, 32);
+  CHECK(std::ranges::count(mixed, 7u) == 4);
+  CHECK(std::ranges::count(mixed, 0xffff'ffffu) == 28);
+}
+
+TEST_CASE("RM0456 7.3.9: MER2 and PER over several pages leave the OTP bytes unchanged")
+{
+  periph::stm32::board board;
+  board.flash.page_erase = std::chrono::microseconds{50};
+  board.flash.bank_erase = std::chrono::microseconds{200};
+  board.flash.mass_erase = std::chrono::microseconds{400};
+  flash_rig rig{board};
+  rig.program(otp_nonsecure, {1, 2, 3, 4});
+  rig.control(0);
+  auto const before = rig.words(otp_nonsecure, otp_area_size / 4);
+  auto const check  = [&](std::uint32_t control) {
+    CAPTURE(control);
+    rig.control(control | strt);
+    rig.wait_idle();
+    rig.control(0);
+    rig.clear_errors();
+    CHECK(rig.words(otp_nonsecure, otp_area_size / 4) == before);
+  };
+  for(auto const control : {mer2, per | bker, per | bker | pnb(127), per | pnb(127)})
+  {
+    check(control);
+  }
+  for(std::uint32_t page = 31; page < 128; page += 32)
+  {
+    check(per | pnb(page));
+    check(per | bker | pnb(page));
+  }
+}
+
+TEST_CASE(
+    "inferred: a power cut half way through an OTP program tears the quad-word, a CPU load of it "
+    "sets ECCD with BK_ECC 0 and ADDR_ECC the offset in the OTP area and takes the NMI")
+{
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  for(address const line : {otp_nonsecure, otp_nonsecure + 0x10, otp_nonsecure + 0x1f0})
+  {
+    for(address const alias : {address{0}, otp_alias - otp_nonsecure})
+    {
+      CAPTURE(line);
+      CAPTURE(alias);
+      flash_rig rig;
+      rig.control(pg);
+      rig.store_words(line, {1, 2, 3, 4});
+      rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
+      CHECK(rig.words(line, 4) == std::vector<std::uint32_t>{1, 2, 0xffff'ffffu, 0xffff'ffffu});
+      CHECK(rig.torn() == std::vector<std::uint32_t>{line});
+      rig.clear_nmi = false;
+      rig.handle_nmi();
+      rig.load(line + alias);
+      REQUIRE(rig.nmi_eccr.size() == 1);
+      CHECK(rig.eccr() == (eccd | (line - otp_nonsecure)));
+      CHECK(rig.nmi_level());
+      CHECK((rig.core_reg("xpsr") & 0x1ff) == exc_nmi);
+      rig.write("FLASH_ECCR", eccd);
+      CHECK((rig.eccr() & eccd) == 0);
+      CHECK_FALSE(rig.nmi_level());
+    }
+  }
+}
+
+TEST_CASE(
+    "a snapshot taken while an OTP program runs completes it after a restore into a fresh machine "
+    "and a torn OTP quad-word still reports ECCD there")
+{
+  flash_rig rig;
+  rig.control(pg);
+  rig.store_words(otp_nonsecure + 0x20, {1, 2, 3, 4});
+  REQUIRE(rig.status("BSY") == 1);
+  auto const running = rig.f.target->snapshot();
+  rig.wait_idle();
+  rig.control(0);
+  rig.tear(otp_nonsecure + 0x40);
+  auto const torn = rig.f.target->snapshot();
+
+  flash_rig other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(running.data()))});
+  CHECK(other.status("BSY") == 1);
+  CHECK(other.words(otp_nonsecure + 0x20, 4) == erased(4));
+  other.wait_idle();
+  CHECK(other.words(otp_nonsecure + 0x20, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+
+  flash_rig again;
+  again.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(torn.data()))});
+  again.clear_nmi = false;
+  again.handle_nmi();
+  again.load(otp_nonsecure + 0x40);
+  REQUIRE(again.nmi_eccr.size() == 1);
+  CHECK(again.eccr() == (eccd | 0x40u));
+}

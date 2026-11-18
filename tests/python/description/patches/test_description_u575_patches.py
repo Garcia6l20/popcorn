@@ -234,7 +234,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.sizes_set == 1
     assert report.registers_added == 13
     assert report.regions_added == 4
-    assert report.controllers_set == 2
+    assert report.controllers_set == 4
     assert report.signature_words == 6
 
 
@@ -280,13 +280,13 @@ def test_flash_windows_are_served_by_the_flash_interface(
     u575_target_and_report: _TargetAndReport,
 ) -> None:
     target, report = u575_target_and_report
-    assert report.controllers_set == 2
+    assert report.controllers_set == 4
     controllers = {r.name: r.controller for r in target.regions}
     assert controllers["Flash_NS"] == "FLASH"
     assert controllers["Flash_S"] == "FLASH"
-    assert controllers["OTP_NS"] is None
-    assert controllers["OTP_S"] is None
-    assert sum(c is not None for c in controllers.values()) == 2
+    assert controllers["OTP_NS"] == "FLASH"
+    assert controllers["OTP_S"] == "FLASH"
+    assert sum(c is not None for c in controllers.values()) == 4
     assert target_peripheral(target, "FLASH").alias_of is None
 
 

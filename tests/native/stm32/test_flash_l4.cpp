@@ -1921,6 +1921,41 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "RM0351 3.3.1 and 3.3.2: a power cut during an OTP double word program tears it, a CPU load of "
+    "it sets ECCD with BK_ECC 0 and ADDR_ECC the byte offset from the OTP base, inferred")
+{
+  for(address const line : {address{otp}, address{otp + 8}, address{otp + 0x3f8}})
+  {
+    CAPTURE(line);
+    rig r;
+    r.tear(line);
+    CHECK(r.words(line, 2) == std::vector<std::uint32_t>{0x1, ~0u});
+    REQUIRE(r.read("ECCR") == 0);
+    auto const reported = eccd | static_cast<std::uint32_t>(line - otp);
+    CHECK(r.load(line + 4) == rig::loaded{~0u, 1, reported});
+    CHECK(r.read("ECCR") == (reported & ~eccd));
+    CHECK(r.load(line - 8 + (line == otp ? 0x10 : 0)) == rig::loaded{~0u, 0, 0});
+  }
+}
+
+TEST_CASE(
+    "RM0351 3.3.1: a FSTPG store to the OTP sets WRPERR and FASTERR and writes nothing, a store to "
+    "the option bytes next to it is no OTP store and sets WRPERR alone, inferred")
+{
+  rig r;
+  r.control(fstpg);
+  r.store_words(otp + 0x10, {0x1, 0x2});
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == (wrperr | fasterr));
+  CHECK(r.words(otp + 0x10, 2) == erased(2));
+  r.control(0);
+  r.clear_errors();
+  r.program(option1, {0, 0});
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(option1, 2) != std::vector<std::uint32_t>{0, 0});
+}
+
+TEST_CASE(
     "RM0351 3.7.8: FLASH_OPTR.DUALBANK 0 makes the 256 KB flash one bank of 128 pages, a bank 2 "
     "erase erases nothing, warns once, raises under strict_peripherals, inferred")
 {

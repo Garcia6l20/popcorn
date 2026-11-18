@@ -758,9 +758,27 @@ struct erase_command
   std::uint32_t page{};
 };
 
+/** @brief How a family programs its OTP area. */
+enum class otp_program : std::uint8_t
+{
+  none,
+  once,
+  half_word
+};
+
 /** @brief STM32U5 FLASH traits, RM0456 section 7, each capability tied to its roles. */
 struct u5_flash
 {
+  /** @brief A quad-word of the OTP area programs once, RM0456 7.3.7 and Table 71. */
+  static constexpr otp_program otp_kind = otp_program::once;
+  /** @brief The OTP area, RM0456 7.3.1 Table 51. */
+  static constexpr memory_extent otp_area{.first = 0x0bfa'0000, .last = 0x0bfa'01ff};
+  /** @brief The OTP region the stores route to the OTP rules, one description page. */
+  static constexpr memory_extent otp_window{.first = 0x0bfa'0000, .last = 0x0bfa'03ff};
+  /** @brief Regions that hold the OTP area, outside the page geometry of the flash. */
+  static constexpr std::array<std::string_view, 2> otp_regions{"OTP_NS", "OTP_S"};
+  /** @brief A Secure store to the OTP area raises the FLASHIE event, RM0456 Table 71. */
+  static constexpr bool otp_secure_event = true;
   /** @brief BWR collects a burst of 8 quad-words, RM0456 7.3.7. */
   static constexpr bool burst_write = true;
   /** @brief FW forces a partly filled write buffer out. */
@@ -1017,6 +1035,15 @@ struct u5_flash
   }
 
   /**
+   * @brief FLASH_ECCR.ADDR_ECC of a failing quad-word of the OTP area, its byte offset in it.
+   * @param offset Byte offset of the quad-word from the start of the OTP area.
+   */
+  [[nodiscard]] static constexpr auto otp_ecc_address(std::uint32_t offset) -> std::uint32_t
+  {
+    return offset;
+  }
+
+  /**
    * @brief Whether a control word selects an erase: PER, MER1 or MER2, RM0456 7.3.6.
    * @param field Value of a set role in the control word.
    */
@@ -1137,6 +1164,10 @@ constexpr std::uint32_t sector_top        = 0x7f;
 /** @brief STM32H5 FLASH traits, RM0481 section 7, each capability tied to its roles. */
 struct h5_flash
 {
+  /** @brief No OTP programming. */
+  static constexpr otp_program otp_kind = otp_program::none;
+  /** @brief No region holds an OTP area. */
+  static constexpr std::array<std::string_view, 0> otp_regions{};
   /** @brief No burst programming, RM0481 7.3.5. */
   static constexpr bool burst_write = false;
   /** @brief FW forces a partly filled write buffer out, RM0481 7.11.11. */
@@ -1546,6 +1577,12 @@ constexpr flash_timing l4_flash_timing{
  *         block registers. */
 struct l4_flash
 {
+  /** @brief A double word of the OTP area programs once, RM0351 3.3.1. */
+  static constexpr otp_program otp_kind = otp_program::once;
+  /** @brief The OTP lies in the information block region, not in a region of its own. */
+  static constexpr std::array<std::string_view, 0> otp_regions{};
+  /** @brief No TrustZone, no Secure store event. */
+  static constexpr bool otp_secure_event = false;
   /** @brief No burst programming, RM0351 3.3.7. */
   static constexpr bool burst_write = false;
   /** @brief A double word launches on its second word, no force write. */
@@ -1580,6 +1617,9 @@ struct l4_flash
   static constexpr std::uint32_t dual_bank_bit = 1u << 21;
   /** @brief The OTP area, RM0351 3.3.1 Table 10. */
   static constexpr memory_extent otp_area{.first = 0x1fff'7000, .last = 0x1fff'73ff};
+  /** @brief The stores the OTP rules govern, the OTP area alone: the option bytes of the
+   *         information block lie past it. */
+  static constexpr memory_extent otp_window = otp_area;
   /** @brief Regions RDP level 1 locks besides the flash main memory and the OTP area, RM0351
    *         3.5.1. */
   static constexpr std::array<std::string_view, 1> read_protected_regions{"SRAM2"};
@@ -1799,6 +1839,15 @@ struct l4_flash
     return line - bank_base;
   }
 
+  /**
+   * @brief FLASH_ECCR.ADDR_ECC of a failing double word of the OTP area, its byte offset in it.
+   * @param offset Byte offset of the double word from the start of the OTP area.
+   */
+  [[nodiscard]] static constexpr auto otp_ecc_address(std::uint32_t offset) -> std::uint32_t
+  {
+    return offset;
+  }
+
   /** @brief The U5 rule: PER, MER1 or MER2 selects an erase, RM0351 3.3.6. */
   template <typename Field> [[nodiscard]] static auto erase_selected(Field const& field) -> bool
   {
@@ -2005,6 +2054,19 @@ static_assert(flag_matches_roles(
  * - Deviation from RM0456 3.5.5: it calls a bank secure when one page is secure, which would let
  *   a Secure bank erase run over a mixed bank. The model follows Table 70 and refuses it whole.
  *
+ * OTP, RM0456 7.3.7 and Table 71: the 512 bytes at 0x0BFA0000 and their Secure alias at
+ * 0x0FFA0000 program through the FLASH interface like the main memory. With PG set, a Non-secure
+ * quad-word store sequence, or a burst of 8 quad-words, programs a quad-word that reads all 0xFF
+ * for the quad-word time. A quad-word with any bit at 0 sets PROGERR, also for zero data, and
+ * keeps its bytes. SIZERR, PGAERR and PGSERR apply as in the main memory, and no erase reaches the
+ * OTP area. With TrustZone a Secure store sets the Secure WRPERR and raises the TZIC `FLASHIE`
+ * event, and writes nothing. Inferred: a store to the 512 bytes past the OTP area, in the 1 KB
+ * of each OTP region, sets the Non-secure WRPERR and writes nothing. A burst over a programmed
+ * quad-word sets PROGERR and programs none of its 8 quad-words. The times are those of the main
+ * memory, as DS13737 has no OTP row. A power cut during an OTP program tears the quad-word as in
+ * the main memory, and a CPU or DMA load of it is a double error with BK_ECC 0 and ADDR_ECC the
+ * quad-word's byte offset in the OTP area.
+ *
  * Latency, RM0456 7.3.3: FLASH_ACR.LATENCY is compared with Table 54, or Table 55 with LPM set,
  * for HCLK and the voltage range PWR_SVMSR.ACTVOS applies, on a FLASH_ACR write, an HCLK change
  * and a range change. Silicon refuses nothing and reads wrong data with too few wait states, so
@@ -2187,9 +2249,11 @@ static_assert(flag_matches_roles(
  *   A DAP store is dropped, a fetch runs. A program in it, an erase of a page holding part of
  *   it and the erase of its bank set WRPERR, the bank rule inferred. An OPTSTRT that clears or
  *   shrinks an area keeps that bank's PCROP words.
- * - OTP, 3.3.1: a double word of the OTP area programs once, a later program sets PROGERR, also
- *   with zeros, inferred flag. A store to the rest of the information block, and a FSTPG store
- *   to the OTP area, set WRPERR, inferred.
+ * - OTP, 3.3.1: a double word of the OTP area programs once under the OTP rule of the U5 above,
+ *   per double word, a later program sets PROGERR, also with zeros, inferred flag. A store to the
+ *   rest of the information block, and a FSTPG store to the OTP area, set WRPERR, inferred. A
+ *   power cut during an OTP program tears the double word, a CPU load of it sets ECCD with BK_ECC
+ *   0 and ADDR_ECC the byte offset from 0x1FFF7000, inferred.
  * - DUALBANK, 3.7.8: on a part of 512 KB or less a loaded DUALBANK 0 makes one bank of the whole
  *   flash. A bank 2 page erase or MER2 alone erases nothing, warns once and raises under
  *   strict_peripherals, inferred.
@@ -2199,6 +2263,22 @@ static_assert(flag_matches_roles(
  *
  * @group u5,h5 unmodelled "Not modelled"
  * - Single ECC errors. ECCC never sets and ECCIE has no effect.
+ *
+ * @group u5 rule "OTP, RM0456 7.3.7 and Table 71"
+ * - A Non-secure quad-word program or burst of 8 quad-words to 0x0BFA0000 to 0x0BFA01FF programs
+ *   a quad-word that reads all 0xFF, RM0456 7.3.7 and 7.3.9, and its alias at 0x0FFA0000 reaches
+ *   the same bytes. BSY is held for the quad-word time.
+ * - A quad-word with any bit at 0 sets PROGERR, also for zero data, and keeps its bytes. SIZERR,
+ *   PGAERR and PGSERR apply as in the main memory. No erase reaches the OTP area, 7.3.9.
+ * - With TrustZone a Secure store sets the Secure WRPERR, raises the TZIC `FLASHIE` event and
+ *   writes nothing, Table 71.
+ * - A store to the 512 bytes past the OTP area in the 1 KB OTP region sets the Non-secure WRPERR
+ *   and writes nothing, inferred.
+ * - A burst over a programmed quad-word sets PROGERR and programs none of its 8 quad-words, and
+ *   the quad-word and burst times are those of the main memory, as DS13737 has no OTP row,
+ *   inferred.
+ * - A power cut during an OTP program tears the quad-word as in the main memory. A CPU or DMA
+ *   load of it sets ECCD with BK_ECC 0 and ADDR_ECC the byte offset in the OTP area, inferred.
  *
  * @group u5 deviation "Differs from RM0456"
  * - OPTSTRT programs the FLASH_WRPxyR registers only and completes at once, with no BSY. The
@@ -2420,7 +2500,9 @@ static_assert(flag_matches_roles(
  * - OTP, RM0351 3.3.1: a double word of 0x1FFF7000 to 0x1FFF73FF programs once with `PG`. A program
  *   of a double word with any bit at 0 sets `PROGERR`, also with zeros, inferred flag. A store to
  *   the rest of the information block, the option bytes and the signature, and a `FSTPG` store to
- *   the OTP area, set `WRPERR`, inferred.
+ *   the OTP area, set `WRPERR`, inferred. A power cut during an OTP program tears the double word,
+ *   a CPU load of it sets `ECCD` with `BK_ECC` 0 and `ADDR_ECC` the byte offset from 0x1FFF7000,
+ *   inferred.
  * - `DUALBANK`, RM0351 3.7.8: on a 256 KB or 512 KB part a loaded `DUALBANK` 0 makes the flash one
  *   bank, pages 0 up to the flash size, `MER1` erases all of it. `BKER` 1 and `MER2` alone erase
  *   nothing, log one warning per machine life and raise `model_error` under `strict_peripherals`,
@@ -2597,18 +2679,27 @@ private:
   void               forget_torn(std::uint32_t from, std::uint32_t length);
   void               sync_watches();
   void               report_double_error(std::uint32_t line);
-  void               open_row(std::uint32_t at);
-  void               close_row();
-  void               watch_row();
-  void               abort_row();
-  [[nodiscard]] auto banks() const -> bank_geometry;
-  [[nodiscard]] auto bank_count() const -> std::uint32_t;
-  [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
-  [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
-  [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
-  [[nodiscard]] auto rule_of(std::uint32_t at) const -> page_policy;
-  [[nodiscard]] auto pages_ruled() const -> bool;
-  [[nodiscard]] auto block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
+  struct ecc_place
+  {
+    std::uint32_t bank;
+    std::uint32_t address;
+  };
+  [[nodiscard]] auto        ecc_place_of(std::uint32_t line) const -> ecc_place;
+  [[nodiscard]] static auto is_otp_region(region_desc const& region) -> bool;
+  [[nodiscard]] static auto in_otp(std::uint32_t at) -> bool;
+  [[nodiscard]] auto        otp_store_allowed(std::uint32_t at, bool secure, bool fast) -> bool;
+  void                      open_row(std::uint32_t at);
+  void                      close_row();
+  void                      watch_row();
+  void                      abort_row();
+  [[nodiscard]] auto        banks() const -> bank_geometry;
+  [[nodiscard]] auto        bank_count() const -> std::uint32_t;
+  [[nodiscard]] auto        bank_of(std::uint32_t at) const -> std::uint32_t;
+  [[nodiscard]] auto        bank_base(std::uint32_t at) const -> std::uint32_t;
+  [[nodiscard]] auto        bank_start(std::uint32_t bank) const -> std::uint32_t;
+  [[nodiscard]] auto        rule_of(std::uint32_t at) const -> page_policy;
+  [[nodiscard]] auto        pages_ruled() const -> bool;
+  [[nodiscard]] auto        block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
       -> bool;
   [[nodiscard]] auto
       writable(std::uint32_t from, std::uint32_t length, bool secure, bool privileged) -> bool;
@@ -2626,7 +2717,7 @@ private:
   [[nodiscard]] auto option_mask(std::uint32_t offset) const -> std::uint32_t;
   void               warn_dropped_options();
   [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
-  [[nodiscard]] auto info_refused(std::uint32_t at, bool fast) const -> bool;
+  [[nodiscard]] auto info_refused(std::uint32_t at) const -> bool;
   [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
   void                      poke_wrp();
   void                      load_options();
@@ -2873,7 +2964,7 @@ flash_model<Traits>::flash_model(
     privileged_blocks_.push_back(has_register(name) ? reg(name).offset : ~0u);
   }
   auto const own = std::ranges::find_if(ctx.part.regions, [&desc](region_desc const& region) {
-    return region.controller == desc.name and not region.physical;
+    return region.controller == desc.name and not region.physical and not is_otp_region(region);
   });
   if(own != ctx.part.regions.end())
   {
@@ -3634,17 +3725,56 @@ template <typename Traits> auto flash_model<Traits>::protection_level() const ->
   return 0;
 }
 
-template <typename Traits>
-auto flash_model<Traits>::info_refused(std::uint32_t at, bool fast) const -> bool
+template <typename Traits> auto flash_model<Traits>::info_refused(std::uint32_t at) const -> bool
 {
   if constexpr(Traits::read_protection)
   {
-    auto const main =
-        storage_ != nullptr and at >= storage_->start and at - storage_->start < storage_->size;
-    auto const otp = at >= Traits::otp_area.first and at <= Traits::otp_area.last;
-    return not main and (fast or not otp);
+    return not(
+        storage_ != nullptr and at >= storage_->start and at - storage_->start < storage_->size);
   }
   return false;
+}
+
+template <typename Traits>
+auto flash_model<Traits>::is_otp_region(region_desc const& region) -> bool
+{
+  return std::ranges::contains(Traits::otp_regions, region.name);
+}
+
+template <typename Traits> auto flash_model<Traits>::in_otp(std::uint32_t at) -> bool
+{
+  if constexpr(Traits::otp_kind != otp_program::none)
+  {
+    return at >= Traits::otp_window.first and at <= Traits::otp_window.last;
+  }
+  return false;
+}
+
+template <typename Traits>
+auto flash_model<Traits>::otp_store_allowed(std::uint32_t at, bool secure, bool fast) -> bool
+{
+  if constexpr(Traits::otp_kind != otp_program::none)
+  {
+    if(secure)
+    {
+      fail(true, set_role::protection_error);
+      if(Traits::otp_secure_event)
+      {
+        illegal_access("FLASHIE");
+      }
+      return false;
+    }
+    if(fast or at > Traits::otp_area.last)
+    {
+      fail(false, set_role::protection_error);
+      if(fast)
+      {
+        fail(false, set_role::fast_error);
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 template <typename Traits> void flash_model<Traits>::update_pcrop()
@@ -3808,7 +3938,7 @@ auto flash_model<Traits>::refused(
   {
     return false;
   }
-  if constexpr(Traits::read_protection)
+  if constexpr(Traits::otp_kind == otp_program::once)
   {
     if(at >= Traits::otp_area.first and at <= Traits::otp_area.last)
     {
@@ -3968,7 +4098,7 @@ auto flash_model<Traits>::page_rule(address at) const -> std::optional<page_poli
   auto const region = std::ranges::find_if(ctx_.part.regions, [&](region_desc const& r) {
     return r.controller == desc_.name and at >= r.start and at - r.start < r.size;
   });
-  if(region == ctx_.part.regions.end())
+  if(region == ctx_.part.regions.end() or is_otp_region(*region))
   {
     return std::nullopt;
   }
@@ -4093,10 +4223,24 @@ template <typename Traits> void flash_model<Traits>::report_double_error(std::ui
   {
     return;
   }
-  update(regs_, unit_[unit_role::ecc_address], Traits::ecc_address(line, bank_base(line)));
-  update(regs_, unit_[unit_role::ecc_bank], bank_of(line));
+  auto const place = ecc_place_of(line);
+  update(regs_, unit_[unit_role::ecc_address], place.address);
+  update(regs_, unit_[unit_role::ecc_bank], place.bank);
   update(regs_, unit_[unit_role::ecc_detect], 1);
   ctx_.nmi.raise();
+}
+
+template <typename Traits>
+auto flash_model<Traits>::ecc_place_of(std::uint32_t line) const -> ecc_place
+{
+  if constexpr(Traits::otp_kind != otp_program::none)
+  {
+    if(line >= Traits::otp_area.first and line <= Traits::otp_area.last)
+    {
+      return {.bank = 0, .address = Traits::otp_ecc_address(line - Traits::otp_area.first)};
+    }
+  }
+  return {.bank = bank_of(line), .address = Traits::ecc_address(line, bank_base(line))};
 }
 
 template <typename Traits> auto flash_model<Traits>::busy() const -> bool
@@ -4426,9 +4570,17 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
       check_row_erased(addr);
     }
   }
-  if((pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
-     or wrp_protected(addr, 1)
-     or info_refused(addr, fast))
+  if(in_otp(addr))
+  {
+    if(not otp_store_allowed(addr, secure, fast))
+    {
+      return;
+    }
+  }
+  else if(
+      (pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
+      or wrp_protected(addr, 1)
+      or info_refused(addr))
   {
     fault(set_role::protection_error);
     return;

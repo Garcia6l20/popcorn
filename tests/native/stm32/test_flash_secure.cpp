@@ -1131,3 +1131,91 @@ TEST_CASE(
     return std::to_integer<unsigned char>(b);
   }));
 }
+
+namespace
+{
+constexpr address otp_nonsecure = 0x0bfa'0000;
+constexpr address otp_alias     = 0x0ffa'0000;
+}
+
+TEST_CASE(
+    "RM0456 Table 71: with TrustZone a Secure store to the OTP in either alias sets the Secure "
+    "WRPERR, raises FLASHIE, leaves the Non-secure flags clear and the OTP bytes as they were")
+{
+  for(address const at : {otp_nonsecure, otp_alias, otp_nonsecure + 0x10, otp_alias + 0x1f0})
+  {
+    CAPTURE(at);
+    rig const r{true};
+    r.unlock(true);
+    r.write("SECCR", pg, secure_priv);
+    r.store(at, {1, 2, 3, 4}, secure_priv);
+    r.settle();
+    CHECK((r.peek("SECSR") & wrperr) != 0);
+    CHECK((r.peek("NSSR") & (wrperr | pgserr)) == 0);
+    CHECK(r.tzic("FLASHF"));
+    CHECK((r.peek("SECSR") & bsy) == 0);
+    for(address const alias : {otp_nonsecure, otp_alias})
+    {
+      CHECK(r.word(alias + (at & 0x1ff)) == 0xffff'ffffu);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0456 Table 71 and 7.3.7: with TrustZone a Non-secure store to the OTP programs it with no "
+    "FLASHIE, the Secure alias reads the same bytes, a second program sets PROGERR")
+{
+  rig const r{true};
+  r.unlock(false);
+  r.write("NSCR", pg, nonsecure_priv);
+  r.store(otp_nonsecure, {1, 2, 3, 4}, nonsecure_priv);
+  r.settle();
+  CHECK((r.peek("NSSR") & (wrperr | pgserr | 0x8u)) == 0);
+  CHECK_FALSE(r.tzic("FLASHF"));
+  for(address const alias : {otp_nonsecure, otp_alias})
+  {
+    CHECK(r.word(alias) == 1);
+    CHECK(r.word(alias + 12) == 4);
+  }
+  r.store(otp_nonsecure, {5, 6, 7, 8}, nonsecure_priv);
+  r.settle();
+  CHECK((r.peek("NSSR") & 0x8u) != 0);
+  CHECK(r.word(otp_alias) == 1);
+}
+
+TEST_CASE(
+    "a Non-secure store through the Secure OTP alias, which the model's services take as the "
+    "transaction's attribute, programs the same bytes as the Non-secure address")
+{
+  rig const r{true};
+  r.unlock(false);
+  r.write("NSCR", pg, nonsecure_priv);
+  r.store(otp_alias + 0x20, {9, 8, 7, 6}, nonsecure_priv);
+  r.settle();
+  CHECK((r.peek("NSSR") & (wrperr | pgserr | 0x8u)) == 0);
+  CHECK(r.word(otp_nonsecure + 0x20) == 9);
+  CHECK(r.word(otp_alias + 0x2c) == 6);
+}
+
+TEST_CASE(
+    "inferred: a store to the OTP regions past byte 0x1FF sets the Non-secure WRPERR and writes "
+    "nothing, with TrustZone and without")
+{
+  for(bool const trustzone : {true, false})
+  {
+    for(address const at : {otp_nonsecure + 0x200, otp_nonsecure + 0x3fc, otp_alias + 0x200})
+    {
+      CAPTURE(trustzone);
+      CAPTURE(at);
+      rig const r{trustzone};
+      r.unlock(false);
+      r.write("NSCR", pg, nonsecure_priv);
+      r.store(at, {1}, nonsecure_priv);
+      r.settle();
+      CHECK((r.peek("NSSR") & wrperr) != 0);
+      CHECK((r.peek("NSSR") & bsy) == 0);
+      CHECK(r.word(otp_nonsecure + (at & 0x3ff)) == 0xffff'ffffu);
+      CHECK_FALSE(r.tzic("FLASHF"));
+    }
+  }
+}
