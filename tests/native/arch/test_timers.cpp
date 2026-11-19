@@ -142,6 +142,13 @@ auto now(arch_fixture const& f) -> std::uint64_t
   return f.target->virtual_clock().now().value;
 }
 
+auto saved_state(arch_fixture const& f) -> popcorn::arch::armv8m::state
+{
+  std::vector<std::byte> bytes;
+  f.module->save(bytes);
+  return reflex::serde::bson::deserializer{bytes}.load<popcorn::arch::armv8m::state>();
+}
+
 void tickless_exit(arch_fixture const& f, std::uint32_t remainder, std::uint32_t control)
 {
   put(f, syst_csr, control & ~1u);
@@ -786,6 +793,95 @@ TEST_CASE("on the external reference an RVR write before the edge wins, one afte
   }
 }
 
+namespace
+{
+auto first_edge_after(arch_fixture const& f, std::uint64_t delay, std::uint32_t reload = 99)
+    -> std::uint64_t
+{
+  auto const origin = saved_state(f).ref_origin;
+  put(f, syst_csr, 2);
+  put(f, syst_rvr, reload);
+  put(f, syst_cvr, 0);
+  auto const base = origin + (now(f) - origin + 7) / 8 * 8 + 64;
+  run_to_instruction(f, base + delay);
+  put(f, syst_csr, 3);
+  auto const    written = now(f);
+  std::uint64_t first{};
+  for(std::uint64_t k = 0; k <= 40; ++k)
+  {
+    run_to_instruction(f, written + k);
+    auto const edges = (written + k - origin) / 8 - (written - origin) / 8;
+    auto const value = get(f, syst_cvr);
+    CAPTURE(k);
+    CHECK(value == (edges == 0 ? 0u : reload - (edges - 1)));
+    if(value == reload and first == 0)
+    {
+      first = k;
+    }
+  }
+  return first;
+}
+}
+
+TEST_CASE("the external reference first edge falls 1 to 8 cycles after the enable, on a free grid")
+{
+  for(std::uint64_t delay = 0; delay < 8; ++delay)
+  {
+    CAPTURE(delay);
+    auto f = sleeping();
+    CHECK(first_edge_after(f, delay) == (delay == 0 ? 8u : 8u - delay));
+  }
+}
+
+TEST_CASE("a second enable at another phase does not restart the grid")
+{
+  auto f = sleeping();
+  REQUIRE(first_edge_after(f, 0) == 8u);
+  CHECK(first_edge_after(f, 3) == 5u);
+  CHECK(first_edge_after(f, 7) == 1u);
+}
+
+TEST_CASE("the grid counts from the system reset of the machine, not from its creation")
+{
+  auto fresh = sleeping();
+  auto again = sleeping();
+  run_to_instruction(again, now(again) + 13);
+  again.target->hold_core(true);
+  run_to_instruction(again, now(again) + 21);
+  again.target->hold_core(false);
+  REQUIRE(saved_state(again).ref_origin == 21u);
+  again.target->reset();
+  CHECK(saved_state(again).ref_origin == 0u);
+  again.set("pc", fn("tick_1khz"));
+  run_to_instruction(again, now(again) + 100);
+  for(std::uint64_t delay : {0u, 1u, 4u, 7u})
+  {
+    CAPTURE(delay);
+    CHECK(first_edge_after(again, delay) == first_edge_after(fresh, delay));
+  }
+}
+
+TEST_CASE("a snapshot at a non-zero origin restores the same edges")
+{
+  auto f = sleeping();
+  run_to_instruction(f, now(f) + 13);
+  f.target->hold_core(true);
+  run_to_instruction(f, now(f) + 21);
+  f.target->hold_core(false);
+  auto const origin = saved_state(f).ref_origin;
+  CHECK(origin == 21u);
+  auto const saved = f.target->snapshot();
+  auto const bytes = core::encode_snapshot(saved.data());
+  auto       other = booted();
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(saved_state(other).ref_origin == origin);
+  for(std::uint64_t delay : {0u, 2u, 6u})
+  {
+    CAPTURE(delay);
+    CHECK(first_edge_after(other, delay) == (delay == 0 ? 8u : 8u - delay));
+  }
+}
+
 TEST_CASE("a CVR write while enabled reloads RVR as it is at the next processor clock")
 {
   auto f = sleeping();
@@ -909,13 +1005,6 @@ auto counting_sleeper() -> arch_fixture
   put(f, demcr, get(f, demcr) | 1u << 24);
   put(f, dwt_ctrl, get(f, dwt_ctrl) | 1u);
   return f;
-}
-
-auto saved_state(arch_fixture const& f) -> popcorn::arch::armv8m::state
-{
-  std::vector<std::byte> bytes;
-  f.module->save(bytes);
-  return reflex::serde::bson::deserializer{bytes}.load<popcorn::arch::armv8m::state>();
 }
 
 auto last_ticks(arch_fixture const& f, std::size_t count) -> std::vector<std::uint64_t>

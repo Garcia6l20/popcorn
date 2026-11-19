@@ -48,7 +48,7 @@ auto cortex_m::systick_of(security bank) noexcept -> systick_state&
 
 auto cortex_m::systick_ticks(systick_state const& s) const -> std::uint64_t
 {
-  return systick::ticks(s, timer_now(), context_->clock.cpi());
+  return systick::ticks(s, timer_now(), context_->clock.cpi(), state_.ref_origin);
 }
 
 void cortex_m::hold_core(bool held)
@@ -66,6 +66,7 @@ void cortex_m::hold_core(bool held)
   }
   auto const span = now - *state_.held_at;
   state_.held_at.reset();
+  state_.ref_origin += span;
   state_.systick.anchor += span;
   state_.systick_nonsecure.anchor += span;
   state_.cyccnt.anchor += span;
@@ -168,8 +169,9 @@ void cortex_m::arm_systick(security bank)
     return;
   }
   auto const& clock = context_->clock;
-  auto const  at    = std::max(systick::expiry(s, *next, clock.cpi()), clock.now().value);
-  std::ignore       = context_->events.schedule(
+  auto const  at =
+      std::max(systick::expiry(s, *next, clock.cpi(), state_.ref_origin), clock.now().value);
+  std::ignore = context_->events.schedule(
       icount{at}, bank == security::secure ? systick_event : systick_nonsecure_event, generation_);
 }
 

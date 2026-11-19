@@ -5,6 +5,7 @@
 #include "systick.hpp"
 
 #include <popcorn/arch/armv8m/thumb.hpp>
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/services.hpp>
 
@@ -276,6 +277,11 @@ auto cortex_m::reset_state(address vector_table) const -> state
     fresh.scs.sau_rlar                 = std::vector<std::uint32_t>(core_.sau_regions, 0);
     fresh.exceptions.targets_nonsecure = bit_words(count);
   }
+
+  auto const origin              = context_->clock.now().value;
+  fresh.ref_origin               = origin;
+  fresh.systick.anchor           = origin;
+  fresh.systick_nonsecure.anchor = origin;
   return fresh;
 }
 
@@ -668,6 +674,7 @@ void cortex_m::load(std::span<std::byte const> in)
     state_.systick           = live.systick;
     state_.systick_nonsecure = live.systick_nonsecure;
     state_.cyccnt            = live.cyccnt;
+    state_.ref_origin        = live.ref_origin;
     for(auto number = exc_nmi; number < exception_count(); ++number)
     {
       if(level_sensitive(number) and test_bit(state_.exceptions.level, number))

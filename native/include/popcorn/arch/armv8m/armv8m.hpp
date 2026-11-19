@@ -52,8 +52,14 @@ namespace popcorn::arch::armv8m
  * Current limitations:
  *
  * - SysTick and DWT CYCCNT count processor cycles derived from executed instructions and the
- *   machine's cycles per instruction. SYST_CSR.CLKSOURCE 0 divides by 8, the STM32 HCLK/8
- *   convention. CYCCNT keeps counting through WFI and WFE sleep, where a real core gates it.
+ *   machine's cycles per instruction. SYST_CSR.CLKSOURCE 0 counts the edges of a divide-by-8
+ *   reference that runs free from the last system reset and is not restarted by a SysTick
+ *   write: an edge falls at every core cycle count that is a multiple of 8, counted from the
+ *   first instruction after the reset, so the first edge after an enable comes 1 to 8 cycles
+ *   later. That free-running phase is measured on an STM32U575ZITxQ, 2026-11-17, and inferred
+ *   for the other parts. The offset of the grid against the first instruction after the reset is
+ *   0, inferred. Cycles per instruction are taken as constant since the reset. CYCCNT keeps
+ *   counting through WFI and WFE sleep, where a real core gates it.
  * - A guest read of SYST_CVR, SYST_CSR.COUNTFLAG or CYCCNT resolves to the end of the translated
  *   block holding the read, which also ends at a 1 KB page boundary.
  * - A debugger `mem()` read of SYST_CSR clears COUNTFLAG, as a guest read does.

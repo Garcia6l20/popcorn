@@ -2,6 +2,7 @@
 
 #include "state.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -23,28 +24,53 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
   return (s.csr & (enable | tickint)) == (enable | tickint);
 }
 
-/** @brief Processor cycles per tick: 1 for the processor clock, 8 for the external reference. */
-[[nodiscard]] constexpr auto divisor(systick_state const& s) noexcept -> std::uint64_t
+/**
+ * @brief Core cycles from the system reset at instruction count @p now, 0 before it.
+ * @param now Instruction count.
+ * @param cpi Core cycles per instruction, taken as constant since the reset.
+ * @param origin Instruction count of the last system reset.
+ */
+[[nodiscard]] inline auto cycles_since(std::uint64_t now, double cpi, std::uint64_t origin) noexcept
+    -> std::uint64_t
 {
-  return (s.csr & clksource) != 0 ? 1 : 8;
+  if(now <= origin)
+  {
+    return 0;
+  }
+  if(cpi == 1.0)
+  {
+    return now - origin;
+  }
+  return static_cast<std::uint64_t>(std::floor(static_cast<long double>(now - origin) * cpi));
 }
 
 /**
- * @brief Ticks since the anchor at instruction count @p now.
+ * @brief Ticks since the anchor at instruction count @p now. The processor clock counts cycles
+ *        from the anchor. The external reference counts the edges of a divider that runs free
+ *        from the system reset, one every 8 cycles at cycle counts that are multiples of 8, so
+ *        the first edge after the anchor falls 1 to 8 cycles later. The offset of that grid
+ *        against the first instruction after the reset is 0, inferred.
  * @param s Counter state.
  * @param now Instruction count, at or after the anchor.
  * @param cpi Core cycles per instruction.
+ * @param origin Instruction count of the last system reset.
  */
-[[nodiscard]] inline auto ticks(systick_state const& s, std::uint64_t now, double cpi) noexcept
+[[nodiscard]] inline auto
+    ticks(systick_state const& s, std::uint64_t now, double cpi, std::uint64_t origin) noexcept
     -> std::uint64_t
 {
-  auto const elapsed = now - s.anchor;
-  if(cpi == 1.0)
+  if((s.csr & clksource) != 0)
   {
-    return elapsed / divisor(s);
+    auto const elapsed = now - s.anchor;
+    if(cpi == 1.0)
+    {
+      return elapsed;
+    }
+    return static_cast<std::uint64_t>(std::floor(static_cast<long double>(elapsed) * cpi));
   }
-  return static_cast<std::uint64_t>(
-      std::floor(static_cast<long double>(elapsed) * cpi / static_cast<long double>(divisor(s))));
+  auto const edges = cycles_since(now, cpi, origin) / 8;
+  auto const base  = cycles_since(s.anchor, cpi, origin) / 8;
+  return edges > base ? edges - base : 0;
 }
 
 /** @brief Tick from which the counter counts down from start_value(): 1 after a latched reload. */
@@ -149,24 +175,33 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
  * @brief First instruction count at which the counter has reached tick @p z: the smallest @c n
  *        with `ticks(n) >= z`, exact also at a non-integer @p cpi.
  */
-[[nodiscard]] inline auto expiry(systick_state const& s, std::uint64_t z, double cpi) noexcept
+[[nodiscard]] inline auto
+    expiry(systick_state const& s, std::uint64_t z, double cpi, std::uint64_t origin) noexcept
     -> std::uint64_t
 {
+  auto const external      = (s.csr & clksource) == 0;
+  auto const base          = external ? origin : s.anchor;
+  auto const floor_at      = external ? std::max(s.anchor, origin) : s.anchor;
+  auto const cycles        = external ? (cycles_since(s.anchor, cpi, origin) / 8 + z) * 8 : z;
+  auto const reaches_first = [&](std::uint64_t n) {
+    return z == 0 or (ticks(s, n, cpi, origin) >= z and ticks(s, n - 1, cpi, origin) < z);
+  };
   if(cpi == 1.0)
   {
-    return s.anchor + z * divisor(s);
+    auto const exact = base + cycles;
+    contract_assert(reaches_first(exact));
+    return exact;
   }
-  auto n = s.anchor
-         + static_cast<std::uint64_t>(
-               std::ceil(static_cast<long double>(z) * static_cast<long double>(divisor(s)) / cpi));
-  while(ticks(s, n, cpi) < z)
+  auto n = base + static_cast<std::uint64_t>(std::ceil(static_cast<long double>(cycles) / cpi));
+  for(auto step = 0; step < 2 and ticks(s, n, cpi, origin) < z; ++step)
   {
     ++n;
   }
-  while(n > s.anchor and ticks(s, n - 1, cpi) >= z)
+  for(auto step = 0; step < 2 and n > floor_at and ticks(s, n - 1, cpi, origin) >= z; ++step)
   {
     --n;
   }
+  contract_assert(reaches_first(n));
   return n;
 }
 }

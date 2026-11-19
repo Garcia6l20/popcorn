@@ -328,6 +328,9 @@ struct state
   systick_state systick_nonsecure{};
   /** @brief DWT CYCCNT. */
   cyccnt_state cyccnt{};
+  /** @brief Instruction count of the last system reset, the origin of the SysTick external
+   *         reference grid. A core hold adds its span to it. */
+  std::uint64_t ref_origin{};
   /** @brief Set while the core sleeps. */
   std::optional<sleep_state> sleep{};
   /** @brief Event register of WFE. */

@@ -195,25 +195,100 @@ TEST_CASE("a SysTick reload edge counts as passed at tick 0 only on the processo
   CHECK_FALSE(systick::reload_passed(s, 0));
 }
 
-TEST_CASE("SysTick ticks and expiries at a cpi of 1, 2 and 1.5 and the external divisor")
+TEST_CASE("SysTick ticks and expiries at a cpi of 1, 2 and 1.5 on the processor clock")
 {
   namespace systick = armv8m::systick;
   armv8m::systick_state s{
       .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 3999, .anchor = 100};
-  CHECK(systick::expiry(s, 4000, 1.0) == 4100u);
-  CHECK(systick::expiry(s, 4000, 2.0) == 2100u);
-  CHECK(systick::ticks(s, 2100, 2.0) == 4000u);
+  CHECK(systick::expiry(s, 4000, 1.0, 0) == 4100u);
+  CHECK(systick::expiry(s, 4000, 2.0, 0) == 2100u);
+  CHECK(systick::ticks(s, 2100, 2.0, 0) == 4000u);
+  CHECK(systick::expiry(s, 4000, 1.0, 37) == 4100u);
   for(std::uint64_t k = 1; k <= 1000; ++k)
   {
     auto const z = *systick::crossing(s, k);
-    auto const n = systick::expiry(s, z, 1.5);
+    auto const n = systick::expiry(s, z, 1.5, 0);
     CAPTURE(k);
-    CHECK(systick::ticks(s, n, 1.5) >= z);
-    CHECK(systick::ticks(s, n - 1, 1.5) < z);
+    CHECK(systick::ticks(s, n, 1.5, 0) >= z);
+    CHECK(systick::ticks(s, n - 1, 1.5, 0) < z);
   }
-  s.csr = systick::enable | systick::tickint;
-  CHECK(systick::expiry(s, 4000, 1.0) == 100u + 32000u);
-  CHECK(systick::ticks(s, 100 + 32007, 1.0) == 4000u);
+}
+
+TEST_CASE(
+    "SysTick on the external reference counts the edges of a divider free-running from the reset, "
+    "inferred offset 0")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{.csr = systick::enable | systick::tickint, .rvr = 3999, .anchor = 100};
+  CHECK(systick::expiry(s, 4000, 1.0, 0) == 32096u);
+  CHECK(systick::ticks(s, 32095, 1.0, 0) == 3999u);
+  CHECK(systick::ticks(s, 32096, 1.0, 0) == 4000u);
+  for(std::uint64_t delay = 0; delay < 8; ++delay)
+  {
+    s.anchor = 96 + delay;
+    CAPTURE(delay);
+    CHECK(systick::expiry(s, 1, 1.0, 0) == 104u);
+    CHECK(systick::ticks(s, 103, 1.0, 0) == 0u);
+    CHECK(systick::ticks(s, 104, 1.0, 0) == 1u);
+    CHECK(systick::ticks(s, 111, 1.0, 0) == 1u);
+    CHECK(systick::ticks(s, 112, 1.0, 0) == 2u);
+  }
+  s.anchor = 104;
+  CHECK(systick::expiry(s, 1, 1.0, 0) == 112u);
+  s.anchor = 100;
+  CHECK(systick::expiry(s, 1, 1.0, 5) == 101u);
+  CHECK(systick::ticks(s, 100, 1.0, 5) == 0u);
+  CHECK(systick::ticks(s, 101, 1.0, 5) == 1u);
+  CHECK(systick::expiry(s, 2, 1.0, 5) == 109u);
+}
+
+TEST_CASE("SysTick expiry on the external reference is exact and bounded far from the origin")
+{
+  namespace systick = armv8m::systick;
+  for(auto const cpi : {1.0, 2.0, 1.5})
+  {
+    for(std::uint64_t const anchor : {5'000'000'000u, 1'000'000'000'000u})
+    {
+      for(std::uint64_t const origin : {0u, 3u})
+      {
+        armv8m::systick_state s{.csr = systick::enable, .rvr = 3999, .anchor = anchor + 5};
+        for(std::uint64_t const z : {1u, 2u, 4000u})
+        {
+          CAPTURE(cpi);
+          CAPTURE(anchor);
+          CAPTURE(origin);
+          CAPTURE(z);
+          auto const n = systick::expiry(s, z, cpi, origin);
+          CHECK(systick::ticks(s, n, cpi, origin) >= z);
+          CHECK(systick::ticks(s, n - 1, cpi, origin) < z);
+          CHECK(n - s.anchor <= static_cast<std::uint64_t>(z * 8 / cpi) + 8);
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE("SysTick on the external reference at a cpi of 2 and 1.5 is exact at every edge")
+{
+  namespace systick = armv8m::systick;
+  for(auto const cpi : {2.0, 1.5})
+  {
+    for(std::uint64_t const origin : {0u, 3u, 1000u})
+    {
+      armv8m::systick_state s{.csr = systick::enable, .rvr = 3999, .anchor = origin + 777};
+      for(std::uint64_t z = 1; z <= 400; ++z)
+      {
+        auto const n = systick::expiry(s, z, cpi, origin);
+        CAPTURE(cpi);
+        CAPTURE(origin);
+        CAPTURE(z);
+        CHECK(systick::ticks(s, n, cpi, origin) >= z);
+        CHECK(systick::ticks(s, n - 1, cpi, origin) < z);
+      }
+    }
+  }
+  armv8m::systick_state s{.csr = systick::enable, .rvr = 3999, .anchor = 800};
+  CHECK(systick::expiry(s, 1, 2.0, 0) == 804u);
 }
 
 TEST_CASE("SysTick COUNTFLAG and missed crossings coalesce")
