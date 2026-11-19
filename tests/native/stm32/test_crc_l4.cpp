@@ -116,6 +116,17 @@ TEST_CASE("RM0351 15.4.3: REV_IN by byte with REV_OUT gives the reflected CRC-32
   CHECK(r.run("reversed") == std::vector<std::uint32_t>{0x340B'C6D9u});
 }
 
+TEST_CASE("inferred from the STM32U575 measurement: a byte under REV_IN 11 feeds the lane group")
+{
+  crc_rig const r;
+  r.write(cr, (3u << 5) | (1u << 7) | 1u);
+  for(auto const byte : std::string_view{"123456789"})
+  {
+    r.write(dr, static_cast<std::uint8_t>(byte), 1);
+  }
+  CHECK(r.read(dr) == 0x19F6'EB51u);
+}
+
 TEST_CASE("RM0351 15.4.2: CRC_IDR holds 8 bits and takes byte and half-word accesses, no log")
 {
   crc_rig const r{true};

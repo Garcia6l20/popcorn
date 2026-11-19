@@ -9,6 +9,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <string_view>
@@ -77,6 +79,21 @@ struct crc_rig
     for(auto const byte : bytes)
     {
       store(dr, 1, static_cast<std::uint8_t>(byte));
+    }
+  }
+
+  void feed_halves(std::string_view bytes) const
+  {
+    auto at = std::size_t{0};
+    for(; at + 1 < bytes.size(); at += 2)
+    {
+      store(
+          dr, 2,
+          static_cast<std::uint8_t>(bytes[at]) | (static_cast<std::uint8_t>(bytes[at + 1]) << 8));
+    }
+    if(at < bytes.size())
+    {
+      store(dr, 1, static_cast<std::uint8_t>(bytes[at]));
     }
   }
 
@@ -358,15 +375,116 @@ TEST_CASE("a DR write that is not right-aligned is ignored and logs once")
   CHECK(r.logged[0].reg == "DR");
 }
 
-TEST_CASE("REV_IN reverses a byte write by the byte whatever its group")
+TEST_CASE("REV_IN 01 reverses a byte write by the byte, REV_IN 10 and 11 feed the lane group")
 {
   crc_rig const r;
-  for(auto const control : {cr_rev_byte, cr_rev_half, cr_rev_word})
+  r.write(cr, cr_rev_byte | cr_rev_out | cr_reset);
+  r.feed_bytes(check_input);
+  CHECK((r.read(dr) ^ 0xFFFF'FFFF) == 0xCBF4'3926);
+  for(auto const control : {cr_rev_half, cr_rev_word})
   {
     r.write(cr, control | cr_rev_out | cr_reset);
     r.feed_bytes(check_input);
-    CHECK((r.read(dr) ^ 0xFFFF'FFFF) == 0xCBF4'3926);
+    CHECK(r.read(dr) == 0x19F6'EB51);
   }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("measured on an STM32U575ZITxQ: CRC_DR under REV_IN and REV_OUT by write width")
+{
+  enum class shape
+  {
+    bytes,
+    halves,
+    word,
+  };
+  struct row
+  {
+    char const*   name;
+    std::uint32_t control;
+    std::uint32_t polynomial;
+    std::uint32_t initial;
+    shape         writes;
+    std::uint32_t expected;
+  };
+  constexpr auto rows = std::to_array<row>({
+      {"C1",  cr_poly16 | cr_rev_byte | cr_rev_out, 0x8005,      0,   shape::bytes,  0x0000'BB3D},
+      {"C2",  cr_poly16 | cr_rev_byte,              0x8005,      0,   shape::bytes,  0x0000'BCDD},
+      {"C3",  cr_rev_word | cr_rev_out,             0x04C1'1DB7, ~0u, shape::bytes,  0x19F6'EB51},
+      {"C4",  cr_rev_half | cr_rev_out,             0x04C1'1DB7, ~0u, shape::bytes,  0x19F6'EB51},
+      {"C5",  cr_rev_word | cr_rev_out,             0x04C1'1DB7, ~0u, shape::halves, 0x19F6'EB51},
+      {"C5b", cr_rev_half | cr_rev_out,             0x04C1'1DB7, ~0u, shape::halves, 0x6B0E'4ED1},
+      {"C6",  cr_poly8 | cr_rev_byte | cr_rev_out,  0x07,        0,   shape::bytes,  0x20       },
+      {"C7",  cr_poly7 | cr_rev_byte | cr_rev_out,  0x09,        0,   shape::bytes,  0x25       },
+      {"C8",  cr_rev_word,                          0x04C1'1DB7, ~0u, shape::word,   0x271D'6588},
+      {"C8b", cr_rev_word | cr_rev_out,             0x04C1'1DB7, ~0u, shape::word,   0x11A6'B8E4},
+      {"C9",  cr_poly16 | cr_rev_half | cr_rev_out, 0x8005,      0,   shape::bytes,  0          },
+      {"C10", cr_poly16 | cr_rev_word | cr_rev_out, 0x8005,      0,   shape::bytes,  0          },
+      {"C11", cr_poly16 | cr_rev_word | cr_rev_out, 0x8005,      0,   shape::halves, 0          },
+      {"C12", cr_poly8 | cr_rev_out,                0x07,        0,   shape::bytes,  0x2F       },
+      {"C13", cr_poly8,                             0x07,        0,   shape::bytes,  0xF4       },
+      {"C14", cr_poly7,                             0x09,        0,   shape::bytes,  0x75       },
+  });
+  crc_rig const  r;
+  for(auto const& entry : rows)
+  {
+    CAPTURE(entry.name);
+    r.configure(entry.control, entry.polynomial, entry.initial);
+    switch(entry.writes)
+    {
+      case shape::bytes:
+        r.feed_bytes(check_input);
+        break;
+      case shape::halves:
+        r.feed_halves(check_input);
+        break;
+      case shape::word:
+        r.write(dr, 0x1A2B'3C4D);
+        break;
+    }
+    CHECK(r.read(dr) == entry.expected);
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a half-word under REV_IN 11 feeds zeros and a word under REV_IN 01 reverses per byte")
+{
+  crc_rig const r;
+  r.configure(cr_rev_word, 0x04C1'1DB7, 0);
+  r.store(dr, 2, 0x1234);
+  CHECK(r.read(dr) == 0);
+  r.configure(cr_rev_byte, 0x04C1'1DB7, ~0u);
+  r.write(dr, 0x1A2B'3C4D);
+  CHECK(r.read(dr) == 0xD35E'9975u);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "a half-word 0x1234 under REV_IN 01 feeds as bytes 0x12 then 0x34, inferred from RM0456 24.3.3")
+{
+  crc_rig const r;
+  r.write(cr, cr_rev_byte | cr_reset);
+  r.store(dr, 2, 0x1234);
+  auto const half = r.read(dr);
+  r.write(cr, cr_rev_byte | cr_reset);
+  r.store(dr, 1, 0x12);
+  r.store(dr, 1, 0x34);
+  CHECK(r.read(dr) == half);
+  CHECK(half != 0xFFFF'FFFFu);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a snapshot after a REV_IN 11 byte feed restores the running CRC")
+{
+  crc_rig const r;
+  r.write(cr, cr_rev_word | cr_rev_out | cr_reset);
+  r.feed_bytes("1234");
+  auto const saved = r.f.target->snapshot();
+  r.feed_bytes("56789");
+  REQUIRE(r.read(dr) == 0x19F6'EB51);
+  r.f.target->restore(saved);
+  r.feed_bytes("56789");
+  CHECK(r.read(dr) == 0x19F6'EB51);
   CHECK(r.logged.empty());
 }
 

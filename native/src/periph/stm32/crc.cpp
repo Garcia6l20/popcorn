@@ -32,8 +32,8 @@ constexpr auto reversed(std::uint32_t value, unsigned bits) noexcept -> std::uin
 
 /**
  * @brief @p data with each @p group-bit group of its low @p width bits reversed in place.
- * @param data Right-aligned data.
- * @param width Data width in bits, a multiple of @p group.
+ * @param data Right-aligned data, zero-extended to the group when @p width is narrower.
+ * @param width Data width in bits, a multiple of @p group or narrower than it.
  * @param group Group width in bits, 0 for no reversal.
  */
 constexpr auto reversed_groups(std::uint32_t data, unsigned width, unsigned group) noexcept
@@ -54,6 +54,9 @@ constexpr auto reversed_groups(std::uint32_t data, unsigned width, unsigned grou
 static_assert(reversed_groups(0x1A2B'3C4D, 32, 8) == 0x58D4'3CB2);
 static_assert(reversed_groups(0x1A2B'3C4D, 32, 16) == 0xD458'B23C);
 static_assert(reversed_groups(0x1A2B'3C4D, 32, 32) == 0xB23C'D458);
+static_assert(reversed_groups(0x0000'0031, 8, 32) == 0x8C00'0000);
+static_assert(reversed_groups(0x0000'0031, 8, 16) == 0x0000'8C00);
+static_assert(reversed_groups(0x0000'3231, 16, 32) == 0x8C4C'0000);
 static_assert(reversed(0x1122'3344, 32) == 0x22CC'4488);
 
 constexpr std::array<unsigned, 4> polynomial_widths{32, 16, 8, 7};
@@ -70,8 +73,11 @@ struct crc_state
  * @brief CRC calculation unit of the STM32U5 and STM32H5, RM0456 section 24, of the STM32L1, RM0038
  *        section 4, and of the STM32L4, RM0351 section 15. A right-aligned 8-, 16- or 32-bit CRC_DR
  *        write feeds its bits MSB first through the low POLYSIZE bits of CRC_POL, after the REV_IN
- *        reversal by byte, half-word or word, a group no wider than the write. The running CRC is
- *        kept unreversed in the CRC_DR storage word, REV_OUT reverses the low POLYSIZE bits of the
+ *        reversal by byte, half-word or word. A write narrower than the REV_IN group is
+ *        zero-extended to the group, the group is reversed and the low write-width bits are fed,
+ *        so a byte under REV_IN 10 or 11 feeds 0x00, measured on an STM32U575ZITxQ, 2026-11-17,
+ *        and inferred for the STM32H5 and STM32L4. The running CRC is kept unreversed in the
+ *        CRC_DR storage word, REV_OUT reverses the low POLYSIZE bits of the
  *        CRC_DR read only, the bits above read 0. The computation completes on the write: the input
  *        buffer hides the 4 HCLK latency, 24.3.3, so no access stalls. CR.RESET reloads CRC_DR from
  *        the low POLYSIZE bits of CRC_INIT and reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL
@@ -87,10 +93,13 @@ struct crc_state
  * @group all unmodelled
  * - The RCC clock gate is not modelled.
  *
- * @group u5,h5,l4 note "Unverified on silicon"
+ * @group u5,h5,l4 note "Measured and inferred below 32 bits"
  * - The running CRC is kept unreversed in the CRC_DR storage word and REV_OUT reverses the low
- *   POLYSIZE bits of the CRC_DR read only. RM0456 gives both readings for 32-bit data only,
- *   unverified on silicon below that.
+ *   POLYSIZE bits of the CRC_DR read only. RM0456 gives both readings for 32-bit data only. Both
+ *   are measured on an STM32U575ZITxQ, 2026-11-17, and inferred for the STM32H5 and STM32L4.
+ * - A write narrower than the REV_IN group is zero-extended to the group, reversed, and the low
+ *   write-width bits are fed. Measured on an STM32U575ZITxQ, 2026-11-17, inferred for the
+ *   STM32H5 and STM32L4.
  *
  * @group u5,h5,l4 deviation "Differs from RM0456 and RM0351"
  * - On the STM32U5, STM32H5 and STM32L4 a `CRC_DR` write that is not right-aligned is ignored
@@ -360,11 +369,10 @@ auto crc::output() const -> std::uint32_t
 
 void crc::feed(std::uint32_t data, unsigned width)
 {
-  auto const top  = polynomial_width() - 1;
-  auto const mask = crc_mask();
-  auto const poly = polynomial() & mask;
-  auto const group =
-      variant_.programmable ? std::min(input_groups[get(regs_, rev_in_)], width) : 0u;
+  auto const top   = polynomial_width() - 1;
+  auto const mask  = crc_mask();
+  auto const poly  = polynomial() & mask;
+  auto const group = variant_.programmable ? input_groups[get(regs_, rev_in_)] : 0u;
   auto const input = reversed_groups(data, width, group);
   auto       value = regs_.peek(data_.offset);
   for(auto bit = width; bit-- > 0;)
