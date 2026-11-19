@@ -1,6 +1,7 @@
+import dataclasses
 import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 import click
@@ -250,3 +251,183 @@ def diff_command(a: Path, b: Path, top: int, tables: tuple[str, ...], as_json: b
         click.echo(f"== {name} ==")
         click.echo("\n".join(lines))
     click.echo(f"{unchanged} reports unchanged")
+
+
+SUMMARY_SORT = ("name", "executed", "ms", "sleep", "irq")
+
+
+@dataclasses.dataclass(frozen=True)
+class _Row:
+    name: str
+    executed: int
+    elapsed_ps: int
+    sleep_share: float | None
+    irq_share: float | None
+    top: str | None
+
+
+def _summary_row(path: Path, report: Report) -> _Row:
+    irq_share = None
+    if report.irq is not None:
+        spent = sum(row.self_time_ps for row in report.irq.exceptions)
+        irq_share = spent / report.elapsed_ps if report.elapsed_ps else 0.0
+    functions = report.hotspots.functions if report.hotspots is not None else ()
+    return _Row(
+        path.stem,
+        report.executed,
+        report.elapsed_ps,
+        None if report.sleep is None else report.sleep.share,
+        irq_share,
+        functions[0].name if functions else None,
+    )
+
+
+def _sort_value(row: _Row, key: str) -> int | float | None:
+    if key == "executed":
+        return row.executed
+    if key == "ms":
+        return row.elapsed_ps
+    if key == "sleep":
+        return row.sleep_share
+    return row.irq_share
+
+
+def _sorted_rows(rows: Sequence[_Row], key: str) -> list[_Row]:
+    if key == "name":
+        return sorted(rows, key=lambda row: row.name)
+
+    def order(row: _Row) -> tuple[int, int | float, str]:
+        number = _sort_value(row, key)
+        return (1, 0, row.name) if number is None else (0, -number, row.name)
+
+    return sorted(rows, key=order)
+
+
+def _aggregate_functions(reports: Sequence[Report], count: int) -> list[tuple[str, int, int]]:
+    """The `count` functions with the most self instructions summed by name over `reports`,
+    as (name, self, reports holding it), ties by name."""
+    totals: dict[str, list[int]] = {}
+    for report in reports:
+        if report.hotspots is None:
+            continue
+        seen: dict[str, int] = {}
+        for row in report.hotspots.functions:
+            seen[row.name] = seen.get(row.name, 0) + row.self
+        for name, own in seen.items():
+            held = totals.setdefault(name, [0, 0])
+            held[0] += own
+            held[1] += 1
+    ranked = sorted(totals.items(), key=lambda item: (-item[1][0], item[0]))
+    return [(name, held[0], held[1]) for name, held in ranked[:count]]
+
+
+def _percent(share: float | None) -> str:
+    return "-" if share is None else f"{100 * share:.1f}%"
+
+
+def _table(
+    header: Sequence[str], body: Sequence[Sequence[str]], left: Collection[int]
+) -> list[str]:
+    widths = [max(len(line[i]) for line in [header, *body]) for i in range(len(header))]
+    return [
+        "  ".join(
+            cell.ljust(width) if i in left else cell.rjust(width)
+            for i, (cell, width) in enumerate(zip(line, widths, strict=True))
+        ).rstrip()
+        for line in [header, *body]
+    ]
+
+
+@profile.command()
+@click.argument("directory", type=click.Path(path_type=Path, exists=True, file_okay=False))
+@click.option(
+    "--sort",
+    "sort_key",
+    default="name",
+    show_default=True,
+    type=click.Choice(SUMMARY_SORT),
+    help="Order of the rows. `name` ascending, the others descending with `-` rows last.",
+)
+@click.option(
+    "--functions",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Also list this many functions with the most self instructions over all reports.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the table as JSON.")
+def summary(directory: Path, sort_key: str, functions: int, as_json: bool) -> None:
+    """One row per report of DIRECTORY: instructions, time, sleep and exception shares, top.
+
+    `ms` is the profile time, `sleep` the share of it asleep, `irq` the share spent in exception
+    handlers, `top` the function with the most self instructions. `-` marks a section the report
+    does not hold. A report that cannot be read is named on stderr, skipped, and the exit
+    status is 1.
+    """
+    try:
+        files = expand([directory])
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    loaded: list[tuple[Path, Report]] = []
+    failed = False
+    for file in files:
+        try:
+            loaded.append((file, load_report(file)))
+        except (OSError, ValueError) as exc:
+            click.echo(f"Error: {exc}", err=True)
+            failed = True
+    rows = _sorted_rows([_summary_row(file, report) for file, report in loaded], sort_key)
+    total = sum(row.executed for row in rows)
+    aggregated = _aggregate_functions([report for _, report in loaded], functions)
+    if as_json:
+        click.echo(
+            _json_text(
+                {
+                    "reports": [
+                        {
+                            "name": row.name,
+                            "executed": row.executed,
+                            "elapsed_ps": row.elapsed_ps,
+                            "sleep_share": row.sleep_share,
+                            "irq_share": row.irq_share,
+                            "top": row.top,
+                        }
+                        for row in rows
+                    ],
+                    "functions": [
+                        {
+                            "function": name,
+                            "self": own,
+                            "share": own / total if total else 0.0,
+                            "reports": held,
+                        }
+                        for name, own, held in aggregated
+                    ],
+                }
+            )
+        )
+    else:
+        body = [
+            [
+                row.name,
+                f"{row.executed:,}",
+                f"{row.elapsed_ps / 1e9:.3f}",
+                _percent(row.sleep_share),
+                _percent(row.irq_share),
+                row.top or "-",
+            ]
+            for row in rows
+        ]
+        for line in _table(["name", "executed", "ms", "sleep", "irq", "top"], body, (0, 5)):
+            click.echo(line)
+        if aggregated:
+            click.echo()
+            rows_ = [
+                [name, f"{own:,}", _percent(own / total if total else 0.0), str(held)]
+                for name, own, held in aggregated
+            ]
+            for line in _table(["function", "self", "share", "reports"], rows_, (0,)):
+                click.echo(line)
+        click.echo(f"{len(rows)} reports, {total:,} instructions")
+    if failed:
+        click.get_current_context().exit(1)
