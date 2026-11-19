@@ -93,6 +93,8 @@ struct iwdg_state
  * - A PVU fall or an LSI rate change between a refresh and its reload edge keeps the reload
  *   pending: after a PVU fall it lands at the first edge of the new division sequence, after a
  *   rate change at the end of the period in progress, inferred.
+ * - A refresh compares the counter against the WINR value as written, while WVU is still set,
+ *   inferred. A new window reloads the counter when WVU falls.
  *
  * @group u5,h5 rule "Reload and reset time"
  * - The prescaler runs free from the start, a refresh does not restart it. A refresh reloads

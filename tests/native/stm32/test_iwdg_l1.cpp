@@ -1,3 +1,4 @@
+#include "iwdg_prescaler_matrix.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -219,6 +220,20 @@ TEST_CASE("RM0038 21.3.2: PR and RLR ignore writes until the 0x5555 key")
   b.write("IWDG", "PR", 3);
   CHECK(b.read("IWDG", "PR") == 0);
   CHECK(b.read("IWDG", "KR") == 0);
+}
+
+TEST_CASE(
+    "a running counter reaches the reset after every prescaler decrease, increase and rewrite, "
+    "inferred")
+{
+  popcorn::testing::check_prescaler_matrix<bus>(
+      [] {
+        auto f = entered("idle");
+        lsi_on(f);
+        return f;
+      },
+      [](stm32_fixture const& f, std::uint64_t ps) { return run_for(f, ps); },
+      {.hz = 37000, .lsi_cycle = lsi_cycle}, 6);
 }
 
 TEST_CASE("RM0038 21.4.2: PR 110 and 111 both divide by 256, 101 by 128")

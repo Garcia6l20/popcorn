@@ -110,7 +110,7 @@ Test files of `tests/native/stm32/` per IP group and family. `test_<ip>_u5.cpp` 
 
 Test files that cover no single IP: `test_at25sf.cpp`, `test_attach_h573.cpp`, `test_attach_u575.cpp`, `test_base.cpp`, `test_class_a_h573.cpp`, `test_dfilter_chain.cpp`, `test_dma_routing.cpp`, `test_engine_counters.cpp`, `test_family_rows.cpp`, `test_flash_geometry.cpp`, `test_flash_secure.cpp`, `test_gpio_analog.cpp`, `test_h5_names.cpp`, `test_i2c_devices.cpp`, `test_i2c_medium.cpp`, `test_link_queues.cpp`, `test_pty.cpp`, `test_rcc_gate.cpp`, `test_smc.cpp`, `test_smoke_l1.cpp`, `test_smoke_l4.cpp`, `test_spi_medium.cpp`, `test_system_uart.cpp`, `test_tim_spi_h573.cpp`, `test_tz_aware.cpp`, `test_uart_wire.cpp`, `test_unregistered.cpp`.
 
-Benchmarks and test helpers: `bench_irq.cpp`, `bench_system.cpp`, `bench_common.hpp`, `boot_alias_checks.hpp`, `dac_ur_cases.hpp`, `h573_secure_rig.hpp`, `reserved_slave_word.hpp`, `stm32_fixture.hpp`, `trigger_probe.hpp`, `usb_drd_rig.hpp`, `wwdg_cases.hpp`, `wwdg_hardware_cases.hpp`, `wwdg_ll_cases.hpp`, `wwdg_sleep_cases.hpp`.
+Benchmarks and test helpers: `bench_irq.cpp`, `bench_system.cpp`, `bench_common.hpp`, `boot_alias_checks.hpp`, `dac_ur_cases.hpp`, `h573_secure_rig.hpp`, `iwdg_prescaler_matrix.hpp`, `reserved_slave_word.hpp`, `stm32_fixture.hpp`, `trigger_probe.hpp`, `usb_drd_rig.hpp`, `wwdg_cases.hpp`, `wwdg_hardware_cases.hpp`, `wwdg_ll_cases.hpp`, `wwdg_sleep_cases.hpp`.
 
 ### Other sources
 

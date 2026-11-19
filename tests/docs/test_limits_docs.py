@@ -197,7 +197,7 @@ def test_the_real_tree_reads_into_titled_pages() -> None:
 def test_the_pilot_pages_keep_their_marks_and_references() -> None:
     pages = limits_docs.read_pages(LIMIT_ROOTS)
     assert (pages["crc"].inferred, len(pages["crc"].groups)) == (3, 6)
-    assert (pages["iwdg"].inferred, len(pages["iwdg"].groups)) == (7, 9)
+    assert (pages["iwdg"].inferred, len(pages["iwdg"].groups)) == (8, 9)
     assert [g.scopes for g in pages["crc"].groups] == [
         (),
         ("u5", "h5", "l4"),

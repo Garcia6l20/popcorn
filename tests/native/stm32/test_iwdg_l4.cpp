@@ -1,3 +1,4 @@
+#include "iwdg_prescaler_matrix.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -225,6 +226,20 @@ TEST_CASE("RM0351 36.4.2: PR 110 and 111 both divide by 256, 101 by 128")
     CHECK(took >= expected);
     CHECK(took < expected + lsi_ticks(divider));
   }
+}
+
+TEST_CASE(
+    "a running counter reaches the reset after every prescaler decrease, increase and rewrite, "
+    "inferred")
+{
+  popcorn::testing::check_prescaler_matrix<bus>(
+      [] {
+        auto f = entered("idle");
+        lsi_on(f);
+        return f;
+      },
+      [](stm32_fixture const& f, std::uint64_t ps) { return run_for(f, ps); },
+      {.hz = 32000, .lsi_cycle = lsi_cycle}, 6);
 }
 
 TEST_CASE("RM0351 36.3.2: a refresh while the counter is above WIN bites at once")

@@ -1,3 +1,4 @@
+#include "iwdg_prescaler_matrix.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -332,6 +333,15 @@ TEST_CASE("a prescaler change applies when PVU clears, the expiry follows the ne
   CAPTURE(now - started);
   CHECK(now + 4 * lsi_cycle >= expected);
   CHECK(now < expected + lsi_cycle);
+}
+
+TEST_CASE(
+    "a running counter reaches the reset after every prescaler decrease, increase and rewrite")
+{
+  popcorn::testing::check_prescaler_matrix<bus>(
+      [] { return entered("idle"); },
+      [](stm32_fixture const& f, std::uint64_t ps) { return run_for(f, ps); },
+      {.hz = 32'000, .lsi_cycle = lsi_cycle}, 8);
 }
 
 TEST_CASE("a window change reloads the counter from RL when WVU clears")
@@ -1293,6 +1303,7 @@ TEST_CASE(
         core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
     again(fresh, fb);
     r.f.target->restore(saved);
+    INFO("inferred: a refresh compares the counter against WINR as written, while WVU is set");
     r.b.write("IWDG", "KR", 0x5555);
     r.b.write("IWDG", "WINR", 10);
     r.b.write("IWDG", "KR", 0xAAAA);

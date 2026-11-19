@@ -426,6 +426,29 @@ async def test_link(machine_factory):
 """
 
 
+REFUSED = LINKED.split("async def test_link")[0] + """import pytest
+
+
+async def test_link(machine_factory):
+    a = await machine_factory.booted(project("a"), name="a")
+    b = await machine_factory.booted(project("b"), name="b")
+    link = popcorn.UartLink("a.NO_SUCH_UNIT", "b.USART1", latency=us(20), baud=460_800)
+    with pytest.raises(popcorn.ConfigError):
+        popcorn.System({{"a": a, "b": b}}, [link])
+"""
+
+
+def test_a_refused_system_leaves_the_profile_open_and_emits_no_warning(
+    pytester: pytest.Pytester, u575_json: Path
+) -> None:
+    write_conftest(pytester)
+    pytester.makepyfile(REFUSED.format(description=str(u575_json), elf=str(USART_LL)))
+    result = run(pytester, "--popcorn-profile=hotspots", "-W", "always::pytest.PytestWarning")
+    result.assert_outcomes(passed=1)
+    result.stdout.no_fnmatch_line("*joined a linked system*")
+    assert len(reports(pytester.path / "popcorn-profile")) == 2
+
+
 def test_a_profiled_factory_machine_joins_a_system_with_its_profile_closed_and_written(
     pytester: pytest.Pytester, u575_json: Path
 ) -> None:
