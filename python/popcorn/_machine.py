@@ -1579,6 +1579,9 @@ class Machine:
         write_log_limit: int = 4096,
         max_call_depth: int = 256,
         write_clock_domain: str = "",
+        reload_key_ids: Iterable[int] = (),
+        reload_change_ids: Iterable[int] = (),
+        reload_values: Iterable[int] = (),
     ) -> Generator[ProfileRecording]:
         """Feed a native profile sink while the block runs, `Machine.profile`'s hook.
 
@@ -1599,9 +1602,14 @@ class Machine:
             max_call_depth: Most call frames the tracker keeps.
             write_clock_domain: Clock domain whose rate each logged write records, none when
                 empty or unknown.
+            reload_key_ids: Flat ids of the key registers of the reload tracker, none for no
+                tracker. It needs `write_clock_domain`.
+            reload_change_ids: Flat ids of the registers whose write opens a tracker epoch.
+            reload_values: Low 16 bits of a key write that reloads, one per reload kind.
 
         Raises:
-            ValueError: An option is negative or too large.
+            ValueError: An option is negative or too large, or a tracker has no known
+                `write_clock_domain`.
             ConfigError: The machine is a member of a live linked system, `members.<name>`.
             MachineRunning: The machine is busy, outside its handlers.
         """
@@ -1617,6 +1625,14 @@ class Machine:
         registers = list(logged_registers)
         if any(not 0 <= register <= 0xFFFF for register in registers):
             raise ValueError(f"logged_registers must be flat register ids, not {registers}")
+        tracker = {
+            "reload_key_ids": list(reload_key_ids),
+            "reload_change_ids": list(reload_change_ids),
+            "reload_values": list(reload_values),
+        }
+        for name, values in tracker.items():
+            if any(not 0 <= value <= 0xFFFF for value in values):
+                raise ValueError(f"{name} must lie in [0, 65535], not {values}")
         owner = self._system
         if owner is not None and owner() is not None:
             key = f"members.{self._name}"
@@ -1635,6 +1651,7 @@ class Machine:
             write_log_limit=write_log_limit,
             max_call_depth=max_call_depth,
             write_clock_domain=write_clock_domain,
+            **tracker,
         )
         try:
             yield recording

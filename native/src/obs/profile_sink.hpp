@@ -51,6 +51,18 @@ struct block_shape
  */
 using code_reader = std::move_only_function<block_shape(address pc, std::uint32_t instructions)>;
 
+/** @brief Registers and key values of a reload tracker, see profile_options::reload_tracker. */
+struct profile_reload_tracker
+{
+  /** @brief Flat ids of the key registers, one per alias. A CPU write to one is a key write, also
+   * when its id is in change_ids. */
+  std::vector<std::uint16_t> key_ids{};
+  /** @brief Flat ids of the registers whose write opens a new epoch, one per alias. */
+  std::vector<std::uint16_t> change_ids{};
+  /** @brief Low 16 bits of a key write that reloads, the index is the reload kind. */
+  std::vector<std::uint16_t> reload_values{};
+};
+
 /** @brief Options of a profile_sink. */
 struct profile_options
 {
@@ -74,6 +86,10 @@ struct profile_options
   /** @brief Most call frames the tracker keeps, exception frames apart. A call past it stays in
    * its caller's frame, is counted in profile_result::deep_calls, and its return pops nothing. */
   std::uint32_t max_call_depth{256};
+  /** @brief Reload tracker, profile_result::reload_tracks. It needs write_domain and a
+   * write_log_limit of at least 1, the sink constructor throws std::invalid_argument without
+   * them. Its epoch table holds at most write_log_limit epochs. */
+  std::optional<profile_reload_tracker> reload_tracker{};
 };
 
 /** @brief Kind of a node of the call tree. */
@@ -247,6 +263,99 @@ struct profile_write_log
   friend auto operator==(profile_write_log const&, profile_write_log const&) -> bool = default;
 };
 
+/** @brief Two consecutive reloads of one segment and the time between them. */
+struct profile_reload_gap
+{
+  /** @brief The earlier reload. */
+  profile_write start{};
+  /** @brief The later reload. */
+  profile_write end{};
+  /** @brief Profile time between them in picoseconds. */
+  std::uint64_t ps{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_reload_gap const&, profile_reload_gap const&) -> bool = default;
+};
+
+/** @brief What opened an epoch of a reload track. */
+enum class epoch_kind : std::uint8_t
+{
+  start,
+  cut,
+  change,
+};
+
+/** @brief Stretch of a profile where the registers of profile_reload_tracker::change_ids hold
+ *         one setting: from the start, a cut or a write to one of them to the next of these. */
+struct profile_epoch
+{
+  /** @brief What opened it. */
+  epoch_kind kind{};
+  /** @brief Cuts seen before it opened. */
+  std::uint64_t segment{};
+  /** @brief Profile time in picoseconds when it opened. */
+  std::uint64_t ps{};
+  /** @brief profile_result::records counted when it opened. */
+  std::uint64_t record{};
+  /** @brief Register id written, 0 unless kind is epoch_kind::change. */
+  std::uint16_t change_id{};
+  /** @brief The write that opened it, empty unless kind is epoch_kind::change. */
+  profile_write change{};
+  /** @brief Low 16 bits of the last key write of the segment before the opening write, ~0 when
+   * the segment had none. */
+  std::uint32_t key_before{~std::uint32_t{0}};
+  /** @brief Per reload kind, the pair of consecutive reloads whose first reload is in the
+   * epoch and that has the most ticks of profile_options::write_domain between them, the first
+   * of equal pairs. The pair may end in a later epoch. */
+  std::vector<std::optional<profile_reload_gap>> longest{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_epoch const&, profile_epoch const&) -> bool = default;
+};
+
+/** @brief The last reload of one segment. */
+struct profile_reload_tail
+{
+  /** @brief Segment. */
+  std::uint64_t segment{};
+  /** @brief The reload. */
+  profile_write last{};
+  /** @brief Its reload kind. */
+  std::uint32_t kind{};
+  /** @brief Index in profile_reload_track::epochs of the epoch it fell in. */
+  std::uint32_t epoch{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_reload_tail const&, profile_reload_tail const&) -> bool = default;
+};
+
+/** @brief What profile_options::reload_tracker saw. */
+struct profile_reload_track
+{
+  /** @brief CPU writes to the key registers, all of them. */
+  std::uint64_t key_writes{};
+  /** @brief Reloads per reload kind, all of them. */
+  std::vector<std::uint64_t> counts{};
+  /** @brief Epochs in order, the first of kind epoch_kind::start. At most
+   * profile_options::write_log_limit. */
+  std::vector<profile_epoch> epochs{};
+  /** @brief The last reload of each segment that had one, in segment order. */
+  std::vector<profile_reload_tail> tails{};
+  /** @brief Epochs past the limit. From the first one, epochs, tails and the gaps stop changing
+   * and only counts and key_writes grow. */
+  std::uint64_t epochs_dropped{};
+  /** @brief Profile time in picoseconds of the first dropped epoch, valid when epochs_dropped
+   * is not 0. */
+  std::uint64_t frozen_ps{};
+  /** @brief Segment of the first dropped epoch, valid when epochs_dropped is not 0: of a dropped
+   * change write, the new segment of a dropped cut. */
+  std::uint64_t frozen_segment{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(profile_reload_track const&, profile_reload_track const&)
+      -> bool = default;
+};
+
 /** @brief A core instruction rate from a clock record. */
 struct profile_clock
 {
@@ -367,6 +476,8 @@ struct profile_result
   std::uint64_t deep_calls{};
   /** @brief Loops by head, ascending, from loop records. */
   std::vector<profile_loop> loops{};
+  /** @brief The reload track, one element with profile_options::reload_tracker, else empty. */
+  std::vector<profile_reload_track> reload_tracks{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(profile_result const&, profile_result const&) -> bool = default;
@@ -539,6 +650,31 @@ private:
     icount        at{};
     std::uint64_t ps{};
     std::uint64_t hz{};
+    std::uint64_t step{};
+  };
+
+  struct reload_state
+  {
+    static constexpr std::uint8_t none   = 0;
+    static constexpr std::uint8_t key    = 1;
+    static constexpr std::uint8_t change = 2;
+
+    struct previous_reload
+    {
+      std::uint32_t     kind{};
+      std::uint32_t     epoch{};
+      unsigned __int128 ticks{};
+    };
+
+    std::vector<std::uint8_t>      roles{};
+    std::vector<std::uint16_t>     values{};
+    profile_reload_track           track{};
+    std::vector<unsigned __int128> longest_ticks{};
+    std::optional<std::uint32_t>   last_key{};
+    std::optional<previous_reload> previous{};
+    unsigned __int128              ticks{};
+    std::uint64_t                  last_rate_ps{};
+    bool                           frozen{};
   };
 
   struct register_state
@@ -561,13 +697,19 @@ private:
   void               block(core::trace_record const& record);
   void               irq(core::trace_record const& record);
   void               mmio(core::trace_record const& record);
-  void               gap_before(icount start, profile_gaps& into);
-  void               add_gap(profile_gaps& into, icount from, icount to) const;
-  auto               count_block(address pc, std::uint32_t instructions) -> std::size_t;
-  void               grow();
-  auto               shape_of(std::size_t at, std::uint32_t instructions) -> block_shape;
-  void               track(std::size_t at, std::uint32_t instructions);
-  void               walk(std::uint32_t instructions, block_shape const& shape, address pc);
+  [[nodiscard]] auto logged_write(core::trace_record const& record, std::uint32_t value) const
+      -> profile_write;
+  void track_write(std::uint8_t role, core::trace_record const& record, std::uint32_t value);
+  void track_cut();
+  void open_epoch(profile_epoch epoch);
+  void track_change(core::trace_record const& record, std::uint32_t value);
+  void gap_before(icount start, profile_gaps& into);
+  void add_gap(profile_gaps& into, icount from, icount to) const;
+  auto count_block(address pc, std::uint32_t instructions) -> std::size_t;
+  void grow();
+  auto shape_of(std::size_t at, std::uint32_t instructions) -> block_shape;
+  void track(std::size_t at, std::uint32_t instructions);
+  void walk(std::uint32_t instructions, block_shape const& shape, address pc);
   auto child(std::uint32_t parent, frame_kind kind, std::uint32_t key) -> std::uint32_t;
   void push_call(address next, address function);
   void pop_to(address pc);
@@ -609,6 +751,7 @@ private:
   std::vector<profile_write_log>                       write_logs_{};
   std::uint64_t                                        domain_hz_{};
   std::vector<profile_rate>                            domain_rates_{};
+  std::optional<reload_state>                          reload_{};
   std::unordered_map<std::uint64_t, block_shape>       shapes_{};
   std::vector<profile_frame>                           nodes_{};
   std::unordered_map<std::uint64_t, std::uint32_t>     children_{};

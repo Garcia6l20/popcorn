@@ -10,6 +10,8 @@
 #include <bit>
 #include <limits>
 #include <ranges>
+#include <span>
+#include <stdexcept>
 #include <utility>
 
 namespace popcorn::obs
@@ -67,6 +69,42 @@ profile_sink::profile_sink(icount start, profile_options options)
   for(auto const id : options_.logged_registers)
   {
     write_logs_.push_back({.id = id});
+  }
+  if(options_.reload_tracker)
+  {
+    if(not options_.write_domain)
+    {
+      throw std::invalid_argument{"a reload tracker needs a write clock domain"};
+    }
+    if(options_.write_log_limit == 0)
+    {
+      throw std::invalid_argument{"a reload tracker needs a write log limit of at least 1"};
+    }
+    auto const& tracker = *options_.reload_tracker;
+    auto&       state   = reload_.emplace();
+    auto        top     = std::size_t{};
+    for(auto const ids : {std::span{tracker.key_ids}, std::span{tracker.change_ids}})
+    {
+      for(auto const id : ids)
+      {
+        top = std::max<std::size_t>(top, std::size_t{id} + 1);
+      }
+    }
+    state.roles.assign(top, reload_state::none);
+    for(auto const id : tracker.change_ids)
+    {
+      state.roles[id] = reload_state::change;
+    }
+    for(auto const id : tracker.key_ids)
+    {
+      state.roles[id] = reload_state::key;
+    }
+    state.values = tracker.reload_values;
+    state.track.counts.assign(state.values.size(), 0);
+    state.track.epochs.push_back(
+        {.kind    = epoch_kind::start,
+         .longest = std::vector<std::optional<profile_reload_gap>>(state.values.size())});
+    state.longest_ticks.assign(state.values.size(), 0);
   }
 }
 
@@ -145,7 +183,11 @@ void profile_sink::clock(std::uint64_t hz)
 {
   close_clock_span();
   clock_elapsed_ = elapsed_;
-  marks_.push_back({.at = now_, .ps = ps_at(now_), .hz = hz});
+  marks_.push_back(
+      {.at   = now_,
+       .ps   = ps_at(now_),
+       .hz   = hz,
+       .step = hz != 0 and ps_per_second % hz == 0 ? ps_per_second / hz : 0});
   clocks_.push_back({.at = now_, .segment = cuts_, .hz = hz});
 }
 
@@ -154,6 +196,12 @@ void profile_sink::domain_clock(core::trace_record const& record)
   if(not options_.write_domain or record.aux != options_.write_domain->index + 1)
   {
     return;
+  }
+  if(reload_)
+  {
+    auto const ps = profile_ps(now_);
+    reload_->ticks += static_cast<unsigned __int128>(domain_hz_) * (ps - reload_->last_rate_ps);
+    reload_->last_rate_ps = ps;
   }
   domain_hz_ = std::uint64_t{record.payload[0]} | std::uint64_t{record.payload[1]} << 32;
   domain_rates_.push_back(
@@ -184,8 +232,9 @@ auto profile_sink::ps_at(icount at) const -> std::uint64_t
   {
     return marks_.front().ps;
   }
-  auto const& mark = *std::prev(found);
-  return mark.ps + span_ps(at.value - mark.at.value, mark.hz);
+  auto const& mark         = *std::prev(found);
+  auto const  instructions = at.value - mark.at.value;
+  return mark.ps + (mark.step != 0 ? instructions * mark.step : span_ps(instructions, mark.hz));
 }
 
 auto profile_sink::ps_between(icount from, icount to) const -> std::uint64_t
@@ -276,6 +325,10 @@ void profile_sink::cut_block(core::trace_record const& record)
 void profile_sink::cut()
 {
   ++cuts_;
+  if(reload_)
+  {
+    track_cut();
+  }
   for(auto const& open : frames_)
   {
     ++exceptions_[open.number].totals.cut;
@@ -712,20 +765,129 @@ void profile_sink::mmio(core::trace_record const& record)
     }
     if(log.writes.size() < options_.write_log_limit)
     {
-      log.writes.push_back(
-          {.at       = now_,
-           .value    = value,
-           .segment  = cuts_,
-           .pc       = record.payload[0],
-           .ps       = profile_ps(now_),
-           .clock_hz = domain_hz_,
-           .record   = records_});
+      log.writes.push_back(logged_write(record, value));
     }
     else
     {
       ++log.dropped;
     }
   }
+  if(reload_ and record.aux < reload_->roles.size())
+  {
+    if(auto const role = reload_->roles[record.aux]; role != reload_state::none)
+    {
+      track_write(role, record, value);
+    }
+  }
+}
+
+auto profile_sink::logged_write(core::trace_record const& record, std::uint32_t value) const
+    -> profile_write
+{
+  return {
+      .at       = now_,
+      .value    = value,
+      .segment  = cuts_,
+      .pc       = record.payload[0],
+      .ps       = profile_ps(now_),
+      .clock_hz = domain_hz_,
+      .record   = records_};
+}
+
+void profile_sink::open_epoch(profile_epoch epoch)
+{
+  auto& state = *reload_;
+  auto& track = state.track;
+  if(track.epochs.size() >= options_.write_log_limit)
+  {
+    if(track.epochs_dropped++ == 0)
+    {
+      track.frozen_ps      = epoch.ps;
+      track.frozen_segment = epoch.segment;
+      state.frozen         = true;
+    }
+    return;
+  }
+  epoch.longest.assign(state.values.size(), std::nullopt);
+  track.epochs.push_back(std::move(epoch));
+  state.longest_ticks.resize(state.longest_ticks.size() + state.values.size(), 0);
+}
+
+void profile_sink::track_cut()
+{
+  auto& state = *reload_;
+  open_epoch(
+      {.kind = epoch_kind::cut, .segment = cuts_, .ps = profile_ps(now_), .record = records_});
+  state.previous.reset();
+  state.last_key.reset();
+}
+
+[[gnu::noinline]] void
+    profile_sink::track_change(core::trace_record const& record, std::uint32_t value)
+{
+  auto const write = logged_write(record, value);
+  open_epoch(
+      {.kind       = epoch_kind::change,
+       .segment    = write.segment,
+       .ps         = write.ps,
+       .record     = write.record,
+       .change_id  = record.aux,
+       .change     = write,
+       .key_before = reload_->last_key.value_or(~std::uint32_t{0})});
+}
+
+void profile_sink::track_write(
+    std::uint8_t              role,
+    core::trace_record const& record,
+    std::uint32_t             value)
+{
+  auto& state = *reload_;
+  auto& track = state.track;
+  if(role == reload_state::change)
+  {
+    track_change(record, value);
+    return;
+  }
+  auto const write = logged_write(record, value);
+  ++track.key_writes;
+  auto const key   = value & 0xFFFF;
+  state.last_key   = key;
+  auto const found = std::ranges::find(state.values, key);
+  if(found == state.values.end())
+  {
+    return;
+  }
+  auto const kind = static_cast<std::uint32_t>(found - state.values.begin());
+  ++track.counts[kind];
+  if(state.frozen)
+  {
+    return;
+  }
+  auto const ticks =
+      state.ticks + static_cast<unsigned __int128>(domain_hz_) * (write.ps - state.last_rate_ps);
+  if(state.previous)
+  {
+    auto const& before = *state.previous;
+    auto const  gap    = ticks - before.ticks;
+    auto&       held   = track.epochs[before.epoch].longest[before.kind];
+    auto&       best   = state.longest_ticks[before.epoch * state.values.size() + before.kind];
+    if(not held or gap > best)
+    {
+      auto const& first = track.tails.back().last;
+      held = profile_reload_gap{.start = first, .end = write, .ps = write.ps - first.ps};
+      best = gap;
+    }
+  }
+  auto const epoch = static_cast<std::uint32_t>(track.epochs.size() - 1);
+  if(not track.tails.empty() and track.tails.back().segment == write.segment)
+  {
+    track.tails.back() = {.segment = write.segment, .last = write, .kind = kind, .epoch = epoch};
+  }
+  else
+  {
+    track.tails.push_back({.segment = write.segment, .last = write, .kind = kind, .epoch = epoch});
+  }
+  state.previous = {.kind = kind, .epoch = epoch, .ticks = ticks};
 }
 
 auto profile_sink::result() const -> profile_result
@@ -772,6 +934,10 @@ auto profile_sink::result() const -> profile_result
   }
   std::ranges::sort(out.code, {}, &profile_block::pc);
   out.loops = loops_ | std::views::values | std::ranges::to<std::vector>();
+  if(reload_)
+  {
+    out.reload_tracks.push_back(reload_->track);
+  }
   if(options_.code)
   {
     out.frames = nodes_;

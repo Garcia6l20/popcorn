@@ -251,6 +251,9 @@ def open_profile(
     write_log_limit: int,
     max_call_depth: int,
     write_clock_domain: str = "",
+    reload_key_ids: Iterable[int] = (),
+    reload_change_ids: Iterable[int] = (),
+    reload_values: Iterable[int] = (),
 ) -> ProfileRecording:
     """Start a profile for `Machine._profile`."""
     settings = _core.ProfileOptions()
@@ -261,6 +264,9 @@ def open_profile(
     settings.write_log_limit = write_log_limit
     settings.max_call_depth = max_call_depth
     settings.write_clock_domain = write_clock_domain
+    settings.reload_key_ids = list(reload_key_ids)
+    settings.reload_change_ids = list(reload_change_ids)
+    settings.reload_values = list(reload_values)
     return ProfileRecording(handle.open_profile(settings))
 
 

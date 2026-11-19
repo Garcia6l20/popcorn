@@ -110,6 +110,14 @@ struct[[= py::rename{"ProfileOptions"}]] profile_settings
   /** @brief Clock domain whose rate the profile follows for the logged writes, empty or unknown
    * for none. */
   std::string write_clock_domain{};
+  /** @brief Flat ids of the key registers of the reload tracker, empty for no tracker, then
+   * reload_change_ids and reload_values are ignored. The tracker needs write_clock_domain and a
+   * write_log_limit of at least 1. */
+  std::vector<std::uint16_t> reload_key_ids{};
+  /** @brief Flat ids of the registers whose write opens a tracker epoch. */
+  std::vector<std::uint16_t> reload_change_ids{};
+  /** @brief Low 16 bits of a key write that reloads, one per reload kind. */
+  std::vector<std::uint16_t> reload_values{};
   /** @brief Whether the call stack tracker runs. */
   bool call_stacks{};
   /** @brief Most call frames the tracker keeps. */

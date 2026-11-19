@@ -385,6 +385,12 @@ auto machine_handle::open_profile(profile_settings const& settings) -> profile_h
         .write_domain     = write_domain(target, settings.write_clock_domain),
         .code = settings.call_stacks ? obs::machine_code_reader(target) : obs::code_reader{},
         .max_call_depth = settings.max_call_depth,
+        .reload_tracker = settings.reload_key_ids.empty()
+                            ? std::nullopt
+                            : std::optional{obs::profile_reload_tracker{
+                                  .key_ids       = settings.reload_key_ids,
+                                  .change_ids    = settings.reload_change_ids,
+                                  .reload_values = settings.reload_values}},
     };
     auto domains = options.write_domain ? std::vector{*options.write_domain}
                                         : std::vector<core::clock_domain>{};

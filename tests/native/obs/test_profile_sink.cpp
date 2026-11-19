@@ -917,3 +917,315 @@ TEST_CASE("a trace writer whose handle a handler drops inside a slice writes unt
   }
   CHECK(file_bytes(path).size() > 16);
 }
+
+namespace
+{
+constexpr std::uint16_t reload_key     = 7;
+constexpr std::uint16_t reload_prescl  = 8;
+constexpr std::uint16_t reload_reload  = 9;
+constexpr std::uint16_t refresh_value  = 0xAAAA;
+constexpr std::uint16_t start_value    = 0xCCCC;
+constexpr std::uint64_t instruction_ps = 250'000;
+
+auto tracker_options(std::size_t limit = 4096) -> obs::profile_options
+{
+  return {
+      .write_log_limit = limit,
+      .write_domain    = core::clock_domain{3},
+      .reload_tracker =
+          obs::profile_reload_tracker{
+                                            .key_ids       = {reload_key},
+                                            .change_ids    = {reload_prescl, reload_reload},
+                                            .reload_values = {refresh_value, start_value},
+                                            },
+  };
+}
+
+auto tracked_prologue() -> std::vector<core::trace_record>
+{
+  return {clocked(4'000'000), domain_clocked(3, 32'000)};
+}
+
+auto key_write(std::uint32_t value, std::uint32_t dt) -> core::trace_record
+{
+  return access(reload_key, 0x100, 0x4000'3000, value, true, dt);
+}
+
+auto change_write(std::uint16_t id, std::uint32_t value, std::uint32_t dt) -> core::trace_record
+{
+  return access(id, 0x120, 0x4000'3004, value, true, dt);
+}
+
+auto track_of(std::vector<core::trace_record> records, obs::profile_options options)
+    -> obs::profile_reload_track
+{
+  auto all = tracked_prologue();
+  all.insert(all.end(), records.begin(), records.end());
+  auto const result = fed(all, std::move(options));
+  REQUIRE(result.reload_tracks.size() == 1);
+  return result.reload_tracks[0];
+}
+
+auto refreshes_at(std::initializer_list<std::uint32_t> gaps) -> std::vector<core::trace_record>
+{
+  std::vector<core::trace_record> out;
+  for(auto const dt : gaps)
+  {
+    out.push_back(key_write(refresh_value, dt));
+  }
+  return out;
+}
+}
+
+TEST_CASE("the reload tracker counts every reload and key write past the log limit")
+{
+  std::vector<core::trace_record> records;
+  for(auto i = 0; i < 9'999; ++i)
+  {
+    records.push_back(key_write(refresh_value, 1));
+  }
+  records.push_back(key_write(0x1234'0000 | refresh_value, 1));
+  records.push_back(key_write(0x5555, 1));
+  records.push_back(key_write(0x5555, 1));
+  auto all = tracked_prologue();
+  all.insert(all.end(), records.begin(), records.end());
+  auto options             = tracker_options(4);
+  options.logged_registers = {reload_key};
+  auto const  result       = fed(all, std::move(options));
+  auto const& track        = result.reload_tracks.at(0);
+  CHECK(track.counts == std::vector<std::uint64_t>{10'000, 0});
+  CHECK(track.key_writes == 10'002);
+  CHECK(result.write_logs.at(0).writes.size() == 4);
+  CHECK(result.write_logs.at(0).dropped == 9'998);
+  REQUIRE(track.tails.size() == 1);
+  CHECK(track.tails[0].last.value == (0x1234'0000 | refresh_value));
+  CHECK(track.tails[0].last.record == 10'001);
+}
+
+TEST_CASE("the reload tracker keeps the longest gap of a kind")
+{
+  auto const track = track_of(refreshes_at({10, 10, 30, 10}), tracker_options());
+  REQUIRE(track.epochs.size() == 1);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  auto const& gap = *track.epochs[0].longest[0];
+  CHECK(gap.start.at == icount{1020});
+  CHECK(gap.end.at == icount{1050});
+  CHECK(gap.ps == 30 * instruction_ps);
+  CHECK(gap.start.ps == 20 * instruction_ps);
+  CHECK(gap.end.ps == 50 * instruction_ps);
+  CHECK_FALSE(track.epochs[0].longest[1].has_value());
+}
+
+TEST_CASE("equal longest gaps report the first")
+{
+  auto const track = track_of(refreshes_at({10, 10, 20, 10, 20}), tracker_options());
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->start.at == icount{1020});
+  CHECK(track.epochs[0].longest[0]->end.at == icount{1040});
+}
+
+TEST_CASE("a gap belongs to the kind of its first reload")
+{
+  auto const track = track_of(
+      {key_write(start_value, 10), key_write(refresh_value, 10), key_write(refresh_value, 40)},
+      tracker_options());
+  CHECK(track.counts == std::vector<std::uint64_t>{2, 1});
+  REQUIRE(track.epochs[0].longest[1].has_value());
+  CHECK(track.epochs[0].longest[1]->ps == 10 * instruction_ps);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 40 * instruction_ps);
+}
+
+TEST_CASE("a change write opens an epoch and the gap across it stays in the earlier one")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10),
+       change_write(reload_prescl, 3, 5), key_write(refresh_value, 45),
+       key_write(refresh_value, 10), time_to(0), clocked(4'000'000),
+       change_write(reload_reload, 0x100, 1)},
+      tracker_options());
+  REQUIRE(track.epochs.size() == 4);
+  CHECK(track.epochs[0].kind == obs::epoch_kind::start);
+  CHECK(track.epochs[0].key_before == ~std::uint32_t{0});
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 50 * instruction_ps);
+  CHECK(track.epochs[1].kind == obs::epoch_kind::change);
+  CHECK(track.epochs[1].change_id == reload_prescl);
+  CHECK(track.epochs[1].change.value == 3);
+  CHECK(track.epochs[1].key_before == refresh_value);
+  REQUIRE(track.epochs[1].longest[0].has_value());
+  CHECK(track.epochs[1].longest[0]->ps == 10 * instruction_ps);
+  CHECK(track.epochs[2].kind == obs::epoch_kind::cut);
+  CHECK(track.epochs[3].kind == obs::epoch_kind::change);
+  CHECK(track.epochs[3].key_before == ~std::uint32_t{0});
+}
+
+TEST_CASE("a cut pairs no reloads across it and gives each segment a tail")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10), time_to(0), clocked(4'000'000),
+       key_write(refresh_value, 50), key_write(refresh_value, 4)},
+      tracker_options());
+  REQUIRE(track.epochs.size() == 2);
+  CHECK(track.epochs[1].kind == obs::epoch_kind::cut);
+  CHECK(track.epochs[1].segment == 1);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  REQUIRE(track.epochs[1].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 10 * instruction_ps);
+  CHECK(track.epochs[1].longest[0]->ps == 4 * instruction_ps);
+  REQUIRE(track.tails.size() == 2);
+  CHECK(track.tails[0].segment == 0);
+  CHECK(track.tails[0].last.at == icount{1020});
+  CHECK(track.tails[0].epoch == 0);
+  CHECK(track.tails[1].segment == 1);
+  CHECK(track.tails[1].last.at == icount{54});
+  CHECK(track.tails[1].epoch == 1);
+}
+
+TEST_CASE("the longest gap is the one with the most ticks of the domain across a rate change")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 400), domain_clocked(3, 64'000),
+       key_write(refresh_value, 300)},
+      tracker_options());
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  auto const& gap = *track.epochs[0].longest[0];
+  CHECK(gap.ps == 300 * instruction_ps);
+  CHECK(gap.start.clock_hz == 32'000);
+  CHECK(gap.end.clock_hz == 64'000);
+}
+
+TEST_CASE("a pair across a rate change counts the ticks of each part at its own rate")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 400), domain_clocked(3, 64'000, 100),
+       key_write(refresh_value, 140)},
+      tracker_options());
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 400 * instruction_ps);
+}
+
+TEST_CASE("a stopped domain accumulates no ticks")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10), domain_clocked(3, 0),
+       key_write(refresh_value, 980)},
+      tracker_options());
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 10 * instruction_ps);
+}
+
+TEST_CASE("the epoch table holds at most the write log limit and counts the epochs past it")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 1), change_write(reload_prescl, 1, 1),
+       change_write(reload_prescl, 2, 1), change_write(reload_reload, 3, 1),
+       change_write(reload_prescl, 4, 1), change_write(reload_prescl, 5, 1),
+       key_write(refresh_value, 1)},
+      tracker_options(2));
+  CHECK(track.epochs.size() == 2);
+  CHECK(track.epochs[1].change.value == 1);
+  CHECK(track.epochs_dropped == 4);
+  CHECK(track.counts == std::vector<std::uint64_t>{2, 0});
+  CHECK(track.key_writes == 2);
+}
+
+TEST_CASE("a reload tracker without a write domain is refused")
+{
+  auto options = tracker_options();
+  options.write_domain.reset();
+  CHECK_THROWS_AS(fed({}, std::move(options)), std::invalid_argument);
+}
+
+TEST_CASE("only CPU writes to the listed registers reach the tracker")
+{
+  auto dma = key_write(refresh_value, 1);
+  dma.flags |= core::trace_dma_flag;
+  auto const track = track_of(
+      {access(10, 0x100, 0x4000'3008, refresh_value, true, 1),
+       access(reload_key, 0, 0x4000'3000, refresh_value, true, 1), dma,
+       access(reload_key, 0x100, 0x4000'3000, refresh_value, false, 1),
+       access(11, 0x100, 0x4000'300c, 0, true, 1)},
+      tracker_options());
+  CHECK(track.key_writes == 0);
+  CHECK(track.counts == std::vector<std::uint64_t>{0, 0});
+  CHECK(track.epochs.size() == 1);
+  CHECK(track.tails.empty());
+}
+
+TEST_CASE("past the epoch cap a dropped change write freezes the gaps and the tails")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10),
+       change_write(reload_prescl, 1, 5), change_write(reload_prescl, 2, 5),
+       key_write(refresh_value, 970)},
+      tracker_options(2));
+  CHECK(track.epochs.size() == 2);
+  CHECK(track.epochs_dropped == 1);
+  CHECK(track.frozen_ps == 30 * instruction_ps);
+  CHECK(track.frozen_segment == 0);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 10 * instruction_ps);
+  REQUIRE(track.tails.size() == 1);
+  CHECK(track.tails[0].last.at == icount{1020});
+  CHECK(track.counts == std::vector<std::uint64_t>{3, 0});
+  CHECK(track.key_writes == 3);
+}
+
+TEST_CASE("a change write that fills the table drops nothing")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10),
+       change_write(reload_prescl, 1, 5), key_write(refresh_value, 970)},
+      tracker_options(2));
+  CHECK(track.epochs_dropped == 0);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 975 * instruction_ps);
+}
+
+TEST_CASE("past the epoch cap a dropped cut keeps the tail it ended and freezes the next segment")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 10),
+       change_write(reload_prescl, 1, 5), time_to(0), clocked(4'000'000),
+       key_write(refresh_value, 5), key_write(refresh_value, 400)},
+      tracker_options(2));
+  CHECK(track.epochs.size() == 2);
+  CHECK(track.epochs_dropped == 1);
+  CHECK(track.frozen_ps == 25 * instruction_ps);
+  CHECK(track.frozen_segment == 1);
+  REQUIRE(track.tails.size() == 1);
+  CHECK(track.tails[0].segment == 0);
+  CHECK(track.tails[0].last.at == icount{1020});
+  CHECK(track.counts == std::vector<std::uint64_t>{4, 0});
+}
+
+TEST_CASE("a gap of more than 576 seconds at 32 kHz is longer than a stored gap of one second")
+{
+  auto const track = track_of(
+      {key_write(refresh_value, 10), key_write(refresh_value, 4'000'000),
+       key_write(refresh_value, 2'308'000'000)},
+      tracker_options());
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  CHECK(track.epochs[0].longest[0]->ps == 577'000'000'000'000);
+}
+
+TEST_CASE("a core rate that does not divide a second still converts each point exactly")
+{
+  auto const result =
+      fed({clocked(3'000'000), domain_clocked(3, 32'000), key_write(refresh_value, 10),
+           key_write(refresh_value, 10), key_write(refresh_value, 11)},
+          tracker_options());
+  auto const& track = result.reload_tracks.at(0);
+  REQUIRE(track.epochs[0].longest[0].has_value());
+  auto const& gap = *track.epochs[0].longest[0];
+  CHECK(gap.start.ps == 20 * 1'000'000'000'000 / 3'000'000);
+  CHECK(gap.end.ps == 31 * 1'000'000'000'000 / 3'000'000);
+  CHECK(track.tails.at(0).last.ps == 31 * 1'000'000'000'000 / 3'000'000);
+  CHECK(result.elapsed_ps == 31 * 1'000'000'000'000 / 3'000'000);
+}
+
+TEST_CASE("a reload tracker with a write log limit of 0 is refused")
+{
+  CHECK_THROWS_AS(fed({}, tracker_options(0)), std::invalid_argument);
+}

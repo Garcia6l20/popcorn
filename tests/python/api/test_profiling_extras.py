@@ -52,7 +52,7 @@ def test_the_watchdog_margin_is_the_timeout_less_the_longest_refresh_interval() 
     assert (dog.starts, dog.refreshes) == (1, len(seen) + 1)
     assert dog.timeout_ps == TIMEOUT_PS
     longest = max(b - a for a, b in itertools.pairwise(seen))
-    assert dog.min_margin_ps == TIMEOUT_PS - longest == 398_999_250_000
+    assert dog.min_margin_ps == TIMEOUT_PS - longest == 398_998_750_000
     assert dog.closest_pc is not None
     assert Names(m.images, m.description).function(dog.closest_pc)[0] == "HAL_IWDG_Refresh"
     assert dog.gaps == ()
@@ -91,7 +91,7 @@ def test_reloads_on_either_side_of_a_watchdog_reset_are_not_paired() -> None:
     dog = report.watchdog
     assert dog is not None
     assert dog.starts == 2
-    assert dog.min_margin_ps == 398_999_250_000
+    assert dog.min_margin_ps == 398_998_750_000
     assert [gap.length_ps for gap in dog.gaps] == [TIMEOUT_PS]
 
 

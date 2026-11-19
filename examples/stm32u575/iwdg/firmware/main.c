@@ -9,6 +9,8 @@ IWDG_HandleTypeDef hiwdg;
 volatile uint32_t  refresh_enabled = 1;
 volatile uint32_t  reset_by_watchdog;
 volatile uint32_t  refresh_burst;
+volatile uint32_t  reconfigure_reload;
+volatile uint32_t  reconfigure_prescaler;
 
 void SysTick_Handler(void);
 
@@ -58,6 +60,16 @@ int main(void)
     if(refresh_enabled != 0)
     {
       HAL_IWDG_Refresh(&hiwdg);
+    }
+    if(reconfigure_reload != 0)
+    {
+      hiwdg.Instance->KR  = IWDG_KEY_WRITE_ACCESS_ENABLE;
+      hiwdg.Instance->PR  = reconfigure_prescaler;
+      hiwdg.Instance->RLR = reconfigure_reload;
+      while(hiwdg.Instance->SR != 0u)
+      {
+      }
+      reconfigure_reload = 0;
     }
     HAL_Delay(REFRESH_MS);
   }

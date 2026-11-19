@@ -123,6 +123,11 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::obs::profile_register>("ProfileRegister");
   m.bind<popcorn::obs::profile_write>("ProfileWrite");
   m.bind<popcorn::obs::profile_write_log>("ProfileWriteLog");
+  m.bind<popcorn::obs::profile_reload_gap>("ProfileReloadGap");
+  m.bind_enum<popcorn::obs::epoch_kind>("EpochKind");
+  m.bind<popcorn::obs::profile_epoch>("ProfileEpoch");
+  m.bind<popcorn::obs::profile_reload_tail>("ProfileReloadTail");
+  m.bind<popcorn::obs::profile_reload_track>("ProfileReloadTrack");
   m.bind<popcorn::obs::profile_clock>("ProfileClock");
   m.bind<popcorn::obs::profile_rate>("ProfileRate");
   m.bind<popcorn::obs::profile_loop>("ProfileLoop");
