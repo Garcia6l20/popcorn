@@ -539,6 +539,7 @@ name = "popcorn"
 source = { editable = "." }
 default-groups = ["dev", "docs"]
 dependencies = [
+    { name = "click" },
     { name = "pyelftools" },
 ]
 
@@ -572,6 +573,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.4,<9" },
     { name = "ninja", marker = "extra == 'plugin'" },
     { name = "pcons", marker = "extra == 'plugin'", specifier = "==0.32.0" },
     { name = "pyelftools" },
