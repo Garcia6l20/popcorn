@@ -6,6 +6,8 @@ from collections.abc import Sequence
 
 import click
 
+from popcorn.cli._profile import profile
+
 __all__ = ["cli", "main"]
 
 
@@ -13,6 +15,9 @@ __all__ = ["cli", "main"]
 @click.version_option(package_name="popcorn", prog_name="popcorn")
 def cli() -> None:
     """Inspect popcorn profiling reports, coverage data and part descriptions."""
+
+
+cli.add_command(profile)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
