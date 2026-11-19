@@ -37,7 +37,9 @@ IWDG = popcorn.MachineDescription(
     images=[popcorn.Elf(ROOT / "examples/stm32u575/iwdg/prebuilt/iwdg_refresh.elf")],
     boot=popcorn.Boot(until="main", budget=1_000_000),
 )
-TIMEOUT_PS = ms(500).ps
+TIMEOUT_PS = ms(501).ps
+GAP_PS = 501_302_000_000
+"""The reset after the last refresh, past the timeout by the phase of the free-running prescaler."""
 
 
 def test_the_watchdog_margin_is_the_timeout_less_the_longest_refresh_interval() -> None:
@@ -58,7 +60,7 @@ def test_the_watchdog_margin_is_the_timeout_less_the_longest_refresh_interval() 
     assert (dog.starts, dog.refreshes) == (1, len(seen) + 1)
     assert dog.timeout_ps == TIMEOUT_PS
     longest = max(b - a for a, b in itertools.pairwise(seen))
-    assert dog.min_margin_ps == TIMEOUT_PS - longest == 398_998_750_000
+    assert dog.min_margin_ps == TIMEOUT_PS - longest == 399_998_750_000
     assert dog.closest_pc is not None
     assert Names(m.images, m.description).function(dog.closest_pc)[0] == "HAL_IWDG_Refresh"
     assert dog.gaps == ()
@@ -86,9 +88,10 @@ def test_a_stopped_refresh_shows_as_a_gap_of_the_timeout() -> None:
     assert dog is not None
     assert len(dog.gaps) == 1
     gap = dog.gaps[0]
-    assert (gap.length_ps, gap.timeout_ps) == (TIMEOUT_PS, TIMEOUT_PS)
+    assert (gap.length_ps, gap.timeout_ps) == (GAP_PS, TIMEOUT_PS)
+    assert TIMEOUT_PS < gap.length_ps <= TIMEOUT_PS + FIRMWARE_PERIOD_PS
     assert gap.start_ps + gap.length_ps == report.elapsed_ps
-    assert "no reload for 500.000 ms" in report.text()
+    assert "no reload for 501.302 ms" in report.text()
 
 
 def test_reloads_on_either_side_of_a_watchdog_reset_are_not_paired() -> None:
@@ -104,8 +107,8 @@ def test_reloads_on_either_side_of_a_watchdog_reset_are_not_paired() -> None:
     dog = report.watchdog
     assert dog is not None
     assert dog.starts == 2
-    assert dog.min_margin_ps == 398_998_750_000
-    assert [gap.length_ps for gap in dog.gaps] == [TIMEOUT_PS]
+    assert dog.min_margin_ps == 399_998_750_000
+    assert [gap.length_ps for gap in dog.gaps] == [GAP_PS]
 
 
 def test_a_reset_at_a_set_core_rate_sends_the_core_rate_after_the_rebase_only(
@@ -344,6 +347,8 @@ def test_a_logged_write_takes_the_lsi_rate_of_its_own_instant_whatever_the_slici
 
 LSI_HZ = 32_000
 PERIOD_PS = 1_000_000_000_000 // LSI_HZ
+FIRMWARE_PERIOD_PS = 32 * PERIOD_PS
+"""One period of the /32 prescaler the IWDG example firmware programs."""
 KR, PR, RLR = 1, 2, 3
 REGISTERS = WatchdogRegisters(
     kr=(KR,),
@@ -512,8 +517,8 @@ def test_the_start_counts_from_0xfff_whatever_rlr_holds() -> None:
     ]
     dog = watchdog(synthetic(events, ms(30).ps), REGISTERS)
     assert dog.starts == dog.refreshes == 1
-    assert dog.min_margin_ps == 4 * 0xFFF * PERIOD_PS - (ms(20).ps - 10)
-    assert dog.timeout_ps == 4 * 100 * PERIOD_PS
+    assert dog.min_margin_ps == 4 * 0x1000 * PERIOD_PS - (ms(20).ps - 10)
+    assert dog.timeout_ps == 4 * 101 * PERIOD_PS
 
 
 def test_after_a_cut_pr_and_rlr_are_unknown_until_written() -> None:
@@ -533,7 +538,7 @@ def test_after_a_cut_pr_and_rlr_are_unknown_until_written() -> None:
     assert dog.min_margin_ps is None
     events += [*setup(cut + ms(4).ps, 3, 500), ("w", KR, 0xAAAA, cut + ms(5).ps)]
     known = watchdog(synthetic(events, cut + ms(6).ps), REGISTERS)
-    assert known.timeout_ps == ms(500).ps
+    assert known.timeout_ps == ms(501).ps
     assert known.min_margin_ps is None
 
 
@@ -546,10 +551,10 @@ def test_a_rate_change_between_two_reloads_counts_each_part_at_its_rate() -> Non
         ("w", KR, 0xAAAA, ms(100).ps),
     ]
     dog = watchdog(synthetic(events, ms(200).ps), REGISTERS)
-    ticks_left = 32 * 500 - LSI_HZ * 10 // 1000
+    ticks_left = 32 * 501 - LSI_HZ * 10 // 1000
     expiry = ms(10).ps + ticks_left * 1_000_000_000_000 // 250
     assert dog.min_margin_ps == expiry - ms(100).ps
-    assert dog.timeout_ps == 32 * 500 * 1_000_000_000_000 // 250
+    assert dog.timeout_ps == 32 * 501 * 1_000_000_000_000 // 250
 
 
 def test_a_reload_while_the_lsi_is_stopped_expires_from_when_it_runs() -> None:
@@ -560,8 +565,8 @@ def test_a_reload_while_the_lsi_is_stopped_expires_from_when_it_runs() -> None:
         ("w", KR, 0xAAAA, ms(2).ps),
     ]
     dog = watchdog(synthetic(events, ms(4).ps), REGISTERS)
-    assert dog.min_margin_ps == ms(1).ps + 4 * 0xFFF * PERIOD_PS - ms(2).ps
-    assert dog.timeout_ps == 4 * 0xFFF * PERIOD_PS
+    assert dog.min_margin_ps == ms(1).ps + 4 * 0x1000 * PERIOD_PS - ms(2).ps
+    assert dog.timeout_ps == 4 * 0x1000 * PERIOD_PS
     stopped = watchdog(synthetic([*events, ("r", 0, 0, ms(3).ps)], ms(4).ps), REGISTERS)
     assert stopped.timeout_ps is None
     assert stopped.min_margin_ps is None
@@ -577,7 +582,7 @@ def test_pr_and_rlr_writes_the_hardware_ignores_leave_the_timeout() -> None:
         ("w", KR, 0xAAAA, 30),
     ]
     dog = watchdog(synthetic(events, ms(1).ps), REGISTERS)
-    assert dog.timeout_ps == 4 * (0x1FC8 & 0xFFF) * PERIOD_PS
+    assert dog.timeout_ps == 4 * ((0x1FC8 & 0xFFF) + 1) * PERIOD_PS
     unknown: list[Event] = [
         ("r", 0, LSI_HZ, 0),
         ("w", RLR, 50, 1),
@@ -596,7 +601,7 @@ def test_writes_at_one_instruction_count_apply_in_stream_order() -> None:
         ("w", KR, 0xAAAA, ms(1).ps),
     ]
     dog = watchdog(synthetic(events, ms(2).ps), REGISTERS)
-    assert dog.timeout_ps == 32 * 0xFFF * PERIOD_PS
+    assert dog.timeout_ps == 32 * 0x1000 * PERIOD_PS
 
 
 def key_paths(value: object, prefix: str = "") -> set[str]:

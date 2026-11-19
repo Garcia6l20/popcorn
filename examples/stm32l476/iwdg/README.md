@@ -2,9 +2,12 @@
 
 An STM32L476 application starts the IWDG with `HAL_IWDG_Init` for 500 ms and refreshes it every
 100 ms with `HAL_IWDG_Refresh`. The IWDG counts the 32 kHz LSI divided by 32, so the HAL loads a
-reload of 500 and the timeout is 500 ms. The window comes from `iwdg_window`, 0xFFF by default,
-which leaves it open. A refresh while the counter is above IWDG_WINR is a reset, RM0351 36.3.2.
-At boot the firmware records whether IWDGRSTF is set in RCC_CSR and clears the reset flags.
+reload of 500: the counter reaches 0 500 ms after the first counter tick that follows a
+refresh, and the reset comes one tick later, 501 to 502 ms after the refresh, inferred on the
+STM32L4 from the rule measured on the STM32U5. The window comes from `iwdg_window`, 0xFFF by
+default, which leaves it open. A refresh while the counter is above IWDG_WINR is a reset, RM0351
+36.3.2. At boot the firmware records whether IWDGRSTF is set in RCC_CSR and clears the reset
+flags.
 
 It ports `stm32l152/iwdg` and adds the IWDG_WINR window of the L4 IWDG. The firmware waits
 100 ms before each refresh, so the first refresh comes 100 ms after `HAL_IWDG_Init`, with the

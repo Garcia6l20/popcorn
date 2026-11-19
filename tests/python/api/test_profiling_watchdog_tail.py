@@ -39,6 +39,7 @@ from popcorn.units import ms, s
 
 from .test_profiling import booted
 from .test_profiling_extras import (
+    FIRMWARE_PERIOD_PS,
     IWDG,
     KR,
     LSI_HZ,
@@ -292,7 +293,7 @@ def oracle_watchdog(result: _core.ProfileResult, registers: WatchdogRegisters) -
                 rates.get(at_segment, []),
                 write.ps,
                 write.record,
-                _divider(held.pr, registers.prescaler_top) * count,
+                _divider(held.pr, registers.prescaler_top) * (count + 1),
             )
         )
         timeout = None if expiry is None else expiry - write.ps
@@ -453,7 +454,7 @@ def test_several_gaps_past_the_timeout_in_one_epoch_list_the_longest_only() -> N
     oracle = oracle_watchdog(result, REGISTERS)
     assert [gap.length_ps for gap in oracle.gaps] == [ms(100).ps, ms(200).ps, ms(89).ps]
     assert [gap.length_ps for gap in got.gaps] == [ms(200).ps, ms(89).ps]
-    assert got.min_margin_ps == oracle.min_margin_ps == 4 * 500 * LSI_PS - ms(200).ps
+    assert got.min_margin_ps == oracle.min_margin_ps == 4 * 501 * LSI_PS - ms(200).ps
 
 
 def test_a_rate_change_inside_a_gap_reports_the_longest_ticks_pair_with_its_exact_margin() -> None:
@@ -467,9 +468,9 @@ def test_a_rate_change_inside_a_gap_reports_the_longest_ticks_pair_with_its_exac
     result = synthetic(events, ms(200).ps)
     got = watchdog(result, REGISTERS)
     oracle = oracle_watchdog(result, REGISTERS)
-    assert got.min_margin_ps == ms(60.75).ps - ms(40).ps
+    assert got.min_margin_ps == ms(60.8125).ps - ms(40).ps
     assert got.closest_pc == 0x0800_0100 + 2 * 5
-    assert oracle.min_margin_ps == ms(11.75).ps
+    assert oracle.min_margin_ps == ms(11.8125).ps
 
 
 def test_a_pair_with_no_timeout_stands_for_its_epoch_and_kind() -> None:
@@ -483,7 +484,7 @@ def test_a_pair_with_no_timeout_stands_for_its_epoch_and_kind() -> None:
     result = synthetic(events, ms(5).ps)
     got = watchdog(result, REGISTERS)
     oracle = oracle_watchdog(result, REGISTERS)
-    assert oracle.min_margin_ps == 40 * LSI_PS - ms(0.5).ps
+    assert oracle.min_margin_ps == 44 * LSI_PS - ms(0.5).ps
     assert got.min_margin_ps is None
 
 
@@ -496,7 +497,7 @@ def test_a_hot_refresher_past_the_cap_keeps_its_margin_and_count() -> None:
     result = synthetic(events, 10 + 50_002 * period + 10_000_000, keep_logs=False)
     dog = watchdog(result, REGISTERS)
     assert dog.refreshes == 50_002
-    assert dog.min_margin_ps == 4 * 500 * LSI_PS - (period + 5_000_000)
+    assert dog.min_margin_ps == 4 * 501 * LSI_PS - (period + 5_000_000)
     assert dog.closest_pc == 0x0800_0100 + 2 * 50_004
 
 
@@ -508,7 +509,7 @@ def test_each_gap_is_judged_with_the_timeout_of_its_own_epoch() -> None:
     events += [("w", KR, 0x5555, ms(last + 10).ps), ("w", PR, 1, ms(last + 10).ps + 1)]
     events += reloads([last + 70, last + 170, last + 270])
     dog = watchdog(synthetic(events, ms(last + 300).ps, keep_logs=False), REGISTERS)
-    short = 4 * 500 * LSI_PS
+    short = 4 * 501 * LSI_PS
     assert dog.min_margin_ps == short - ms(70).ps
     assert [gap.timeout_ps for gap in dog.gaps] == [short]
     assert dog.timeout_ps == 2 * short
@@ -534,7 +535,7 @@ def test_a_stall_in_the_first_segment_is_one_gap_and_the_second_segment_is_clean
 
 
 def test_a_dropped_change_write_stops_the_analysis_where_the_table_stopped() -> None:
-    timeout = 4 * 500 * LSI_PS
+    timeout = 4 * 501 * LSI_PS
     events: list[Event] = [
         ("r", 0, LSI_HZ, 0),
         ("w", KR, 0x5555, 0),
@@ -692,7 +693,8 @@ def test_a_burst_past_the_cap_then_a_stall_reports_the_real_numbers() -> None:
     assert dog.key_writes > dog.refreshes + dog.starts
     assert dog.logged_until_ps is None
     (gap,) = dog.gaps
-    assert gap.length_ps == gap.timeout_ps == dog.timeout_ps
+    assert gap.timeout_ps == dog.timeout_ps
+    assert gap.timeout_ps < gap.length_ps <= gap.timeout_ps + FIRMWARE_PERIOD_PS
     assert gap.start_ps + gap.length_ps == elapsed
     longest = max(b - a for a, b in pairwise(seen))
     assert dog.min_margin_ps == dog.timeout_ps - longest
@@ -749,7 +751,7 @@ def test_each_segment_is_judged_with_its_own_lsi_rate() -> None:
     got = watchdog(result, REGISTERS)
     oracle = oracle_watchdog(result, REGISTERS)
     assert_matches_oracle(got, oracle)
-    fast = 4 * 500 * LSI_PS // 2
+    fast = 4 * 501 * LSI_PS // 2
     assert got.min_margin_ps == fast - ms(40).ps < 0
     assert (got.gaps[-1].start_ps, got.gaps[-1].timeout_ps) == (cut + ms(1).ps, fast)
 
@@ -887,7 +889,7 @@ def test_the_watchdog_line_prints_the_counts_and_the_key_writes() -> None:
     events: list[Event] = [("r", 0, LSI_HZ, 0), *setup(0, 0, 500), *reloads([1, 51, 101])]
     dog = watchdog(synthetic(events, ms(110).ps), REGISTERS)
     text = "\n".join(watchdog_text(dog))
-    assert "refreshes 3, starts 0, timeout 62.500 ms," in text
+    assert "refreshes 3, starts 0, timeout 62.625 ms," in text
     assert "key writes 4" in text
     assert "writes past the log" not in text
     assert "counts cover the whole profile" not in text
@@ -923,6 +925,9 @@ def test_the_report_text_of_a_burst_carries_the_exact_count_and_the_notes() -> N
     assert f"refreshes {report.watchdog.refreshes:,}, starts 1," in text
     assert f"key writes {report.watchdog.key_writes:,}" in text
     assert "watchdog: refreshes, starts and key writes cover the whole profile" in text
-    assert "exact for a constant LSI rate and stop at `logged_until_ps` when it is set" in text
+    assert (
+        "exact against the earliest-reset timeout for a constant LSI rate and stop at "
+        "`logged_until_ps` when it is set"
+    ) in text
     assert "a stretch holds one gap, its longest" in text
     assert "Intervals are ordered by LSI periods" in text

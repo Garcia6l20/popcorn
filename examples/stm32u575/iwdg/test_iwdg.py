@@ -1,4 +1,6 @@
-"""The independent watchdog from HAL: refreshed every 100 ms, a reset 500 ms after the last one.
+"""The independent watchdog from HAL: refreshed every 100 ms, a reset 501 to 502 ms after the last
+one, RL + 1 to RL + 2 counter ticks of 1 ms: the counter reloads at the first tick after the
+refresh and the reset comes one tick after it reaches 0.
 
 A watchdog reset request stops the run with `StopReason.RESET_REQUEST`, and `stop.detail`
 names the requester. The test resets the machine with the matching `ResetKind`, as the chip
@@ -12,6 +14,7 @@ from popcorn.units import VirtualTime, ms, s, us
 pytestmark = pytest.mark.popcorn(budget=20_000_000)
 
 TIMEOUT = ms(500)
+COUNTER_TICK = ms(1)
 LSI_TICK = us(31.25)
 
 
@@ -39,7 +42,9 @@ async def test_refreshing_keeps_the_watchdog_quiet(iwdg: Machine) -> None:
     assert len(seen) == 20
 
 
-async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) -> None:
+async def test_the_watchdog_resets_one_to_two_ticks_past_500_ms_after_the_last_refresh(
+    iwdg: Machine,
+) -> None:
     seen = refreshes(iwdg)
     await iwdg.run(for_=ms(250))
     iwdg.var("refresh_enabled").value = 0
@@ -48,7 +53,8 @@ async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) 
     assert stop.reason is StopReason.RESET_REQUEST, stop
     kind = ResetKind[stop.detail.upper()]
     assert kind is ResetKind.WATCHDOG
-    assert abs((stop.time - seen[-1]).ps - TIMEOUT.ps) <= LSI_TICK.ps
+    after = (stop.time - seen[-1]).ps
+    assert TIMEOUT.ps + COUNTER_TICK.ps < after <= TIMEOUT.ps + 2 * COUNTER_TICK.ps + LSI_TICK.ps
 
     iwdg.reset(kind)
     stop = await iwdg.run(until="reset_cause_recorded")

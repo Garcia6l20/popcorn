@@ -2,8 +2,10 @@
 
 An STM32L152 application starts the IWDG with `HAL_IWDG_Init` for 500 ms and refreshes it every
 100 ms with `HAL_IWDG_Refresh`. The IWDG counts the 37 kHz LSI divided by 32, so the HAL loads a
-reload of 578 and the timeout is 499.89 ms. At boot the firmware records whether IWDGRSTF is set
-in RCC_CSR and clears the reset flags.
+reload of 578: the counter reaches 0 499.89 ms after the first counter tick that follows a
+refresh, and the reset comes one tick later, inferred on the STM32L1 from the rule measured on
+the STM32U5. At boot the firmware records whether IWDGRSTF is set in RCC_CSR and clears the
+reset flags.
 
 It ports `stm32u575/iwdg`. The L1 IWDG has no window and no early wake-up interrupt, and the LSI
 runs at 37 kHz where the U5 one runs at 32 kHz.

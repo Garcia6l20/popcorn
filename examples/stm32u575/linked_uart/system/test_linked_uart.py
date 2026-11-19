@@ -316,13 +316,14 @@ async def test_a_starved_responder_resets_and_comes_back(system: System) -> None
     await system.run(until=VirtualTime(ms(1005).ps))
     last_refresh = refreshes[-1].ps
     period_ps = (4 << responder.periph.IWDG.PR.value) * 10**12 // LSI_HZ
-    reload = last_refresh + REFRESH_BLOCK_CYCLES * CYCLE_PS
-    bite = reload + responder.periph.IWDG.RLR.value * period_ps
+    written = last_refresh + REFRESH_BLOCK_CYCLES * CYCLE_PS
+    reload = responder.periph.IWDG.RLR.value
     responder.var("starve").value = 1
     events.clear()
 
     await run_for(system, s(4))
-    assert system.to_system("responder2", VirtualTime(0)).ps == bite
+    bite = system.to_system("responder2", VirtualTime(0)).ps
+    assert written + (reload + 1) * period_ps < bite <= written + (reload + 2) * period_ps
     answers = system.tap("controller.USART3").frames(towards="controller.USART3")
     lost = [frame for frame in answers if frame.lost]
     assert [frame.end.ps for frame in lost] == [bite]

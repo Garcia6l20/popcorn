@@ -120,7 +120,9 @@ struct sliced
 };
 }
 
-TEST_CASE("a refreshed IWDG keeps running, the last refresh plus 1 s requests a watchdog reset")
+TEST_CASE(
+    "a refreshed IWDG keeps running, RL + 1 to RL + 2 periods after the last refresh it "
+    "requests a watchdog reset")
 {
   std::uint64_t first = 0;
   for(int run = 0; run < 2; ++run)
@@ -135,9 +137,9 @@ TEST_CASE("a refreshed IWDG keeps running, the last refresh plus 1 s requests a 
     REQUIRE(refreshes.at.size() == 51);
     CHECK(refreshes.at.back() - refreshes.at.front() > 40 * ms);
     auto const now      = f.target->virtual_clock().time().ps;
-    auto const expected = refreshes.at.back() + 1'000 * ms;
-    CHECK(now >= expected);
-    CHECK(now < expected + lsi_cycle);
+    auto const earliest = refreshes.at.back() + 1'001 * ms;
+    CHECK(now > earliest);
+    CHECK(now <= earliest + ms + lsi_cycle);
     CHECK(((b.read("RCC", "RCC_BDCR") >> 26) & 0b11u) == 0b10u);
     if(run == 0)
     {
@@ -183,8 +185,8 @@ TEST_CASE("the early wake-up interrupt fires when the counter reaches EWIT - 1")
   CHECK(f.log() == std::vector<std::uint32_t>{0});
   REQUIRE(irq.at.size() == 1);
   auto const after = irq.at.front() - refreshes.at.back();
-  CHECK(after >= 101 * ms);
-  CHECK(after < 101 * ms + lsi_cycle);
+  CHECK(after > 101 * ms);
+  CHECK(after <= 102 * ms + lsi_cycle);
 }
 
 TEST_CASE("PR, RLR and WINR ignore writes until the 0x5555 key, then set their update flag")
@@ -211,7 +213,9 @@ TEST_CASE("PR, RLR and WINR ignore writes until the 0x5555 key, then set their u
   CHECK(((b.read("RCC", "RCC_BDCR") >> 26) & 0b11u) == 0b10u);
 }
 
-TEST_CASE("the started IWDG counts 0xFFF ticks of the reset prescaler, then bites")
+TEST_CASE(
+    "the started IWDG counts 0xFFF + 1 ticks of the reset prescaler, then bites, measured "
+    "on an STM32U575ZITxQ and an STM32H573")
 {
   auto f = entered("idle");
   bus  b{f};
@@ -223,12 +227,13 @@ TEST_CASE("the started IWDG counts 0xFFF ticks of the reset prescaler, then bite
   auto const stopped = run_for(f, 2'000 * ms);
   REQUIRE(stopped.reason == stop_reason::reset_request);
   auto const took     = f.target->virtual_clock().time().ps - started;
-  auto const expected = std::uint64_t{0xFFF} * 4 * lsi_cycle;
+  auto const expected = std::uint64_t{0x1000} * 4 * lsi_cycle;
   CHECK(took >= expected);
   CHECK(took < expected + 200'000'000);
 }
 
-TEST_CASE("RccOptions lsi_hz sets the IWDG tick: 0xFFF ticks of the reset prescaler at 31550 Hz")
+TEST_CASE(
+    "RccOptions lsi_hz sets the IWDG tick: 0xFFF + 1 ticks of the reset prescaler at 31550 Hz")
 {
   auto options   = popcorn::testing::stm32_options();
   options.models = stm32::factories(stm32::board{.rcc = {.lsi_hz = std::uint64_t{31'550}}}, u575());
@@ -242,7 +247,7 @@ TEST_CASE("RccOptions lsi_hz sets the IWDG tick: 0xFFF ticks of the reset presca
   auto const stopped = run_for(f, 2'000 * ms);
   REQUIRE(stopped.reason == stop_reason::reset_request);
   auto const took     = f.target->virtual_clock().time().ps - started;
-  auto const expected = std::uint64_t{0xFFF} * 4 * (1'000'000'000'000 / 31'550);
+  auto const expected = std::uint64_t{0x1000} * 4 * (1'000'000'000'000 / 31'550);
   CHECK(took >= expected);
   CHECK(took < expected + 200'000'000);
   CHECK(took > std::uint64_t{0xFFF} * 4 * lsi_cycle + 5 * ms);
@@ -304,7 +309,7 @@ TEST_CASE("a core clock change keeps the watchdog deadline in virtual time")
   CAPTURE(stopped.detail);
   REQUIRE(stopped.reason == stop_reason::reset_request);
   auto const took     = f.target->virtual_clock().time().ps - started;
-  auto const expected = 100 * us + std::uint64_t{0xFFF} * 4 * lsi_cycle;
+  auto const expected = 100 * us + std::uint64_t{0x1000} * 4 * lsi_cycle;
   CHECK(took >= expected);
   CHECK(took < expected + lsi_cycle);
 }
@@ -322,7 +327,7 @@ TEST_CASE("a prescaler change applies when PVU clears, the expiry follows the ne
   auto const ticks   = (cleared - started - 100 * us) / (4 * lsi_cycle);
   auto const stopped = run_for(f, 5'000 * ms);
   REQUIRE(stopped.reason == stop_reason::reset_request);
-  auto const expected = cleared + (0xFFF - ticks) * 32 * lsi_cycle;
+  auto const expected = cleared + (0xFFF - ticks + 1) * 32 * lsi_cycle;
   auto const now      = f.target->virtual_clock().time().ps;
   CAPTURE(now - started);
   CHECK(now + 4 * lsi_cycle >= expected);
@@ -343,7 +348,7 @@ TEST_CASE("a window change reloads the counter from RL when WVU clears")
   auto const cleared = f.target->virtual_clock().time().ps + 6 * lsi_cycle;
   auto const stopped = run_for(f, 100 * ms);
   REQUIRE(stopped.reason == stop_reason::reset_request);
-  auto const expected = cleared + 100 * 4 * lsi_cycle;
+  auto const expected = cleared + 101 * 4 * lsi_cycle;
   auto const now      = f.target->virtual_clock().time().ps;
   CHECK(now >= expected);
   CHECK(now < expected + lsi_cycle);
@@ -425,7 +430,7 @@ TEST_CASE("an LSI rate change keeps the partial division sequence")
   REQUIRE(cycles == 3202);
   b.write("RCC", "RCC_BDCR", b.read("RCC", "RCC_BDCR") | (1u << 28));
   constexpr std::uint64_t slow     = 1'000'000'000'000 / 250;
-  auto const              expected = changed + ((0xFFF - 800) * 4 - 2) * slow;
+  auto const              expected = changed + ((0xFFF - 800 + 1) * 4 - 2) * slow;
   auto const              stopped  = run_for(f, 100'000 * ms);
   REQUIRE(stopped.reason == stop_reason::reset_request);
   auto const now = f.target->virtual_clock().time().ps;
@@ -548,7 +553,7 @@ TEST_CASE("KR reloads replace the expiry and early wakeup events instead of queu
 
 namespace
 {
-constexpr std::uint64_t bite_after = std::uint64_t{0xFFF} * 4 * lsi_cycle;
+constexpr std::uint64_t bite_after = std::uint64_t{0x1000} * 4 * lsi_cycle;
 
 auto started_idle(core::machine_options options = popcorn::testing::stm32_options())
     -> stm32_fixture
@@ -667,7 +672,7 @@ TEST_CASE("clock changes during a frozen hold shift the bite by the held span on
     b.write("RCC", "RCC_BDCR", b.read("RCC", "RCC_BDCR") | (1u << 28));
     REQUIRE(run_for(f, 300 * ms).reason == stop_reason::time);
     f.target->hold_core(false);
-    auto const expected = changed + 500 * ms + ((0xFFF - 800) * 4 - 2) * slow;
+    auto const expected = changed + 500 * ms + ((0xFFF - 800 + 1) * 4 - 2) * slow;
     auto const bitten   = bite_time(f, 100'000 * ms);
     CHECK(bitten >= expected);
     CHECK(bitten < expected + slow);
@@ -901,7 +906,7 @@ TEST_CASE("RM0456 61.7.2: PR 0111 divides by 512, PR 1000 and above by 1024")
     auto const stopped = run_for(f, 200'000 * ms);
     REQUIRE(stopped.reason == stop_reason::reset_request);
     auto const took     = f.target->virtual_clock().time().ps - started;
-    auto const expected = std::uint64_t{0xFFF} * divider * lsi_cycle;
+    auto const expected = std::uint64_t{0x1000} * divider * lsi_cycle;
     CHECK(took >= expected);
     CHECK(took < expected + divider * lsi_cycle);
   }
@@ -909,11 +914,8 @@ TEST_CASE("RM0456 61.7.2: PR 0111 divides by 512, PR 1000 and above by 1024")
 
 namespace
 {
-auto tick_span(std::uint64_t ticks, std::uint64_t divider, std::uint64_t hz) -> std::uint64_t
-{
-  using wide = unsigned __int128;
-  return static_cast<std::uint64_t>((wide{ticks} * divider * 1'000'000'000'000u + hz - 1) / hz);
-}
+constexpr std::uint64_t ps_per_second = 1'000'000'000'000u;
+constexpr std::uint64_t update_cycles = 6;
 
 auto queued_dues(stm32_fixture const& f) -> std::vector<std::uint64_t>
 {
@@ -925,19 +927,125 @@ auto queued_dues(stm32_fixture const& f) -> std::vector<std::uint64_t>
   return out;
 }
 
+struct iwdg_mirror
+{
+  using wide = unsigned __int128;
+
+  wide          anchor{};
+  std::uint64_t hz{};
+  std::uint64_t ticks{};
+  std::uint64_t divider{4};
+  std::uint64_t before{};
+
+  [[nodiscard]] auto unit() const -> wide
+  {
+    return wide{divider} * ps_per_second;
+  }
+
+  [[nodiscard]] auto pending(std::uint64_t ps) const -> bool
+  {
+    return wide{ps} * hz < anchor;
+  }
+
+  [[nodiscard]] auto count(std::uint64_t ps) const -> std::uint64_t
+  {
+    if(pending(ps))
+    {
+      return before;
+    }
+    auto const at   = wide{ps} * hz;
+    auto const gone = at > anchor ? (at - anchor) / unit() : 0;
+    return gone >= ticks ? 0 : static_cast<std::uint64_t>(ticks - gone);
+  }
+
+  void restart(std::uint64_t ps, std::uint64_t value)
+  {
+    anchor = wide{ps} * hz;
+    ticks  = value;
+  }
+
+  void refresh(std::uint64_t ps, std::uint64_t reload)
+  {
+    before        = count(ps);
+    auto const at = wide{ps} * hz;
+    anchor        = at >= anchor ? anchor + ((at - anchor) / unit() + 1) * unit()
+                                 : anchor - (anchor - at - 1) / unit() * unit();
+    ticks         = reload;
+  }
+
+  void rebase(std::uint64_t ps, std::uint64_t new_hz)
+  {
+    auto const at     = wide{ps} * hz;
+    auto const late   = pending(ps);
+    auto const last   = late ? anchor - ((anchor - at - 1) / unit() + 1) * unit()
+                             : anchor + (at > anchor ? (at - anchor) / unit() * unit() : 0);
+    auto const cycles = (at - last) / ps_per_second;
+    auto const left   = count(ps);
+    auto const now    = wide{ps} * new_hz;
+    anchor =
+        (now > cycles * ps_per_second ? now - cycles * ps_per_second : 0) + (late ? unit() : 0);
+    hz = new_hz;
+    if(not late)
+    {
+      ticks = left;
+    }
+  }
+
+  void prescale(std::uint64_t ps, std::uint64_t new_divider)
+  {
+    auto const late = pending(ps);
+    auto const left = count(ps);
+    divider         = new_divider;
+    if(not late)
+    {
+      restart(ps, left);
+      return;
+    }
+    before = left;
+    anchor = wide{ps} * hz + unit();
+  }
+
+  [[nodiscard]] auto due(std::uint64_t edges, std::uint64_t ps) const -> std::uint64_t
+  {
+    auto const at = anchor + wide{edges} * unit();
+    return std::max(static_cast<std::uint64_t>((at + hz - 1) / hz), ps);
+  }
+
+  [[nodiscard]] auto expiry(std::uint64_t ps) const -> std::uint64_t
+  {
+    return due(ticks + 1, ps);
+  }
+
+  [[nodiscard]] auto early(std::uint64_t ewit, std::uint64_t ps) const -> std::uint64_t
+  {
+    return due(ticks - ewit + 1, ps);
+  }
+};
+
 struct reload_rig
 {
   stm32_fixture f;
   bus           b;
-  std::uint64_t divider;
   std::uint64_t rlr;
   std::uint64_t ewit;
+  std::uint64_t lsi;
+  iwdg_mirror   m;
 
-  reload_rig(std::uint32_t pr, std::uint32_t reload, std::uint32_t early, core::machine_options o)
-      : f{entered("idle", std::move(o))}, b{f}, divider{std::uint64_t{4} << pr}, rlr{reload},
-        ewit{early}
+  reload_rig(
+      std::uint32_t         pr,
+      std::uint32_t         reload,
+      std::uint32_t         early,
+      core::machine_options o,
+      std::uint64_t         lsi_hz = 32'000)
+      : f{entered("idle", std::move(o))}, b{f}, rlr{reload}, ewit{early}, lsi{lsi_hz},
+        m{.hz = lsi_hz}
   {
+    b.write("RCC", "RCC_BDCR", b.read("RCC", "RCC_BDCR") | (1u << 26));
+    REQUIRE(run_for(f, ms).reason == stop_reason::time);
+    REQUIRE(f.field("RCC", "RCC_BDCR", "LSIRDY") == 1);
     b.write("IWDG", "KR", 0xCCCC);
+    auto const started = f.target->virtual_clock().time().ps;
+    m.restart(started, 0xFFF);
     b.write("IWDG", "KR", 0x5555);
     b.write("IWDG", "PR", pr);
     b.write("IWDG", "RLR", reload);
@@ -945,20 +1053,49 @@ struct reload_rig
     {
       b.write("IWDG", "EWCR", (1u << 15) | early);
     }
+    if(pr != 0)
+    {
+      settle_prescaler(started, std::uint64_t{4} << pr);
+    }
     REQUIRE(run_for(f, 2 * ms).reason == stop_reason::time);
     REQUIRE(b.read("IWDG", "SR") == 0);
   }
 
-  void refresh_and_check(std::uint64_t hz)
+  void settle_prescaler(std::uint64_t written, std::uint64_t divider)
+  {
+    auto const cleared = written + (update_cycles * ps_per_second + m.hz - 1) / m.hz;
+    m.prescale(cleared, divider);
+  }
+
+  void prescale(std::uint32_t pr)
+  {
+    b.write("IWDG", "KR", 0x5555);
+    b.write("IWDG", "PR", pr);
+    settle_prescaler(f.target->virtual_clock().time().ps, std::uint64_t{4} << pr);
+    REQUIRE(run_for(f, 2 * ms).reason == stop_reason::time);
+    REQUIRE(b.read("IWDG", "SR") == 0);
+  }
+
+  void lsi_slow(bool slow)
+  {
+    auto const bdcr = b.read("RCC", "RCC_BDCR");
+    b.write("RCC", "RCC_BDCR", slow ? bdcr | (1u << 28) : bdcr & ~(1u << 28));
+    m.rebase(f.target->virtual_clock().time().ps, slow ? lsi / 128 : lsi);
+  }
+
+  void refresh_and_check()
   {
     b.write("IWDG", "KR", 0xAAAA);
-    auto const now  = f.target->virtual_clock().time().ps;
+    auto const now = f.target->virtual_clock().time().ps;
+    m.refresh(now, rlr);
     auto const dues = queued_dues(f);
     CAPTURE(now);
-    CHECK(std::ranges::contains(dues, now + tick_span(rlr, divider, hz)));
+    CHECK(std::ranges::contains(dues, m.expiry(now)));
+    CHECK(m.expiry(now) > now + (rlr + 1) * m.divider * ps_per_second / m.hz);
+    CHECK(m.expiry(now) <= now + (rlr + 2) * m.divider * ps_per_second / m.hz + 1);
     if(ewit != 0)
     {
-      CHECK(std::ranges::contains(dues, now + tick_span(rlr - ewit + 1, divider, hz)));
+      CHECK(std::ranges::contains(dues, m.early(ewit, now)));
     }
   }
 };
@@ -979,7 +1116,7 @@ TEST_CASE("every refresh queues the expiry and the early wake-up at the exact ti
         for(auto const wait : {1ull, 700ull, 33ull, 1'234ull})
         {
           REQUIRE(run_for(r.f, wait * us + wait * 7).reason == stop_reason::time);
-          r.refresh_and_check(32'000);
+          r.refresh_and_check();
         }
       }
     }
@@ -989,36 +1126,35 @@ TEST_CASE("every refresh queues the expiry and the early wake-up at the exact ti
 TEST_CASE("a refresh after an RL, PR or LSI rate change uses the new tick times")
 {
   reload_rig r{0, 500, 40, popcorn::testing::stm32_options()};
-  r.refresh_and_check(32'000);
+  r.refresh_and_check();
   REQUIRE(run_for(r.f, 300 * us).reason == stop_reason::time);
 
   r.b.write("IWDG", "KR", 0x5555);
   r.b.write("IWDG", "RLR", 1500);
   REQUIRE(run_for(r.f, 2 * ms).reason == stop_reason::time);
   r.rlr = 1500;
-  r.refresh_and_check(32'000);
+  r.refresh_and_check();
 
-  r.b.write("IWDG", "KR", 0x5555);
-  r.b.write("IWDG", "PR", 2);
-  REQUIRE(run_for(r.f, 2 * ms).reason == stop_reason::time);
-  r.divider = 16;
-  r.refresh_and_check(32'000);
+  r.prescale(2);
+  r.refresh_and_check();
 
-  r.b.write("RCC", "RCC_BDCR", r.b.read("RCC", "RCC_BDCR") | (1u << 28));
+  r.lsi_slow(true);
   REQUIRE(run_for(r.f, 3 * ms).reason == stop_reason::time);
-  r.refresh_and_check(250);
+  r.refresh_and_check();
 
-  r.b.write("RCC", "RCC_BDCR", r.b.read("RCC", "RCC_BDCR") & ~(1u << 28));
+  r.lsi_slow(false);
   REQUIRE(run_for(r.f, 3 * ms).reason == stop_reason::time);
-  r.refresh_and_check(32'000);
+  r.refresh_and_check();
 
-  auto const saved = r.f.target->snapshot();
-  r.b.write("RCC", "RCC_BDCR", r.b.read("RCC", "RCC_BDCR") | (1u << 28));
+  auto const saved  = r.f.target->snapshot();
+  auto const mirror = r.m;
+  r.lsi_slow(true);
   REQUIRE(run_for(r.f, 3 * ms).reason == stop_reason::time);
-  r.refresh_and_check(250);
+  r.refresh_and_check();
   r.f.target->restore(saved);
+  r.m = mirror;
   REQUIRE(run_for(r.f, 300 * us).reason == stop_reason::time);
-  r.refresh_and_check(32'000);
+  r.refresh_and_check();
 }
 
 TEST_CASE("a refresh with the window at or above RL never bites, below RL it can")
@@ -1044,64 +1180,18 @@ TEST_CASE("a refresh with the window at or above RL never bites, below RL it can
 TEST_CASE("an early wake-up armed again after a prescaler change is queued at the new divider")
 {
   reload_rig r{3, 1000, 40, popcorn::testing::stm32_options()};
-  r.refresh_and_check(32'000);
+  r.refresh_and_check();
   r.b.write("IWDG", "KR", 0x5555);
   r.b.write("IWDG", "EWCR", 0);
   REQUIRE(run_for(r.f, 2 * ms).reason == stop_reason::time);
-  r.b.write("IWDG", "KR", 0x5555);
-  r.b.write("IWDG", "PR", 0);
-  REQUIRE(run_for(r.f, 2 * ms).reason == stop_reason::time);
-  r.divider = 4;
-  r.ewit    = 0;
-  r.refresh_and_check(32'000);
+  r.ewit = 0;
+  r.prescale(0);
+  r.refresh_and_check();
   r.b.write("IWDG", "KR", 0x5555);
   r.b.write("IWDG", "EWCR", (1u << 15) | 40u);
   REQUIRE(run_for(r.f, 2 * ms).reason == stop_reason::time);
   r.ewit = 40;
-  r.refresh_and_check(32'000);
-}
-
-namespace
-{
-struct counter_mirror
-{
-  using wide = unsigned __int128;
-
-  wide          anchor;
-  std::uint64_t hz;
-  std::uint64_t ticks;
-  std::uint64_t divider;
-
-  [[nodiscard]] auto unit() const -> wide
-  {
-    return wide{divider} * 1'000'000'000'000u;
-  }
-
-  void refresh(std::uint64_t ps, std::uint64_t reload)
-  {
-    anchor = wide{ps} * hz;
-    ticks  = reload;
-  }
-
-  void rebase(std::uint64_t ps, std::uint64_t new_hz)
-  {
-    auto const at     = wide{ps} * hz;
-    auto const since  = at > anchor ? at - anchor : 0;
-    auto const cycles = since % unit() / 1'000'000'000'000u;
-    auto const gone   = since / unit();
-    auto const count  = gone >= ticks ? 0 : ticks - gone;
-    auto const now    = wide{ps} * new_hz;
-    anchor            = now > cycles * 1'000'000'000'000u ? now - cycles * 1'000'000'000'000u : 0;
-    hz                = new_hz;
-    ticks             = static_cast<std::uint64_t>(count);
-  }
-
-  [[nodiscard]] auto due(std::uint64_t ps) const -> std::uint64_t
-  {
-    auto const at = anchor + wide{ticks} * unit();
-    return std::max(static_cast<std::uint64_t>((at + hz - 1) / hz), ps);
-  }
-};
+  r.refresh_and_check();
 }
 
 TEST_CASE("the expiry right after an LSI rate switch follows the partial division exactly")
@@ -1111,26 +1201,135 @@ TEST_CASE("the expiry right after an LSI rate switch follows the partial divisio
     CAPTURE(lsi);
     auto options   = popcorn::testing::stm32_options();
     options.models = stm32::factories(stm32::board{.rcc = {.lsi_hz = lsi}}, u575());
-    reload_rig r{0, 0xFFF, 0, std::move(options)};
-    r.b.write("IWDG", "KR", 0xAAAA);
-    counter_mirror m{.anchor = 0, .hz = lsi, .ticks = 0, .divider = 4};
-    m.refresh(r.f.target->virtual_clock().time().ps, 0xFFF);
+    reload_rig r{0, 0xFFF, 0, std::move(options), lsi};
+    r.refresh_and_check();
     for(std::uint64_t step = 0; step < 24; ++step)
     {
       REQUIRE(run_for(r.f, (37 + 29 * step) * us + step * 3'000).reason == stop_reason::time);
-      auto const slow = step % 2 == 0;
-      auto const bdcr = r.b.read("RCC", "RCC_BDCR");
-      r.b.write("RCC", "RCC_BDCR", slow ? bdcr | (1u << 28) : bdcr & ~(1u << 28));
+      r.lsi_slow(step % 2 == 0);
       auto const now = r.f.target->virtual_clock().time().ps;
-      m.rebase(now, slow ? lsi / 128 : lsi);
       CAPTURE(step);
-      CHECK(std::ranges::contains(queued_dues(r.f), m.due(now)));
+      CHECK(std::ranges::contains(queued_dues(r.f), r.m.expiry(now)));
       if(step % 5 == 4)
       {
         r.b.write("IWDG", "KR", 0xAAAA);
-        m.refresh(r.f.target->virtual_clock().time().ps, 0xFFF);
-        CHECK(std::ranges::contains(queued_dues(r.f), m.due(m.anchor / m.hz)));
+        auto const at = r.f.target->virtual_clock().time().ps;
+        r.m.refresh(at, 0xFFF);
+        CHECK(std::ranges::contains(queued_dues(r.f), r.m.expiry(at)));
       }
     }
+  }
+}
+
+TEST_CASE(
+    "a refresh reloads at the first prescaler edge after the key write, RL + 1 edges later "
+    "it bites, measured on an STM32U575ZITxQ and an STM32H573")
+{
+  for(auto const pr : {0u, 6u})
+  {
+    for(auto const reload : {0u, 1u, 0xFFFu})
+    {
+      for(auto const phase : {0ull, 1ull, 3ull})
+      {
+        CAPTURE(pr);
+        CAPTURE(reload);
+        CAPTURE(phase);
+        reload_rig r{pr, reload, 0, popcorn::testing::stm32_options()};
+        auto const period = r.m.divider * lsi_cycle;
+        auto const now    = r.f.target->virtual_clock().time().ps;
+        auto const edge = static_cast<std::uint64_t>(r.m.anchor / r.m.hz)
+                        + (now - static_cast<std::uint64_t>(r.m.anchor / r.m.hz)) / period * period;
+        REQUIRE(run_for(r.f, edge + period + phase * period / 4 - now).reason == stop_reason::time);
+        r.refresh_and_check();
+        auto const written = r.f.target->virtual_clock().time().ps;
+        auto const bite    = edge + 2 * period + (reload + 1) * period;
+        CHECK(r.m.expiry(written) == bite);
+        REQUIRE(run_for(r.f, bite - lsi_cycle - written).reason == stop_reason::time);
+        REQUIRE(run_for(r.f, 2 * lsi_cycle).reason == stop_reason::reset_request);
+        CHECK(r.f.target->virtual_clock().time().ps >= bite);
+        CHECK(r.f.target->virtual_clock().time().ps < bite + lsi_cycle);
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "a second refresh inside the window before the reload edge does not reset: the counter "
+    "keeps its value until the edge, across a snapshot and in a fresh machine")
+{
+  for(auto const pr : {0u, 6u})
+  {
+    CAPTURE(pr);
+    reload_rig r{pr, 100, 0, popcorn::testing::stm32_options()};
+    r.b.write("IWDG", "KR", 0x5555);
+    r.b.write("IWDG", "WINR", 40);
+    auto const written = r.f.target->virtual_clock().time().ps;
+    r.m.restart(written + (update_cycles * ps_per_second + r.m.hz - 1) / r.m.hz, 100);
+    REQUIRE(run_for(r.f, 2 * ms + r.m.divider * lsi_cycle).reason == stop_reason::time);
+    REQUIRE(r.b.read("IWDG", "SR") == 0);
+    auto const period = r.m.divider * lsi_cycle;
+    auto const grid   = static_cast<std::uint64_t>(r.m.anchor / r.m.hz);
+    auto const now    = r.f.target->virtual_clock().time().ps;
+    auto const edge   = grid + ((now - grid) / period + 70) * period;
+    REQUIRE(run_for(r.f, edge + period / 16 - now).reason == stop_reason::time);
+    r.b.write("IWDG", "KR", 0xAAAA);
+    auto const first = r.f.target->virtual_clock().time().ps;
+    auto const saved = r.f.target->snapshot();
+    auto const again = [&](stm32_fixture const& f, bus const& b) {
+      REQUIRE(run_for(f, period / 8).reason == stop_reason::time);
+      b.write("IWDG", "KR", 0xAAAA);
+      REQUIRE(run_for(f, 2 * period).reason == stop_reason::time);
+      REQUIRE(run_for(f, 200 * period).reason == stop_reason::reset_request);
+      auto const after = f.target->virtual_clock().time().ps - first;
+      CHECK(after > 101 * period);
+      CHECK(after <= 102 * period + lsi_cycle);
+    };
+    again(r.f, r.b);
+    r.f.target->restore(saved);
+    again(r.f, r.b);
+    auto fresh = entered("idle");
+    bus  fb{fresh};
+    fresh.target->restore(
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    again(fresh, fb);
+    r.f.target->restore(saved);
+    r.b.write("IWDG", "KR", 0x5555);
+    r.b.write("IWDG", "WINR", 10);
+    r.b.write("IWDG", "KR", 0xAAAA);
+    CHECK(run_for(r.f, lsi_cycle).reason == stop_reason::reset_request);
+  }
+}
+
+TEST_CASE(
+    "a prescaler change or an LSI rate change between a refresh and its reload edge keeps "
+    "the pending reload, inferred")
+{
+  SUBCASE("PVU falls before the edge: the reload lands at the first edge of the new sequence")
+  {
+    reload_rig r{6, 100, 40, popcorn::testing::stm32_options()};
+    r.refresh_and_check();
+    auto const written = r.f.target->virtual_clock().time().ps;
+    r.b.write("IWDG", "KR", 0x5555);
+    r.b.write("IWDG", "PR", 0);
+    r.settle_prescaler(written, 4);
+    REQUIRE(run_for(r.f, ms).reason == stop_reason::time);
+    REQUIRE(r.b.read("IWDG", "SR") == 0);
+    auto const now  = r.f.target->virtual_clock().time().ps;
+    auto const dues = queued_dues(r.f);
+    CHECK(std::ranges::contains(dues, r.m.expiry(now)));
+    CHECK(std::ranges::contains(dues, r.m.early(40, now)));
+    CHECK(r.m.expiry(now) == written + (update_cycles + 4 + 101 * 4) * lsi_cycle);
+  }
+  SUBCASE("the LSI slows before the edge: the reload keeps the partial sequence")
+  {
+    reload_rig r{6, 100, 40, popcorn::testing::stm32_options()};
+    r.refresh_and_check();
+    REQUIRE(run_for(r.f, 1'000 * us).reason == stop_reason::time);
+    REQUIRE(r.m.pending(r.f.target->virtual_clock().time().ps));
+    r.lsi_slow(true);
+    auto const now  = r.f.target->virtual_clock().time().ps;
+    auto const dues = queued_dues(r.f);
+    CHECK(std::ranges::contains(dues, r.m.expiry(now)));
+    CHECK(std::ranges::contains(dues, r.m.early(40, now)));
   }
 }

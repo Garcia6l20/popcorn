@@ -84,7 +84,8 @@ def watchdog_registers(
 
 @dataclass(frozen=True, slots=True)
 class WatchdogGap:
-    """A span from a reload with no further reload before the watchdog timeout."""
+    """A span from a reload with no further reload before the timeout: the watchdog could have
+    expired in it, at the earliest prescaler phase."""
 
     start_ps: int
     """Profile time of the reload."""
@@ -105,17 +106,20 @@ class Watchdog:
     starts: int
     """Starts, KR writes of 0xCCCC."""
     timeout_ps: int | None
-    """Time from the last reload to the expiry the model computes: PR and RLR in force, RL
-    periods of the prescaled LSI from the key write, 0xFFF for the start, each part at the LSI
-    rate it ran at. None without a reload, with PR or RLR unknown, or with the LSI stopped from
-    the reload on."""
+    """Time from the last reload to its earliest expiry: PR and RLR in force, RL + 1 periods of
+    the prescaled LSI from the key write, 0xFFF + 1 for the start, each part at the LSI rate it
+    ran at. The model resets a refresh RL + 1 to RL + 2 periods after the write, by the phase of
+    the free-running prescaler, and a start exactly 0xFFF + 1 periods after it. None without a
+    reload, with PR or RLR unknown, or with the LSI stopped from the reload on."""
     min_margin_ps: int | None
     """Smallest timeout less the time to the next reload, over the longest pair of consecutive
     reloads of each epoch and reload kind, the pair with the most LSI periods between its
     reloads. Each pair margin is exact in picoseconds. It is the smallest margin of the profile
     while the LSI rate is constant and every pair has a timeout. A rate change inside a timeout
     window can leave another pair with a smaller margin, and a longest pair with no timeout
-    leaves its epoch and kind out. Negative when the watchdog would have expired between them."""
+    leaves its epoch and kind out. Negative when the watchdog could have expired between them,
+    at the earliest prescaler phase: the model resets up to one prescaled period later, by the
+    phase of the write against the free-running prescaler."""
     closest_pc: int | None
     """Address of the reload that ended the pair of `min_margin_ps`. Equal margins go to the
     first epoch, then the lowest reload kind."""
@@ -193,7 +197,7 @@ def _reload_timeout(
             rates,
             write.ps,
             write.record,
-            _divider(held.pr, registers.prescaler_top) * count,
+            _divider(held.pr, registers.prescaler_top) * (count + 1),
         )
     )
     return None if expiry is None else expiry - write.ps

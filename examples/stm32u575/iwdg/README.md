@@ -18,8 +18,8 @@ uv run pytest -q examples/stm32u575/iwdg
 - `test_iwdg.py`:
   - Refreshes are timed with an intercept on `HAL_IWDG_Refresh`.
   - The host stops the refreshes by writing `refresh_enabled` through `machine.var`.
-  - The watchdog reset request stops the run with `StopReason.RESET_REQUEST`, 500 ms after the
-    last refresh. `stop.detail` names the requester, here `watchdog`. A window watchdog or
+  - The watchdog reset request stops the run with `StopReason.RESET_REQUEST`, 501 to 502 ms
+    after the last refresh. `stop.detail` names the requester, here `watchdog`. A window watchdog or
     a SYSRESETREQ reports its own, so `ResetKind[stop.detail.upper()]` is the kind to reset
     with.
   - `machine.reset(kind)` reboots the chip the way that reset does, and the firmware reports

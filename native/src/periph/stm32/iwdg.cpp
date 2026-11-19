@@ -52,6 +52,7 @@ struct iwdg_state
   std::array<std::uint64_t, first_update + updates> queued{};
   std::array<std::uint64_t, updates>                update_due{};
   std::uint32_t                                     start{};
+  std::uint32_t                                     before_reload{};
   std::uint32_t                                     divider{4};
   std::uint32_t                                     early{};
   std::uint8_t                                      running{};
@@ -72,23 +73,52 @@ struct iwdg_state
  *        unlocks PR, RLR, WINR and EWCR until another key. PVU, RVU, WVU and EWU stay set for the
  *        variant's update cycles of the LSI after a write, six on the U5, RM0456 Table 623, five on
  *        the L1, RM0038 21.4.4 "up to 5", inferred. The new prescaler applies then, a new window
- *        reloads the counter then, a new EWIT and EWIE apply then. The counter reaching 0, or a
- *        reload while it is above WIN, requests a watchdog reset. EWIF and the IWDG IRQ follow the
- *        counter reaching EWIT - 1 while EWIE is set. The variant says whether the window and the
- *        early wake-up exist, the L1 has neither, and the largest PR with its own divider. The
- *        kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is kept in virtual
- *        time, re-derived when the LSI rate changes. An LSI rate change keeps the partial division
- *        sequence, a stopped LSI drops it. With `iwdg_variant::hardware_option`, the STM32L4, the
- *        watchdog starts at every reset when FLASH_OPTR.IWDG_SW reads 0, read once every model has
- *        reset, so after the option load of that reset. Once started it runs until reset.
+ *        reloads the counter then, a new EWIT and EWIE apply then. One prescaled period after
+ *        the counter reaches 0, or at a reload while it is above WIN, the IWDG requests a
+ *        watchdog reset. EWIF and the IWDG IRQ follow the counter reaching EWIT - 1 while EWIE is
+ *        set. The variant says whether the window and the early wake-up exist, the L1 has
+ *        neither, and the largest PR with its own divider. The kernel clock is RCC's `lsi`
+ *        domain, after LSIPREDIV. Every deadline is kept in virtual time, re-derived when the LSI
+ *        rate changes. An LSI rate change keeps the partial division sequence, a stopped LSI
+ *        drops it. With `iwdg_variant::hardware_option`, the STM32L4, the watchdog starts at
+ *        every reset when FLASH_OPTR.IWDG_SW reads 0, read once every model has reset, so after
+ *        the option load of that reset. Once started it runs until reset.
  *
  * @limits iwdg IWDG
  *
  * @group all rule "Every family"
  * - A new prescaler restarts the division sequence when PVU falls, an error below one period of
  *   the old prescaled clock.
- * - A refresh reloads at the key write, not one period later.
  * - EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
+ * - A PVU fall or an LSI rate change between a refresh and its reload edge keeps the reload
+ *   pending: after a PVU fall it lands at the first edge of the new division sequence, after a
+ *   rate change at the end of the period in progress, inferred.
+ *
+ * @group u5,h5 rule "Reload and reset time"
+ * - The prescaler runs free from the start, a refresh does not restart it. A refresh reloads
+ *   the counter with RL at the first prescaler edge after the `KR` 0xAAAA write, the counter
+ *   decrements at each later edge, and the reset comes one period after it reaches 0: RL + 1
+ *   periods after the reload edge, RL + 1 to RL + 2 periods after the write. Until that edge the
+ *   counter keeps its value, which a second refresh compares against WIN. `KR` 0xCCCC
+ *   starts the prescaler and the counter at 0xFFF together, and the reset comes 0xFFF + 1
+ *   periods later. EWIF sets at the edge where the counter reaches EWIT - 1, EWIT periods
+ *   before the reset. Measured on an STM32U575ZITxQ and an STM32H573, 2026-11-18, at PR /4,
+ *   /32 and /256. RM0456 61.4.3 Figure 767 and RM0481 Figure 677 draw the one period from the
+ *   refresh to the reload.
+ *
+ * @group l1,l4 rule "Reload and reset time on the STM32L1 and STM32L4"
+ * - The STM32L1 and STM32L4 take the reload and reset rule of the STM32U5, inferred. RM0038
+ *   Table 92 gives RL + 1 periods of the prescaled LSI from RL 0 to 0xFFF on the STM32L1.
+ *
+ * @group u5,h5 deviation "EWCR written after a prescaler change, measured"
+ * - On an STM32U575ZITxQ and an STM32H573, 2026-11-18, at PR /32 and /256, RL 15 and EWIT 8:
+ *   with EWCR written after a new PR once SR cleared, and on the STM32U575ZITxQ also with EWCR
+ *   in the same batch as PR and RLR, the reset came one period early, RL to RL + 1 periods
+ *   after the refresh, EWIF still EWIT periods before it. EWCR written before the PR change gave
+ *   the normal time. The model keeps the normal time in every write order.
+ * - On the STM32H573, PR, RLR and EWCR written in one batch with a new prescaler, the RM0481
+ *   programming order, then a wait for SR to clear and a refresh: the watchdog stopped, no reset
+ *   and no EWIF within 3 s. The model starts the reset and EWIF as for any other write order.
  *
  * @group u5,h5,l1 deviation "Differs from RM0456 and RM0038"
  * - The IWDG starts at the first `KR` 0xCCCC whatever the hardware watchdog option holds:
@@ -151,9 +181,11 @@ private:
   [[nodiscard]] auto anchor() const -> wide;
   [[nodiscard]] auto tick_unit() const -> wide;
   [[nodiscard]] auto count_at(std::uint64_t ps) const -> std::uint32_t;
+  [[nodiscard]] auto reload_pending(std::uint64_t ps) const -> bool;
   [[nodiscard]] auto divider() const -> std::uint32_t;
 
   void restart(std::uint32_t value);
+  void reload(std::uint32_t value);
   void start();
   void start_update(update_index which);
   void schedule_update(std::size_t which);
@@ -262,9 +294,18 @@ auto iwdg::count_at(std::uint64_t ps) const -> std::uint32_t
   {
     return state_.start;
   }
+  if(reload_pending(ps))
+  {
+    return state_.before_reload;
+  }
   auto const at    = wide{ps} * state_.hz;
   auto const since = at > anchor() ? (at - anchor()) / tick_unit() : 0;
   return since >= state_.start ? 0 : static_cast<std::uint32_t>(state_.start - since);
+}
+
+auto iwdg::reload_pending(std::uint64_t ps) const -> bool
+{
+  return state_.running != 0 and state_.hz != 0 and wide{ps} * state_.hz < anchor();
 }
 
 void iwdg::restart(std::uint32_t value)
@@ -273,6 +314,25 @@ void iwdg::restart(std::uint32_t value)
   state_.anchor_ps   = now_ps();
   state_.anchor_frac = 0;
   state_.hz          = ctx_.clock.hz(lsi_);
+  reschedule();
+}
+
+void iwdg::reload(std::uint32_t value)
+{
+  auto const hz = ctx_.clock.hz(lsi_);
+  if(state_.hz == 0 or hz != state_.hz)
+  {
+    restart(value);
+    return;
+  }
+  state_.before_reload = count_at(now_ps());
+  auto const at        = wide{now_ps()} * hz;
+  auto const base      = anchor();
+  auto const edge      = at >= base ? base + ((at - base) / tick_unit() + 1) * tick_unit()
+                                    : base - (base - at - 1) / tick_unit() * tick_unit();
+  state_.start         = value;
+  state_.anchor_ps     = static_cast<std::uint64_t>(edge / hz);
+  state_.anchor_frac   = static_cast<std::uint64_t>(edge % hz);
   reschedule();
 }
 
@@ -329,7 +389,7 @@ void iwdg::reschedule()
   {
     return;
   }
-  schedule_at_tick(expiry, state_.start);
+  schedule_at_tick(expiry, std::uint64_t{state_.start} + 1);
   if(not variant_.early_wakeup)
   {
     return;
@@ -378,25 +438,32 @@ void iwdg::schedule_updates()
 
 void iwdg::rebase(std::uint64_t ps, std::uint64_t hz)
 {
-  auto const count  = count_at(ps);
-  auto       cycles = wide{};
+  auto const count   = count_at(ps);
+  auto const pending = reload_pending(ps);
+  auto       cycles  = wide{};
   if(state_.hz != 0)
   {
-    auto const at    = wide{ps} * state_.hz;
-    auto const since = at > anchor() ? at - anchor() : 0;
-    cycles           = since % tick_unit() / ps_per_second;
+    auto const at   = wide{ps} * state_.hz;
+    auto const base = anchor();
+    auto const unit = tick_unit();
+    auto const last = pending ? base - ((base - at - 1) / unit + 1) * unit
+                              : base + (at > base ? (at - base) / unit * unit : 0);
+    cycles          = at > last ? (at - last) / ps_per_second : 0;
   }
-  state_.start = count;
-  state_.hz    = hz;
+  if(not pending)
+  {
+    state_.start = count;
+  }
+  state_.hz = hz;
   if(hz == 0)
   {
     return;
   }
   auto const at      = wide{ps} * hz;
   auto const back    = cycles * ps_per_second;
-  auto const start   = at > back ? at - back : 0;
-  state_.anchor_ps   = static_cast<std::uint64_t>(start / hz);
-  state_.anchor_frac = static_cast<std::uint64_t>(start % hz);
+  auto const edge    = (at > back ? at - back : 0) + (pending ? tick_unit() : 0);
+  state_.anchor_ps   = static_cast<std::uint64_t>(edge / hz);
+  state_.anchor_frac = static_cast<std::uint64_t>(edge % hz);
 }
 
 void iwdg::finish_update(update_index which)
@@ -415,9 +482,20 @@ void iwdg::finish_update(update_index which)
   }
   if(which == prescaler_update)
   {
-    auto const count = count_at(now_ps());
-    state_.divider   = divider();
-    restart(count);
+    auto const pending = reload_pending(now_ps());
+    auto const count   = count_at(now_ps());
+    state_.divider     = divider();
+    if(not pending or ctx_.clock.hz(lsi_) == 0)
+    {
+      restart(count);
+      return;
+    }
+    state_.hz            = ctx_.clock.hz(lsi_);
+    state_.before_reload = count;
+    auto const edge      = wide{now_ps()} * state_.hz + tick_unit();
+    state_.anchor_ps     = static_cast<std::uint64_t>(edge / state_.hz);
+    state_.anchor_frac   = static_cast<std::uint64_t>(edge % state_.hz);
+    reschedule();
   }
   else if(which == window_update)
   {
@@ -511,7 +589,7 @@ void iwdg::key_written(std::uint32_t, std::uint32_t now)
       bite();
       return;
     }
-    restart(get(regs_, reload_));
+    reload(get(regs_, reload_));
   }
 }
 

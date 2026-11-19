@@ -138,9 +138,8 @@ auto status_of(std::vector<popcorn::register_desc>& registers) -> popcorn::regis
 }
 
 TEST_CASE(
-    "a refreshed L1 IWDG keeps running, the last refresh plus RL ticks of /32 requests a watchdog "
-    "reset, RL and not the RL + 1 of RM0038 Table 92 by the refresh deviation of the IWDG limits "
-    "page")
+    "a refreshed L1 IWDG keeps running, RL + 1 to RL + 2 ticks of /32 after the last refresh it "
+    "requests a watchdog reset, inferred")
 {
   std::uint64_t first = 0;
   for(int run = 0; run < 2; ++run)
@@ -153,9 +152,9 @@ TEST_CASE(
     CHECK(stopped.detail.find("watchdog") != std::string::npos);
     REQUIRE(refreshes.at.size() == 51);
     auto const now      = f.target->virtual_clock().time().ps;
-    auto const expected = refreshes.at.back() + lsi_ticks(1'000 * 32);
-    CHECK(now >= expected);
-    CHECK(now < expected + lsi_cycle);
+    auto const earliest = refreshes.at.back() + lsi_ticks(1'001 * 32);
+    CHECK(now > earliest);
+    CHECK(now <= earliest + lsi_ticks(32) + lsi_cycle);
     CHECK(f.field("RCC", "CSR", "LSIRDY") == 1);
     if(run == 0)
     {
@@ -241,15 +240,15 @@ TEST_CASE("RM0038 21.4.2: PR 110 and 111 both divide by 256, 101 by 128")
     b.write("IWDG", "KR", 0xCCCC);
     auto const started  = f.target->virtual_clock().time().ps;
     auto const took     = bite_time(f) - started;
-    auto const expected = lsi_ticks(std::uint64_t{0xFFF} * divider);
+    auto const expected = lsi_ticks(std::uint64_t{0x1000} * divider);
     CHECK(took >= expected);
     CHECK(took < expected + lsi_ticks(divider));
   }
 }
 
 TEST_CASE(
-    "with no window, a refresh at once after the start bites RL ticks later, RL and not the RL + 1 "
-    "of RM0038 Table 92 by the refresh deviation of the IWDG limits page")
+    "a refresh at the start reloads at the next prescaler edge and bites RL + 1 ticks later, "
+    "the RL + 1 of RM0038 Table 92, the edge inferred")
 {
   auto f = entered("idle");
   bus  b{f};
@@ -262,9 +261,9 @@ TEST_CASE(
   b.write("IWDG", "KR", 0xAAAA);
   auto const refreshed = f.target->virtual_clock().time().ps;
   auto const took      = bite_time(f) - refreshed;
-  auto const expected  = lsi_ticks(100 * 4);
+  auto const expected  = lsi_ticks(102 * 4);
   CHECK(took >= expected);
-  CHECK(took < expected + lsi_ticks(4));
+  CHECK(took < expected + lsi_cycle);
 }
 
 TEST_CASE("RM0038 6.2.12: starting the IWDG forces the LSI on, an LSION 1 then 0 does not stop it")

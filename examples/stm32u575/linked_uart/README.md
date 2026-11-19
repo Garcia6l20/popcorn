@@ -179,8 +179,9 @@ uv run pytest -q examples/stm32u575/linked_uart
   - the intercepts of two members run on two threads, neither the test's.
   - a 50 us link moves responder 1's IDLE by 30 us and the controller's answer by 60 us.
   - the same frames and IDLE log at any slicing, quantum or CPU count.
-  - a starved responder's IWDG bites 500 ms after its last refresh, to the picosecond. Its
-    frame in flight shows `lost` in the tap. It reboots, the controller marks it lost 3 s
+  - a starved responder's IWDG bites 501 to 502 ms after its last refresh: the counter reloads
+    at the first prescaler tick after the refresh. Its frame in flight shows `lost` in the tap,
+    ending at the bite to the picosecond. It reboots, the controller marks it lost 3 s
     after its last answer and assigns it again, and responder 1 never misses a block.
   - a cable pulled for 4 s, the line idle or held low: the frames cut and lost at the cut's
     edges, the controller marking responder 1 lost 3 s after its last answer and finding it

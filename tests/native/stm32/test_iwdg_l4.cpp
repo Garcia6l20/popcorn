@@ -154,7 +154,9 @@ auto register_of(popcorn::peripheral_desc& unit, std::string_view name) -> popco
 }
 }
 
-TEST_CASE("a refreshed L4 IWDG keeps running, the last refresh plus RL ticks of /32 bites")
+TEST_CASE(
+    "a refreshed L4 IWDG keeps running, RL + 1 to RL + 2 ticks of /32 after the last refresh "
+    "it bites, inferred")
 {
   auto       f = entered("main");
   calls      refreshes{f, "refresh"};
@@ -164,9 +166,9 @@ TEST_CASE("a refreshed L4 IWDG keeps running, the last refresh plus RL ticks of 
   CHECK(stopped.detail.find("watchdog") != std::string::npos);
   REQUIRE(refreshes.at.size() == 51);
   auto const now      = f.target->virtual_clock().time().ps;
-  auto const expected = refreshes.at.back() + lsi_ticks(1'000 * 32);
-  CHECK(now >= expected);
-  CHECK(now < expected + lsi_cycle);
+  auto const earliest = refreshes.at.back() + lsi_ticks(1'001 * 32);
+  CHECK(now > earliest);
+  CHECK(now <= earliest + lsi_ticks(32) + lsi_cycle);
   CHECK(f.field("RCC", "CSR", "LSIRDY") == 1);
 }
 
@@ -219,7 +221,7 @@ TEST_CASE("RM0351 36.4.2: PR 110 and 111 both divide by 256, 101 by 128")
     b.write("IWDG", "KR", 0xCCCC);
     auto const started  = f.target->virtual_clock().time().ps;
     auto const took     = bite_time(f) - started;
-    auto const expected = lsi_ticks(std::uint64_t{0xFFF} * divider);
+    auto const expected = lsi_ticks(std::uint64_t{0x1000} * divider);
     CHECK(took >= expected);
     CHECK(took < expected + lsi_ticks(divider));
   }
@@ -253,13 +255,13 @@ TEST_CASE("RM0351 36.3.3: with FLASH_OPTR.IWDG_SW 0 the IWDG starts at reset wit
     program_option(f, hardware ? optr & ~iwdg_sw : optr);
     CHECK(f.field("FLASH", "OPTR", "IWDG_SW") == (hardware ? 0u : 1u));
     auto const started = f.target->virtual_clock().time().ps;
-    auto const stopped = run_for(f, lsi_ticks(0xFFF * 4) + 10 * ms);
+    auto const stopped = run_for(f, lsi_ticks(0x1000 * 4) + 10 * ms);
     if(hardware)
     {
       REQUIRE(stopped.reason == stop_reason::reset_request);
       auto const took = f.target->virtual_clock().time().ps - started;
-      CHECK(took >= lsi_ticks(0xFFF * 4));
-      CHECK(took < lsi_ticks(0xFFF * 4) + lsi_ticks(4) + lsi_cycle);
+      CHECK(took >= lsi_ticks(0x1000 * 4));
+      CHECK(took < lsi_ticks(0x1000 * 4) + lsi_ticks(4) + lsi_cycle);
       CHECK(f.field("RCC", "CSR", "LSIRDY") == 1);
     }
     else

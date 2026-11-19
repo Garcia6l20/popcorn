@@ -197,7 +197,7 @@ def test_the_real_tree_reads_into_titled_pages() -> None:
 def test_the_pilot_pages_keep_their_marks_and_references() -> None:
     pages = limits_docs.read_pages(LIMIT_ROOTS)
     assert (pages["crc"].inferred, len(pages["crc"].groups)) == (1, 6)
-    assert (pages["iwdg"].inferred, len(pages["iwdg"].groups)) == (5, 6)
+    assert (pages["iwdg"].inferred, len(pages["iwdg"].groups)) == (7, 9)
     assert [g.scopes for g in pages["crc"].groups] == [
         (),
         ("u5", "h5", "l4"),
@@ -208,6 +208,9 @@ def test_the_pilot_pages_keep_their_marks_and_references() -> None:
     ]
     assert [g.scopes for g in pages["iwdg"].groups] == [
         (),
+        ("u5", "h5"),
+        ("l1", "l4"),
+        ("u5", "h5"),
         ("u5", "h5", "l1"),
         ("l1",),
         (),
@@ -215,7 +218,7 @@ def test_the_pilot_pages_keep_their_marks_and_references() -> None:
         (),
     ]
     assert pages["crc"].references == ["RM0456", "RM0351", "RM0038"]
-    assert pages["iwdg"].references == ["RM0456", "RM0038", "RM0351"]
+    assert pages["iwdg"].references == ["RM0456", "RM0481", "RM0038", "RM0351"]
 
 
 def test_two_blocks_of_one_id_in_one_file_keep_source_order(tmp_path: Path) -> None:

@@ -33,10 +33,11 @@ NOTES = (
     "keeps its own stack; `mov pc, lr` and `bx` through a register other than lr are not seen "
     "as returns, the frame stays until a later return matches deeper; a fault retried at a "
     "block start moves a frame again until the next matching return",
-    "watchdog: the timeout is the model's, RL periods of the prescaled LSI from the key write, "
-    "0xFFF periods from a start; silicon reloads one prescaled period after the write, RM0456 "
-    "61.4.3, so its timeout is RL + 1 periods; each part of the time after a reload counts at "
-    "the LSI rate it ran at",
+    "watchdog: the timeout is the earliest reset, RL + 1 periods of the prescaled LSI from the "
+    "key write, 0xFFF + 1 from a start; the counter reloads at the first prescaler edge after "
+    "a refresh, so the reset comes up to one period later and the margin is exact to within one "
+    "prescaled period, a gap one where the watchdog could have expired at the earliest prescaler "
+    "phase; each part of the time after a reload counts at the LSI rate it ran at",
     "watchdog: a PR or RLR write takes effect after a 0x5555 key with no other key since, "
     "masked to its field; a write before the first key of the profile, or after a reset or a "
     "restore, and PR and RLR after a reset or a restore until written, are unknown, and so is "
@@ -44,8 +45,9 @@ NOTES = (
     "are not part of the margin; an IWDG the option bytes start at the reset, IWDG_SW 0 on "
     "the L4, has no start key, so the time from the reset to its first refresh is unchecked",
     "watchdog: refreshes, starts and key writes cover the whole profile. Margin, closest pc, "
-    "timeout and gaps are exact for a constant LSI rate and stop at `logged_until_ps` when it "
-    "is set. Per stretch of constant PR and RLR and per refresh or start the longest interval "
+    "timeout and gaps are exact against the earliest-reset timeout for a constant LSI rate and "
+    "stop at `logged_until_ps` when it is set. Per stretch of constant PR and RLR and per "
+    "refresh or start the longest interval "
     "between reloads is kept, so a stretch holds one gap, its longest. Intervals are ordered by "
     "LSI periods, which matches picoseconds while the LSI rate holds. A reload pair with no "
     "timeout, the LSI stopped for good after the reload, can stand for its stretch and hide a "

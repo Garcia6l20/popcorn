@@ -2,7 +2,9 @@
 last one.
 
 The IWDG counts the 37 kHz LSI of the STM32L1 divided by 32. The firmware asks for 500 ms and
-the HAL loads a reload of 578, so the counter reaches 0 after 578 * 32 / 37000 s, 499.89 ms.
+the HAL loads a reload of 578, so the counter reaches 0 after 578 * 32 / 37000 s, 499.89 ms,
+counted from the first counter tick after the refresh, and the reset comes one tick later,
+inferred on the STM32L1 from the rule measured on the STM32U5.
 
 A watchdog reset request stops the run with `StopReason.RESET_REQUEST`, and `stop.detail`
 names the requester. The test resets the machine with the matching `ResetKind`, as the chip
@@ -20,6 +22,7 @@ PRESCALER = 32
 RELOAD = 578
 TIMEOUT_PS = RELOAD * PRESCALER * 10**12 // LSI_HZ
 COUNTER_TICK_PS = PRESCALER * 10**12 // LSI_HZ
+LSI_TICK_PS = 10**12 // LSI_HZ
 
 
 def refreshes(machine: Machine) -> list[VirtualTime]:
@@ -46,7 +49,9 @@ async def test_refreshing_keeps_the_watchdog_quiet(iwdg: Machine) -> None:
     assert len(seen) == 20
 
 
-async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) -> None:
+async def test_the_watchdog_resets_one_to_two_ticks_past_the_timeout_after_the_last_refresh(
+    iwdg: Machine,
+) -> None:
     seen = refreshes(iwdg)
     await iwdg.run(for_=ms(250))
     iwdg.var("refresh_enabled").value = 0
@@ -56,7 +61,8 @@ async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) 
     kind = ResetKind[stop.detail.upper()]
     assert kind is ResetKind.WATCHDOG
     assert iwdg.periph.IWDG.RLR.RL == RELOAD
-    assert abs((stop.time - seen[-1]).ps - TIMEOUT_PS) <= COUNTER_TICK_PS
+    after = (stop.time - seen[-1]).ps
+    assert TIMEOUT_PS + COUNTER_TICK_PS < after <= TIMEOUT_PS + 2 * COUNTER_TICK_PS + LSI_TICK_PS
 
     iwdg.reset(kind)
     stop = await iwdg.run(until="reset_cause_recorded")

@@ -1,10 +1,12 @@
-"""The independent watchdog from HAL: refreshed every 100 ms, a reset 500 ms after the last one,
-and a refresh above the window.
+"""The independent watchdog from HAL: refreshed every 100 ms, a reset 501 to 502 ms after the last
+one, and a refresh above the window.
 
 The IWDG counts the 32 kHz LSI of the STM32L4, RM0351 6.2.7, divided by 32, a 1 ms tick. The
-firmware asks for 500 ms and the HAL loads a reload of 500, so the counter reaches 0 after
-500 ms. The firmware reads the window from `iwdg_window`, 0xFFF by default, which leaves the
-window open. A refresh while the counter is above IWDG_WINR is a reset, RM0351 36.3.2.
+firmware asks for 500 ms and the HAL loads a reload of 500, so the counter reaches 0 500 ms
+after the first tick that follows the refresh, and the reset comes one tick later, inferred on the
+STM32L4 from the rule measured on the STM32U5. The firmware
+reads the window from `iwdg_window`, 0xFFF by default, which leaves the window open. A refresh
+while the counter is above IWDG_WINR is a reset, RM0351 36.3.2.
 
 A watchdog reset request stops the run with `StopReason.RESET_REQUEST`, and `stop.detail`
 names the requester. The test resets the machine with the matching `ResetKind`, as the chip
@@ -13,7 +15,7 @@ would, and the firmware reads IWDGRSTF back from RCC_CSR at boot.
 
 import pytest
 from popcorn import Call, Machine, ResetKind, Return, StopReason
-from popcorn.units import VirtualTime, ms, s
+from popcorn.units import VirtualTime, ms, s, us
 
 pytestmark = pytest.mark.popcorn(budget=20_000_000)
 
@@ -48,7 +50,9 @@ async def test_refreshing_keeps_the_watchdog_quiet(iwdg: Machine) -> None:
     assert iwdg.periph.IWDG.WINR.WIN == 0xFFF
 
 
-async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) -> None:
+async def test_the_watchdog_resets_one_to_two_ticks_past_500_ms_after_the_last_refresh(
+    iwdg: Machine,
+) -> None:
     seen = refreshes(iwdg)
     await iwdg.run(for_=ms(250))
     iwdg.var("refresh_enabled").value = 0
@@ -58,7 +62,8 @@ async def test_the_watchdog_resets_500_ms_after_the_last_refresh(iwdg: Machine) 
     kind = ResetKind[stop.detail.upper()]
     assert kind is ResetKind.WATCHDOG
     assert iwdg.periph.IWDG.RLR.RL == RELOAD
-    assert abs((stop.time - seen[-1]).ps - TIMEOUT.ps) <= COUNTER_TICK.ps
+    after = (stop.time - seen[-1]).ps
+    assert TIMEOUT.ps + COUNTER_TICK.ps < after <= TIMEOUT.ps + 2 * COUNTER_TICK.ps + us(31.25).ps
 
     iwdg.reset(kind)
     stop = await iwdg.run(until="reset_cause_recorded")

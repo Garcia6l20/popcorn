@@ -283,7 +283,7 @@ printf banner and line echo on USART2, HAL, xe and xb. [Sources and tests](https
 
 IWDG refresh and a watchdog reset on the 37 kHz LSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/iwdg).
 
---8<-- "stm32l152/iwdg/README.md:3:9"
+--8<-- "stm32l152/iwdg/README.md:3:11"
 
 ### l152 crc
 
@@ -360,7 +360,7 @@ printf banner and line echo on USART2, HAL. [Sources and tests](https://github.c
 
 IWDG refresh, the IWDG_WINR window and a watchdog reset on the 32 kHz LSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l476/iwdg).
 
---8<-- "stm32l476/iwdg/README.md:3:12"
+--8<-- "stm32l476/iwdg/README.md:3:15"
 
 ### l476 crc
 
