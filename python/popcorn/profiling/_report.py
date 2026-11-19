@@ -43,6 +43,13 @@ NOTES = (
     "the timeout they give; the update delay of PR and RLR, the window and the early wake-up "
     "are not part of the margin; an IWDG the option bytes start at the reset, IWDG_SW 0 on "
     "the L4, has no start key, so the time from the reset to its first refresh is unchecked",
+    "watchdog: refreshes, starts and key writes cover the whole profile. Margin, closest pc, "
+    "timeout and gaps are exact for a constant LSI rate and stop at `logged_until_ps` when it "
+    "is set. Per stretch of constant PR and RLR and per refresh or start the longest interval "
+    "between reloads is kept, so a stretch holds one gap, its longest. Intervals are ordered by "
+    "LSI periods, which matches picoseconds while the LSI rate holds. A reload pair with no "
+    "timeout, the LSI stopped for good after the reload, can stand for its stretch and hide a "
+    "valid pair",
     "timeline: a milestone is reached when a translated block starts at its address, a "
     "function start or a branch target",
 )
@@ -278,6 +285,11 @@ def _watchdog_lines(dog: Watchdog) -> list[str]:
         f"refreshes {dog.refreshes:,}, starts {dog.starts}, timeout {timeout}, "
         f"smallest margin {margin}{closest}, key writes {dog.key_writes:,}",
     ]
+    if dog.logged_until_ps is not None:
+        lines.append(
+            f"  counts cover the whole profile, margin, closest pc, timeout and gaps stop at "
+            f"{_ms(dog.logged_until_ps)}"
+        )
     lines += [
         f"  no reload for {_ms(gap.length_ps)} from {_ms(gap.start_ps)} "
         f"({gap.pc:#010x}), timeout {_ms(gap.timeout_ps)}"

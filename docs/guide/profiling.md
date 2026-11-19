@@ -85,7 +85,7 @@ the values of `popcorn.profiling.Analysis`.
 | `irq` | Entries per exception, entries per millisecond, time from entry to exit with and without the exceptions that preempted it, tail chains and the most entries in a window of `BURST_WINDOW_PS`, 1 ms. |
 | `peripherals` | Reads, writes and repeated writes per register, by CPU and by DMA. Accesses from Python or a debugger are left out. |
 | `loops` | Runs of at least `MIN_PASSES` identical passes per loop head, their passes, time and what ended them. |
-| `watchdog` | IWDG key, prescaler and reload writes, the timeout they give, the smallest margin between two reloads and the gaps longer than the timeout. |
+| `watchdog` | IWDG key, prescaler and reload writes, the timeout they give, the smallest margin between two reloads and the gaps longer than the timeout. Refreshes, starts and key writes count the whole profile. Margin, closest pc, timeout and gaps are exact for a constant LSI rate. Per stretch of constant PR and RLR and per refresh or start, the longest interval is kept, so a stretch lists one gap. PR and RLR writes, restores and resets each open a stretch, and the list of stretches holds as many as the write log limit, 4096 by default. `logged_until_ps` is set when more stretches open, and margin, closest pc, timeout and gaps then stop at that time. |
 
 `milestones=` names symbols or addresses whose first executed block `Report.timeline` times from
 the profile start, a boot timeline for a profile opened at the reset. `report.text()` ends with

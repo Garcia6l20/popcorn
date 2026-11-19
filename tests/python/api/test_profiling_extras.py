@@ -10,6 +10,7 @@ import json
 import re
 import types
 import typing
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -65,13 +66,21 @@ def test_the_watchdog_margin_is_the_timeout_less_the_longest_refresh_interval() 
     assert seen[0] - start < ms(1).ps
 
 
+def advance(
+    m: popcorn.Machine,
+    span: VirtualDuration,
+    reason: popcorn.StopReason = popcorn.StopReason.TIME,
+) -> None:
+    stop = asyncio.run(m.run(for_=span))
+    assert stop.reason is reason, stop
+
+
 def test_a_stopped_refresh_shows_as_a_gap_of_the_timeout() -> None:
     m = booted(IWDG)
     with m.profile("watchdog") as profile:
-        asyncio.run(m.run(for_=ms(250)))
+        advance(m, ms(250))
         m.var("refresh_enabled").value = 0
-        stop = asyncio.run(m.run(for_=s(1)))
-    assert stop.reason is popcorn.StopReason.RESET_REQUEST
+        advance(m, s(1), popcorn.StopReason.RESET_REQUEST)
     report = profile.report()
     dog = report.watchdog
     assert dog is not None
@@ -85,12 +94,11 @@ def test_a_stopped_refresh_shows_as_a_gap_of_the_timeout() -> None:
 def test_reloads_on_either_side_of_a_watchdog_reset_are_not_paired() -> None:
     m = booted(IWDG)
     with m.profile("watchdog") as profile:
-        asyncio.run(m.run(for_=ms(250)))
+        advance(m, ms(250))
         m.var("refresh_enabled").value = 0
-        stop = asyncio.run(m.run(for_=s(1)))
-        assert stop.reason is popcorn.StopReason.RESET_REQUEST
+        advance(m, s(1), popcorn.StopReason.RESET_REQUEST)
         m.reset(popcorn.ResetKind.WATCHDOG)
-        asyncio.run(m.run(for_=ms(350)))
+        advance(m, ms(350))
     report = profile.report()
     assert report.cuts == 1
     dog = report.watchdog
@@ -443,7 +451,11 @@ class _Mirror:
 
 
 def synthetic(
-    events: list[Event], end_ps: int, limit: int = 4096, keep_logs: bool = True
+    events: list[Event],
+    end_ps: int,
+    limit: int = 4096,
+    keep_logs: bool = True,
+    pcs: Sequence[int] | None = None,
 ) -> _core.ProfileResult:
     result = _core.ProfileResult()
     logs = {register: _core.ProfileWriteLog() for register in (KR, PR, RLR)}
@@ -468,7 +480,7 @@ def synthetic(
             records += 1
             write = _core.ProfileWrite()
             write.segment, write.value, write.ps, write.record = segment, value, ps, records
-            write.pc = 0x0800_0100 + 2 * records
+            write.pc = 0x0800_0100 + 2 * records if pcs is None else pcs[records - 1]
             if keep_logs:
                 logs[register].writes = [*logs[register].writes, write]
             if register == KR:
@@ -626,11 +638,11 @@ def type_paths(kind: object, prefix: str) -> set[str]:
 def stopped_report() -> Report:
     m = booted(IWDG)
     with m.profile(*Analysis, milestones=["HAL_IWDG_Refresh", 0x0800_0002]) as profile:
-        asyncio.run(m.run(for_=ms(250)))
+        advance(m, ms(250))
         m.var("refresh_enabled").value = 0
-        assert asyncio.run(m.run(for_=s(1))).reason is popcorn.StopReason.RESET_REQUEST
+        advance(m, s(1), popcorn.StopReason.RESET_REQUEST)
         m.reset(popcorn.ResetKind.WATCHDOG)
-        asyncio.run(m.run(for_=ms(50)))
+        advance(m, ms(50))
     return profile.report()
 
 

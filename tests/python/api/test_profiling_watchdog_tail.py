@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import inspect
 import json
@@ -36,7 +35,7 @@ from popcorn.profiling._watchdog import (
     watchdog,
     watchdog_registers,
 )
-from popcorn.units import VirtualDuration, ms, s
+from popcorn.units import ms, s
 
 from .test_profiling import booted
 from .test_profiling_extras import (
@@ -47,6 +46,7 @@ from .test_profiling_extras import (
     REGISTERS,
     RLR,
     Event,
+    advance,
     setup,
     synthetic,
 )
@@ -76,15 +76,6 @@ def tracked(
         reload_change_ids=(*dog.pr, *dog.rlr),
         reload_values=KEY_VALUES,
     )
-
-
-def advance(
-    m: popcorn.Machine,
-    span: VirtualDuration,
-    reason: popcorn.StopReason = popcorn.StopReason.TIME,
-) -> None:
-    stop = asyncio.run(m.run(for_=span))
-    assert stop.reason is reason, stop
 
 
 def run_burst(m: popcorn.Machine) -> None:
@@ -782,8 +773,10 @@ def test_the_capped_log_gives_the_old_analysis_a_false_tail_and_a_partial_count(
 
 
 def shape(track: _core.ProfileReloadTrack, ids: dict[int, int]) -> tuple[object, ...]:
-    def gap(held: _core.ProfileReloadGap | None) -> tuple[int, int, int] | None:
-        return None if held is None else (held.start.ps, held.end.ps, held.ps)
+    def gap(held: _core.ProfileReloadGap | None) -> tuple[int, ...] | None:
+        if held is None:
+            return None
+        return (held.start.ps, held.end.ps, held.ps, held.start.pc, held.end.pc)
 
     return (
         track.counts,
@@ -795,19 +788,20 @@ def shape(track: _core.ProfileReloadTrack, ids: dict[int, int]) -> tuple[object,
                 e.ps,
                 ids.get(e.change_id, 0),
                 e.change.value,
+                e.change.pc,
                 e.key_before,
                 [gap(held) for held in e.longest],
             )
             for e in track.epochs
         ],
-        [(t.segment, t.kind, t.epoch, t.last.ps, t.last.value) for t in track.tails],
+        [(t.segment, t.kind, t.epoch, t.last.ps, t.last.value, t.last.pc) for t in track.tails],
         track.epochs_dropped,
         track.frozen_ps if track.epochs_dropped else 0,
         track.frozen_segment if track.epochs_dropped else 0,
     )
 
 
-def events_of(result: _core.ProfileResult, dog: WatchdogRegisters) -> list[Event]:
+def events_of(result: _core.ProfileResult, dog: WatchdogRegisters) -> tuple[list[Event], list[int]]:
     kind_of = {
         **dict.fromkeys(dog.kr, KR),
         **dict.fromkeys(dog.pr, PR),
@@ -818,13 +812,20 @@ def events_of(result: _core.ProfileResult, dog: WatchdogRegisters) -> list[Event
         for log in result.write_logs
         for write in log.writes
     ]
+    pcs = [
+        write.pc
+        for write in sorted(
+            (write for log in result.write_logs for write in log.writes),
+            key=lambda write: write.record,
+        )
+    ]
     items += [
         (epoch.record, 1, ("cut", 0, 0, epoch.ps))
         for epoch in result.reload_tracks[0].epochs
         if epoch.kind == _core.EpochKind.cut
     ]
     items += [(rate.record, 2, ("r", 0, rate.hz, rate.ps)) for rate in result.domain_rates]
-    return [event for _, _, event in sorted(items, key=lambda item: item[:2])]
+    return [event for _, _, event in sorted(items, key=lambda item: item[:2])], pcs
 
 
 @pytest.mark.parametrize(
@@ -835,9 +836,9 @@ def test_the_python_mirror_equals_the_native_tracker(scenario: str, limit: int) 
     full, dog = real_run(scenario)
     capped, _ = real_run(scenario, limit)
     ids = {**dict.fromkeys(dog.kr, KR), **dict.fromkeys(dog.pr, PR), **dict.fromkeys(dog.rlr, RLR)}
-    events = events_of(full, dog)
+    events, pcs = events_of(full, dog)
     end = max(event[3] for event in events)
-    mirror = synthetic(events, end, limit, keep_logs=False).reload_tracks[0]
+    mirror = synthetic(events, end, limit, keep_logs=False, pcs=pcs).reload_tracks[0]
     assert shape(capped.reload_tracks[0], ids) == shape(mirror, {KR: KR, PR: PR, RLR: RLR})
 
 
@@ -874,3 +875,54 @@ def test_json_of_a_report_with_logged_until_ps_set_round_trips() -> None:
     back = Report.from_json(cut.to_json())
     assert back == cut
     assert back.watchdog is not None and back.watchdog.logged_until_ps == 123
+
+
+def watchdog_text(dog: Watchdog) -> list[str]:
+    from popcorn.profiling._report import _watchdog_lines
+
+    return _watchdog_lines(dog)
+
+
+def test_the_watchdog_line_prints_the_counts_and_the_key_writes() -> None:
+    events: list[Event] = [("r", 0, LSI_HZ, 0), *setup(0, 0, 500), *reloads([1, 51, 101])]
+    dog = watchdog(synthetic(events, ms(110).ps), REGISTERS)
+    text = "\n".join(watchdog_text(dog))
+    assert "refreshes 3, starts 0, timeout 62.500 ms," in text
+    assert "key writes 4" in text
+    assert "writes past the log" not in text
+    assert "counts cover the whole profile" not in text
+    assert "no reload for" not in text
+
+
+def test_the_watchdog_text_notes_where_the_margin_stops_when_epochs_overflowed() -> None:
+    events: list[Event] = [
+        ("r", 0, LSI_HZ, 0),
+        ("w", KR, 0x5555, 0),
+        ("w", PR, 0, 1),
+        *reloads([1, 51]),
+        ("w", PR, 0, ms(60).ps),
+        *reloads([61]),
+    ]
+    result = synthetic(events, ms(100).ps, limit=2)
+    dog = watchdog(result, REGISTERS)
+    lines = watchdog_text(dog)
+    assert dog.logged_until_ps == ms(60).ps
+    assert lines[-1] == (
+        "  counts cover the whole profile, margin, closest pc, timeout and gaps stop at 60.000 ms"
+    )
+
+
+def test_the_report_text_of_a_burst_carries_the_exact_count_and_the_notes() -> None:
+    m = booted(IWDG)
+    with m.profile("watchdog") as profile:
+        run_burst(m)
+        advance(m, ms(200))
+    report = profile.report()
+    assert report.watchdog is not None
+    text = report.text()
+    assert f"refreshes {report.watchdog.refreshes:,}, starts 1," in text
+    assert f"key writes {report.watchdog.key_writes:,}" in text
+    assert "watchdog: refreshes, starts and key writes cover the whole profile" in text
+    assert "exact for a constant LSI rate and stop at `logged_until_ps` when it is set" in text
+    assert "a stretch holds one gap, its longest" in text
+    assert "Intervals are ordered by LSI periods" in text
