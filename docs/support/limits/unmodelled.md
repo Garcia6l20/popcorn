@@ -27,7 +27,10 @@ gets that IP's patches and built-in model, as on the reference. UART5 and SAI2 o
 and U585 C packages and SPI4, UART8 and USART10 on the 64-pin STM32H5 parts are such instances.
 
 - This rule is inferred from the die. Its supporting reading is on a STM32U575ZITxQ, an LQFP144
-  that bonds no port I pin, where `GPIOI_MODER` reads 0x0000FFFF, the reset value of the 8 pins
-  of port I: an unbonded block keeps its registers.
+  that bonds no port I pin, where `GPIOI_MODER` reads 0x0000FFFF with `GPIOIEN` set, the reset
+  value of the 8 pins of port I: an unbonded block keeps its registers. The same part, measured
+  2026-11-17, reads `DBGMCU_IDCODE` 0x30016482, FLASHSIZE 2048 KB and PACKAGE 0x520C, a flash read
+  at 0x081FFFF0 and a bus error at 0x08200000, SRAM3 ending at 0x200BFFFC and SRAM4 at 0x28003FFC
+  with a bus error on the next word of each, all as the shipped description has them.
 - An instance that no part of the die and SVD lists keeps the SVD group as its IP and an empty
   version, and has no model.

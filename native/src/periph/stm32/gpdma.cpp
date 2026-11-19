@@ -255,11 +255,12 @@ struct transfer_cache
  *        SBL_1 + 1 beats, never after a burst shortened by the block end. DAO likewise after each
  *        destination burst of DBL_1 + 1 items, counted after the data handling, so packing and
  *        unpacking change the count. A destination burst left partial by the block end gets no DAO,
- *        an assumption: RM0456 is silent on it. BRSAO and BRDAO apply after every block, per BRSDEC
- *        and BRDDEC, on top of the burst offsets. SAO, BRSAO not a multiple of the source width and
- *        DAO, BRDAO not a multiple of the destination width are user setting errors. A state saved
- *        before the destination burst count existed loads with the count 0, exact when the save
- *        fell on a destination burst boundary, as it always does with one-item destination bursts.
+ *        as measured on an STM32U575ZITxQ, 2026-11-17. BRSAO and BRDAO apply after every block, per
+ *        BRSDEC and BRDDEC, on top of the burst offsets. SAO, BRSAO not a multiple of the source
+ *        width and DAO, BRDAO not a multiple of the destination width are user setting errors. A
+ *        state saved before the destination burst count existed loads with the count 0, exact when
+ *        the save fell on a destination burst boundary, as it always does with one-item destination
+ *        bursts.
  *        Not modelled: link step mode, logging once and running to completion, and triggers. The
  *        half transfer event rises at the half of each block under TCEM 0, 1 and 2, and only in the
  *        last item, the one running with LLR = 0, under TCEM 3. On channels 12 to 15, TCEM 0 keeps

@@ -520,12 +520,13 @@ struct hash_state
  *        clears and DINIS 1 cycle later, or all at a DIN write before that, as measured from the
  *        DCAL store: BUSY 0 at 84, 68 and 100 cycles for one compression, the rule within 1 cycle
  *        of the two compression readings. The digest registers read 0 in the cycle between BUSY
- *        0 and DCIS, as on the part. SHA2-224 takes the SHA2-256 times and SHA2-384 to
- *        SHA2-512/256 the SHA2-512 ones, inferred from their families. SHA-3 and SHAKE digests
- *        take their blocks only, DCIS with BUSY 0. SHA3-224 to SHA3-512 take 60, 58, 50 and 42,
- *        Table 401, and SHAKE128 and SHAKE256 66 and 58 by the same rule, one permutation of a
- *        squeeze taking a block time. HMAC takes the block size as its key size, for every
- *        algorithm but SHAKE.
+ *        0 and DCIS, as on the part. SHA2-224 takes the SHA2-256 times and SHA2-384 to SHA2-512/256
+ *        the SHA2-512 ones. Both are measured on an STM32H573, 2026-11-17, to the cycle at the
+ *        block launch, after "abc", after one block and after a block less two words. SHA-3 and
+ *        SHAKE digests take their blocks only, DCIS with BUSY 0. SHA3-224 to SHA3-512 take 60, 58,
+ *        50 and 42, Table 401, and SHAKE128 and SHAKE256 66 and 58 by the same rule, one
+ *        permutation of a squeeze taking a block time. HMAC takes the block size as its key size,
+ *        for every algorithm but SHAKE.
  *        Context swap CSRs hold the Keccak lanes at CSR4-53, the last word at CSR54, and the inner
  *        HMAC digest at CSR55 for SHA3-224 and SHA3-256, CSR72 for SHA3-384 and SHA3-512, the
  *        SHA-512 chaining value at CSR4-19, the pending block at CSR20-51 and the inner digest at
@@ -577,8 +578,9 @@ struct hash_state
  *   82, 98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS 1 cycle
  *   later, as measured. While BUSY, NBWP counts the launched block's words with the pending ones.
  *   SHA2-384, SHA2-512/224 and SHA2-512/256 take the SHA2-512 times and SHA2-224 the SHA2-256
- *   times, inferred from their families. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66 under
- *   MD5, SHA2-224 and SHA2-256.
+ *   times, as measured on an STM32H573, 2026-11-17, to the cycle at the block launch, after "abc",
+ *   after one block and after a block less two words. The U5 keeps RM0456 Table 486: 82 under SHA-1
+ *   and 66 under MD5, SHA2-224 and SHA2-256.
  * - An H5 final digest keeps BUSY its compressions times the block time plus 17 HCLK cycles under
  *   SHA-1 and SHA2-256 and 33 under SHA2-512. DCIS, NBWE and the digest registers follow 1 cycle
  *   after BUSY clears and DINIS 1 cycle later. An STM32H573 measured from the DCAL store BUSY 0 at
