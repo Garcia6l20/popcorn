@@ -325,11 +325,13 @@ template <typename Signal> struct bus_gate
  *        11.8.9, RM0481 11.4.5 and 11.8.7. Deviation: the fraction applies at once, silicon takes
  *        it three reference clock periods later.
  *
- *        STM32H5, RM0481 11.8.1: `HSIDIV` reads its new value from the write. `HSIDIVF` clears and
- *        then sets again with the new HSI rate after the cycles of the running HSI rate in
- *        `h5_rcc::hsi_divider_timings`, as measured on an STM32H573: /2 to /4 or /8 clear at 3 and
- *        set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8. The HSI keeps its old rate until `HSIDIVF`
- *        sets, a point the board run did not measure. `HSIDIV` keeps its value while PLL1 drives
+ *        STM32H5, RM0481 11.8.1: `HSIDIV` reads its new value from the write. `HSIDIVF` clears
+ *        and then sets again after the HSI cycles in `h5_rcc::hsi_divider_timings`, one per
+ *        instruction with the core on the HSI at HPRE 1, as measured on an STM32H573,
+ *        2026-11-17. The HSI takes the new rate at the
+ *        clear, so the cycles from the clear to the set run at the new rate. The rate change at
+ *        the clear is measured for /2, /4 and /8 to /1 and /1 to /2, inferred for the other
+ *        transitions. `HSIDIV` keeps its value while PLL1 drives
  *        SYSCLK from HSI and changes in every other state, an enabled PLL1 off SYSCLK fed by HSI
  *        included, as measured on an STM32H573 against the RM0481 11.8.1 text. For PLL2 and PLL3
  *        fed by HSI the model applies the same rule, inferred from PLL1. `TIMPRE`, RM0481 11.8.5,
@@ -512,15 +514,26 @@ template <typename Signal> struct bus_gate
  *   every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
  *   for PLL1. For PLL2 and PLL3 fed by HSI the model applies the same rule, inferred from PLL1. One
  *   write that clears PLL1ON of a PLL1 off SYSCLK and changes `HSIDIV` takes both.
- * - STM32H5: after an `HSIDIV` change, `HSIDIV` reads the new value at once. `HSIDIVF` clears and
- *   sets again after the cycles of the running HSI rate measured on an STM32H573: /2 to /4 or /8
- *   clear at 3 and set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8, /4 to /1 2 and 14, /8 to /1 2 and
- *   8. The other transitions are inferred: from /1 they take the /2 row, /4 to /8 and /8 to /2 and
- *   /4 the /4 to /2 timing. The new HSI rate applies when `HSIDIVF` sets, a point the board run did
- *   not measure. On an STM32H573 ST's HAL reads `HSIDIVF` about 24 cycles after the store and reads
- *   1 for every transition. The model runs one cycle per instruction, so the same load lands 13
- *   cycles after the store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL
- *   takes `HSI_VALUE` either way.
+ * - STM32H5: after an `HSIDIV` change, `HSIDIV` reads the new value at once. `HSIDIVF` clears
+ *   and sets again after the core cycles of `h5_rcc::hsi_divider_timings`, measured on an
+ *   STM32H573, 2026-11-17, as clear and set: /1 to /2 4 and 11, /1 to /4 4 and 7, /1 to /8 4 and
+ *   8, /2 to /4 or /8 3 and 6, /2 to /1 3 and 16, /4 to /1 2 and 14, /4 to /2 2 and 8, /4 to /8
+ *   2 and 5, /8 to /1 2 and 8, /8 to /2 2 and 5, /8 to /4 2 and 3. The HSI takes the new rate
+ *   at the `HSIDIVF` clear, measured for /2, /4 and /8 to /1 and /1 to /2, inferred for the other
+ *   transitions. The cycles up to the clear run at the old rate and the cycles from the clear to
+ *   the set at the new rate, inferred. A second `HSIDIV` write between the clear and the set
+ *   counts its cycles at the new rate, inferred. The counts are HSI cycles, equal to
+ *   instructions while the core runs from the HSI at HPRE 1, as measured. With the core on
+ *   another source or HPRE above 1 they stay HSI cycles and a load lands more or fewer
+ *   instructions after the store, inferred. ST's HAL reads `HSIDIVF` about 24 cycles after the
+ *   store on an STM32H573 and reads 1 for every transition. The model runs one cycle per
+ *   instruction, so the same load lands 13 cycles after the store and reads 1, except for /2 to
+ *   /1 and /4 to /1, where it reads 0 and HAL takes `HSI_VALUE` either way.
+ *
+ * @group h5 deviation "Differs from RM0481"
+ * - RM0481 RCC_CR HSIDIVF says the new division ratio reaches `hsi_ck` when the flag sets. An
+ *   STM32H573 takes the new rate at the `HSIDIVF` clear, a few cycles after the store, measured
+ *   2026-11-17. The model applies the new HSI rate at the clear.
  *
  * @group all rule "Oscillators and interrupt flags"
  * - STM32U5 and STM32H5: `HSEBYP` in `RCC_CR` and `LSEBYP` in `RCC_BDCR` take writes while their
@@ -1724,13 +1737,16 @@ auto rcc_model<Traits>::divider_written(std::uint32_t old, std::uint32_t now) ->
     if constexpr(Traits::hsi_divider)
     {
       auto const timing = Traits::hsi_divider_timings[state_.hsi_divider][divider.of(now)];
-      auto const old_hz = Traits::undivided_hsi_hz >> state_.hsi_divider;
-      auto const cycles = [old_hz](std::uint64_t count) {
-        return (count * ps_per_second + old_hz - 1) / old_hz;
+      auto const cycles = [](std::uint64_t count, std::uint64_t hz) {
+        return (count * ps_per_second + hz - 1) / hz;
       };
-      state_.divider_set_ps   = ctx_.clock.time().ps + cycles(timing.set);
+      auto const old_hz   = Traits::undivided_hsi_hz >> state_.hsi_divider;
+      auto const new_hz   = Traits::undivided_hsi_hz >> divider.of(now);
+      auto const clear_ps = cycles(timing.clear, old_hz);
+      state_.divider_set_ps =
+          ctx_.clock.time().ps + clear_ps + cycles(timing.set - timing.clear, new_hz);
       state_.divider_clearing = 1;
-      schedule(divider_kind, cycles(timing.clear));
+      schedule(divider_kind, clear_ps);
     }
   }
   return now;
@@ -1981,11 +1997,13 @@ void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
     if(std::exchange(state_.divider_clearing, 0) != 0)
     {
       update(regs_, names_[rcc_role::hsi_divider_flag], 0);
+      state_.hsi_divider = read(rcc_role::hsi_divider);
       schedule(divider_kind, state_.divider_set_ps - ctx_.clock.time().ps);
-      return;
     }
-    update(regs_, names_[rcc_role::hsi_divider_flag], 1);
-    state_.hsi_divider = read(rcc_role::hsi_divider);
+    else
+    {
+      update(regs_, names_[rcc_role::hsi_divider_flag], 1);
+    }
   }
   else if(is_on(static_cast<source>(kind)))
   {

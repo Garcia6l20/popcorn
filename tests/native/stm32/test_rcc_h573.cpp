@@ -373,103 +373,182 @@ TEST_CASE("RM0481 11.8.7: PLL1SRC 10 takes CSI, DIVM1 0 keeps PLL1RDY clear")
   CHECK(clocks.hz("pll1_q") == 16 * mhz);
 }
 
-TEST_CASE("H573 board: HSIDIVF clears and sets at the measured cycles of the running HSI rate")
+namespace
 {
-  struct leg
+constexpr std::uint64_t ps_per_s = 1'000'000'000'000;
+
+struct hsidiv_leg
+{
+  std::uint32_t from;
+  std::uint32_t to;
+  std::uint64_t clear;
+  std::uint64_t set;
+};
+
+constexpr auto hsidiv_legs = std::to_array<hsidiv_leg>({
+    {0, 1, 4, 11},
+    {0, 2, 4, 7 },
+    {0, 3, 4, 8 },
+    {1, 2, 3, 6 },
+    {1, 3, 3, 6 },
+    {1, 0, 3, 16},
+    {2, 1, 2, 8 },
+    {2, 0, 2, 14},
+    {2, 3, 2, 5 },
+    {3, 0, 2, 8 },
+    {3, 1, 2, 5 },
+    {3, 2, 2, 3 },
+});
+
+constexpr auto hsi_of(std::uint32_t divider) -> std::uint64_t
+{
+  return (64 * mhz) >> divider;
+}
+
+constexpr auto cycle_of(std::uint32_t divider) -> std::uint64_t
+{
+  return ps_per_s / hsi_of(divider);
+}
+
+constexpr auto set_after(hsidiv_leg const& leg) -> std::uint64_t
+{
+  return leg.clear * cycle_of(leg.from) + (leg.set - leg.clear) * cycle_of(leg.to);
+}
+
+auto after_divider(std::uint32_t from) -> popcorn::testing::stm32_fixture
+{
+  auto f = idle_fixture();
+  if(from != 1)
   {
-    std::uint32_t from;
-    std::uint32_t to;
-    std::uint64_t clear;
-    std::uint64_t set;
-  };
-  for(auto const& [from, to, clear, set_at] : std::to_array<leg>({
-          {1, 2, 3, 6 },
-          {1, 3, 3, 6 },
-          {1, 0, 3, 16},
-          {2, 1, 2, 8 },
-          {2, 0, 2, 14},
-          {3, 0, 2, 8 },
-  }))
+    set(f, "RCC_CR", "HSIDIV", from);
+    idle_until(f, std::chrono::microseconds{2});
+  }
+  return f;
+}
+}
+
+TEST_CASE(
+    "H573 board: HSIDIVF clears and sets at the measured HSI cycles, the HSI takes the new rate "
+    "at the clear")
+{
+  for(auto const& leg : hsidiv_legs)
   {
-    CAPTURE(from);
-    CAPTURE(to);
-    auto  f      = idle_fixture();
+    CAPTURE(leg.from);
+    CAPTURE(leg.to);
+    auto  f      = after_divider(leg.from);
     auto& clocks = probe(f);
-    if(from != 1)
-    {
-      set(f, "RCC_CR", "HSIDIV", from);
-      idle_until(f, std::chrono::microseconds{2});
-    }
-    auto const old_hz = (64 * mhz) >> from;
-    REQUIRE(clocks.hz("hsi") == old_hz);
+    REQUIRE(clocks.hz("hsi") == hsi_of(leg.from));
     REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
     auto const written = f.target->virtual_clock().time().ps;
-    set(f, "RCC_CR", "HSIDIV", to);
-    auto const cycle_ps = 1'000'000'000'000 / old_hz;
-    CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == to);
+    set(f, "RCC_CR", "HSIDIV", leg.to);
+    CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == leg.to);
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
-    CHECK(clocks.hz("hsi") == old_hz);
-    idle_to(f, written + (clear - 1) * cycle_ps);
+    CHECK(clocks.hz("hsi") == hsi_of(leg.from));
+    auto const clear_at = written + leg.clear * cycle_of(leg.from);
+    idle_to(f, clear_at - cycle_of(leg.from));
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
-    idle_to(f, written + clear * cycle_ps);
+    CHECK(clocks.hz("hsi") == hsi_of(leg.from));
+    idle_to(f, clear_at);
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-    CHECK(f.target->virtual_clock().core_hz() == old_hz);
-    idle_to(f, written + (set_at - 1) * cycle_ps);
+    CHECK(clocks.hz("hsi") == hsi_of(leg.to));
+    CHECK(f.target->virtual_clock().core_hz() == hsi_of(leg.to));
+    auto const set_at = written + set_after(leg);
+    idle_to(f, set_at - cycle_of(leg.to));
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-    CHECK(clocks.hz("hsi") == old_hz);
-    idle_to(f, written + set_at * cycle_ps);
+    CHECK(clocks.hz("hsi") == hsi_of(leg.to));
+    idle_to(f, set_at);
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
-    CHECK(clocks.hz("hsi") == (64 * mhz) >> to);
-    CHECK(f.target->virtual_clock().core_hz() == (64 * mhz) >> to);
+    CHECK(clocks.hz("hsi") == hsi_of(leg.to));
+    CHECK(f.target->virtual_clock().core_hz() == hsi_of(leg.to));
     write(f, "RCC_CR", peek(f, "RCC_CR") & ~lsb_of("RCC_CR", "HSIDIVF"));
     CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   }
 }
 
 TEST_CASE(
-    "HAL_RCC_OscConfig's HSIDIVF load reads 1 24 cycles after the HSIDIV store as on an H573 "
-    "board, and at the 13 cycles one instruction per cycle gives, 0 only for /2 and /4 to /1")
+    "HAL_RCC_OscConfig's HSIDIVF load reads 1 24 instructions after the HSIDIV store as on an "
+    "H573 board, and at 13 instructions 0 only for /2 and /4 to /1")
 {
-  struct leg
+  for(auto const& leg : hsidiv_legs)
   {
-    std::uint32_t from;
-    std::uint32_t to;
-    std::uint64_t cycles;
-    std::uint32_t flag;
-  };
-  for(auto const& [from, to, cycles, flag] : std::to_array<leg>({
-          {1, 2, 24, 1},
-          {1, 3, 24, 1},
-          {1, 0, 24, 1},
-          {2, 1, 24, 1},
-          {2, 0, 24, 1},
-          {3, 0, 24, 1},
-          {1, 2, 13, 1},
-          {1, 3, 13, 1},
-          {1, 0, 13, 0},
-          {2, 1, 13, 1},
-          {2, 0, 13, 0},
-          {3, 0, 13, 1},
-  }))
-  {
-    CAPTURE(from);
-    CAPTURE(to);
-    CAPTURE(cycles);
-    auto f = idle_fixture();
-    if(from != 1)
+    for(auto const instructions : {std::uint64_t{24}, std::uint64_t{13}, leg.set - 1, leg.set})
     {
-      set(f, "RCC_CR", "HSIDIV", from);
-      idle_until(f, std::chrono::microseconds{2});
+      CAPTURE(leg.from);
+      CAPTURE(leg.to);
+      CAPTURE(instructions);
+      auto       f       = after_divider(leg.from);
+      auto const written = f.target->virtual_clock().time().ps;
+      set(f, "RCC_CR", "HSIDIV", leg.to);
+      auto const read_at =
+          written + leg.clear * cycle_of(leg.from) + (instructions - leg.clear) * cycle_of(leg.to);
+      REQUIRE(
+          f.run_to_stop({.max_instructions = icount{1'000}, .until_time = vtime{read_at}}).reason
+          == stop_reason::time);
+      CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == (instructions >= leg.set ? 1u : 0u));
     }
-    auto const written = f.target->virtual_clock().time().ps;
-    set(f, "RCC_CR", "HSIDIV", to);
-    auto const old_hz  = (64 * mhz) >> from;
-    auto const read_at = written + cycles * (1'000'000'000'000 / old_hz);
-    REQUIRE(
-        f.run_to_stop({.max_instructions = icount{1'000}, .until_time = vtime{read_at}}).reason
-        == stop_reason::time);
-    CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == flag);
   }
+}
+
+TEST_CASE(
+    "HSIDIVF counts HSI cycles with the core on PLL1 from the HSE, inferred: /1 to /2 clears 4 HSI "
+    "cycles after the store")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  set(f, "RCC_CR", "HSIDIV", 0);
+  idle_until(f, std::chrono::microseconds{2});
+  set(f, "RCC_CR", "HSEON", 1);
+  idle_until(f, std::chrono::microseconds{200});
+  REQUIRE(f.field("RCC", "RCC_CR", "HSERDY") == 1);
+  pll1_from(f, 3, 5, 50);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  set(f, "RCC_CFGR1", "SW", 3);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  auto const core_hz = f.target->virtual_clock().core_hz();
+  REQUIRE(core_hz > 64 * mhz);
+  REQUIRE(clocks.hz("hsi") == 64 * mhz);
+  auto const written = f.target->virtual_clock().time().ps;
+  set(f, "RCC_CR", "HSIDIV", 1);
+  auto const instruction = 1'000'000'000'000 / core_hz;
+  idle_to(f, written + 4 * instruction);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_to(f, written + 6 * instruction);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  CHECK(clocks.hz("hsi") == 32 * mhz);
+  CHECK(f.target->virtual_clock().core_hz() == core_hz);
+  idle_to(f, written + 21 * instruction);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  idle_to(f, written + 25 * instruction);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
+}
+
+TEST_CASE("an HSIDIV write between the clear and the set counts its cycles at the new rate")
+{
+  auto       f       = idle_fixture();
+  auto&      clocks  = probe(f);
+  auto const written = f.target->virtual_clock().time().ps;
+  set(f, "RCC_CR", "HSIDIV", 0);
+  idle_to(f, written + 3 * cycle_of(1) + 3 * cycle_of(0));
+  REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  REQUIRE(clocks.hz("hsi") == 64 * mhz);
+  auto const again = f.target->virtual_clock().time().ps;
+  set(f, "RCC_CR", "HSIDIV", 1);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  idle_to(f, again + 3 * cycle_of(0));
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_to(f, again + 4 * cycle_of(0));
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  CHECK(clocks.hz("hsi") == 32 * mhz);
+  idle_to(f, again + 4 * cycle_of(0) + 6 * cycle_of(1));
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  idle_to(f, again + 4 * cycle_of(0) + 7 * cycle_of(1));
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
+  CHECK(clocks.hz("hsi") == 32 * mhz);
 }
 
 TEST_CASE("H573 board: HSIDIV changes while HSI feeds an enabled PLL1 off SYSCLK, holds on it")
@@ -507,35 +586,38 @@ TEST_CASE("H573 board: HSIDIV changes while HSI feeds an enabled PLL1 off SYSCLK
   }
 }
 
-TEST_CASE("a snapshot taken while HSIDIVF is clear restores the pending divider event")
+TEST_CASE("a snapshot taken while HSIDIVF is clear restores the new rate and the pending set")
 {
   auto       f       = idle_fixture();
   auto&      clocks  = probe(f);
   auto const written = f.target->virtual_clock().time().ps;
+  auto const set_at  = 3 * cycle_of(1) + 13 * cycle_of(0);
   set(f, "RCC_CR", "HSIDIV", 0);
   REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   auto const before_clear = f.target->snapshot();
-  idle_to(f, written + 4 * 31'250);
+  idle_to(f, written + 4 * cycle_of(1));
   REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-  auto const saved = f.target->snapshot();
-  idle_to(f, written + 20 * 31'250);
-  REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   REQUIRE(clocks.hz("hsi") == 64 * mhz);
+  auto const saved = f.target->snapshot();
+  idle_to(f, written + set_at + 4 * cycle_of(0));
+  REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   f.target->restore(saved);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-  CHECK(clocks.hz("hsi") == 32 * mhz);
-  idle_to(f, written + 15 * 31'250);
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_to(f, written + set_at - cycle_of(0));
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
   write(f, "RCC_PLL1FRACR", peek(f, "RCC_PLL1FRACR"));
-  CHECK(clocks.hz("hsi") == 32 * mhz);
-  idle_to(f, written + 16 * 31'250);
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_to(f, written + set_at);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   CHECK(clocks.hz("hsi") == 64 * mhz);
   f.target->restore(before_clear);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
-  idle_to(f, written + 3 * 31'250);
+  CHECK(clocks.hz("hsi") == 32 * mhz);
+  idle_to(f, written + 3 * cycle_of(1));
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-  idle_to(f, written + 16 * 31'250);
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_to(f, written + set_at);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
 }
 

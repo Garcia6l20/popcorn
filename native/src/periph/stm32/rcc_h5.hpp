@@ -437,18 +437,21 @@ struct h5_rcc
   static constexpr bool      msi_standby_ranges = false;
   static constexpr bool      hsi_divider        = true;
   /**
-   * @brief Cycles of the running HSI rate from an `HSIDIV` write to the `HSIDIVF` clear and to
-   *        its set with the new rate, indexed by the running and the new `HSIDIV`. Measured on
-   *        an STM32H573: /2 to /4 and /8 clear at 3 and set at 6, /2 to /1 3 and 16, /4 to /2 2
-   *        and 8, /4 to /1 2 and 14, /8 to /1 2 and 8. Inferred: from /1 the /2 row, /4 to /8
-   *        and /8 to /2 and /4 the /4 to /2 timing.
+   * @brief HSI cycles after an `HSIDIV` write at which `HSIDIVF` clears and sets again, indexed
+   *        by the running and the new `HSIDIV`. The HSI takes the new rate at the clear, so the
+   *        cycles up to the clear run at the old rate and the cycles from the clear to the set at
+   *        the new rate. Measured on an STM32H573, 2026-11-17, with the core on the HSI at HPRE 1,
+   *        where a cycle is one instruction, as clear and set: /1 to /2 4 and 11, /1 to /4 4 and
+   *        7, /1 to /8 4 and 8, /2 to /4 and /8 3 and 6, /2 to /1 3 and 16, /4 to /1 2 and 14, /4
+   *        to /2 2 and 8, /4 to /8 2 and 5, /8 to /1 2 and 8, /8 to /2 2 and 5, /8 to /4 2 and 3.
+   *        The cycles are HSI cycles whatever feeds the core, inferred.
    */
   static constexpr std::array<std::array<hsi_divider_timing, 4>, 4> hsi_divider_timings{
       {
-       {{{0, 0}, {3, 6}, {3, 6}, {3, 6}}},
+       {{{0, 0}, {4, 11}, {4, 7}, {4, 8}}},
        {{{3, 16}, {0, 0}, {3, 6}, {3, 6}}},
-       {{{2, 14}, {2, 8}, {0, 0}, {2, 8}}},
-       {{{2, 8}, {2, 8}, {2, 8}, {0, 0}}},
+       {{{2, 14}, {2, 8}, {0, 0}, {2, 5}}},
+       {{{2, 8}, {2, 5}, {2, 3}, {0, 0}}},
        }
   };
   /** @brief HSI rate before HSIDIV. */
