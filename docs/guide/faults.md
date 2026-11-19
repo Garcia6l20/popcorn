@@ -70,6 +70,13 @@ A handler that sets FAULTMASK and returns from HardFault keeps it set on an ARMv
 loses it on an ARMv7-M core. Any other return, NMI's aside, clears it on both.
 [Limits](../support/generated/limits/core.md#faultmask-on-exception-return) has the rule.
 
+A FAULTMASK write in a HardFault or NMI handler, `CPSID f` or `MSR FAULTMASK`, takes effect in the
+model. Silicon ignores it: measured with `CPSID f` in a HardFault handler on an STM32U575ZITxQ, while
+`MSR FAULTMASK`, NMI and ARMv7-M follow DDI0553B and DDI0403E. A handler of a configurable fault
+takes the write in the model and on silicon, measured with `CPSID f` on an STM32U575ZITxQ.
+[Limits](../support/generated/limits/core.md#faultmask-write-at-negative-priority)
+has the rule.
+
 ## Host accesses
 
 A host read or write through `m.mem` that the bus refuses raises `popcorn.BusAccessError`, a

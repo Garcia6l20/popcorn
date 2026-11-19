@@ -60,6 +60,11 @@ namespace popcorn::arch::armv8m
  *   for the other parts. The offset of the grid against the first instruction after the reset is
  *   0, inferred. Cycles per instruction are taken as constant since the reset. CYCCNT keeps
  *   counting through WFI and WFE sleep, where a real core gates it.
+ * - A FAULTMASK write at execution priority -1 or higher, CPSID f or MSR FAULTMASK in a HardFault
+ *   or NMI handler, takes effect. Silicon ignores it: measured with CPSID f in a HardFault handler
+ *   on an STM32U575ZITxQ, 2026-11-17, while MSR FAULTMASK, NMI and ARMv7-M follow DDI0553B and
+ *   DDI0403E. A handler of a configurable fault takes the write in the model and on silicon,
+ *   measured with CPSID f on an STM32U575ZITxQ.
  * - A guest read of SYST_CVR, SYST_CSR.COUNTFLAG or CYCCNT resolves to the end of the translated
  *   block holding the read, which also ends at a 1 KB page boundary.
  * - A debugger `mem()` read of SYST_CSR clears COUNTFLAG, as a guest read does.

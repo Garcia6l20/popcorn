@@ -41,6 +41,14 @@
  * from HardFault or NMI, whose raw priority is negative, keeps FAULTMASK on an ARMv8-M core, as
  * DDI0553B DeActivate says. An ARMv7-M core clears it on every return except NMI's.
  *
+ * @group all deviation "FAULTMASK write at negative priority"
+ * - On silicon a FAULTMASK write at execution priority -1 or higher, `CPSID f` or `MSR FAULTMASK`
+ *   in a HardFault or NMI handler, has no effect. That is measured with `CPSID f` in a HardFault
+ *   handler on an STM32U575ZITxQ, 2026-11-17, and `MSR FAULTMASK`, NMI and ARMv7-M follow DDI0553B
+ *   and DDI0403E. The model takes the write. A handler of a configurable fault, whose priority is
+ *   0 or above, takes the write in the model and on silicon, measured with `CPSID f` on an
+ *   STM32U575ZITxQ.
+ *
  * @group all rule "Unprivileged system space access"
  * - An unprivileged access to the system space, 0xE0000000 to 0xE000EFFF, takes a precise
  *   BusFault, with BFAR set to the address, and changes nothing. A debugger or host access is

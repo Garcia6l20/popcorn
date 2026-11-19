@@ -117,6 +117,13 @@ ENTRIES = {
     ),
     "faults": (
         "faults_setup",
+        "mask_cpsid",
+        "mask_common",
+        "mask_msr",
+        "mask_resume",
+        "mask_nmi_run",
+        "mask_inside",
+        "mask_after",
         "udf",
         "udf_at",
         "udf_forced",

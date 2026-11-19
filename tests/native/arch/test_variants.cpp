@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -376,6 +377,93 @@ TEST_CASE(
     REQUIRE(f.run_to_stop().reason == stop_reason::user);
     CHECK((f.reg("xpsr") & 0x1ff) == 0);
     CHECK(f.reg("faultmask") == one.faultmask);
+  }
+}
+
+TEST_CASE(
+    "model differs from silicon: a FAULTMASK write at execution priority -1 or higher takes "
+    "effect, silicon ignores it, measured on an STM32U575ZITxQ for a HardFault handler, and a "
+    "configurable fault handler takes it")
+{
+  enum class where
+  {
+    hardfault,
+    nmi,
+    usagefault,
+  };
+  struct row
+  {
+    bool             v8;
+    where            handler;
+    std::string_view write;
+    bool             debugger_set;
+    std::uint32_t    inside;
+    std::uint32_t    after;
+    std::string_view silicon;
+  };
+  core::machine_options enter;
+  enter.faults = arch::fault_policy::enter_handler;
+  for(auto const& one : {
+          row{true,  where::hardfault,  "mask_cpsid",  false, 1, 1,
+              "silicon reads 0 inside, measured on an STM32U575ZITxQ"                                 },
+          row{true,  where::hardfault,  "mask_msr",    false, 1, 1, "silicon reads 0 inside, DDI0553B"},
+          row{true,  where::nmi,        "mask_cpsid",  false, 1, 1, "silicon reads 0 inside, DDI0553B"},
+          row{true,  where::nmi,        "mask_msr",    false, 1, 1, "silicon reads 0 inside, DDI0553B"},
+          row{true,  where::usagefault, "mask_cpsid",  false, 1, 0,
+              "silicon reads 1 inside and 0 after the return, measured on an STM32U575ZITxQ"          },
+          row{true,  where::usagefault, "mask_msr",    false, 1, 0,
+              "silicon reads 1 inside and 0 after the return, DDI0553B"                               },
+          row{true,  where::hardfault,  "mask_common", true,  1, 1,
+              "silicon reads 1 inside and 1 after the return, measured on an STM32U575ZITxQ"          },
+          row{false, where::hardfault,  "mask_cpsid",  false, 1, 0,
+              "silicon reads 0 inside, DDI0403E"                                                      },
+          row{false, where::hardfault,  "mask_msr",    false, 1, 0, "silicon reads 0 inside, DDI0403E"},
+          row{false, where::nmi,        "mask_cpsid",  false, 1, 1, "silicon reads 0 inside, DDI0403E"},
+          row{false, where::nmi,        "mask_msr",    false, 1, 1, "silicon reads 0 inside, DDI0403E"},
+          row{false, where::usagefault, "mask_cpsid",  false, 1, 0,
+              "silicon reads 1 inside and 0 after the return, DDI0403E"                               },
+          row{false, where::usagefault, "mask_msr",    false, 1, 0,
+              "silicon reads 1 inside and 0 after the return, DDI0403E"                               },
+          row{false, where::hardfault,  "mask_common", true,  1, 0,
+              "silicon reads 1 inside and 0 after the return, DDI0403E"                               },
+  })
+  {
+    CAPTURE(one.v8);
+    CAPTURE(static_cast<int>(one.handler));
+    CAPTURE(one.write);
+    CAPTURE(one.debugger_set);
+    INFO(one.silicon);
+    auto const   suffix = one.v8 ? std::string_view{} : cm4.suffix;
+    auto const   name   = std::string{"faults"} + std::string{suffix};
+    arch_fixture f{one.v8 ? m33() : description(cm4), name, enter};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    REQUIRE(run_to(f, sym(name, "faults_setup")).reason == stop_reason::user);
+    auto const vtor = f.word(0xE000'ED08);
+    auto const slot = static_cast<address>(
+        vtor
+        + 4
+              * (one.handler == where::nmi         ? 2u
+                 : one.handler == where::hardfault ? 3u
+                                                   : 6u));
+    REQUIRE(f.target->mem().write(slot, 4, sym(name, one.write) | 1u));
+    std::optional<core::intercept_handle> hook;
+    if(one.debugger_set)
+    {
+      hook =
+          f.target->add_intercept(sym(name, "mask_common"), [](core::intercept_call const& call) {
+            auto regs = call.target().regs();
+            regs.write(*regs.find("faultmask"), 1);
+            return core::intercept_result::proceed();
+          });
+    }
+    auto const entry   = one.handler == where::nmi       ? "mask_nmi_run"
+                       : one.handler == where::hardfault ? "udf_forced"
+                                                         : "udf";
+    auto const stopped = run_to(f, sym(name, entry));
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(f.word(sym(name, "mask_inside")) == one.inside);
+    CHECK(f.word(sym(name, "mask_after")) == one.after);
+    CHECK(f.reg("faultmask") == one.after);
   }
 }
 
