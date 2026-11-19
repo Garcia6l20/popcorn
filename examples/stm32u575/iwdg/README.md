@@ -26,7 +26,8 @@ uv run pytest -q examples/stm32u575/iwdg
     IWDGRSTF.
   - Without it, the next `run` or `step` applies the reset the stop reported first, as the
     chip would.
-- `firmware/main.c`: the reset cause, the IWDG setup and the refresh loop.
+- `firmware/main.c`: the reset cause, the IWDG setup and the refresh loop. Writing `refresh_burst`
+  makes the loop refresh that many extra times back to back, then clear it.
 
 ## Rebuild the firmware
 

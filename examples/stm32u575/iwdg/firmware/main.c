@@ -8,6 +8,7 @@
 IWDG_HandleTypeDef hiwdg;
 volatile uint32_t  refresh_enabled = 1;
 volatile uint32_t  reset_by_watchdog;
+volatile uint32_t  refresh_burst;
 
 void SysTick_Handler(void);
 
@@ -49,6 +50,11 @@ int main(void)
   MX_IWDG_Init();
   for(;;)
   {
+    for(uint32_t n = refresh_burst; n != 0 && refresh_enabled != 0; --n)
+    {
+      HAL_IWDG_Refresh(&hiwdg);
+    }
+    refresh_burst = 0;
     if(refresh_enabled != 0)
     {
       HAL_IWDG_Refresh(&hiwdg);
