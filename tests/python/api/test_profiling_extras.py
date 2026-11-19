@@ -19,7 +19,12 @@ from popcorn import _core, trace
 from popcorn.profiling import SCHEMA, Analysis, FrameKind, Report, diff
 from popcorn.profiling._diff import IDENTITY, MEASURES
 from popcorn.profiling._symbols import Names
-from popcorn.profiling._watchdog import WatchdogRegisters, watchdog
+from popcorn.profiling._watchdog import (
+    RELOAD_KEYS,
+    WatchdogRegisters,
+    watchdog,
+    watchdog_registers,
+)
 from popcorn.units import VirtualDuration, ms, s
 
 from .conftest import ROOT
@@ -56,7 +61,7 @@ def test_the_watchdog_margin_is_the_timeout_less_the_longest_refresh_interval() 
     assert dog.closest_pc is not None
     assert Names(m.images, m.description).function(dog.closest_pc)[0] == "HAL_IWDG_Refresh"
     assert dog.gaps == ()
-    assert dog.dropped == 0
+    assert dog.logged_until_ps is None
     assert seen[0] - start < ms(1).ps
 
 
@@ -190,17 +195,17 @@ def test_the_json_holds_the_schema_and_reads_back_equal() -> None:
     report = spi_report(ms(20))
     text = report.to_json()
     data = json.loads(text)
-    assert data["schema"] == SCHEMA == 1
+    assert data["schema"] == SCHEMA == 2
     assert data["report"]["hotspots"]["frames"][1]["kind"] == FrameKind.ENTRY.value
     assert data["report"]["analyses"] == [a.value for a in report.analyses]
     back = Report.from_json(text)
     assert back == report
     assert back.text() == report.text()
     assert isinstance(back.analyses[0], Analysis)
-    with pytest.raises(ValueError, match="schema 1"):
-        Report.from_json(json.dumps({"schema": 2, "report": data["report"]}))
+    with pytest.raises(ValueError, match="schema 2"):
+        Report.from_json(json.dumps({"schema": 1, "report": data["report"]}))
     with pytest.raises(ValueError, match="malformed"):
-        Report.from_json(json.dumps({"schema": 1, "report": {}}))
+        Report.from_json(json.dumps({"schema": 2, "report": {}}))
 
 
 def test_folded_stacks_have_one_line_per_node_with_its_self_instructions() -> None:
@@ -298,13 +303,17 @@ def iwdg_writes(
     chunk: VirtualDuration | None,
 ) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int]]]:
     m = booted(IWDG)
-    with m.profile("watchdog") as profile:
+    dog = watchdog_registers(m.description, lambda at: int.from_bytes(m.mem.read(at, 4), "little"))
+    assert dog is not None
+    with m._profile(  # pyright: ignore[reportPrivateUsage]
+        logged_registers=dog.logged, write_clock_domain="lsi"
+    ) as recording:
         if chunk is None:
-            asyncio.run(m.run(for_=ms(2)))
+            stops = [asyncio.run(m.run(for_=ms(2)))]
         else:
-            for _ in range(ms(2).ps // chunk.ps):
-                asyncio.run(m.run(for_=chunk))
-    result = profile._recording.result  # pyright: ignore[reportPrivateUsage]
+            stops = [asyncio.run(m.run(for_=chunk)) for _ in range(ms(2).ps // chunk.ps)]
+        assert {stop.reason for stop in stops} == {popcorn.StopReason.TIME}
+    result = recording.result
     writes = sorted(
         (write.at, write.value, write.ps, write.clock_hz)
         for log in result.write_logs
@@ -344,11 +353,103 @@ type Event = tuple[str, int, int, int]
 starts the next segment."""
 
 
-def synthetic(events: list[Event], end_ps: int) -> _core.ProfileResult:
+class _Mirror:
+    """The reload tracker rule of the profile sink, written again in Python over `Event`s."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.track = _core.ProfileReloadTrack()
+        self.track.counts = [0, 0]
+        self.epochs: list[_core.ProfileEpoch] = [self.epoch(_core.EpochKind.start, 0, 0, 0)]
+        self.best: dict[tuple[int, int], int] = {}
+        self.tails: list[_core.ProfileReloadTail] = []
+        self.last_key: int | None = None
+        self.previous: tuple[int, int, int] | None = None
+        self.ticks = 0
+        self.hz = 0
+        self.last_rate_ps = 0
+        self.frozen = False
+
+    @staticmethod
+    def epoch(kind: _core.EpochKind, segment: int, ps: int, record: int) -> _core.ProfileEpoch:
+        epoch = _core.ProfileEpoch()
+        epoch.kind, epoch.segment, epoch.ps, epoch.record = kind, segment, ps, record
+        epoch.key_before = 0xFFFF_FFFF
+        epoch.longest = [None, None]
+        return epoch
+
+    def open(self, epoch: _core.ProfileEpoch) -> None:
+        if len(self.epochs) >= self.limit:
+            if self.track.epochs_dropped == 0:
+                self.track.frozen_ps, self.track.frozen_segment = epoch.ps, epoch.segment
+                self.frozen = True
+            self.track.epochs_dropped += 1
+            return
+        self.epochs.append(epoch)
+
+    def rate(self, hz: int, ps: int) -> None:
+        self.ticks += self.hz * (ps - self.last_rate_ps)
+        self.last_rate_ps, self.hz = ps, hz
+
+    def cut(self, segment: int, ps: int, record: int) -> None:
+        self.open(self.epoch(_core.EpochKind.cut, segment, ps, record))
+        self.previous = None
+        self.last_key = None
+
+    def change(self, register: int, write: _core.ProfileWrite) -> None:
+        epoch = self.epoch(_core.EpochKind.change, write.segment, write.ps, write.record)
+        epoch.change_id, epoch.change = register, write
+        if self.last_key is not None:
+            epoch.key_before = self.last_key
+        self.open(epoch)
+
+    def key(self, write: _core.ProfileWrite) -> None:
+        self.track.key_writes += 1
+        self.last_key = write.value & 0xFFFF
+        if self.last_key not in RELOAD_KEYS:
+            return
+        kind = RELOAD_KEYS.index(self.last_key)
+        self.track.counts = [
+            count + (index == kind) for index, count in enumerate(self.track.counts)
+        ]
+        if self.frozen:
+            return
+        ticks = self.ticks + self.hz * (write.ps - self.last_rate_ps)
+        if self.previous is not None:
+            first_kind, first_epoch, first_ticks = self.previous
+            gap = ticks - first_ticks
+            slot = self.epochs[first_epoch]
+            if slot.longest[first_kind] is None or gap > self.best[first_epoch, first_kind]:
+                held = _core.ProfileReloadGap()
+                held.start, held.end = self.tails[-1].last, write
+                held.ps = write.ps - held.start.ps
+                longest = list(slot.longest)
+                longest[first_kind] = held
+                slot.longest = longest
+                self.best[first_epoch, first_kind] = gap
+        tail = _core.ProfileReloadTail()
+        tail.segment, tail.last, tail.kind = write.segment, write, kind
+        tail.epoch = len(self.epochs) - 1
+        if self.tails and self.tails[-1].segment == write.segment:
+            self.tails[-1] = tail
+        else:
+            self.tails.append(tail)
+        self.previous = (kind, tail.epoch, ticks)
+
+    def finish(self) -> _core.ProfileReloadTrack:
+        self.track.epochs = self.epochs
+        self.track.tails = self.tails
+        return self.track
+
+
+def synthetic(
+    events: list[Event], end_ps: int, limit: int = 4096, keep_logs: bool = True
+) -> _core.ProfileResult:
     result = _core.ProfileResult()
     logs = {register: _core.ProfileWriteLog() for register in (KR, PR, RLR)}
     rates: list[_core.ProfileRate] = []
     clocks: list[_core.ProfileClock] = []
+    mirror = _Mirror(limit)
     records = segment = 0
     segment_start = 0
     for kind, register, value, ps in events:
@@ -357,16 +458,23 @@ def synthetic(events: list[Event], end_ps: int) -> _core.ProfileResult:
             clock.segment, clock.ps = segment, ps - segment_start
             clocks.append(clock)
             segment, segment_start = segment + 1, ps
+            mirror.cut(segment, ps, records)
         elif kind == "r":
             rate = _core.ProfileRate()
             rate.segment, rate.ps, rate.hz, rate.record = segment, ps, value, records
             rates.append(rate)
+            mirror.rate(value, ps)
         else:
             records += 1
             write = _core.ProfileWrite()
             write.segment, write.value, write.ps, write.record = segment, value, ps, records
             write.pc = 0x0800_0100 + 2 * records
-            logs[register].writes = [*logs[register].writes, write]
+            if keep_logs:
+                logs[register].writes = [*logs[register].writes, write]
+            if register == KR:
+                mirror.key(write)
+            else:
+                mirror.change(register, write)
     clock = _core.ProfileClock()
     clock.segment, clock.ps = segment, end_ps - segment_start
     clocks.append(clock)
@@ -375,6 +483,7 @@ def synthetic(events: list[Event], end_ps: int) -> _core.ProfileResult:
     result.write_logs = list(logs.values())
     result.domain_rates = rates
     result.clocks = clocks
+    result.reload_tracks = [mirror.finish()]
     return result
 
 
@@ -537,7 +646,7 @@ def test_a_report_with_a_gap_a_cut_and_an_unreached_milestone_reads_back_equal()
 
 def test_the_schema_holds_its_key_set() -> None:
     contract = {".schema", ".report", *type_paths(Report, ".report")}
-    assert sorted(contract) == SCHEMA_1_KEYS
+    assert sorted(contract) == SCHEMA_2_KEYS
     data = json.loads(stopped_report().to_json())
     under_dicts = (".report.sleep.reasons.", ".report.loops.loops[].enders.")
     seen = {path for path in key_paths(data) if not path.startswith(under_dicts)}
@@ -547,8 +656,8 @@ def test_the_schema_holds_its_key_set() -> None:
 
 def test_the_schema_refuses_a_version_of_another_type() -> None:
     data = json.loads(spi_report(ms(1)).to_json())
-    for schema in (True, 1.0, "1"):
-        with pytest.raises(ValueError, match="schema 1"):
+    for schema in (True, 2.0, "2"):
+        with pytest.raises(ValueError, match="schema 2"):
             Report.from_json(json.dumps({"schema": schema, "report": data["report"]}))
 
 
@@ -584,7 +693,7 @@ def test_a_diff_row_holds_every_measure_of_its_row_type() -> None:
         assert set(built[table][key]) == measures | extra, table
 
 
-SCHEMA_1_KEYS = [
+SCHEMA_2_KEYS = [
     ".report",
     ".report.analyses",
     ".report.clocks",
@@ -678,16 +787,17 @@ SCHEMA_1_KEYS = [
     ".report.timeline[].time_ps",
     ".report.watchdog",
     ".report.watchdog.closest_pc",
-    ".report.watchdog.dropped",
     ".report.watchdog.gaps",
     ".report.watchdog.gaps[].length_ps",
     ".report.watchdog.gaps[].pc",
     ".report.watchdog.gaps[].start_ps",
     ".report.watchdog.gaps[].timeout_ps",
+    ".report.watchdog.key_writes",
+    ".report.watchdog.logged_until_ps",
     ".report.watchdog.min_margin_ps",
     ".report.watchdog.refreshes",
     ".report.watchdog.starts",
     ".report.watchdog.timeout_ps",
     ".schema",
 ]
-"""Every key path of a schema 1 report, `[]` for the items of a list."""
+"""Every key path of a schema 2 report, `[]` for the items of a list."""

@@ -276,7 +276,7 @@ def _watchdog_lines(dog: Watchdog) -> list[str]:
         "",
         "== watchdog ==",
         f"refreshes {dog.refreshes:,}, starts {dog.starts}, timeout {timeout}, "
-        f"smallest margin {margin}{closest}, writes past the log {dog.dropped:,}",
+        f"smallest margin {margin}{closest}, key writes {dog.key_writes:,}",
     ]
     lines += [
         f"  no reload for {_ms(gap.length_ps)} from {_ms(gap.start_ps)} "

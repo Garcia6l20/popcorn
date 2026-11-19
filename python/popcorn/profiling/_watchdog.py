@@ -1,11 +1,10 @@
-"""The independent watchdog margin, from the logged IWDG register writes."""
+"""The independent watchdog margin, from the reload tracker of a profile."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
-from itertools import pairwise
 
 from popcorn import _core
 from popcorn._part_description import PartDescription
@@ -16,7 +15,12 @@ START_KEY = 0xCCCC
 UNLOCK_KEY = 0x5555
 COUNTER_RESET = 0xFFF
 """Count a start reloads, the counter's reset value, RM0456 61.4.3."""
-KEY_MASK = 0xFFFF
+REFRESH_KIND = 0
+START_KIND = 1
+RELOAD_KEYS = (REFRESH_KEY, START_KEY)
+"""Low 16 bits of a KR write that reloads, indexed by reload kind."""
+NO_KEY = 0xFFFF_FFFF
+"""`key_before` of a write with no earlier KR write in its segment."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,15 +110,24 @@ class Watchdog:
     rate it ran at. None without a reload, with PR or RLR unknown, or with the LSI stopped from
     the reload on."""
     min_margin_ps: int | None
-    """Smallest timeout less the time to the next reload, over consecutive reloads of one
-    segment. Negative when the watchdog would have expired between them."""
+    """Smallest timeout less the time to the next reload, over the longest pair of consecutive
+    reloads of each epoch and reload kind, the pair with the most LSI periods between its
+    reloads. Each pair margin is exact in picoseconds. It is the smallest margin of the profile
+    while the LSI rate is constant and every pair has a timeout. A rate change inside a timeout
+    window can leave another pair with a smaller margin, and a longest pair with no timeout
+    leaves its epoch and kind out. Negative when the watchdog would have expired between them."""
     closest_pc: int | None
-    """Address of the reload that ended the smallest margin."""
+    """Address of the reload that ended the pair of `min_margin_ps`. Equal margins go to the
+    first epoch, then the lowest reload kind."""
     gaps: tuple[WatchdogGap, ...]
     """Spans at or past the timeout with no reload, the span after the last reload of each
-    segment included."""
-    dropped: int
-    """Logged writes past the log limit, not counted."""
+    segment included. Per epoch and reload kind only the longest span is listed."""
+    key_writes: int
+    """KR writes of any key, the whole profile."""
+    logged_until_ps: int | None
+    """Profile time up to which `min_margin_ps`, `closest_pc`, `timeout_ps` and `gaps` hold, None
+    when they hold for the whole profile. `refreshes`, `starts` and `key_writes` always cover the
+    whole profile."""
 
 
 def _divider(pr: int, top: int) -> int:
@@ -163,25 +176,56 @@ class _Held:
             self.rlr = value & registers.rlr_mask if unlocked else None
 
 
-def watchdog(result: _core.ProfileResult, registers: WatchdogRegisters | None) -> Watchdog:
-    """The watchdog section of a profile result."""
-    if registers is None:
-        return Watchdog(0, 0, None, None, None, (), 0)
+def _reload_timeout(
+    held: _Held,
+    kind: int,
+    registers: WatchdogRegisters,
+    rates: Sequence[_core.ProfileRate],
+    write: _core.ProfileWrite,
+) -> int | None:
+    """Picoseconds from the reload `write` of reload kind `kind` to the expiry under `held`, None
+    when it is unknown."""
+    count = COUNTER_RESET if kind == START_KIND else held.rlr
+    expiry = (
+        None
+        if held.pr is None or count is None
+        else _expiry(
+            rates,
+            write.ps,
+            write.record,
+            _divider(held.pr, registers.prescaler_top) * count,
+        )
+    )
+    return None if expiry is None else expiry - write.ps
+
+
+def _snapshots(track: _core.ProfileReloadTrack, registers: WatchdogRegisters) -> list[_Held]:
+    """The PR and RLR in force in each epoch of `track`."""
     kinds = {
-        **dict.fromkeys(registers.kr, "kr"),
         **dict.fromkeys(registers.pr, "pr"),
         **dict.fromkeys(registers.rlr, "rlr"),
     }
-    logs = [log for log in result.write_logs if log.id in kinds]
-    writes = sorted(
-        (
-            (write.segment, write.record, kinds[log.id], write)
-            for log in logs
-            for write in log.writes
-        ),
-        key=lambda item: (item[0], item[1]),
-    )
-    dropped = sum(log.dropped for log in logs)
+    held = _Held(registers.pr_start, registers.rlr_start, None)
+    snapshots: list[_Held] = []
+    for epoch in track.epochs:
+        match epoch.kind:
+            case _core.EpochKind.start:
+                held = _Held(registers.pr_start, registers.rlr_start, None)
+            case _core.EpochKind.cut:
+                held = _Held(None, None, None)
+            case _core.EpochKind.change:
+                held.locked = None if epoch.key_before == NO_KEY else epoch.key_before != UNLOCK_KEY
+                held.write(kinds[epoch.change_id], epoch.change.value, registers)
+        snapshots.append(replace(held))
+    return snapshots
+
+
+def watchdog(result: _core.ProfileResult, registers: WatchdogRegisters | None) -> Watchdog:
+    """The watchdog section of a profile result, from its reload track. The empty section for a
+    part with no IWDG and for a result with no reload track."""
+    if registers is None or not result.reload_tracks:
+        return Watchdog(0, 0, None, None, None, (), 0, None)
+    track = result.reload_tracks[0]
     rates: dict[int, list[_core.ProfileRate]] = {}
     for rate in result.domain_rates:
         rates.setdefault(rate.segment, []).append(rate)
@@ -190,52 +234,49 @@ def watchdog(result: _core.ProfileResult, registers: WatchdogRegisters | None) -
     for clock in result.clocks:
         total += clock.ps
         segment_end[clock.segment] = total
-    held = _Held(registers.pr_start, registers.rlr_start, None)
-    segment = 0
-    reloads: list[tuple[int, int, int, int | None]] = []
-    refreshes = starts = 0
-    for at_segment, _, kind, write in writes:
-        if at_segment != segment:
-            held, segment = _Held(None, None, None), at_segment
-        if kind != "kr":
-            held.write(kind, write.value, registers)
-            continue
-        key = write.value & KEY_MASK
-        held.locked = key != UNLOCK_KEY
-        if key not in (REFRESH_KEY, START_KEY):
-            continue
-        refreshes += key == REFRESH_KEY
-        starts += key == START_KEY
-        count = COUNTER_RESET if key == START_KEY else held.rlr
-        expiry = (
-            None
-            if held.pr is None or count is None
-            else _expiry(
-                rates.get(at_segment, []),
-                write.ps,
-                write.record,
-                _divider(held.pr, registers.prescaler_top) * count,
-            )
-        )
-        timeout = None if expiry is None else expiry - write.ps
-        reloads.append((at_segment, write.ps, write.pc, timeout))
+    snapshots = _snapshots(track, registers)
     margin: int | None = None
     closest: int | None = None
     gaps: list[WatchdogGap] = []
-    for (seg_a, ps_a, pc_a, timeout), (seg_b, ps_b, pc_b, _) in pairwise(reloads):
-        if seg_a != seg_b or timeout is None:
-            continue
-        left = timeout - (ps_b - ps_a)
-        if margin is None or left < margin:
-            margin, closest = left, pc_b
-        if left <= 0:
-            gaps.append(WatchdogGap(ps_a, ps_b - ps_a, timeout, pc_a))
-    for index, (seg, ps, pc, timeout) in enumerate(reloads):
-        last_of_segment = index + 1 == len(reloads) or reloads[index + 1][0] != seg
-        if last_of_segment and timeout is not None:
-            length = segment_end.get(seg, ps) - ps
+    for epoch, held in zip(track.epochs, snapshots, strict=True):
+        for kind, gap in enumerate(epoch.longest):
+            if gap is None:
+                continue
+            timeout = _reload_timeout(
+                held, kind, registers, rates.get(gap.start.segment, []), gap.start
+            )
+            if timeout is None:
+                continue
+            left = timeout - gap.ps
+            if margin is None or left < margin:
+                margin, closest = left, gap.end.pc
+            if left <= 0:
+                gaps.append(WatchdogGap(gap.start.ps, gap.ps, timeout, gap.start.pc))
+    last: int | None = None
+    frozen = track.epochs_dropped > 0
+    for tail in track.tails:
+        if frozen and tail.segment >= track.frozen_segment:
+            break
+        timeout = _reload_timeout(
+            snapshots[tail.epoch],
+            tail.kind,
+            registers,
+            rates.get(tail.segment, []),
+            tail.last,
+        )
+        last = timeout
+        if timeout is not None:
+            length = segment_end.get(tail.segment, tail.last.ps) - tail.last.ps
             if length >= timeout:
-                gaps.append(WatchdogGap(ps, length, timeout, pc))
+                gaps.append(WatchdogGap(tail.last.ps, length, timeout, tail.last.pc))
     gaps.sort(key=lambda gap: gap.start_ps)
-    last = reloads[-1][3] if reloads else None
-    return Watchdog(refreshes, starts, last, margin, closest, tuple(gaps), dropped)
+    return Watchdog(
+        track.counts[REFRESH_KIND],
+        track.counts[START_KIND],
+        last,
+        margin,
+        closest,
+        tuple(gaps),
+        track.key_writes,
+        track.frozen_ps if frozen else None,
+    )

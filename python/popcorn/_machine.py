@@ -1524,7 +1524,7 @@ class Machine:
         """
         from popcorn.profiling import BURST_WINDOW_PS, MIN_PASSES, Analysis, Profile, selected
         from popcorn.profiling._symbols import Names
-        from popcorn.profiling._watchdog import watchdog_registers
+        from popcorn.profiling._watchdog import RELOAD_KEYS, watchdog_registers
 
         chosen = selected(analyses)
         marks: list[tuple[str, int]] = []
@@ -1555,8 +1555,10 @@ class Machine:
             call_stacks=Analysis.HOTSPOTS in chosen,
             loop_reports=passes,
             burst_window_ps=burst,
-            logged_registers=() if dog is None else dog.logged,
             write_clock_domain="" if dog is None else "lsi",
+            reload_key_ids=() if dog is None else dog.kr,
+            reload_change_ids=() if dog is None else (*dog.pr, *dog.rlr),
+            reload_values=RELOAD_KEYS,
         ) as recording:
             yield Profile(
                 recording,

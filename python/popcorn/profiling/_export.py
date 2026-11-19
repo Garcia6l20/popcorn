@@ -12,7 +12,7 @@ from typing import Any, TextIO, cast
 
 from popcorn.profiling._tables import FrameKind, FrameRow
 
-SCHEMA = 1
+SCHEMA = 2
 """Version of the JSON a report writes, `Report.to_json`."""
 
 
