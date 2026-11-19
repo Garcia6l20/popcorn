@@ -1,0 +1,6 @@
+$ popcorn profile folded spin.json
+prvIdleTask 5429491
+prvIdleTask;prvCheckTasksWaitingTermination 9501610
+flag_task 665198
+status_task 286277
+[SysTick] 113000

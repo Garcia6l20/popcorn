@@ -1,0 +1,9 @@
+$ popcorn profile summary reports --functions 2
+name    executed       ms  sleep   irq  top
+spin  15,995,576  999.723   0.0%  0.7%  prvIdleTask
+wfi    1,147,475  965.467  92.6%  0.7%  prvIdleTask
+
+function                              self  share  reports
+prvCheckTasksWaitingTermination  9,532,610  55.6%        2
+prvIdleTask                      5,481,491  32.0%        2
+2 reports, 17,143,051 instructions

@@ -1,0 +1,1 @@
+$ popcorn coverage merge gw0.pcov gw1.pcov -o all.pcov

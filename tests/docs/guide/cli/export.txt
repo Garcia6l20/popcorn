@@ -1,0 +1,2 @@
+$ popcorn coverage export all.pcov --lcov all.info --drcov all.drcov
+all.drcov: 1 block outside every image was left out

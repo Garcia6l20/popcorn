@@ -1,0 +1,21 @@
+$ popcorn profile show spin.json
+profile from the reset: 999.723 ms at 16,000,000 Hz, 15,995,576 instructions of time, 15,995,576 executed, 0 cuts
+
+== hotspots ==
+function                                     self  self%    inclusive  incl%     calls
+prvIdleTask                             5,429,491  33.9%   14,931,101  93.3%         1
+prvCheckTasksWaitingTermination         9,501,610  59.4%    9,501,610  59.4%         1
+flag_task                                 665,198   4.2%      665,198   4.2%         1
+status_task                               286,277   1.8%      286,277   1.8%         1
+SysTick                                   113,000   0.7%      113,000   0.7%         1
+calls 1,000, returns with no frame 0, calls past the depth limit 0
+
+== sleep ==
+asleep 0.0% of the time, 0 sleeps, 0.000 ms, longest 0.0 us
+by reason: none, cut by the end 0
+held or uncovered: 0.000 ms
+
+== irq ==
+burst window 0.0 us, times in us
+exception              entries   per ms         self         time   longest depth  tailch  burst
+SysTick                  1,000     1.00      7,062.5      7,062.5       7.1     1       0      0

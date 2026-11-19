@@ -29,6 +29,12 @@ Check the install:
 uv run python -c "import popcorn; print(popcorn.version())"
 ```
 
+The `popcorn` command is installed too:
+
+```sh
+uv run popcorn --help
+```
+
 The extras add optional dependencies:
 
 - `pytest` installs pytest for the `popcorn.pytest` plugin.

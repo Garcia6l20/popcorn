@@ -14,6 +14,7 @@ nav = [
     "guide/running.md",
     "guide/testing.md",
     "guide/profiling.md",
+    "guide/cli.md",
     "guide/faults.md",
     "guide/systems.md",
     "guide/snapshots.md",

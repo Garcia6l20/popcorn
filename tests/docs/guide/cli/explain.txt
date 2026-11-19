@@ -1,0 +1,7 @@
+$ popcorn part explain STM32U575QGIx
+instance      ip          version                         model    row                               source       factory             variant           reads
+EXTI          EXTI        -                               builtin  EXTI/-/u5,h5/*                    row          exti_u5h5_factory   -                 -
+FLASH         flash       v1.0.0_U5_Cube                  builtin  flash/v1.0.0_U5_Cube/u5/*         row          flash_factory       flash_u5          flash
+GPIOA         GPIO        STM32U57x_gpio                  builtin  GPIO/STM32U57x_gpio/u5/GPIO?      row          gpio_factory        u575_gpio         -
+GPIOB         GPIO        STM32U57x_gpio                  builtin  GPIO/STM32U57x_gpio/u5/GPIO?      row          gpio_factory        u575_gpio         -
+GPIOC         GPIO        STM32U57x_gpio                  builtin  GPIO/STM32U57x_gpio/u5/GPIO?      row          gpio_factory        u575_gpio         -

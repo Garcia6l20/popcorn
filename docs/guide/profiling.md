@@ -116,6 +116,24 @@ once the run halts or after `await profile.wait_closed()`.
   needs the `hotspots` analysis.
 - `diff(a, b)` compares two reports, such as a JSON report kept from an earlier build.
 
+### From the shell
+
+The [`popcorn` command](cli.md#profile) reads the JSON reports `--popcorn-profile` writes, with no
+script:
+
+```console
+$ popcorn profile show reports/test_spi.json
+$ popcorn profile folded reports/test_spi.json -o spi.folded
+$ popcorn profile diff before/ after/
+$ popcorn profile summary reports/
+```
+
+`popcorn profile chrome REPORT -o spi.cpuprofile` writes the call tree as a V8 `.cpuprofile`.
+speedscope opens it as a file and the Performance panel of Chrome DevTools opens it with Load
+profile. A node is a call tree frame and its `hitCount` is the frame's self instructions. One
+time unit is one instruction. Sleeps do not appear, and the time axis is the call tree weights
+laid end to end, not a recording of when they ran.
+
 ## Profile a test
 
 ```console

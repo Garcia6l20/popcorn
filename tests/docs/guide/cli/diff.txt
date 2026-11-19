@@ -1,0 +1,4 @@
+$ popcorn profile diff spin.json wfi.json --table functions --top 3
+functions
+  prvCheckTasksWaitingTermination  self=-9,470,610 inclusive=-9,470,610
+  prvIdleTask  self=-5,377,491 inclusive=-14,848,101
