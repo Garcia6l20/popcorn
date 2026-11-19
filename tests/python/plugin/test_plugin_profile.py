@@ -397,3 +397,48 @@ def test_xdist_workers_name_the_files_by_node_id_alone(pytester: pytest.Pytester
     result.stdout.fnmatch_lines(
         [f"popcorn: 2 profile(s) written to {pytester.path / 'popcorn-profile'}"]
     )
+
+
+LINKED = """
+from pathlib import Path
+
+import popcorn
+from popcorn.units import us
+
+
+def project(name):
+    return popcorn.MachineDescription(
+        part="STM32U575QGIx",
+        description=Path({description!r}),
+        images=[popcorn.Elf(Path({elf!r}))],
+        name=name,
+        boot=popcorn.Boot(until="main", budget=1_000_000),
+    )
+
+
+async def test_link(machine_factory):
+    a = await machine_factory.booted(project("a"), name="a")
+    b = await machine_factory.booted(project("b"), name="b")
+    link = popcorn.UartLink("a.USART1", "b.USART1", latency=us(20), baud=460_800)
+    system = popcorn.System({{"a": a, "b": b}}, [link])
+    await system.run(for_=us(100))
+    system.close()
+"""
+
+
+def test_a_profiled_factory_machine_joins_a_system_with_its_profile_closed_and_written(
+    pytester: pytest.Pytester, u575_json: Path
+) -> None:
+    write_conftest(pytester)
+    pytester.makepyfile(LINKED.format(description=str(u575_json), elf=str(USART_LL)))
+    result = run(pytester, "--popcorn-profile=hotspots", "-W", "always::pytest.PytestWarning")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*popcorn closed its profile of machine_factory #1 of *test_link before the machine "
+            "joined a linked system as members.a*"
+        ]
+    )
+    written = reports(pytester.path / "popcorn-profile")
+    assert len(written) == 2
+    assert all(not report.from_reset for report in written.values())

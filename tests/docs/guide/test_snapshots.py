@@ -91,6 +91,7 @@ def test_the_guide_names_the_format_a_snapshot_carries(button: popcorn.Machine) 
     stated = re.search(r"popcorn reads format (\d+)", guide)
     assert stated is not None
     data = button.snapshot().to_bytes()
-    key = b"\x12format\x00"
-    at = data.index(key) + len(key)
+    first = b"\x12format\x00"
+    assert data[4 : 4 + len(first)] == first
+    at = 4 + len(first)
     assert int(stated.group(1)) == int.from_bytes(data[at : at + 8], "little")

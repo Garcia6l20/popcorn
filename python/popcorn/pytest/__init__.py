@@ -130,7 +130,9 @@ the same name from an earlier session is replaced, other files are kept. The sum
 `popcorn: N profile(s) written to DIR`. Under xdist each worker writes the files of its own tests. A
 fixture machine starts from its boot snapshot, so its report holds no boot: `from_reset` is False
 and the timeline is empty. System members are not profiled, and a marker `profile` on a test using a
-system fixture fails its setup.
+system fixture fails its setup. A profiled `machine_factory` machine that joins a `System` has its
+profile closed and written first, with a PytestWarning naming the member: the report covers the
+machine alone, up to the `System` call.
 
 `--popcorn-part=PART` builds every machine the plugin makes on the shipped part `PART`, the part of
 the selected config of each description replaced: machine fixtures, system members and

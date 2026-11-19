@@ -42,6 +42,7 @@ class ProfileRun:
         self._analyses = analyses
         self._stack = contextlib.ExitStack()
         self._profile: Profile | None = None
+        self._finished = False
 
     def start(self, machine: Machine) -> bool:
         """Open the profile on the parked `machine`. A profile that cannot open is one
@@ -60,7 +61,21 @@ class ProfileRun:
                 stacklevel=1,
             )
             return False
+        recording = machine._profiling  # pyright: ignore[reportPrivateUsage]
+        if recording is not None:
+            recording.release_for_link = self._release
         return True
+
+    def _release(self, member: str) -> None:
+        warnings.warn(
+            pytest.PytestWarning(
+                f"popcorn closed its profile of {self._label} of {self._item.nodeid} before the "
+                f"machine joined a linked system as members.{member}: the report covers the "
+                "machine alone"
+            ),
+            stacklevel=1,
+        )
+        self.finish()
 
     def finish(self) -> None:
         """Close the profile of the parked machine, write its JSON report and add its text to
@@ -72,6 +87,9 @@ class ProfileRun:
             pytest.PytestWarning: The report could not be written, under
                 `-W error::pytest.PytestWarning`.
         """
+        if self._finished:
+            return
+        self._finished = True
         try:
             self._stack.close()
         except Exception as error:

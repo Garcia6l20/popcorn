@@ -1503,7 +1503,9 @@ class Machine:
 
         Entered parked only. Leaving the block takes the counts at once while parked, and at the
         next block boundary inside a free run: call `report()` after the run halts or after
-        `await profile.wait_closed()`.
+        `await profile.wait_closed()`. A profile covers one lone machine: a machine whose profile
+        is open cannot join a `System` until the profile closes, except a profile the pytest
+        plugin opened, which the plugin closes and writes as the machine joins.
 
         "watchdog" logs the CPU writes of the IWDG KR, PR and RLR registers and every change of
         the LSI rate, each in order, and reads PR and RLR once at the entry. `milestones` names

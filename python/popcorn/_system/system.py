@@ -29,6 +29,7 @@ from popcorn._system.checks import (
     end_error,
     offsets_of,
     on_loop,
+    release_profile,
     unmark,
 )
 from popcorn._system.description import SystemSnapshot, SystemStop
@@ -256,6 +257,8 @@ class System:
         offset_ps = offsets_of(self._names, offsets or {})
         self._media: list[Wired] = []
         self._taps: dict[int, UartTap | SpiTap | I2CTap] = {}
+        for name, machine in self._machines.items():
+            release_profile(name, machine)
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )

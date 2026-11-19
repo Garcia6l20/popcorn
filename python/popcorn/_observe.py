@@ -195,12 +195,16 @@ class ProfileRecording:
     returned.
     """
 
-    __slots__ = ("_closing", "_native")
+    __slots__ = ("_closing", "_native", "release_for_link")
 
     def __init__(self, native: _core.ProfileHandle) -> None:
         """Wrap a native profile. `Machine._profile` builds it."""
         self._native = native
         self._closing: Pending[tuple[object, VirtualTime]] | None = None
+        self.release_for_link: Callable[[str], None] | None = None
+        """Called with the member name when the machine joins a `System` while the profile is
+        open, to close it first, as the pytest plugin does for the profiles it opened. None
+        refuses the machine."""
 
     @property
     def closed(self) -> bool:

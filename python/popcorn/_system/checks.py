@@ -84,7 +84,7 @@ def check_member(name: str, machine: Machine) -> None:
             expected="a machine in no linked system",
         )
     profiling = machine._profiling  # pyright: ignore[reportPrivateUsage]
-    if profiling is not None and not profiling.closed:
+    if profiling is not None and not profiling.closed and profiling.release_for_link is None:
         raise ConfigError(
             f"members.{name}: a profile covers one lone machine, close it before linking",
             key=f"members.{name}",
@@ -99,6 +99,20 @@ def check_member(name: str, machine: Machine) -> None:
         )
     if machine.busy:
         raise MachineBusy(f"members.{name}: the machine is busy")
+
+
+def release_profile(name: str, machine: Machine) -> None:
+    """Close the open profile of the member `name` that a `release_for_link` owner lets go."""
+    profiling = machine._profiling  # pyright: ignore[reportPrivateUsage]
+    if profiling is None or profiling.closed or profiling.release_for_link is None:
+        return
+    profiling.release_for_link(name)
+    if not profiling.closed:
+        raise ConfigError(
+            f"members.{name}: a profile covers one lone machine, its owner did not close it",
+            key=f"members.{name}",
+            expected="a machine with no open profile",
+        )
 
 
 def check_target(for_: VirtualDuration | None, until: VirtualTime | None) -> None:
