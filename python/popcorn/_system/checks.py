@@ -83,6 +83,13 @@ def check_member(name: str, machine: Machine) -> None:
             key=f"members.{name}",
             expected="a machine in no linked system",
         )
+    profiling = machine._profiling  # pyright: ignore[reportPrivateUsage]
+    if profiling is not None and not profiling.closed:
+        raise ConfigError(
+            f"members.{name}: a profile covers one lone machine, close it before linking",
+            key=f"members.{name}",
+            expected="a machine with no open profile",
+        )
     if machine._on_reset_request != "stop":  # pyright: ignore[reportPrivateUsage]
         raise ConfigError(
             f'members.{name}: the machine was built with on_reset_request="reset", a system'

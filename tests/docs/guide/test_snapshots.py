@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import popcorn
@@ -83,3 +84,13 @@ async def test_hooks_and_probes_survive_a_restore(button: popcorn.Machine) -> No
     assert pressed.count == 2
     assert not button.periph.GPIOA.pin(5).level
     # --8<-- [end:hooks]
+
+
+def test_the_guide_names_the_format_a_snapshot_carries(button: popcorn.Machine) -> None:
+    guide = (Path(__file__).parents[3] / "docs/guide/snapshots.md").read_text()
+    stated = re.search(r"popcorn reads format (\d+)", guide)
+    assert stated is not None
+    data = button.snapshot().to_bytes()
+    key = b"\x12format\x00"
+    at = data.index(key) + len(key)
+    assert int(stated.group(1)) == int.from_bytes(data[at : at + 8], "little")

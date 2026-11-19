@@ -26,9 +26,10 @@ from popcorn.profiling._watchdog import (
     watchdog,
     watchdog_registers,
 )
-from popcorn.units import VirtualDuration, ms, s
+from popcorn.units import VirtualDuration, ms, s, us
 
 from .conftest import ROOT
+from .linked import member
 from .test_profiling import SPI, TIM, booted
 
 IWDG = popcorn.MachineDescription(
@@ -818,3 +819,24 @@ SCHEMA_2_KEYS = [
     ".schema",
 ]
 """Every key path of a schema 2 report, `[]` for the items of a list."""
+
+
+def test_a_member_with_an_open_profile_is_refused_and_nothing_is_linked(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_tx", "a")
+    b = member(u575, "idle", "b")
+    links = [popcorn.UartLink("a.USART1", "b.USART1", latency=us(20), baud=460_800)]
+    with b.profile("sleep") as profile:
+        with pytest.raises(
+            popcorn.ConfigError, match=r"members\.b: a profile covers one lone"
+        ) as refused:
+            popcorn.System({"a": a, "b": b}, links)
+        assert refused.value.key == "members.b"
+        stop = asyncio.run(b.run(for_=ms(1)))
+        assert stop.reason is popcorn.StopReason.TIME
+    assert profile.report().elapsed_ps == ms(1).ps
+    system = popcorn.System({"a": a, "b": b}, links)
+    asyncio.run(system.run(for_=us(500)))
+    assert system.time_of("b").ps >= us(500).ps
+    system.close()

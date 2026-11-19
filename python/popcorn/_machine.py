@@ -379,6 +379,7 @@ class Machine:
         "_pin_watches",
         "_ports",
         "_posted_bodies",
+        "_profiling",
         "_refs",
         "_registers",
         "_restore_done",
@@ -578,6 +579,7 @@ class Machine:
         self._strict_peripherals = strict_peripherals
         self._on_reset_request = on_reset_request
         self._system: weakref.ref[System] | None = None
+        self._profiling: ProfileRecording | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = ContextCell(contextvars.copy_context())
@@ -1655,6 +1657,7 @@ class Machine:
             write_clock_domain=write_clock_domain,
             **tracker,
         )
+        self._profiling = recording
         try:
             yield recording
         except BaseException as error:
@@ -1663,6 +1666,8 @@ class Machine:
             except Exception as close_error:
                 error.add_note(f"closing the profile also failed: {close_error}")
             raise
+        finally:
+            self._profiling = None
         self._close_profile(recording)
 
     def _close_profile(self, recording: ProfileRecording) -> None:

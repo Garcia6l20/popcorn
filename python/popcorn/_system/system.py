@@ -209,7 +209,8 @@ class System:
 
         Raises:
             ConfigError: A member named apart from its key, `members.<name>`, already in a linked
-                system or built with `on_reset_request="reset"`, or no link, `links`, or a link that
+                system, built with `on_reset_request="reset"` or with a profile open, or no link,
+                `links`, or a link that
                 is neither a `UartLink` nor an `SpiBus` nor an `I2CBus`, `links[i]`, or an SPI end,
                 `links[i].master` or `links[i].slaves[<chip select>]`, that is not an SPI of a
                 member, a master SPI with a board controller, a slave SPI with a board controller or
