@@ -193,7 +193,7 @@ Two families show the steps with a core and a peripheral set of their own:
 | The description disagrees with the variant | `expect_register` or `expect_field` throws `config_error` |
 | A `debug_maps` or `idau_maps` entry is missing for a family | The part has no debug blocks or IDAU map |
 
-`python -m popcorn.stm32 explain <part> [--trustzone]` prints, per instance, its model, the row
+`popcorn part explain <part> [--trustzone]`, also `python -m popcorn.stm32 explain <part> [--trustzone]`, prints, per instance, its model, the row
 that serves it, the row's factory, variant and board members where the row names them, and why an
 instance has none: `row`, `none_no_row` (no row matches) or `none_part_refused` (some row knows
 the IP and version, none serves the part). The generated part pages of the support section list,

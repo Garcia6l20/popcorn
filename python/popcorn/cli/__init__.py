@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import click
 
 from popcorn.cli._coverage import coverage
+from popcorn.cli._part import part
 from popcorn.cli._profile import profile
 
 __all__ = ["cli", "main"]
@@ -20,6 +21,7 @@ def cli() -> None:
 
 cli.add_command(profile)
 cli.add_command(coverage)
+cli.add_command(part)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
