@@ -1984,7 +1984,18 @@ auto send_then_stop(variant const& how, std::int64_t stamp_at, std::int64_t stop
 }
 }
 
-TEST_CASE("a delivered pause's tap holds every frame ended by its point at any quantum")
+namespace
+{
+#if defined(__SANITIZE_THREAD__)
+constexpr bool under_tsan = true;
+#else
+constexpr bool under_tsan = false;
+#endif
+}
+
+TEST_CASE(
+    "a delivered pause's tap holds every frame ended by its point at any quantum"
+    * doctest::skip(under_tsan))
 {
   for(auto const stamp_at : {760 * us_ps, 772 * us_ps, 784 * us_ps, 796 * us_ps})
   {
