@@ -73,13 +73,20 @@ firmware's bytes not read by a tool are dropped too. `cdc.write()` while no driv
 and the next driver takes the bytes. As on a real `ttyACM`, a tool that set `TIOCEXCL` on the pty
 frees it by closing it: once the last tool closed the pty, the next `open()` succeeds, whether the
 machine runs, sleeps or is parked. A watcher thread per pty clears the flag right after the last
-close, usually within microseconds and within 1 s under load, with no slice needed, so a tool
+close, usually within microseconds and within 1 s under load, with no slice needed. A process that
+reads `/proc/<pid>/fd` of the tool at the moment it closes the pty, such as `lsof` or `ps`, delays
+the kernel's close event by one of its system calls, and the clear and the flush with it, so a tool
 started after another one exited opens the pty. A process that closes the pty and opens it again
-with no gap can still find it exclusive. Tools running as root open an exclusive pty anyway. A
-re-enumerated device is a fresh port, so a detach or attach clears the flag too, also while a tool
-still holds the pty open. That clear happens at the next slice boundary: a re-enumeration the
-firmware drives is cleared before the machine parks, a `detach()` or `attach()` on a parked machine
-on the next run.
+with no gap can still find it exclusive. Tools running as root open an exclusive pty anyway. The
+last close also drops the bytes the pty holds for tools that no tool read, as a serial port drops
+its tty buffer when its last user closes it: the next tool never reads the previous tool's answer.
+The bytes the firmware sends while no tool holds the pty after that close are dropped too, so a
+late answer to a request the closed tool made never reaches the next one. Bytes sent before the
+first open wait for it, and bytes sent after the next open reach that tool. A re-enumerated device
+is a fresh port, so a detach or attach clears the flag too, also while a tool still holds the pty
+open.
+That clear happens at the next slice boundary: a re-enumeration the firmware drives is cleared
+before the machine parks, a `detach()` or `attach()` on a parked machine on the next run.
 
 The watcher counts opens and closes through inotify. The kernel merges two identical events that
 follow each other before the watcher reads them, so the count is a hint. After a close the bridge
@@ -87,9 +94,10 @@ checks it by scanning `/proc/*/fd` for the tools still holding the pty, at the n
 or once the pty saw no open or close for 20 ms. A tool found after the watcher cleared the flag gets
 it back, unless another tool opened the pty in between. So two tools that both opened the pty before
 the watcher read the first open leave a short window after the first close where a third tool can
-open it. A tool of another user, another pid namespace, a `hidepid` mount or a non-dumpable process
-is invisible to the scan and does not keep the flag. A child forked with the pty open holds it as on
-a real port, so the flag stays until the child closes it or exits. If the kernel refuses the inotify
+open it, and the flush of the unread bytes can drop those a tool still holding the pty had not read.
+A tool of another user, another pid namespace, a `hidepid` mount or a non-dumpable process is
+invisible to the scan and does not keep the flag. A child forked with the pty open holds it as on a
+real port, so the flag stays until the child closes it or exits. If the kernel refuses the inotify
 watch the bridge needs, `machine.board.pty()` still works, logs one warning and clears the flag only
 at a detach or attach. If the system refuses the watcher thread, the bridge logs one warning and
 clears the flag at the next slice boundary after the close. UART ptys behave the same way.

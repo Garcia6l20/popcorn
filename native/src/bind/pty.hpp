@@ -180,10 +180,17 @@ using slave_opener = std::move_only_function<int(char const*)>;
  *        descriptor counts, one holding only the bridge's own slave does not. A holder found
  *        after a clear sets the flag again, unless a tool opened since: two opens made before
  *        the watcher read the first count once, so between such a clear and the walk another
- *        tool can open the pty. A process that closes the pty and opens it again with no gap can
- *        still find it exclusive: the clear follows the close by the watcher's wake-up. Tools
- *        running as root open an exclusive pty anyway. The watcher runs no model code, no
- *        Python and no logging, and takes only the bridge's own mutex.
+ *        tool can open the pty. At the last close the bridge also drops the bytes the pty holds
+ *        for tools that no tool read, as a serial port drops its tty buffer when its last user
+ *        closes it. flush() drops the bytes the link sends while no tool holds the pty after such
+ *        a close, ordered with that flush under the bridge's mutex. It applies the queued events
+ *        first, and confirms the empty count with a holder scan before it drops, since the merge
+ *        above can leave a stale 0. Bytes sent before the first open stay buffered. The merge can
+ *        bring the count to 0 while a tool still holds the pty, and the last close's flush then
+ *        drops the bytes that tool had not read. A process that closes the pty and opens it again
+ *        with no gap can still find it exclusive: the clear follows the close by the
+ *        watcher's wake-up. Tools running as root open an exclusive pty anyway. The watcher runs no
+ *        model code, no Python and no logging, and takes only the bridge's own mutex.
  *
  *        A kernel refusing the watch leaves only the clear at a device change, with one warning.
  *        A system refusing the thread leaves the count to pump(), which clears TIOCEXCL at the
@@ -291,9 +298,11 @@ public:
 
   /**
    * @brief Counts the opens and closes of the pty the watcher has not read yet, then reports
-   *        the changes since the last call. Every open and close made before the call is seen.
-   *        A close whose verification a tool loop kept interrupting is reported at a later
-   *        call, once a walk completed.
+   *        the changes since the last call. Every open made before the call is seen, and every
+   *        close whose last reference to the file was dropped: a process reading
+   *        /proc/<pid>/fd/<n> holds the file for that moment, so a close() can return before the
+   *        close event and the change comes at a later call. A close whose verification a tool
+   *        loop kept interrupting is reported at a later call, once a walk completed.
    *        A close and an open between two calls that leave a tool holding the pty make no
    *        change.
    * @return The changes of the host tools holding the pty, in order, empty for a link that does
@@ -344,6 +353,8 @@ private:
     bool        inexact    = false;
     bool        cleared    = false;
     bool        joined     = false;
+    bool        flushed    = false;
+    bool        confirmed  = false;
   };
 
   struct batch
@@ -417,7 +428,8 @@ private:
 
   /**
    * @brief Reads every pending inotify event into clients_. The kernel emits one open per open
-   *        file description and one close when its last copy closes: dup, fork, O_PATH opens and
+   *        file description and one close when its last reference goes, which can be a /proc walk
+   *        in another process after the tool's close() returned: dup, fork, O_PATH opens and
    *        refused opens emit nothing. It merges an event into an identical unread one before
    *        it, so two quick opens or two quick closes count once, and the count is a hint.
    * @param held The lock of clients_mutex_.
@@ -442,6 +454,12 @@ private:
    * @return Whether an open, a close or an overflow was read.
    */
   auto consume(std::scoped_lock<std::mutex> const& held, verify when) -> bool;
+
+  /**
+   * @brief Drops the bytes the pty holds for tools and no tool read, once per run of closes with
+   *        no open between. Under clients_mutex_.
+   */
+  void drop_unread();
 
   /** @brief Whether a tool walk_holders() found last still holds the pty. Under clients_mutex_. */
   [[nodiscard]] auto still_held() const -> bool;

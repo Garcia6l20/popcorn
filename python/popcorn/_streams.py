@@ -856,6 +856,11 @@ class Board:
         `EIO`. Bytes the tools wrote and the host stream queued for the device before the unbind
         are dropped.
 
+        The last close of the pty drops the bytes the pty holds for tools that no tool read, as
+        a serial port does, so the next tool never reads the previous tool's answer. The bytes
+        the firmware sends while no tool holds the pty after that close are dropped too. Bytes
+        sent before the first open wait for it, and bytes sent after the next open reach that tool.
+
         `Machine.restore` drops the bytes the firmware sent that the bridge has not written into
         the pty yet, for a UART and a CDC function alike. Bytes already in the pty stay readable.
 

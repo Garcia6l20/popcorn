@@ -276,9 +276,11 @@ auto pty_bridge::read_events(std::scoped_lock<std::mutex> const&) -> batch
       else if((event.mask & IN_OPEN) != 0)
       {
         ++clients_.count;
-        clients_.holds  = true;
-        clients_.opened = true;
-        clients_.joined = clients_.cleared;
+        clients_.holds     = true;
+        clients_.opened    = true;
+        clients_.flushed   = false;
+        clients_.confirmed = false;
+        clients_.joined    = clients_.cleared;
       }
       else if((event.mask & IN_CLOSE) != 0)
       {
@@ -300,15 +302,15 @@ auto pty_bridge::consume(std::scoped_lock<std::mutex> const& held, verify when) 
     auto const read = read_events(held);
     changed         = changed or read.any;
     auto exclusive  = 0;
-    if(read.closed
-       and not clients_.inexact
-       and clients_.count == 0
-       and ::ioctl(slave_.get(), TIOCGEXCL, &exclusive) == 0
-       and exclusive != 0)
+    if(read.closed and not clients_.inexact and clients_.count == 0)
     {
-      (void)::ioctl(slave_.get(), TIOCNXCL);
-      clients_.cleared = true;
-      clients_.joined  = false;
+      drop_unread();
+      if(::ioctl(slave_.get(), TIOCGEXCL, &exclusive) == 0 and exclusive != 0)
+      {
+        (void)::ioctl(slave_.get(), TIOCNXCL);
+        clients_.cleared = true;
+        clients_.joined  = false;
+      }
     }
     if(when == verify::later or not clients_.unverified)
     {
@@ -332,10 +334,17 @@ auto pty_bridge::consume(std::scoped_lock<std::mutex> const& held, verify when) 
         holders_ = std::move(*found);
       }
       clients_.holds = not holders_.empty();
+      if(clients_.holds)
+      {
+        clients_.flushed   = false;
+        clients_.confirmed = false;
+      }
       if(not clients_.holds)
       {
-        clients_.count   = 0;
-        clients_.inexact = false;
+        clients_.confirmed = true;
+        clients_.count     = 0;
+        clients_.inexact   = false;
+        drop_unread();
         (void)::ioctl(slave_.get(), TIOCNXCL);
       }
       else if(clients_.cleared and not clients_.joined)
@@ -347,6 +356,14 @@ auto pty_bridge::consume(std::scoped_lock<std::mutex> const& held, verify when) 
     clients_.cleared    = false;
     clients_.joined     = false;
     return changed;
+  }
+}
+
+void pty_bridge::drop_unread()
+{
+  if(not std::exchange(clients_.flushed, true))
+  {
+    (void)::tcflush(slave_.get(), TCIFLUSH);
   }
 }
 
@@ -616,20 +633,57 @@ auto pty_bridge::flush() -> std::optional<std::string>
   {
     outgoing_.clear();
   }
-  std::size_t written = 0;
-  while(written < outgoing_.size())
   {
-    auto const put = ::write(master_.get(), outgoing_.data() + written, outgoing_.size() - written);
-    if(put > 0)
+    auto                   interrupted = false;
+    std::scoped_lock const lock{clients_mutex_};
+    if(not outgoing_.empty() and clients_.flushed)
     {
-      written += static_cast<std::size_t>(put);
+      if(consume(lock, verify::later) and wake_.get() >= 0)
+      {
+        (void)::eventfd_write(wake_.get(), 1);
+      }
+      if(clients_.flushed and not clients_.inexact and clients_.count == 0)
+      {
+        if(not clients_.confirmed)
+        {
+          if(auto found = walk_holders(); not found)
+          {
+            interrupted = true;
+          }
+          else if(found->empty())
+          {
+            clients_.confirmed = true;
+          }
+          else
+          {
+            holders_           = std::move(*found);
+            clients_.holds     = true;
+            clients_.flushed   = false;
+            clients_.confirmed = false;
+          }
+        }
+        if(clients_.confirmed)
+        {
+          outgoing_.clear();
+        }
+      }
     }
-    else if(put == 0 or errno != EINTR)
+    std::size_t written = 0;
+    while(not interrupted and written < outgoing_.size())
     {
-      break;
+      auto const put =
+          ::write(master_.get(), outgoing_.data() + written, outgoing_.size() - written);
+      if(put > 0)
+      {
+        written += static_cast<std::size_t>(put);
+      }
+      else if(put == 0 or errno != EINTR)
+      {
+        break;
+      }
     }
+    outgoing_.erase(outgoing_.begin(), outgoing_.begin() + static_cast<std::ptrdiff_t>(written));
   }
-  outgoing_.erase(outgoing_.begin(), outgoing_.begin() + static_cast<std::ptrdiff_t>(written));
   std::optional<std::string> warning;
   if(outgoing_.size() > pty_outgoing_limit)
   {
