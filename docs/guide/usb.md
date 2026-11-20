@@ -107,9 +107,21 @@ SET_CONTROL_LINE_STATE with DTR and RTS set, unless the device already has both 
 that leaves no tool holding the pty sends it with both clear, so the firmware sees a falling DTR
 edge between two tool runs and a rising one at the next. The close drops the lines whatever the
 tool's `HUPCL` setting. The bridge sees opens and closes at the slice boundary, like the byte
-bridging. A tool that opens and closes the pty inside one slice makes both edges. A close
-followed by a reopen inside one slice that leaves a tool holding the pty makes none. A child
-forked with the pty open and a second tool keep DTR set until the last of them closed it.
+bridging. A tool that opens and closes the pty inside one slice makes both edges. The close
+that leaves no tool holding the pty, followed by the next tool's open inside one slice, makes
+a falling and a rising DTR edge, in that order. A close that leaves another tool holding the
+pty makes no edge. A child forked with the pty open and a second tool keep DTR set until the
+last of them closed it.
+
+The bytes the closing tool wrote reach the device first, then the two edges, then the bytes
+the next tool wrote, as on a `ttyACM` port. The bridge splits the stream at the moment its
+watcher reads the close: bytes that reach the master later follow the edges, and bytes the next
+tool wrote before the watcher read that close precede them. The bridge counts holders from
+inotify events, which merge identical unread events: two opens read as one, and two closes read
+as one. Two tools opened back to back and read together make an extra falling and rising edge
+at a later open. Two tools closed back to back and read together make no edge at an open that
+follows. When the next tool opens while the bridge verifies the close, the edges come at the
+next slice boundary, after the bytes that tool wrote in the first slice.
 
 While a tool holds the pty, DTR and RTS are raised again once a configured driver exists after
 a `restore()` or after a `detach()` and `attach()` that left them clear.

@@ -275,6 +275,7 @@ auto pty_bridge::read_events(std::scoped_lock<std::mutex> const&) -> batch
       }
       else if((event.mask & IN_OPEN) != 0)
       {
+        read.cycle = read.cycle or std::exchange(clients_.emptied, false);
         ++clients_.count;
         clients_.holds     = true;
         clients_.opened    = true;
@@ -284,7 +285,12 @@ auto pty_bridge::read_events(std::scoped_lock<std::mutex> const&) -> batch
       }
       else if((event.mask & IN_CLOSE) != 0)
       {
-        read.closed = true;
+        read.closed      = true;
+        clients_.emptied = clients_.count == 1 and not clients_.inexact;
+        if(clients_.emptied and wants_sessions_)
+        {
+          read_master(clients_.farewell);
+        }
         clients_.count -= clients_.count > 0 ? 1 : 0;
         clients_.closed     = true;
         clients_.unverified = true;
@@ -301,6 +307,7 @@ auto pty_bridge::consume(std::scoped_lock<std::mutex> const& held, verify when) 
   {
     auto const read = read_events(held);
     changed         = changed or read.any;
+    clients_.cycled = clients_.cycled or read.cycle;
     auto exclusive  = 0;
     if(read.closed and not clients_.inexact and clients_.count == 0)
     {
@@ -379,7 +386,8 @@ auto pty_bridge::take_sessions() -> std::vector<session_edge>
     eventfd_t drained = 0;
     (void)::eventfd_read(wake_.get(), &drained);
   }
-  clients seen;
+  clients    seen;
+  auto const was_held = held_;
   {
     std::scoped_lock const lock{clients_mutex_};
     std::ignore     = consume(lock, verify::now);
@@ -387,7 +395,8 @@ auto pty_bridge::take_sessions() -> std::vector<session_edge>
     clients_.opened = false;
     if(not seen.unverified)
     {
-      clients_.closed = clients_.overflowed = false;
+      clients_.closed = clients_.overflowed = clients_.cycled = false;
+      clients_.emptied                                        = clients_.emptied and seen.holds;
     }
   }
   if(not wants_sessions_)
@@ -399,7 +408,17 @@ auto pty_bridge::take_sessions() -> std::vector<session_edge>
     held_ = true;
     changes.push_back(session_edge::opened);
   }
-  if(seen.unverified or (not seen.closed and not seen.overflowed))
+  if(seen.unverified)
+  {
+    return changes;
+  }
+  if(seen.cycled and was_held and seen.holds and not seen.overflowed)
+  {
+    changes.push_back(session_edge::closed);
+    changes.push_back(session_edge::opened);
+    return changes;
+  }
+  if(not seen.closed and not seen.overflowed)
   {
     return changes;
   }
@@ -411,12 +430,17 @@ auto pty_bridge::take_sessions() -> std::vector<session_edge>
   return changes;
 }
 
-void pty_bridge::deliver(
-    std::vector<session_edge> const& sessions,
-    std::vector<std::uint8_t> const& input) const
+void pty_bridge::deliver(std::vector<session_edge> const& sessions, host_input const& input) const
 {
   auto const trailing_close = not sessions.empty() and sessions.back() == session_edge::closed;
   auto const before         = sessions.size() - (trailing_close ? 1 : 0);
+  auto       farewell       = not input.before.empty();
+  auto const send_farewell  = [&] {
+    if(std::exchange(farewell, false))
+    {
+      link_->send(input.before);
+    }
+  };
   for(auto const edge : sessions | std::views::take(before))
   {
     if(edge == session_edge::opened)
@@ -425,12 +449,14 @@ void pty_bridge::deliver(
     }
     else
     {
+      send_farewell();
       link_->host_closed();
     }
   }
-  if(not input.empty())
+  send_farewell();
+  if(not input.after.empty())
   {
-    link_->send(input);
+    link_->send(input.after);
   }
   if(trailing_close)
   {
@@ -528,22 +554,30 @@ auto pty_bridge::pump() -> std::optional<std::string>
   return flush();
 }
 
-auto pty_bridge::take_input() -> std::vector<std::uint8_t>
+void pty_bridge::read_master(std::vector<std::uint8_t>& into) const
 {
-  std::vector<std::uint8_t>      incoming;
   std::array<std::uint8_t, 4096> chunk{};
   for(;;)
   {
     auto const got = ::read(master_.get(), chunk.data(), chunk.size());
     if(got > 0)
     {
-      incoming.append_range(std::span{chunk}.first(static_cast<std::size_t>(got)));
+      into.append_range(std::span{chunk}.first(static_cast<std::size_t>(got)));
     }
     else if(got == 0 or errno != EINTR)
     {
       break;
     }
   }
+}
+
+auto pty_bridge::take_input() -> host_input
+{
+  host_input             incoming;
+  std::scoped_lock const lock{clients_mutex_};
+  incoming.before = std::move(clients_.farewell);
+  clients_.farewell.clear();
+  read_master(incoming.after);
   return incoming;
 }
 
@@ -578,8 +612,9 @@ void pty_bridge::hang_up()
   int const              locked = 1;
   (void)::ioctl(master_.get(), TIOCSPTLCK, &locked);
   (void)::ioctl(slave_.get(), TIOCNXCL);
-  clients_.cleared    = false;
-  std::ignore         = consume(lock, verify::later);
+  clients_.cleared = false;
+  std::ignore      = consume(lock, verify::later);
+  clients_.farewell.clear();
   auto       cause    = 0;
   auto const try_open = [&] {
     auto const got =
@@ -717,7 +752,7 @@ auto pump_all(pty_bridges& ptys) -> std::vector<pty_warning>
   {
     std::shared_ptr<pty_bridge> bridge;
     std::vector<session_edge>   sessions;
-    std::vector<std::uint8_t>   input;
+    host_input                  input;
   };
   std::vector<arrival> arrivals;
   {

@@ -461,6 +461,7 @@ TEST_CASE("an open after a walk leaves the holders found to be re-checked")
   pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events)};
 
   auto const first  = open_client(bridge.path());
+  std::ignore       = bridge.pump();
   auto const second = open_client(bridge.path());
   std::ignore       = bridge.pump();
   release(bridge.path(), first);
@@ -779,7 +780,7 @@ TEST_CASE("a child forked with the bridge's own slave does not hold the pty")
   CHECK(exits_cleanly(child));
 }
 
-TEST_CASE("a close and a reopen between two pumps make no change while the watcher runs")
+TEST_CASE("a close and a reopen between two pumps make a close and an open while the watcher runs")
 {
   std::vector<std::string> events;
   pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events)};
@@ -793,11 +794,11 @@ TEST_CASE("a close and a reopen between two pumps make no change while the watch
   auto const second = open_client(bridge.path());
   std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
   std::ignore = bridge.pump();
-  CHECK(events == std::vector<std::string>{"open"});
+  CHECK(events == std::vector<std::string>{"open", "close", "open"});
 
   release(bridge.path(), second);
   std::ignore = bridge.pump();
-  CHECK(events == std::vector<std::string>{"open", "close"});
+  CHECK(events == std::vector<std::string>{"open", "close", "open", "close"});
 }
 
 namespace
@@ -818,6 +819,22 @@ struct gated_start
   {
     open.store(true);
     open.notify_all();
+  }
+};
+
+struct gate_guard
+{
+  gated_start& gate;
+
+  gate_guard(gate_guard const&)            = delete;
+  gate_guard& operator=(gate_guard const&) = delete;
+
+  explicit gate_guard(gated_start& started) : gate{started}
+  {}
+
+  ~gate_guard()
+  {
+    gate.release();
   }
 };
 
@@ -859,6 +876,10 @@ void overflow_queue(std::string const& path)
   for(std::size_t round = 0; round <= limit / 2; ++round)
   {
     ::close(open_client(path));
+  }
+  for(auto round = 0; round < 8; ++round)
+  {
+    release(path, open_client(path));
   }
 }
 }
@@ -958,8 +979,10 @@ constexpr int tool_flags = O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC;
 
 struct cdc_rig
 {
-  std::shared_ptr<usb::cdc_hub> hub   = std::make_shared<usb::cdc_hub>();
-  int                           posts = 0;
+  std::shared_ptr<usb::cdc_hub>      hub   = std::make_shared<usb::cdc_hub>();
+  int                                posts = 0;
+  std::vector<std::pair<bool, bool>> lines;
+  std::vector<std::size_t>           bytes_at_post;
 
   explicit cdc_rig(bool bound)
   {
@@ -1026,8 +1049,10 @@ struct cdc_rig
       attachments     = hub->channel(held, 0).attachments;
       unbinds         = hub->channel(held, 0).unbinds;
     }
-    return std::make_unique<cdc_pty_link>(hub, 0, attachments, unbinds, [this](bool, bool) {
+    return std::make_unique<cdc_pty_link>(hub, 0, attachments, unbinds, [this](bool dtr, bool rts) {
       ++posts;
+      lines.emplace_back(dtr, rts);
+      bytes_at_post.push_back(host_bytes());
       return true;
     });
   }
@@ -1579,10 +1604,6 @@ TEST_CASE("firmware output is kept while the event queue overflowed")
   release(bridge.path(), tool_open(bridge.path()));
   std::ignore = bridge.take_sessions();
   overflow_queue(bridge.path());
-  for(auto round = 0; round < 8; ++round)
-  {
-    release(bridge.path(), tool_open(bridge.path()));
-  }
   pending     = {'k', 'e', 'p', 't'};
   std::ignore = bridge.flush();
 
@@ -1614,4 +1635,352 @@ TEST_CASE("firmware output sent between a re-attach and the next open is dropped
   std::ignore = bridge.pump();
   CHECK(read_ready(next, 1000) == std::vector<std::uint8_t>{'l', 'i', 'v', 'e'});
   ::close(next);
+}
+
+TEST_CASE("a last close and the next open read in one pump reach the link as a close and an open")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+
+  release(bridge.path(), first);
+  auto const second = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close", "open"});
+
+  std::ignore = bridge.pump();
+  CHECK(events.size() == 3);
+
+  release(bridge.path(), second);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close", "open", "close"});
+}
+
+TEST_CASE("a close that leaves a holder and a later open make no close")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  auto const other = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  release(bridge.path(), first);
+  auto const third = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  release(bridge.path(), other);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  release(bridge.path(), third);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close"});
+}
+
+TEST_CASE("bytes the next holder wrote in the pump of the cycle follow the open")
+{
+  std::vector<std::string> events;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events)};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  auto const second = open_client(bridge.path());
+  REQUIRE(::write(second, "hi", 2) == 2);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close", "open", "send hi"});
+  ::close(second);
+}
+
+TEST_CASE("a CDC pty sends DTR low then high when a last close and an open meet in one pump")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+
+  auto const first = tool_open(bridge.path());
+  REQUIRE(first >= 0);
+  std::ignore = bridge.pump();
+  CHECK(rig.lines.empty());
+
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  auto const second = tool_open(bridge.path());
+  REQUIRE(second >= 0);
+  REQUIRE(::write(second, "ab", 2) == 2);
+  std::ignore = bridge.pump();
+  CHECK(
+      rig.lines
+      == std::vector<std::pair<bool, bool>>{
+          {false, false},
+          {true,  true }
+  });
+  CHECK(rig.bytes_at_post == std::vector<std::size_t>{0, 0});
+  CHECK(rig.host_bytes() == 2);
+  ::close(second);
+}
+
+TEST_CASE("the bytes the closing tool wrote reach the link before the close and the open")
+{
+  std::vector<std::string> events;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events)};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  REQUIRE(::write(first, "aa", 2) == 2);
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  auto const second = open_client(bridge.path());
+  REQUIRE(::write(second, "bb", 2) == 2);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "send aa", "close", "open", "send bb"});
+  ::close(second);
+}
+
+TEST_CASE("a CDC pty sends the closing tool's bytes, then DTR low and high, then the next tool's")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+
+  auto const first = tool_open(bridge.path());
+  REQUIRE(first >= 0);
+  std::ignore = bridge.pump();
+  REQUIRE(::write(first, "aa", 2) == 2);
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  auto const second = tool_open(bridge.path());
+  REQUIRE(second >= 0);
+  REQUIRE(::write(second, "bb", 2) == 2);
+  std::ignore = bridge.pump();
+  CHECK(
+      rig.lines
+      == std::vector<std::pair<bool, bool>>{
+          {false, false},
+          {true,  true }
+  });
+  CHECK(rig.bytes_at_post == std::vector<std::size_t>{2, 2});
+  CHECK(rig.host_bytes() == 4);
+  ::close(second);
+}
+
+TEST_CASE("a closing tool's bytes precede the DTR cycle when the next tool opens with no write")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+
+  auto const first = tool_open(bridge.path());
+  REQUIRE(first >= 0);
+  std::ignore = bridge.pump();
+  REQUIRE(::write(first, "x", 1) == 1);
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  auto const second = tool_open(bridge.path());
+  REQUIRE(second >= 0);
+  std::ignore = bridge.pump();
+  CHECK(rig.bytes_at_post == std::vector<std::size_t>{1, 1});
+  CHECK(rig.host_bytes() == 1);
+  ::close(second);
+}
+
+TEST_CASE("bytes a closing tool wrote reach the link first when no open follows")
+{
+  std::vector<std::string> events;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events)};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  REQUIRE(::write(first, "z", 1) == 1);
+  release(bridge.path(), first);
+  std::this_thread::sleep_for(std::chrono::milliseconds{2 * popcorn::bind::detail::pty_quiet_ms});
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "send z", "close"});
+}
+
+TEST_CASE("a close that left a holder the walk found keeps the cycle for the next open")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first  = open_client(bridge.path());
+  auto const second = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  release(bridge.path(), first);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+
+  auto const third = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close", "open"});
+  ::close(second);
+  ::close(third);
+}
+
+TEST_CASE("an open after a close with no tool held at the start of the pump makes an open only")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  release(bridge.path(), open_client(bridge.path()));
+  auto const second = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  ::close(second);
+}
+
+TEST_CASE("a close that leaves a holder after a cycle makes no further close")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  release(bridge.path(), first);
+  auto const second = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  REQUIRE(events == std::vector<std::string>{"open", "close", "open"});
+
+  auto const third = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  release(bridge.path(), second);
+  auto const fourth = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close", "open"});
+  ::close(third);
+  ::close(fourth);
+}
+
+TEST_CASE("a cycle read in the same batch as an event queue overflow makes no edge")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  release(bridge.path(), first);
+  auto const second = open_client(bridge.path());
+  overflow_queue(bridge.path());
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  ::close(second);
+}
+
+TEST_CASE("a close and an open after an overflow was verified make no cycle")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  overflow_queue(bridge.path());
+  std::ignore = bridge.pump();
+  REQUIRE(events == std::vector<std::string>{"open"});
+
+  release(bridge.path(), first);
+  auto const second = open_client(bridge.path());
+  std::ignore       = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  ::close(second);
+}
+
+TEST_CASE(
+    "an open while a forked child holds the pty after the tool that opened it closed makes no "
+    "cycle")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  std::array<int, 2> hold{};
+  REQUIRE(::pipe(hold.data()) == 0);
+  auto const child = ::fork();
+  REQUIRE(child >= 0);
+  if(child == 0)
+  {
+    ::close(hold[1]);
+    char byte   = 0;
+    std::ignore = ::read(hold[0], &byte, 1);
+    ::_exit(0);
+  }
+  ::close(hold[0]);
+  ::close(first);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+
+  auto const third = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+
+  ::close(hold[1]);
+  CHECK(exits_cleanly(child));
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+  release(bridge.path(), third);
+  std::ignore = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open", "close"});
+}
+
+TEST_CASE(
+    "a child that opens the pty itself is a holder and an open after the first tool closes makes "
+    "no cycle")
+{
+  std::vector<std::string> events;
+  gated_start              gate;
+  pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), gate};
+  gate_guard               guard{gate};
+
+  auto const first = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  std::array<int, 2> hold{};
+  std::array<int, 2> ready{};
+  REQUIRE(::pipe(hold.data()) == 0);
+  REQUIRE(::pipe(ready.data()) == 0);
+  auto const child = ::fork();
+  REQUIRE(child >= 0);
+  if(child == 0)
+  {
+    ::close(first);
+    ::close(hold[1]);
+    ::close(ready[0]);
+    auto const own  = ::open(bridge.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+    char       byte = own >= 0 ? 'y' : 'n';
+    std::ignore     = ::write(ready[1], &byte, 1);
+    std::ignore     = ::read(hold[0], &byte, 1);
+    ::_exit(0);
+  }
+  ::close(hold[0]);
+  ::close(ready[1]);
+  char opened = 0;
+  REQUIRE(::read(ready[0], &opened, 1) == 1);
+  REQUIRE(opened == 'y');
+  std::ignore = bridge.pump();
+  release(bridge.path(), first);
+  auto const third = open_client(bridge.path());
+  std::ignore      = bridge.pump();
+  CHECK(events == std::vector<std::string>{"open"});
+
+  ::close(third);
+  ::close(hold[1]);
+  ::close(ready[0]);
+  CHECK(exits_cleanly(child));
 }

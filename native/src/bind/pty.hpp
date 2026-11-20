@@ -32,6 +32,20 @@ inline constexpr int pty_quiet_ms = 20;
  * to a later pump or to the watcher. */
 inline constexpr int pty_walk_retries = 3;
 
+/** @brief What the host wrote to a pty, split at the close that left no tool holding it. */
+struct host_input
+{
+  /** @brief The bytes read at that close, written by the tool that closed. */
+  std::vector<std::uint8_t> before;
+  /** @brief Every byte read after it. */
+  std::vector<std::uint8_t> after;
+
+  [[nodiscard]] auto empty() const noexcept -> bool
+  {
+    return before.empty() and after.empty();
+  }
+};
+
 /** @brief A change of the host tools holding a pty. */
 enum class session_edge : std::uint8_t
 {
@@ -293,8 +307,14 @@ public:
    */
   auto pump() -> std::optional<std::string>;
 
-  /** @brief Reads what the host wrote, until the pty has no more. */
-  [[nodiscard]] auto take_input() -> std::vector<std::uint8_t>;
+  /**
+   * @brief Reads what the host wrote, until the pty has no more. When the watcher read a close
+   *        that left no tool holding a link that wants sessions, it read the master then: those
+   *        bytes are before, the rest after. A tool that wrote after its open before the watcher
+   *        read the previous tool's close puts its bytes in before, and bytes that reach the
+   *        master after that read are in after.
+   */
+  [[nodiscard]] auto take_input() -> host_input;
 
   /**
    * @brief Counts the opens and closes of the pty the watcher has not read yet, then reports
@@ -303,21 +323,24 @@ public:
    *        /proc/<pid>/fd/<n> holds the file for that moment, so a close() can return before the
    *        close event and the change comes at a later call. A close whose verification a tool
    *        loop kept interrupting is reported at a later call, once a walk completed.
-   *        A close and an open between two calls that leave a tool holding the pty make no
-   *        change.
+   *        A close that leaves a counted holder makes no change. A close that drops the last
+   *        counted holder, followed by an open, makes a close and an open, so a link sees every
+   *        last close. The count is a hint: inotify merges identical unread events, so two
+   *        merged opens count once and two merged closes count once. When an open lands
+   *        while the verification of a close runs, the close and the open come at the next
+   *        call, after the bytes the new holder wrote.
    * @return The changes of the host tools holding the pty, in order, empty for a link that does
    *         not want sessions.
    */
   [[nodiscard]] auto take_sessions() -> std::vector<session_edge>;
 
   /**
-   * @brief Delivers sessions and input to the link: every change but a trailing close, the
-   *        input, then that close.
+   * @brief Delivers sessions and input to the link: the input read at a last close, every
+   *        change but a trailing close, the rest of the input, then that close.
    * @param sessions What take_sessions() returned.
    * @param input What take_input() returned.
    */
-  void deliver(std::vector<session_edge> const& sessions, std::vector<std::uint8_t> const& input)
-      const;
+  void deliver(std::vector<session_edge> const& sessions, host_input const& input) const;
 
   /** @brief Whether pump_all() has work for the bridge besides what it read. */
   [[nodiscard]] auto settling() const -> bool
@@ -344,23 +367,27 @@ public:
 private:
   struct clients
   {
-    std::size_t count      = 0;
-    bool        holds      = false;
-    bool        opened     = false;
-    bool        closed     = false;
-    bool        overflowed = false;
-    bool        unverified = false;
-    bool        inexact    = false;
-    bool        cleared    = false;
-    bool        joined     = false;
-    bool        flushed    = false;
-    bool        confirmed  = false;
+    std::size_t               count      = 0;
+    bool                      holds      = false;
+    bool                      opened     = false;
+    bool                      closed     = false;
+    bool                      overflowed = false;
+    bool                      unverified = false;
+    bool                      inexact    = false;
+    bool                      cleared    = false;
+    bool                      joined     = false;
+    bool                      flushed    = false;
+    bool                      confirmed  = false;
+    bool                      cycled     = false;
+    bool                      emptied    = false;
+    std::vector<std::uint8_t> farewell;
   };
 
   struct batch
   {
     bool any    = false;
     bool closed = false;
+    bool cycle  = false;
   };
 
   enum class verify : std::uint8_t
@@ -398,6 +425,9 @@ private:
 
   /** @brief Starts watching path() and its thread through @p start. */
   void start_watching(thread_starter start);
+
+  /** @brief Appends what the host wrote to @p into, until the pty has no more. */
+  void read_master(std::vector<std::uint8_t>& into) const;
 
   /**
    * @brief Hangs the pty up. The kernel refuses an open of a slave its master locked with

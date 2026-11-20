@@ -640,7 +640,8 @@ class PtyBridge:
     returns to what the snapshot held. A UART keeps its state when a tool opens or closes the pty.
     The first open of a CDC pty by a tool sends SET_CONTROL_LINE_STATE with DTR and RTS set,
     unless the device has both set, and the close that leaves no tool holding the pty sends it
-    with both clear, as a `ttyACM` port does. Both are seen at the next slice boundary. While a
+    with both clear, as a `ttyACM` port does. Both are seen at the next slice boundary, and a last
+    close followed by the next tool's open inside one slice makes both, close first. While a
     tool holds the pty, DTR and RTS are raised again after a restore, a detach and attach, or an
     open before the device is configured.
 
