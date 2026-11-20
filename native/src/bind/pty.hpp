@@ -75,6 +75,17 @@ public:
     return false;
   }
 
+  /**
+   * @brief Whether the device behind the link is gone, so the pty is hung up: true while no
+   *        device is bound, and once when a device unbound since the last call that returned true,
+   *        a bind and an unbind between two calls included.
+   * @return False for a link with no such state.
+   */
+  [[nodiscard]] virtual auto detached() -> bool
+  {
+    return false;
+  }
+
   /** @brief Whether the link acts on host_opened() and host_closed(). The bridge wakes the host
    * at an open or a close of the pty only for a link that does. */
   [[nodiscard]] virtual auto wants_sessions() const -> bool
@@ -149,6 +160,10 @@ private:
 /** @brief Starts a pty_bridge's watcher thread, start_thread() or a stand-in for tests. */
 using thread_starter = std::function_ref<std::jthread(std::move_only_function<void()>)>;
 
+/** @brief Opens the slave at a path for a pty_bridge's hang-up, as open(2) does or a stand-in for
+ * tests. Returns the descriptor, or -1 with errno set. */
+using slave_opener = std::move_only_function<int(char const*)>;
+
 /**
  * @brief A host pty bridged to a byte link: host tools open path() like a serial port. Owns both
  *        ends of the pty and keeps the slave open, so the master never reads EIO or polls
@@ -183,7 +198,11 @@ public:
    *        watcher through @p start.
    * @throws std::system_error when no pty can be opened.
    */
-  pty_bridge(std::string name, std::unique_ptr<pty_link> link, thread_starter start = start_thread);
+  pty_bridge(
+      std::string               name,
+      std::unique_ptr<pty_link> link,
+      thread_starter            start  = start_thread,
+      slave_opener              opener = {});
 
   /** @brief Not copyable. */
   pty_bridge(pty_bridge const&) = delete;
@@ -221,6 +240,12 @@ public:
     return scans_.load(std::memory_order_relaxed);
   }
 
+  /** @brief Whether the pty is hung up. Called by the thread that owns the engine. */
+  [[nodiscard]] auto hung_up() const noexcept -> bool
+  {
+    return hung_up_;
+  }
+
   /** @brief Whether the watcher thread runs. */
   [[nodiscard]] auto watching() const noexcept -> bool
   {
@@ -246,6 +271,14 @@ public:
   {
     return wants_write_;
   }
+
+  /**
+   * @brief Hangs the pty up or releases it when the link's detached() differs from hung_up().
+   *        pump() and pump_all() call it before they read what the tools wrote, so bytes written
+   *        before an unbind never reach the device bound next, and the flush() that follows
+   *        does not look again. Called by the thread that owns the engine.
+   */
+  void follow_link();
 
   /**
    * @brief Moves bytes both ways: take_sessions() and take_input() into the link, then flush().
@@ -342,10 +375,39 @@ private:
   std::shared_ptr<std::atomic<bool>> wants_write_ = std::make_shared<std::atomic<bool>>(false);
   bool                               overflowed_  = false;
   bool                               held_        = false;
+  bool                               hung_up_     = false;
+  bool                               followed_    = false;
+  bool                               hang_warned_ = false;
+  bool                               own_open_    = false;
+  slave_opener                       opener_;
   std::mutex                         clients_mutex_;
   clients                            clients_;
   std::vector<std::string>           holders_;
   std::jthread                       watcher_;
+
+  /** @brief Starts watching path() and its thread through @p start. */
+  void start_watching(thread_starter start);
+
+  /**
+   * @brief Hangs the pty up. The kernel refuses an open of a slave its master locked with
+   *        TIOCSPTLCK, with EIO, and checks TIOCEXCL before that lock, so the flag is cleared
+   *        first. A tool that sets it again between the clear and the bridge's own open makes
+   *        that open fail with EBUSY, which is retried once after another clear. The refused open
+   *        sets the tty's I/O error flag: read and write fail with EIO on every descriptor
+   *        already open, the bridge's own slave included, while ioctls keep working. The next
+   *        open that succeeds, after release(), clears the flag for all of them. A reader asleep
+   *        in read or poll is not woken and sees EIO at its next call. A refused open emits no
+   *        inotify event. An open that succeeds anyway is closed, its events are not counted and
+   *        one warning is logged. Drops the bytes the tools wrote that the bridge has not read,
+   *        by reading the master and flushing both queues of the pty.
+   */
+  void hang_up();
+
+  /** @brief Hangs the pty up or releases it when the link's detached() differs from hung_up(). */
+  void follow();
+
+  /** @brief Unlocks the pty. */
+  void release();
 
   /** @brief The watcher thread: polls the inotify descriptor and stop_, consumes under
    * clients_mutex_, writes wake_ after an open or a close, and verifies once no event came for
@@ -419,6 +481,7 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    * @param attachments The channel's attachment count now, the baseline of device_changed().
+   * @param unbinds The channel's unbind count now, the baseline of detached().
    * @param post Posts a SET_CONTROL_LINE_STATE with DTR and RTS as the engine owner, false when
    *        no driver is bound. It returns false when the machine is gone and throws nothing.
    */
@@ -426,11 +489,16 @@ public:
       std::shared_ptr<periph::usb::cdc_hub>     hub,
       std::size_t                               function,
       std::uint64_t                             attachments,
+      std::uint64_t                             unbinds,
       std::move_only_function<bool(bool, bool)> post) noexcept;
 
   void               send(std::span<std::uint8_t const> bytes) override;
   void               drain(std::vector<std::uint8_t>& out) override;
   [[nodiscard]] auto device_changed() -> bool override;
+  /** @brief True while no driver is bound, and once for a driver that unbound since the last
+   * true. A restore of the machine's state is no unbind: the first call after discard() takes the
+   * channel's count as the baseline. */
+  [[nodiscard]] auto detached() -> bool override;
 
   [[nodiscard]] auto wants_sessions() const -> bool override
   {
@@ -464,6 +532,8 @@ private:
   std::shared_ptr<periph::usb::cdc_hub>     hub_;
   std::size_t                               function_;
   std::uint64_t                             seen_{};
+  std::uint64_t                             unbinds_seen_{};
+  bool                                      rebase_ = false;
   std::move_only_function<bool(bool, bool)> post_;
   std::optional<std::uint8_t>               requested_;
   std::uint64_t                             requested_at_{};

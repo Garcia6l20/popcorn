@@ -79,7 +79,8 @@ struct POPCORN_API cdc_channel
   /** @brief Received bytes dropped because `in` held `limit`. */
   std::uint64_t dropped{};
   /** @brief Bytes for the device the driver has not submitted yet, oldest first. Saved in the
-   * driver's state. */
+   * driver's state. An unbind drops them, as a USB disconnect drops the transfers the host had
+   * queued. Bytes queued while no driver is bound stay for the driver bound next. */
   std::deque<std::uint8_t> out{};
   /** @brief Bytes of the OUT transfer in progress. */
   std::uint64_t in_flight{};
@@ -97,6 +98,9 @@ struct POPCORN_API cdc_channel
   /** @brief Drivers bound to this channel and unbound from it, ever. Never reset, so a detach
    * and re-attach between two looks still differ. */
   std::uint64_t attachments{};
+  /** @brief Drivers unbound from this channel, ever: a detach, a bus reset or a restore that
+   * destroys the bound driver. A bind alone leaves it. Never reset. */
+  std::uint64_t unbinds{};
   /** @brief Control transfers submitted for the binding whose result is not in yet. */
   std::set<transfer_id> awaited{};
   /** @brief Results of awaited control transfers not collected yet. */

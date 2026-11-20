@@ -846,6 +846,19 @@ class Board:
         releases the GIL. Open a peer whose connection blocks wall time, a probe or a handshake
         on the pty, while the machine is parked, before `start()` or `running()`.
 
+        A CDC function's pty is hung up while no driver of the device is bound, before the
+        firmware first enumerates and between a detach, a reset or a soft disconnect and the next
+        enumeration: `open()` fails with `EIO`, and `read()` and `write()` on a descriptor a
+        tool holds fail with `EIO` until a tool opens the pty again after the firmware
+        enumerated. The hang-up and the release apply at a slice boundary, so a parked machine
+        keeps the pty as it was until it runs. Nothing orders the release before the wake-up of
+        `await host.wait_configured()`, so a tool that must not fail retries the `open()` on
+        `EIO`. Bytes the tools wrote and the host stream queued for the device before the unbind
+        are dropped.
+
+        `Machine.restore` drops the bytes the firmware sent that the bridge has not written into
+        the pty yet, for a UART and a CDC function alike. Bytes already in the pty stay readable.
+
         Args:
             name: UART instance, or USB device controller with a virtual host.
             function: The n-th CDC ACM function of the device, in interface order. 0 for a

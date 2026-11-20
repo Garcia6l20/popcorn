@@ -148,6 +148,8 @@ public:
     }
     auto const held = hub_->lock();
     ++channel_->attachments;
+    ++channel_->unbinds;
+    channel_->out.clear();
     channel_->comm_interface.reset();
     channel_->ready     = false;
     channel_->in_flight = 0;

@@ -101,11 +101,12 @@ template <typename Body> auto cdc_link::locked(Body&& body) const
 
 auto cdc_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
 {
-  auto const attachments = locked([](usb::cdc_channel& channel) { return channel.attachments; });
-  auto       line        = *this;
+  auto const [attachments, unbinds] = locked(
+      [](usb::cdc_channel& channel) { return std::pair{channel.attachments, channel.unbinds}; });
+  auto line = *this;
   line.host_.reset();
   return std::make_unique<detail::cdc_pty_link>(
-      hub_, function_, attachments, [line = std::move(line)](bool dtr, bool rts) mutable {
+      hub_, function_, attachments, unbinds, [line = std::move(line)](bool dtr, bool rts) mutable {
         try
         {
           return line.post_line_state(dtr, rts);

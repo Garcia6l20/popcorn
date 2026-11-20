@@ -55,15 +55,31 @@ enumerate again.
 and DTR at configuration. `cdc.bound` turns true at configuration, and `await cdc.wait_ready()`
 runs until DTR and RTS went out. `cdc.read_packets()` returns the packets with their times.
 `machine.board.pty("OTG_FS")` bridges the function to a pty any serial tool opens, on first call.
-The pty path stays the same across a detach and re-attach. As on a real `ttyACM`, a tool that set
-`TIOCEXCL` on the pty frees it by closing it: once the last tool closed the pty, the next `open()`
-succeeds, whether the machine runs, sleeps or is parked. A watcher thread per pty clears the flag
-within microseconds of the last close on an idle host, so a tool started after another one exited
-opens the pty at once. A process that closes the pty and opens it again with no gap can still find
-it exclusive. Tools running as root open an exclusive pty anyway. A re-enumerated device is a fresh
-port, so a detach or attach clears the flag too, also while a tool still holds the pty open. That
-clear happens at the next slice boundary: a re-enumeration the firmware drives is cleared before the
-machine parks, a `detach()` or `attach()` on a parked machine on the next run.
+The pty path stays the same across a detach and re-attach. While no driver is bound, which is before
+the firmware first enumerates, after `host.detach()`, an MCU reset or a firmware soft disconnect,
+the pty is hung up as a real `ttyACM` is by the USB detach: `open()` fails with `EIO`, and `read()`
+and `write()` on a descriptor a tool already holds fail with `EIO`. A reader asleep in `read()` or
+`poll()` sees the error at its next call. The hang-up and the release apply at a slice boundary, so
+a parked machine keeps the pty as it was until it runs. Nothing orders the release before the
+wake-up of `await host.wait_configured()`: an `open()` right after it succeeded in every measured
+run, and a tool that must not fail retries the `open()` on `EIO`. Once the firmware enumerates again
+a new `open()` succeeds. A descriptor held across the detach keeps failing until some tool opens the
+pty again, like a port that came back as a new device, so a tool reopens the path after a reset. A
+`restore()` into a bound machine leaves a held descriptor working, and drops the bytes the firmware
+sent that the bridge has not written into the pty yet. Bytes already in the pty stay readable. The
+unbind drops what the host had not delivered: the bytes a tool wrote that popcorn has not read, the
+bytes in the pty's queues, and the bytes `cdc.write()` queued and the device has not taken. The
+firmware's bytes not read by a tool are dropped too. `cdc.write()` while no driver is bound queues,
+and the next driver takes the bytes. As on a real `ttyACM`, a tool that set `TIOCEXCL` on the pty
+frees it by closing it: once the last tool closed the pty, the next `open()` succeeds, whether the
+machine runs, sleeps or is parked. A watcher thread per pty clears the flag right after the last
+close, usually within microseconds and within 1 s under load, with no slice needed, so a tool
+started after another one exited opens the pty. A process that closes the pty and opens it again
+with no gap can still find it exclusive. Tools running as root open an exclusive pty anyway. A
+re-enumerated device is a fresh port, so a detach or attach clears the flag too, also while a tool
+still holds the pty open. That clear happens at the next slice boundary: a re-enumeration the
+firmware drives is cleared before the machine parks, a `detach()` or `attach()` on a parked machine
+on the next run.
 
 The watcher counts opens and closes through inotify. The kernel merges two identical events that
 follow each other before the watcher reads them, so the count is a hint. After a close the bridge
@@ -88,7 +104,7 @@ followed by a reopen inside one slice that leaves a tool holding the pty makes n
 forked with the pty open and a second tool keep DTR set until the last of them closed it.
 
 While a tool holds the pty, DTR and RTS are raised again once a configured driver exists after
-an open before enumeration, a `restore()` or a `detach()` and `attach()` that left them clear.
+a `restore()` or after a `detach()` and `attach()` that left them clear.
 A close with no tool holding the pty sends nothing while no driver is configured. The bridge
 walks `/proc` once for the tools holding the pty and re-checks the ones it found at the next
 closes, so a close costs a walk only when none of them is left. Without the inotify watch the

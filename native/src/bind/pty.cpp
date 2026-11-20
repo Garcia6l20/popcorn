@@ -97,9 +97,13 @@ auto start_thread(std::move_only_function<void()> body) -> std::jthread
   return std::jthread{std::move(body)};
 }
 
-pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link, thread_starter start)
+pty_bridge::pty_bridge(
+    std::string               name,
+    std::unique_ptr<pty_link> link,
+    thread_starter            start,
+    slave_opener              opener)
     : name_{std::move(name)}, link_{std::move(link)}, wants_sessions_{link_->wants_sessions()},
-      forks_{(core::host::watch_forks(), core::host::fork_generation())}
+      forks_{(core::host::watch_forks(), core::host::fork_generation())}, opener_{std::move(opener)}
 {
   int master = -1;
   int slave  = -1;
@@ -137,7 +141,13 @@ pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link, thread_
     errno = failed;
     fail("ttyname_r");
   }
-  path_          = found.data();
+  path_ = found.data();
+  start_watching(start);
+  follow();
+}
+
+void pty_bridge::start_watching(thread_starter start)
+{
   clients_watch_ = unique_fd{::inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
   if(clients_watch_.get() < 0
      or ::inotify_add_watch(clients_watch_.get(), path_.c_str(), IN_OPEN | IN_CLOSE) < 0)
@@ -252,6 +262,10 @@ auto pty_bridge::read_events(std::scoped_lock<std::mutex> const&) -> batch
       inotify_event event{};
       std::memcpy(&event, buffer.data() + at, sizeof event);
       at += sizeof event + event.len;
+      if(own_open_ and (event.mask & (IN_OPEN | IN_CLOSE)) != 0)
+      {
+        continue;
+      }
       read.any = true;
       if((event.mask & IN_Q_OVERFLOW) != 0)
       {
@@ -491,6 +505,7 @@ auto pty_bridge::walk_holders() -> std::optional<std::vector<std::string>>
 
 auto pty_bridge::pump() -> std::optional<std::string>
 {
+  follow_link();
   auto const sessions = take_sessions();
   deliver(sessions, take_input());
   return flush();
@@ -515,6 +530,75 @@ auto pty_bridge::take_input() -> std::vector<std::uint8_t>
   return incoming;
 }
 
+void pty_bridge::follow_link()
+{
+  follow();
+  followed_ = true;
+}
+
+void pty_bridge::follow()
+{
+  auto const detached = link_->detached();
+  if(detached == hung_up_)
+  {
+    return;
+  }
+  hung_up_ = detached;
+  if(detached)
+  {
+    hang_up();
+  }
+  else
+  {
+    release();
+  }
+}
+
+void pty_bridge::hang_up()
+{
+  (void)take_input();
+  std::scoped_lock const lock{clients_mutex_};
+  int const              locked = 1;
+  (void)::ioctl(master_.get(), TIOCSPTLCK, &locked);
+  (void)::ioctl(slave_.get(), TIOCNXCL);
+  clients_.cleared    = false;
+  std::ignore         = consume(lock, verify::later);
+  auto       cause    = 0;
+  auto const try_open = [&] {
+    auto const got =
+        opener_ ? opener_(path_.c_str()) : ::open(path_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    cause = got < 0 ? errno : 0;
+    return got;
+  };
+  auto fd = try_open();
+  if(cause == EBUSY)
+  {
+    (void)::ioctl(slave_.get(), TIOCNXCL);
+    fd = try_open();
+  }
+  if(fd >= 0)
+  {
+    own_open_ = true;
+    ::close(fd);
+    std::ignore = consume(lock, verify::later);
+    own_open_   = false;
+  }
+  if(cause != EIO and not std::exchange(hang_warned_, true))
+  {
+    clients_warning_ = std::format(
+        "{}: the hang-up of {} did not make the kernel refuse an open ({}), tools may still use it",
+        name_, path_, cause == 0 ? "it succeeded" : std::generic_category().message(cause));
+  }
+  (void)::tcflush(slave_.get(), TCIOFLUSH);
+  (void)::tcflush(master_.get(), TCIOFLUSH);
+}
+
+void pty_bridge::release()
+{
+  int const unlocked = 0;
+  (void)::ioctl(master_.get(), TIOCSPTLCK, &unlocked);
+}
+
 auto pty_bridge::flush() -> std::optional<std::string>
 {
   if(link_->device_changed())
@@ -523,7 +607,15 @@ auto pty_bridge::flush() -> std::optional<std::string>
     (void)::ioctl(slave_.get(), TIOCNXCL);
     clients_.cleared = false;
   }
+  if(not std::exchange(followed_, false))
+  {
+    follow();
+  }
   link_->drain(outgoing_);
+  if(hung_up_)
+  {
+    outgoing_.clear();
+  }
   std::size_t written = 0;
   while(written < outgoing_.size())
   {
@@ -578,6 +670,7 @@ auto pump_all(pty_bridges& ptys) -> std::vector<pty_warning>
     std::scoped_lock const lock{ptys.mutex};
     for(auto const& bridge : ptys.bridges)
     {
+      bridge->follow_link();
       auto sessions = bridge->take_sessions();
       auto incoming = bridge->take_input();
       if(not sessions.empty() or not incoming.empty() or bridge->settling())
@@ -663,8 +756,10 @@ cdc_pty_link::cdc_pty_link(
     std::shared_ptr<periph::usb::cdc_hub>     hub,
     std::size_t                               function,
     std::uint64_t                             attachments,
+    std::uint64_t                             unbinds,
     std::move_only_function<bool(bool, bool)> post) noexcept
-    : hub_{std::move(hub)}, function_{function}, seen_{attachments}, post_{std::move(post)}
+    : hub_{std::move(hub)}, function_{function}, seen_{attachments}, unbinds_seen_{unbinds},
+      post_{std::move(post)}
 {}
 
 auto cdc_pty_link::view() -> line_view
@@ -730,6 +825,7 @@ void cdc_pty_link::host_closed()
 
 void cdc_pty_link::discard() noexcept
 {
+  rebase_ = true;
   requested_.reset();
   unsettled_ = tool_holds_;
 }
@@ -747,6 +843,22 @@ auto cdc_pty_link::device_changed() -> bool
   auto const changed  = std::exchange(seen_, attached) != attached;
   unsettled_          = unsettled_ or (changed and tool_holds_);
   return changed;
+}
+
+auto cdc_pty_link::detached() -> bool
+{
+  auto const  held    = hub_->lock();
+  auto const& channel = hub_->channel(held, function_);
+  if(std::exchange(rebase_, false))
+  {
+    unbinds_seen_ = channel.unbinds;
+  }
+  auto const gone = not channel.comm_interface or channel.unbinds != unbinds_seen_;
+  if(gone)
+  {
+    unbinds_seen_ = channel.unbinds;
+  }
+  return gone;
 }
 
 void cdc_pty_link::drain(std::vector<std::uint8_t>& out)

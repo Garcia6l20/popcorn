@@ -79,7 +79,9 @@ class CdcStream:
     the same times.
 
     The stream outlives the driver: it exists before the device is configured, an unplug keeps
-    the bytes received and the bytes not sent yet, and a replug binds the same stream again.
+    the bytes received and drops the bytes not sent yet, as a USB disconnect drops the queued
+    transfers, and a replug binds the same stream again. Bytes written while no driver is bound
+    wait for the next one.
     `Machine.restore` drops the bytes received and not read yet, and puts back the bytes not
     yet taken by the device as the snapshot had them, bound or not.
 

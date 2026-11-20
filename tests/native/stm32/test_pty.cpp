@@ -496,16 +496,35 @@ auto exits_cleanly(pid_t child) -> bool
   return ::waitpid(child, &status, 0) == child and WIFEXITED(status) and WEXITSTATUS(status) == 0;
 }
 
-auto busy_rounds(std::string const& path, int rounds) -> int
+auto open_within(std::string const& path, std::chrono::milliseconds limit) -> bool
 {
-  int busy = 0;
+  auto const deadline = std::chrono::steady_clock::now() + limit;
+  for(;;)
+  {
+    auto const fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if(fd >= 0)
+    {
+      ::close(fd);
+      return true;
+    }
+    if(errno != EBUSY or std::chrono::steady_clock::now() > deadline)
+    {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+}
+
+auto stuck_rounds(std::string const& path, int rounds) -> int
+{
+  auto stuck = 0;
   for(int round = 0; round < rounds; ++round)
   {
     auto const holder = ::fork();
     if(holder == 0)
     {
       auto const fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-      ::_exit(fd < 0 ? (errno == EBUSY ? 1 : 2) : ::ioctl(fd, TIOCEXCL) != 0 ? 2 : 0);
+      ::_exit(fd < 0 or ::ioctl(fd, TIOCEXCL) != 0 ? 2 : 0);
     }
     auto status = 0;
     if(holder < 0 or ::waitpid(holder, &status, 0) != holder or not WIFEXITED(status))
@@ -514,26 +533,15 @@ auto busy_rounds(std::string const& path, int rounds) -> int
     }
     if(WEXITSTATUS(status) != 0)
     {
-      if(WEXITSTATUS(status) != 1)
+      if(not open_within(path, std::chrono::seconds{1}))
       {
         return 255;
       }
-      ++busy;
       continue;
     }
-    auto const next = ::fork();
-    if(next == 0)
-    {
-      ::execl("/bin/sh", "sh", "-c", "exec 3<>\"$0\"", path.c_str(), nullptr);
-      ::_exit(127);
-    }
-    if(next < 0)
-    {
-      return 255;
-    }
-    busy += exits_cleanly(next) ? 0 : 1;
+    stuck += open_within(path, std::chrono::seconds{1}) ? 0 : 1;
   }
-  return std::min(busy, 254);
+  return std::min(stuck, 254);
 }
 
 auto queued_events_limit() -> std::size_t
@@ -561,7 +569,7 @@ TEST_CASE("the watcher clears a closed tool's exclusive flag with no pump")
 }
 
 TEST_CASE(
-    "a process exiting with the pty exclusive lets the next process open it in 196 of 200 rounds")
+    "a process exiting with the pty exclusive lets the next open succeed within 1 s in every round")
 {
   std::vector<std::uint8_t>                pending;
   std::vector<std::uint8_t>                received;
@@ -576,12 +584,12 @@ TEST_CASE(
     REQUIRE(driver >= 0);
     if(driver == 0)
     {
-      ::_exit(busy_rounds(bridge->path(), 200));
+      ::_exit(stuck_rounds(bridge->path(), 200));
     }
     int status = 0;
     REQUIRE(::waitpid(driver, &status, 0) == driver);
     REQUIRE(WIFEXITED(status));
-    CHECK(WEXITSTATUS(status) <= 4);
+    CHECK(WEXITSTATUS(status) == 0);
   }
 }
 
@@ -891,10 +899,12 @@ TEST_CASE("a pump returns while a tool loop keeps interrupting its walk")
   pty_bridge               bridge{"OTG_FS", std::make_unique<session_link>(events), refused_thread};
 
   auto const        path = bridge.path();
-  std::atomic<bool> churning{true};
+  std::atomic<bool> stop{false};
+  std::atomic<bool> expired{false};
   std::atomic<bool> started{false};
   std::jthread      churn{[&] {
-    for(int round = 0; round < 20'000; ++round)
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+    while(not stop.load())
     {
       auto const fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
       if(fd >= 0)
@@ -902,16 +912,376 @@ TEST_CASE("a pump returns while a tool loop keeps interrupting its walk")
         ::close(fd);
       }
       started.store(true);
+      if(std::chrono::steady_clock::now() > deadline)
+      {
+        expired.store(true);
+        return;
+      }
     }
-    churning.store(false);
   }};
   while(not started.load())
   {
     std::this_thread::yield();
   }
   std::ignore = bridge.pump();
-  CHECK(churning.load());
+  CHECK_FALSE(expired.load());
+  stop.store(true);
   churn.join();
   std::ignore = bridge.pump();
   CHECK(events == std::vector<std::string>{"open", "close"});
+}
+
+namespace
+{
+using popcorn::bind::detail::cdc_pty_link;
+using popcorn::bind::detail::slave_opener;
+namespace usb = popcorn::periph::usb;
+
+constexpr int tool_flags = O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC;
+
+struct cdc_rig
+{
+  std::shared_ptr<usb::cdc_hub> hub   = std::make_shared<usb::cdc_hub>();
+  int                           posts = 0;
+
+  explicit cdc_rig(bool bound)
+  {
+    if(bound)
+    {
+      bind();
+    }
+  }
+
+  void bind()
+  {
+    auto const held        = hub->lock();
+    auto&      channel     = hub->channel(held, 0);
+    channel.comm_interface = 0;
+    channel.ready          = true;
+    channel.line_state     = 3;
+    ++channel.attachments;
+  }
+
+  void unbind()
+  {
+    auto const held    = hub->lock();
+    auto&      channel = hub->channel(held, 0);
+    ++channel.attachments;
+    ++channel.unbinds;
+    channel.comm_interface.reset();
+    channel.ready = false;
+  }
+
+  void line_state(std::uint8_t lines)
+  {
+    auto const held                  = hub->lock();
+    hub->channel(held, 0).line_state = lines;
+  }
+
+  void restore()
+  {
+    auto const held    = hub->lock();
+    auto&      channel = hub->channel(held, 0);
+    ++channel.attachments;
+    ++channel.unbinds;
+    ++channel.attachments;
+  }
+
+  void firmware_sends(std::string_view text)
+  {
+    auto const                      held = hub->lock();
+    std::vector<std::uint8_t> const bytes(text.begin(), text.end());
+    hub->channel(held, 0).received(bytes, popcorn::vtime{1});
+  }
+
+  auto host_bytes() -> std::size_t
+  {
+    auto const held = hub->lock();
+    return hub->channel(held, 0).out.size();
+  }
+
+  auto link()
+  {
+    std::uint64_t attachments = 0;
+    std::uint64_t unbinds     = 0;
+    {
+      auto const held = hub->lock();
+      attachments     = hub->channel(held, 0).attachments;
+      unbinds         = hub->channel(held, 0).unbinds;
+    }
+    return std::make_unique<cdc_pty_link>(hub, 0, attachments, unbinds, [this](bool, bool) {
+      ++posts;
+      return true;
+    });
+  }
+};
+
+auto read_errno(int fd) -> int
+{
+  std::array<char, 16> chunk{};
+  return ::read(fd, chunk.data(), chunk.size()) < 0 ? errno : 0;
+}
+
+auto write_errno(int fd) -> int
+{
+  return ::write(fd, "x", 1) < 0 ? errno : 0;
+}
+
+auto tool_open(std::string const& path) -> int
+{
+  return ::open(path.c_str(), tool_flags);
+}
+}
+
+TEST_CASE("a CDC pty opened before a driver binds refuses opens with EIO until one binds")
+{
+  cdc_rig    rig{false};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  CHECK(bridge.hung_up());
+  CHECK(open_error(bridge.path()) == EIO);
+  CHECK_FALSE(bridge.pump().has_value());
+  CHECK(open_error(bridge.path()) == EIO);
+
+  rig.bind();
+  std::ignore = bridge.pump();
+  CHECK_FALSE(bridge.hung_up());
+  CHECK(open_error(bridge.path()) == 0);
+}
+
+TEST_CASE("a detach hangs up a held descriptor and a new open after the re-attach revives it")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  CHECK_FALSE(bridge.hung_up());
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+  CHECK(read_errno(held) == EAGAIN);
+  CHECK(write_errno(held) == 0);
+
+  rig.unbind();
+  std::ignore = bridge.pump();
+  CHECK(bridge.hung_up());
+  CHECK(read_errno(held) == EIO);
+  CHECK(write_errno(held) == EIO);
+  CHECK(open_error(bridge.path()) == EIO);
+
+  rig.bind();
+  std::ignore = bridge.pump();
+  CHECK_FALSE(bridge.hung_up());
+  CHECK(read_errno(held) == EIO);
+  auto const fresh = tool_open(bridge.path());
+  REQUIRE(fresh >= 0);
+  CHECK(read_errno(fresh) == EAGAIN);
+  CHECK(write_errno(fresh) == 0);
+  CHECK(read_errno(held) == EAGAIN);
+  CHECK(write_errno(held) == 0);
+  ::close(fresh);
+  ::close(held);
+}
+
+TEST_CASE("a bind and an unbind between two pumps hang up once and the next pump releases")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+
+  rig.restore();
+  std::ignore = bridge.pump();
+  CHECK(bridge.hung_up());
+  CHECK(read_errno(held) == EIO);
+  std::ignore = bridge.pump();
+  CHECK_FALSE(bridge.hung_up());
+  CHECK(open_error(bridge.path()) == 0);
+  ::close(held);
+}
+
+TEST_CASE("a restore into a bound machine leaves a held descriptor working")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+
+  bridge.discard();
+  rig.restore();
+  std::ignore = bridge.pump();
+  CHECK_FALSE(bridge.hung_up());
+  CHECK(read_errno(held) == EAGAIN);
+  CHECK(write_errno(held) == 0);
+
+  rig.unbind();
+  std::ignore = bridge.pump();
+  CHECK(bridge.hung_up());
+  CHECK(read_errno(held) == EIO);
+  ::close(held);
+}
+
+TEST_CASE("a restore into an unbound machine hangs the pty up")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+
+  bridge.discard();
+  rig.unbind();
+  std::ignore = bridge.pump();
+  CHECK(bridge.hung_up());
+  CHECK(read_errno(held) == EIO);
+  ::close(held);
+}
+
+TEST_CASE("a tool that sets TIOCEXCL between the clear and the self-open still ends in EIO")
+{
+  cdc_rig      rig{true};
+  auto         calls = 0;
+  auto const   held  = std::make_shared<int>(-1);
+  slave_opener opener{[&calls, held](char const* path) {
+    if(++calls == 1)
+    {
+      REQUIRE(::ioctl(*held, TIOCEXCL) == 0);
+    }
+    return ::open(path, tool_flags);
+  }};
+  pty_bridge   bridge{"OTG_FS", rig.link(), popcorn::bind::detail::start_thread, std::move(opener)};
+  *held = tool_open(bridge.path());
+  REQUIRE(*held >= 0);
+
+  rig.unbind();
+  CHECK_FALSE(bridge.pump().has_value());
+  CHECK(calls == 2);
+  CHECK(bridge.hung_up());
+  CHECK(read_errno(*held) == EIO);
+  CHECK(open_error(bridge.path()) == EIO);
+  ::close(*held);
+}
+
+TEST_CASE("a descriptor holding TIOCEXCL is hung up with no warning")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+  REQUIRE(::ioctl(held, TIOCEXCL) == 0);
+
+  rig.unbind();
+  CHECK_FALSE(bridge.pump().has_value());
+  CHECK(read_errno(held) == EIO);
+  CHECK(open_error(bridge.path()) == EIO);
+  ::close(held);
+}
+
+TEST_CASE("a self-open that succeeds is closed, warned once and makes no phantom tool")
+{
+  cdc_rig      rig{true};
+  pty_bridge*  self = nullptr;
+  slave_opener opener{[&self](char const* path) {
+    int const unlocked = 0;
+    REQUIRE(::ioctl(self->master(), TIOCSPTLCK, &unlocked) == 0);
+    return ::open(path, tool_flags);
+  }};
+  pty_bridge   bridge{"OTG_FS", rig.link(), popcorn::bind::detail::start_thread, std::move(opener)};
+  self = &bridge;
+
+  rig.unbind();
+  auto const warned = bridge.pump();
+  REQUIRE(warned.has_value());
+  CHECK(warned->contains("did not make the kernel refuse an open"));
+  rig.bind();
+  std::ignore = bridge.pump();
+  rig.unbind();
+  CHECK_FALSE(bridge.pump().has_value());
+  rig.bind();
+  std::ignore = bridge.pump();
+  std::this_thread::sleep_for(std::chrono::milliseconds{4 * popcorn::bind::detail::pty_quiet_ms});
+  std::ignore = bridge.pump();
+  CHECK(rig.posts == 0);
+}
+
+TEST_CASE("bytes written before a hang-up never reach a tool opened after the re-attach")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+  rig.firmware_sends("stale");
+  std::ignore = bridge.pump();
+  REQUIRE(write_errno(held) == 0);
+  rig.firmware_sends("queued");
+
+  rig.unbind();
+  std::ignore = bridge.flush();
+  rig.firmware_sends("dropped");
+  std::ignore = bridge.pump();
+  rig.bind();
+  std::ignore = bridge.pump();
+  CHECK(rig.host_bytes() == 0);
+
+  auto const fresh = tool_open(bridge.path());
+  REQUIRE(fresh >= 0);
+  CHECK(read_errno(fresh) == EAGAIN);
+  rig.firmware_sends("live");
+  std::ignore = bridge.pump();
+  CHECK(read_ready(fresh, 1000) == std::vector<std::uint8_t>{'l', 'i', 'v', 'e'});
+  ::close(fresh);
+  ::close(held);
+}
+
+TEST_CASE("bytes a tool wrote before an unbind never reach the device bound next")
+{
+  cdc_rig    rig{true};
+  pty_bridge bridge{"OTG_FS", rig.link()};
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+  REQUIRE(::write(held, "ab", 2) == 2);
+
+  rig.unbind();
+  std::ignore = bridge.pump();
+  rig.bind();
+  std::ignore = bridge.pump();
+  CHECK(rig.host_bytes() == 0);
+
+  auto const fresh = tool_open(bridge.path());
+  REQUIRE(fresh >= 0);
+  REQUIRE(::write(fresh, "cd", 2) == 2);
+  std::ignore = bridge.pump();
+  CHECK(rig.host_bytes() == 2);
+  ::close(fresh);
+  ::close(held);
+}
+
+TEST_CASE("bytes a tool wrote between the bridge's read and its refused open are flushed")
+{
+  cdc_rig      rig{true};
+  auto const   held = std::make_shared<int>(-1);
+  slave_opener opener{[held](char const* path) {
+    REQUIRE(::write(*held, "late", 4) == 4);
+    return ::open(path, tool_flags);
+  }};
+  pty_bridge   bridge{"OTG_FS", rig.link(), popcorn::bind::detail::start_thread, std::move(opener)};
+  *held = tool_open(bridge.path());
+  REQUIRE(*held >= 0);
+
+  rig.unbind();
+  CHECK_FALSE(bridge.pump().has_value());
+  rig.bind();
+  std::ignore = bridge.pump();
+  CHECK(rig.host_bytes() == 0);
+  ::close(*held);
+}
+
+TEST_CASE("a UART pty is never hung up")
+{
+  std::vector<std::uint8_t> pending;
+  std::vector<std::uint8_t> received;
+  pty_bridge                bridge{"USART1", std::make_unique<fake_link>(pending, received)};
+  CHECK_FALSE(bridge.hung_up());
+  auto const held = tool_open(bridge.path());
+  REQUIRE(held >= 0);
+  std::ignore = bridge.pump();
+  CHECK_FALSE(bridge.hung_up());
+  CHECK(read_errno(held) == EAGAIN);
+  CHECK(open_error(bridge.path()) == 0);
+  ::close(held);
 }

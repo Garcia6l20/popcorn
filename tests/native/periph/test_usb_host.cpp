@@ -2175,8 +2175,12 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   r.dev.s.in_queue[2] = {bytes_of("a")};
   r.run_until(t0 + second + 10 * ms);
   auto& channel = hub->channel(hub->lock(), 0);
+  channel.out.append_range(bytes_of("pre"));
+  CHECK(channel.unbinds == 0);
   r.host->pull_up_changed(false, vtime{t0 + second + 10 * ms});
   CHECK(r.host->drivers().empty());
+  CHECK(channel.unbinds == 1);
+  CHECK(channel.out.empty());
   CHECK_FALSE(channel.comm_interface.has_value());
   CHECK_FALSE(channel.ready);
   CHECK(channel.take(5)[0].data == bytes_of("a"));
@@ -2190,8 +2194,31 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   CHECK(r.host->state() == usb::device_state::configured);
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
   CHECK(channel.ready);
+  CHECK(channel.unbinds == 1);
   CHECK(r.dev.s.received[2] == packet_list{bytes_of("zz")});
   CHECK(&hub->channel(hub->lock(), 0) == &channel);
+}
+
+TEST_CASE(
+    "a restore to an unbound snapshot keeps the OUT bytes it held while the live driver unbinds")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.host->pull_up_changed(false, vtime{t0 + second + 10 * ms});
+  auto& channel = hub->channel(hub->lock(), 0);
+  channel.out.append_range(bytes_of("abc"));
+  std::vector<std::byte> saved;
+  r.host->save(saved);
+
+  r.plug(t0 + second + 50 * ms);
+  r.run_until(t0 + 3 * second);
+  REQUIRE(channel.comm_interface.has_value());
+  hub->discard();
+  r.host->load(saved);
+  CHECK_FALSE(channel.comm_interface.has_value());
+  CHECK(std::ranges::equal(channel.out, bytes_of("abc")));
 }
 
 TEST_CASE("a bulk IN STALL is cleared as Linux does and reading carries on at DATA0")

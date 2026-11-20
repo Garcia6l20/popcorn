@@ -1697,16 +1697,7 @@ void host::load(std::span<std::byte const> in)
     impl.load_factories();
     return;
   }
-  impl.s = reflex::serde::bson::deserializer{in}.template load<host_state>();
-  impl.load_factories();
-  impl.results.clear();
-  impl.forgotten.clear();
-  ++impl.epoch;
-  impl.parsed.reset();
-  if(auto config = parse_configuration(octets(impl.s.configuration_bytes)))
-  {
-    impl.parsed = std::move(*config);
-  }
+  impl.s             = reflex::serde::bson::deserializer{in}.template load<host_state>();
   auto const kept_at = [&](std::size_t index) {
     if(index >= impl.drivers.size() or index >= impl.s.drivers.size())
     {
@@ -1722,6 +1713,15 @@ void host::load(std::span<std::byte const> in)
     {
       impl.drivers[index].driver.reset();
     }
+  }
+  impl.load_factories();
+  impl.results.clear();
+  impl.forgotten.clear();
+  ++impl.epoch;
+  impl.parsed.reset();
+  if(auto config = parse_configuration(octets(impl.s.configuration_bytes)))
+  {
+    impl.parsed = std::move(*config);
   }
   std::vector<bound_driver> drivers{};
   for(std::size_t index = 0; index < impl.s.drivers.size(); ++index)

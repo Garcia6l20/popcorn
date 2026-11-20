@@ -1548,7 +1548,7 @@ def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thr
     assert [str(error) for error in raised] == ["filter failed"]
 
 
-def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches(
+def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_and_attaches(
     u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
@@ -1570,8 +1570,10 @@ def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches
 
     held = hold_exclusively()
     asyncio.run(host.detach())
-    reopens(held)
-    held = hold_exclusively()
+    asyncio.run(m.run(for_=ms(1)))
+    with pytest.raises(OSError) as detached:
+        os.open(path, os.O_RDWR | os.O_NOCTTY)
+    assert detached.value.errno == errno.EIO
     asyncio.run(host.attach())
     asyncio.run(host.wait_configured(for_=s(2)))
     reopens(held)
@@ -1603,33 +1605,47 @@ def test_a_cdc_pty_opens_again_once_the_last_client_closed_it(
 
 
 EXCLUSIVE_ROUNDS = """
-import errno, fcntl, os, sys, termios
-path, rounds, busy = sys.argv[1], int(sys.argv[2]), 0
+import errno, fcntl, os, sys, termios, time
+path, rounds, stuck = sys.argv[1], int(sys.argv[2]), 0
+
+
+def opens() -> bool:
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            os.close(os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+            return True
+        except OSError as refused:
+            if refused.errno != errno.EBUSY or time.monotonic() > deadline:
+                return False
+            time.sleep(0.001)
+
+
 for _ in range(rounds):
     holder = os.fork()
     if holder == 0:
         try:
             fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        except OSError as refused:
-            os._exit(1 if refused.errno == errno.EBUSY else 2)
+        except OSError:
+            os._exit(2)
         fcntl.ioctl(fd, termios.TIOCEXCL)
         os._exit(0)
     held = os.waitstatus_to_exitcode(os.waitpid(holder, 0)[1])
-    assert held in (0, 1), held
-    busy += held
-    if held == 0:
-        busy += os.spawnv(os.P_WAIT, "/bin/sh", ["sh", "-c", 'exec 3<>"$0"', path]) != 0
-print(busy)
+    if held != 0:
+        assert opens(), "held"
+        continue
+    stuck += not opens()
+print(stuck)
 """
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
-def test_a_tool_exiting_with_the_cdc_pty_exclusive_lets_the_next_tool_open_it(
+def test_a_tool_exiting_with_the_cdc_pty_exclusive_lets_the_next_open_succeed_within_1_s(
     u575: popcorn.PartDescription, running: bool
 ) -> None:
-    """Each round a process opens the pty, sets TIOCEXCL and exits, then a new process opens
-    it at once. The bridge's watcher clears the flag at the close, with the machine parked or
-    running."""
+    """Each round a process opens the pty, sets TIOCEXCL and exits, then the test polls the pty
+    until an open succeeds, up to 1 s. The bridge's watcher clears the flag after the close,
+    with the machine parked or running, and no round hits the deadline."""
     m, _ = configured(u575)
     path = m.board.pty("OTG_FS")
 
@@ -1647,7 +1663,7 @@ def test_a_tool_exiting_with_the_cdc_pty_exclusive_lets_the_next_tool_open_it(
         async with m.running():
             return await asyncio.to_thread(rounds)
 
-    assert (run_bounded(scenario(), HANG) if running else rounds()) <= 4
+    assert (run_bounded(scenario(), HANG) if running else rounds()) == 0
     m.board.close()
 
 
@@ -1759,14 +1775,18 @@ def test_a_cdc_pty_quick_open_and_close_in_one_slice_shows_both_edges(
     m.board.close()
 
 
-def test_a_tool_that_opens_the_cdc_pty_before_configuration_gets_dtr_once_configured(
+def test_a_tool_that_opens_the_cdc_pty_once_configured_gets_dtr(
     u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(dtr=False, rts=False))
     host = m.periph.OTG_FS.host
     path = m.board.pty("OTG_FS")
-    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    with pytest.raises(OSError) as early:
+        os.open(path, os.O_RDWR | os.O_NOCTTY)
+    assert early.value.errno == errno.EIO
     asyncio.run(host.wait_configured(for_=s(2)))
+    settle(m)
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
     run_until_dtr(m, host.cdc(), True)
     assert (host.cdc().dtr, host.cdc().rts) == (True, True)
     assert line_states(host) == [0, 3]
@@ -2579,3 +2599,105 @@ def test_a_usb_wait_refuses_both_for_and_deadline(u575: popcorn.PartDescription,
     with pytest.raises(TypeError, match="exclusive"):
         asyncio.run(wait(stream, {"for_": ms(1), "deadline": m.time}))
     assert m.instructions == before
+
+
+def open_error(path: str) -> int:
+    try:
+        os.close(os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+    except OSError as refused:
+        assert refused.errno is not None
+        return refused.errno
+    return 0
+
+
+def io_errors(fd: int) -> tuple[int, int]:
+    errors: list[int] = []
+    for call in (lambda: os.read(fd, 16), lambda: os.write(fd, b"x")):
+        try:
+            call()
+            errors.append(0)
+        except OSError as failed:
+            assert failed.errno is not None
+            errors.append(failed.errno)
+    return errors[0], errors[1]
+
+
+def hang_up_leg(m: popcorn.Machine, host: UsbHost, path: str, cause: Callable[[], None]) -> None:
+    held = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    assert io_errors(held) == (errno.EAGAIN, 0)
+    cause()
+    asyncio.run(m.run(for_=ms(1)))
+    assert io_errors(held) == (errno.EIO, errno.EIO)
+    assert open_error(path) == errno.EIO
+    asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(m.run(for_=ms(5)))
+    assert open_error(path) == 0
+    reading, writing = io_errors(held)
+    assert (reading in (0, errno.EAGAIN), writing) == (True, 0)
+    os.close(held)
+    m.board.close()
+
+
+def test_a_detach_and_an_attach_hang_up_the_cdc_pty_until_the_firmware_enumerates(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(), u575)
+
+    def cause() -> None:
+        asyncio.run(host.detach())
+        asyncio.run(host.attach())
+
+    hang_up_leg(m, host, path, cause)
+
+
+def test_an_mcu_reset_hangs_up_the_cdc_pty_until_the_firmware_enumerates_again(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(), u575)
+    hang_up_leg(m, host, path, lambda: m.reset(popcorn.ResetKind.SOFTWARE))
+
+
+def test_a_firmware_soft_disconnect_hangs_up_the_cdc_pty(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host, path = pty_machine(UsbHostOptions(), u575)
+    held = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+
+    m.periph.OTG_FS.DCTL.SDIS = 1
+    asyncio.run(m.run(for_=ms(5)))
+    assert host.state is UsbState.DETACHED
+    assert io_errors(held) == (errno.EIO, errno.EIO)
+    assert open_error(path) == errno.EIO
+
+    m.periph.OTG_FS.DCTL.SDIS = 0
+    asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(m.run(for_=ms(5)))
+    assert open_error(path) == 0
+    os.close(held)
+    m.board.close()
+
+
+def test_a_restore_into_a_bound_machine_leaves_a_held_cdc_pty_descriptor_working(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, _, path = pty_machine(UsbHostOptions(), u575)
+    saved = m.snapshot()
+    held = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    m.restore(saved)
+    settle(m)
+    assert io_errors(held) == (errno.EAGAIN, 0)
+    os.close(held)
+    m.board.close()
+
+
+def test_a_cdc_pty_refuses_opens_until_the_firmware_first_enumerates(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions())
+    host = m.periph.OTG_FS.host
+    path = m.board.pty("OTG_FS")
+    assert open_error(path) == errno.EIO
+    asyncio.run(host.wait_configured(for_=s(2)))
+    settle(m)
+    assert open_error(path) == 0
+    m.board.close()
