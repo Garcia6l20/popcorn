@@ -1602,6 +1602,55 @@ def test_a_cdc_pty_opens_again_once_the_last_client_closed_it(
     os.close(open_client())
 
 
+EXCLUSIVE_ROUNDS = """
+import errno, fcntl, os, sys, termios
+path, rounds, busy = sys.argv[1], int(sys.argv[2]), 0
+for _ in range(rounds):
+    holder = os.fork()
+    if holder == 0:
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as refused:
+            os._exit(1 if refused.errno == errno.EBUSY else 2)
+        fcntl.ioctl(fd, termios.TIOCEXCL)
+        os._exit(0)
+    held = os.waitstatus_to_exitcode(os.waitpid(holder, 0)[1])
+    assert held in (0, 1), held
+    busy += held
+    if held == 0:
+        busy += os.spawnv(os.P_WAIT, "/bin/sh", ["sh", "-c", 'exec 3<>"$0"', path]) != 0
+print(busy)
+"""
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_tool_exiting_with_the_cdc_pty_exclusive_lets_the_next_tool_open_it(
+    u575: popcorn.PartDescription, running: bool
+) -> None:
+    """Each round a process opens the pty, sets TIOCEXCL and exits, then a new process opens
+    it at once. The bridge's watcher clears the flag at the close, with the machine parked or
+    running."""
+    m, _ = configured(u575)
+    path = m.board.pty("OTG_FS")
+
+    def rounds() -> int:
+        done = subprocess.run(
+            [sys.executable, "-c", EXCLUSIVE_ROUNDS, path, "200"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=HANG,
+        )
+        return int(done.stdout)
+
+    async def scenario() -> int:
+        async with m.running():
+            return await asyncio.to_thread(rounds)
+
+    assert (run_bounded(scenario(), HANG) if running else rounds()) <= 4
+    m.board.close()
+
+
 def pty_machine(
     options: UsbHostOptions, u575: popcorn.PartDescription
 ) -> tuple[popcorn.Machine, UsbHost, str]:
@@ -1643,6 +1692,28 @@ def test_a_cdc_pty_open_raises_dtr_and_the_last_close_drops_it(
     settle(m)
     assert (cdc.dtr, line_states(host)) == (True, [0, 3, 0, 3])
     os.close(fd)
+    m.board.close()
+
+
+def test_a_tool_closing_the_cdc_pty_alone_drops_dtr_in_a_free_run(
+    u575: popcorn.PartDescription,
+) -> None:
+    """Inside `running()` the tool's close is the only host action, and the firmware sees DTR
+    drop."""
+    m, host, path = pty_machine(UsbHostOptions(dtr=False, rts=False), u575)
+    cdc = host.cdc()
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    settle(m)
+    assert cdc.dtr
+
+    async def scenario() -> None:
+        async with m.running():
+            os.close(fd)
+            while cdc.dtr:
+                await asyncio.sleep(0.001)
+
+    run_bounded(scenario(), HANG)
+    assert line_states(host) == [0, 3, 0]
     m.board.close()
 
 

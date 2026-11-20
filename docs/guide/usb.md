@@ -55,19 +55,28 @@ enumerate again.
 and DTR at configuration. `cdc.bound` turns true at configuration, and `await cdc.wait_ready()`
 runs until DTR and RTS went out. `cdc.read_packets()` returns the packets with their times.
 `machine.board.pty("OTG_FS")` bridges the function to a pty any serial tool opens, on first call.
-The pty path stays the same across a detach and re-attach. As on a real `ttyACM`, a tool that
-set `TIOCEXCL` on the pty frees it by closing it: once the last tool closed the pty, the next
-`open()` succeeds. A re-enumerated device is a fresh port, so a detach or attach clears the flag
-too, also while a tool still holds the pty open. The bridge clears the flag at the next slice
-boundary. A close or a re-enumeration the firmware drives happens inside a run and is cleared
-before the machine parks. A close, `detach()` or `attach()` on a parked machine is cleared on the
-next run, so run the machine before the reopen. The bridge finds the tools that still hold the
-pty by scanning `/proc/*/fd`, as described below for a CDC pty, and once per close of an
-exclusive UART pty. A tool of another user, another pid namespace, a `hidepid` mount or a
-non-dumpable process is invisible to the scan and does not keep the flag. A child forked with the
-pty open holds it as on a real port, so the flag stays until the child closes it or exits. If the
-kernel refuses the inotify watch the bridge needs, `machine.board.pty()` still works, logs one
-warning and clears the flag only at a detach or attach. UART ptys behave the same way.
+The pty path stays the same across a detach and re-attach. As on a real `ttyACM`, a tool that set
+`TIOCEXCL` on the pty frees it by closing it: once the last tool closed the pty, the next `open()`
+succeeds, whether the machine runs, sleeps or is parked. A watcher thread per pty clears the flag
+within microseconds of the last close on an idle host, so a tool started after another one exited
+opens the pty at once. A process that closes the pty and opens it again with no gap can still find
+it exclusive. Tools running as root open an exclusive pty anyway. A re-enumerated device is a fresh
+port, so a detach or attach clears the flag too, also while a tool still holds the pty open. That
+clear happens at the next slice boundary: a re-enumeration the firmware drives is cleared before the
+machine parks, a `detach()` or `attach()` on a parked machine on the next run.
+
+The watcher counts opens and closes through inotify. The kernel merges two identical events that
+follow each other before the watcher reads them, so the count is a hint. After a close the bridge
+checks it by scanning `/proc/*/fd` for the tools still holding the pty, at the next slice boundary
+or once the pty saw no open or close for 20 ms. A tool found after the watcher cleared the flag gets
+it back, unless another tool opened the pty in between. So two tools that both opened the pty before
+the watcher read the first open leave a short window after the first close where a third tool can
+open it. A tool of another user, another pid namespace, a `hidepid` mount or a non-dumpable process
+is invisible to the scan and does not keep the flag. A child forked with the pty open holds it as on
+a real port, so the flag stays until the child closes it or exits. If the kernel refuses the inotify
+watch the bridge needs, `machine.board.pty()` still works, logs one warning and clears the flag only
+at a detach or attach. If the system refuses the watcher thread, the bridge logs one warning and
+clears the flag at the next slice boundary after the close. UART ptys behave the same way.
 
 A CDC pty drives DTR like a `ttyACM` port. The first open of the pty by a tool sends
 SET_CONTROL_LINE_STATE with DTR and RTS set, unless the device already has both set. The close

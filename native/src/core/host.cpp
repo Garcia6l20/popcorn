@@ -1474,13 +1474,6 @@ void after_fork_in_child() noexcept
   on.leaf.unlock();
 }
 
-void watch_forks() noexcept
-{
-  static int const registered =
-      ::pthread_atfork(before_fork, after_fork_in_parent, after_fork_in_child);
-  std::ignore = registered;
-}
-
 void record_hold(detail::host_core const* of)
 {
   auto&                  on = graph();
@@ -1704,6 +1697,13 @@ auto host::forked() const noexcept -> bool
 auto host::fork_generation() noexcept -> std::uint64_t
 {
   return forks.load(std::memory_order_relaxed);
+}
+
+void host::watch_forks() noexcept
+{
+  static int const registered =
+      ::pthread_atfork(before_fork, after_fork_in_parent, after_fork_in_child);
+  std::ignore = registered;
 }
 
 void host::refuse_forked() const

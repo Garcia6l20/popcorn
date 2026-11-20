@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,14 @@ namespace popcorn::bind::detail
 {
 /** @brief Bytes a pty keeps for the host while no tool reads it. */
 inline constexpr std::size_t pty_outgoing_limit = 64 * 1024;
+
+/** @brief Milliseconds with no open or close of a pty before its watcher walks /proc to verify
+ * the count. */
+inline constexpr int pty_quiet_ms = 20;
+
+/** @brief Walks a pump starts over when events interrupt them, before it leaves the verification
+ * to a later pump or to the watcher. */
+inline constexpr int pty_walk_retries = 3;
 
 /** @brief A change of the host tools holding a pty. */
 enum class session_edge : std::uint8_t
@@ -66,8 +75,8 @@ public:
     return false;
   }
 
-  /** @brief Whether the link acts on host_opened() and host_closed(). The bridge reads the opens
-   * of the pty and scans /proc at every close only for a link that does. */
+  /** @brief Whether the link acts on host_opened() and host_closed(). The bridge wakes the host
+   * at an open or a close of the pty only for a link that does. */
   [[nodiscard]] virtual auto wants_sessions() const -> bool
   {
     return false;
@@ -132,26 +141,61 @@ private:
 };
 
 /**
+ * @brief Starts the thread that runs @p body.
+ * @throws std::system_error when the system refuses the thread.
+ */
+[[nodiscard]] auto start_thread(std::move_only_function<void()> body) -> std::jthread;
+
+/** @brief Starts a pty_bridge's watcher thread, start_thread() or a stand-in for tests. */
+using thread_starter = std::function_ref<std::jthread(std::move_only_function<void()>)>;
+
+/**
  * @brief A host pty bridged to a byte link: host tools open path() like a serial port. Owns both
  *        ends of the pty and keeps the slave open, so the master never reads EIO or polls
  *        POLLHUP while no tool has the pty open. Through that slave it clears TIOCEXCL when the
  *        last tool closes the pty, as the last close of a serial port frees it, and when the
- *        link's device detaches or attaches, as a re-enumerated device is a fresh port. The
- *        kernel keeps the flag on a pty while the master is open, and refuses the slave open the
- *        clearing needs once it is set, so the bridge watches the closes of path() through
- *        inotify and scans /proc for another tool holding the pty, only while it is exclusive. A
- * child forked with the pty open holds it too. A kernel refusing the watch leaves only the clear at
- * a device change, with one warning. pump() and discard() run on the thread that owns the engine,
- * the others on any thread.
+ *        link's device detaches or attaches, as a re-enumerated device is a fresh port.
+ *
+ *        A watcher thread per bridge reads the opens and closes of path() through inotify.
+ *        When its count of tools falls to 0 at a close it clears TIOCEXCL at once, so the next
+ *        process opens the pty whether the machine runs, sleeps or is parked. The count is a
+ *        hint, so after a close the next pump, or the watcher once no open or close came for
+ *        pty_quiet_ms, walks /proc for the tools still holding the pty, while the pty is
+ *        exclusive, was cleared or the link wants sessions. A forked child holding a tool's
+ *        descriptor counts, one holding only the bridge's own slave does not. A holder found
+ *        after a clear sets the flag again, unless a tool opened since: two opens made before
+ *        the watcher read the first count once, so between such a clear and the walk another
+ *        tool can open the pty. A process that closes the pty and opens it again with no gap can
+ *        still find it exclusive: the clear follows the close by the watcher's wake-up. Tools
+ *        running as root open an exclusive pty anyway. The watcher runs no model code, no
+ *        Python and no logging, and takes only the bridge's own mutex.
+ *
+ *        A kernel refusing the watch leaves only the clear at a device change, with one warning.
+ *        A system refusing the thread leaves the count to pump(), which clears TIOCEXCL at the
+ *        next slice, with one warning. pump() and discard() run on the thread that owns the
+ *        engine, the others on any thread.
  */
 class pty_bridge
 {
 public:
   /**
-   * @brief Opens a raw pty for @p name over @p link, its master non-blocking.
+   * @brief Opens a raw pty for @p name over @p link, its master non-blocking, and starts its
+   *        watcher through @p start.
    * @throws std::system_error when no pty can be opened.
    */
-  pty_bridge(std::string name, std::unique_ptr<pty_link> link);
+  pty_bridge(std::string name, std::unique_ptr<pty_link> link, thread_starter start = start_thread);
+
+  /** @brief Not copyable. */
+  pty_bridge(pty_bridge const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(pty_bridge const&) -> pty_bridge& = delete;
+
+  /**
+   * @brief Stops and joins the watcher, then closes the pty. In a process forked from the one
+   *        that built the bridge it closes the descriptors only, and leaves the parent's watcher
+   *        running.
+   */
+  ~pty_bridge();
 
   /** @brief Name of the bridged UART or CDC function, as Board.ptys keys it. */
   [[nodiscard]] auto name() const noexcept -> std::string const&
@@ -171,17 +215,24 @@ public:
     return master_.get();
   }
 
-  /** @brief How many times the bridge walked /proc for tools holding the pty. */
+  /** @brief How many times the bridge walked /proc for tools holding the pty. Any thread. */
   [[nodiscard]] auto scans() const noexcept -> std::size_t
   {
-    return scans_;
+    return scans_.load(std::memory_order_relaxed);
   }
 
-  /** @brief The descriptor that turns readable when a tool closes the pty, for a poller, -1 when
-   * the kernel refused the watch. */
+  /** @brief Whether the watcher thread runs. */
+  [[nodiscard]] auto watching() const noexcept -> bool
+  {
+    return watcher_.joinable();
+  }
+
+  /** @brief The descriptor that turns readable when a tool opens or closes the pty, for a poller:
+   * the watcher's eventfd for a link that wants sessions, the inotify descriptor when no watcher
+   * runs, -1 when nothing needs the poller. */
   [[nodiscard]] auto clients_watch() const noexcept -> int
   {
-    return clients_watch_.get();
+    return watching() ? wake_.get() : clients_watch_.get();
   }
 
   /** @brief Whether bytes for the host wait for room in the pty. Lock-free, any thread. */
@@ -206,10 +257,12 @@ public:
   [[nodiscard]] auto take_input() -> std::vector<std::uint8_t>;
 
   /**
-   * @brief Reads the opens and closes of the pty since the last call, and clears TIOCEXCL after
-   *        the last close. A close makes the bridge scan /proc for the tools still holding the
-   *        pty, so a forked child or a second tool keeps it open. A close and an open between two
-   *        calls that leave a tool holding the pty make no change.
+   * @brief Counts the opens and closes of the pty the watcher has not read yet, then reports
+   *        the changes since the last call. Every open and close made before the call is seen.
+   *        A close whose verification a tool loop kept interrupting is reported at a later
+   *        call, once a walk completed.
+   *        A close and an open between two calls that leave a tool holding the pty make no
+   *        change.
    * @return The changes of the host tools holding the pty, in order, empty for a link that does
    *         not want sessions.
    */
@@ -247,22 +300,95 @@ public:
   void discard() noexcept;
 
 private:
+  struct clients
+  {
+    std::size_t count      = 0;
+    bool        holds      = false;
+    bool        opened     = false;
+    bool        closed     = false;
+    bool        overflowed = false;
+    bool        unverified = false;
+    bool        inexact    = false;
+    bool        cleared    = false;
+    bool        joined     = false;
+  };
+
+  struct batch
+  {
+    bool any    = false;
+    bool closed = false;
+  };
+
+  enum class verify : std::uint8_t
+  {
+    later,
+    when_quiet,
+    now,
+  };
+
   std::string                        name_;
   unique_fd                          master_;
   unique_fd                          slave_;
   unique_fd                          clients_watch_;
+  unique_fd                          stop_;
+  unique_fd                          wake_;
   std::string                        clients_warning_;
-  std::size_t                        scans_ = 0;
+  std::atomic<std::size_t>           scans_{0};
   std::string                        path_;
   std::shared_ptr<pty_link>          link_;
+  bool                               wants_sessions_;
+  std::uint64_t                      forks_;
   std::vector<std::uint8_t>          outgoing_;
   std::shared_ptr<std::atomic<bool>> wants_write_ = std::make_shared<std::atomic<bool>>(false);
   bool                               overflowed_  = false;
   bool                               held_        = false;
+  std::mutex                         clients_mutex_;
+  clients                            clients_;
   std::vector<std::string>           holders_;
+  std::jthread                       watcher_;
 
-  [[nodiscard]] auto walk_holders(bool first_only) -> std::vector<std::string>;
+  /** @brief The watcher thread: polls the inotify descriptor and stop_, consumes under
+   * clients_mutex_, writes wake_ after an open or a close, and verifies once no event came for
+   * pty_quiet_ms, writing wake_ again when that leaves a close for the pump. A failed poll is
+   * retried after 1 ms, the thread ends only at the stop write. */
+  void watch() noexcept;
+
+  /**
+   * @brief Reads every pending inotify event into clients_. The kernel emits one open per open
+   *        file description and one close when its last copy closes: dup, fork, O_PATH opens and
+   *        refused opens emit nothing. It merges an event into an identical unread one before
+   *        it, so two quick opens or two quick closes count once, and the count is a hint.
+   * @param held The lock of clients_mutex_.
+   * @return What it read.
+   */
+  auto read_events(std::scoped_lock<std::mutex> const& held) -> batch;
+
+  /**
+   * @brief read_events(), then clears TIOCEXCL at once when a close brought the count to 0, and
+   *        verifies by /proc when @p when allows it. The flag stays on the slave across its last
+   *        close while the master is open, and the kernel checks it first at an open, so only
+   *        the bridge's own slave descriptor can clear it. A verification walks /proc while the
+   *        pty is exclusive, was cleared or the link wants sessions: no holder found clears the
+   *        flag and the count, a holder found after a clear with no open since sets the flag
+   *        again. An event arriving during the walk ends it: verify::now reads it and walks
+   *        again, up to pty_walk_retries walks, then leaves the verification to the next pump or
+   *        the watcher's next quiet period. verify::when_quiet reads it and leaves the walk to
+   *        the next quiet period. A walk with no holder ends the inexact state an overflow left,
+   *        in which a close at count 0 does not clear the flag.
+   * @param held The lock of clients_mutex_.
+   * @param when Whether to verify a close or an overflow read since the last verification.
+   * @return Whether an open, a close or an overflow was read.
+   */
+  auto consume(std::scoped_lock<std::mutex> const& held, verify when) -> bool;
+
+  /** @brief Whether a tool walk_holders() found last still holds the pty. Under clients_mutex_. */
   [[nodiscard]] auto still_held() const -> bool;
+
+  /**
+   * @brief Walks /proc for the descriptors of other tools holding the pty. Under clients_mutex_.
+   * @return Empty when an inotify event arrived during the walk, which consume() reads first.
+   */
+  [[nodiscard]] auto walk_holders() -> std::optional<std::vector<std::string>>;
 };
 
 /** @brief A UART as a pty link: host bytes enter its receiver, the low 8 bits of each frame out. */

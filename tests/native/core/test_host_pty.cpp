@@ -14,6 +14,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <format>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -238,4 +240,81 @@ TEST_CASE("a failed poll logs one warning per watched member and still wakes it"
   {
     ::close(fd);
   }
+}
+
+namespace
+{
+struct session_counting_link final : pty::pty_link
+{
+  std::atomic<int>* opened;
+  std::atomic<int>* closed;
+
+  session_counting_link(std::atomic<int>& opens, std::atomic<int>& closes)
+      : opened{&opens}, closed{&closes}
+  {}
+
+  void send(std::span<std::uint8_t const>) override
+  {}
+
+  void drain(std::vector<std::uint8_t>&) override
+  {}
+
+  [[nodiscard]] auto wants_sessions() const -> bool override
+  {
+    return true;
+  }
+
+  void host_opened() override
+  {
+    ++*opened;
+  }
+
+  void host_closed() override
+  {
+    ++*closed;
+  }
+};
+}
+
+TEST_CASE("a tool's open and close wake a member sleeping idle through the watcher's eventfd")
+{
+  auto             ptys = std::make_shared<pty::pty_bridges>();
+  std::atomic<int> opened{0};
+  std::atomic<int> closed{0};
+  auto             bridge = std::make_shared<pty::pty_bridge>(
+      "OTG_FS", std::make_unique<session_counting_link>(opened, closed));
+  REQUIRE(bridge->watching());
+  REQUIRE(bridge->clients_watch() >= 0);
+  CHECK(
+      std::filesystem::read_symlink(std::format("/proc/self/fd/{}", bridge->clients_watch()))
+      == "anon_inode:[eventfd]");
+  {
+    std::unique_lock lock{ptys->mutex};
+    pty::add_bridge(*ptys, lock, bridge);
+  }
+  std::vector<std::unique_ptr<core::machine>> members;
+  members.push_back(idle_forever());
+  core::host on{std::move(members), {}, {.boundary = [weak = std::weak_ptr{ptys}](core::member_id) {
+                  if(auto const alive = weak.lock())
+                  {
+                    std::ignore = pty::pump_all(*alive);
+                  }
+                }}};
+  auto const watched = on.watch(0, bridge->clients_watch(), [] { return false; });
+  {
+    auto held = on.lock();
+    on.start(held, 0);
+  }
+  REQUIRE(settles([&] { return on.state(0) == core::host_state::idle_wait; }));
+
+  auto const client = ::open(bridge->path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+  REQUIRE(client >= 0);
+  CHECK(settles([&] { return opened.load() == 1; }));
+  ::close(client);
+  CHECK(settles([&] { return closed.load() == 1; }));
+
+  on.unwatch(watched);
+  std::ignore = on.halt(0);
+  std::unique_lock lock{ptys->mutex};
+  std::ignore = pty::remove_bridge(*ptys, lock, bridge.get());
 }

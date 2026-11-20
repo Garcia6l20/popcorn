@@ -1,22 +1,34 @@
 #include "pty.hpp"
 
+#include <popcorn/core/host.hpp>
+
+#include <dirent.h>
 #include <fcntl.h>
+#include <linux/kcmp.h>
+#include <poll.h>
 #include <pty.h>
+#include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
+#include <chrono>
 #include <climits>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <ranges>
+#include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace popcorn::bind::detail
@@ -26,6 +38,37 @@ namespace
 [[noreturn]] void fail(char const* what)
 {
   throw std::system_error(errno, std::generic_category(), what);
+}
+
+auto each_name(
+    int                                       directory,
+    std::function_ref<bool()>                 interrupted,
+    std::function_ref<bool(std::string_view)> visit) -> bool
+{
+  alignas(dirent64) std::array<char, 2048> buffer{};
+  for(;;)
+  {
+    if(interrupted())
+    {
+      return false;
+    }
+    auto const got = ::getdents64(directory, buffer.data(), buffer.size());
+    if(got <= 0)
+    {
+      return true;
+    }
+    for(std::size_t at = 0; at < static_cast<std::size_t>(got);)
+    {
+      unsigned short length = 0;
+      std::memcpy(&length, buffer.data() + at + offsetof(dirent64, d_reclen), sizeof length);
+      std::string_view const name{buffer.data() + at + offsetof(dirent64, d_name)};
+      at += length;
+      if(name != "." and name != ".." and not visit(name))
+      {
+        return false;
+      }
+    }
+  }
 }
 }
 
@@ -49,8 +92,14 @@ unique_fd::~unique_fd()
   }
 }
 
-pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link)
-    : name_{std::move(name)}, link_{std::move(link)}
+auto start_thread(std::move_only_function<void()> body) -> std::jthread
+{
+  return std::jthread{std::move(body)};
+}
+
+pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link, thread_starter start)
+    : name_{std::move(name)}, link_{std::move(link)}, wants_sessions_{link_->wants_sessions()},
+      forks_{(core::host::watch_forks(), core::host::fork_generation())}
 {
   int master = -1;
   int slave  = -1;
@@ -99,6 +148,191 @@ pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link)
         "{}: cannot watch {} for closes ({}), a tool's TIOCEXCL stays set until the device "
         "detaches or attaches",
         name_, path_, cause);
+    return;
+  }
+  try
+  {
+    stop_ = unique_fd{::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)};
+    if(stop_.get() < 0)
+    {
+      fail("eventfd");
+    }
+    if(wants_sessions_)
+    {
+      wake_ = unique_fd{::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)};
+      if(wake_.get() < 0)
+      {
+        fail("eventfd");
+      }
+    }
+    watcher_ = start([this] { watch(); });
+  }
+  catch(std::system_error const& refused)
+  {
+    stop_            = unique_fd{};
+    wake_            = unique_fd{};
+    clients_warning_ = std::format(
+        "{}: cannot start the thread watching {} ({}), a tool's TIOCEXCL is cleared at the next "
+        "slice after its close",
+        name_, path_, refused.code().message());
+  }
+}
+
+pty_bridge::~pty_bridge()
+{
+  if(not watcher_.joinable())
+  {
+    return;
+  }
+  if(forks_ != core::host::fork_generation())
+  {
+    std::ignore = std::make_unique<std::jthread>(std::move(watcher_)).release();
+    return;
+  }
+  (void)::eventfd_write(stop_.get(), 1);
+  watcher_.join();
+}
+
+void pty_bridge::watch() noexcept
+{
+  std::array<pollfd, 2> polled{
+      {
+       {.fd = clients_watch_.get(), .events = POLLIN, .revents = 0},
+       {.fd = stop_.get(), .events = POLLIN, .revents = 0},
+       }
+  };
+  auto unverified = false;
+  for(;;)
+  {
+    auto const ready = ::poll(polled.data(), polled.size(), unverified ? pty_quiet_ms : -1);
+    if(ready < 0)
+    {
+      if(errno != EINTR)
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+      }
+      continue;
+    }
+    if(polled[1].revents != 0)
+    {
+      return;
+    }
+    auto changed = false;
+    {
+      std::scoped_lock const lock{clients_mutex_};
+      auto const             quiet = ready == 0;
+      changed                      = consume(lock, quiet ? verify::when_quiet : verify::later);
+      unverified                   = clients_.unverified;
+      changed = changed or (quiet and not unverified and (clients_.closed or clients_.overflowed));
+    }
+    if(changed and wake_.get() >= 0)
+    {
+      (void)::eventfd_write(wake_.get(), 1);
+    }
+  }
+}
+
+auto pty_bridge::read_events(std::scoped_lock<std::mutex> const&) -> batch
+{
+  alignas(inotify_event) std::array<char, 4096> buffer{};
+  batch                                         read;
+  for(;;)
+  {
+    auto const got = ::read(clients_watch_.get(), buffer.data(), buffer.size());
+    if(got < 0 and errno == EINTR)
+    {
+      continue;
+    }
+    if(got <= 0)
+    {
+      return read;
+    }
+    for(std::size_t at = 0; at + sizeof(inotify_event) <= static_cast<std::size_t>(got);)
+    {
+      inotify_event event{};
+      std::memcpy(&event, buffer.data() + at, sizeof event);
+      at += sizeof event + event.len;
+      read.any = true;
+      if((event.mask & IN_Q_OVERFLOW) != 0)
+      {
+        clients_.overflowed = true;
+        clients_.unverified = true;
+        clients_.inexact    = true;
+      }
+      else if((event.mask & IN_OPEN) != 0)
+      {
+        ++clients_.count;
+        clients_.holds  = true;
+        clients_.opened = true;
+        clients_.joined = clients_.cleared;
+      }
+      else if((event.mask & IN_CLOSE) != 0)
+      {
+        read.closed = true;
+        clients_.count -= clients_.count > 0 ? 1 : 0;
+        clients_.closed     = true;
+        clients_.unverified = true;
+      }
+    }
+  }
+}
+
+auto pty_bridge::consume(std::scoped_lock<std::mutex> const& held, verify when) -> bool
+{
+  auto changed = false;
+  auto walks   = 0;
+  for(;;)
+  {
+    auto const read = read_events(held);
+    changed         = changed or read.any;
+    auto exclusive  = 0;
+    if(read.closed
+       and not clients_.inexact
+       and clients_.count == 0
+       and ::ioctl(slave_.get(), TIOCGEXCL, &exclusive) == 0
+       and exclusive != 0)
+    {
+      (void)::ioctl(slave_.get(), TIOCNXCL);
+      clients_.cleared = true;
+      clients_.joined  = false;
+    }
+    if(when == verify::later or not clients_.unverified)
+    {
+      return changed;
+    }
+    exclusive = 0;
+    (void)::ioctl(slave_.get(), TIOCGEXCL, &exclusive);
+    if(exclusive != 0 or clients_.cleared or wants_sessions_)
+    {
+      if(not still_held())
+      {
+        auto found = walk_holders();
+        if(not found)
+        {
+          if(when == verify::when_quiet or ++walks == pty_walk_retries)
+          {
+            when = verify::later;
+          }
+          continue;
+        }
+        holders_ = std::move(*found);
+      }
+      clients_.holds = not holders_.empty();
+      if(not clients_.holds)
+      {
+        clients_.count   = 0;
+        clients_.inexact = false;
+        (void)::ioctl(slave_.get(), TIOCNXCL);
+      }
+      else if(clients_.cleared and not clients_.joined)
+      {
+        (void)::ioctl(slave_.get(), TIOCEXCL);
+      }
+    }
+    clients_.unverified = false;
+    clients_.cleared    = false;
+    clients_.joined     = false;
+    return changed;
   }
 }
 
@@ -109,70 +343,39 @@ auto pty_bridge::take_sessions() -> std::vector<session_edge>
   {
     return changes;
   }
-  alignas(inotify_event) std::array<char, 4096> buffer{};
-  bool                                          closed  = false;
-  bool                                          opened  = false;
-  bool                                          recount = false;
-  for(;;)
+  if(wake_.get() >= 0)
   {
-    auto const got = ::read(clients_watch_.get(), buffer.data(), buffer.size());
-    if(got < 0 and errno == EINTR)
+    eventfd_t drained = 0;
+    (void)::eventfd_read(wake_.get(), &drained);
+  }
+  clients seen;
+  {
+    std::scoped_lock const lock{clients_mutex_};
+    std::ignore     = consume(lock, verify::now);
+    seen            = clients_;
+    clients_.opened = false;
+    if(not seen.unverified)
     {
-      continue;
-    }
-    if(got <= 0)
-    {
-      break;
-    }
-    for(std::size_t at = 0; at + sizeof(inotify_event) <= static_cast<std::size_t>(got);)
-    {
-      inotify_event event{};
-      std::memcpy(&event, buffer.data() + at, sizeof event);
-      at += sizeof event + event.len;
-      if((event.mask & IN_Q_OVERFLOW) != 0)
-      {
-        recount = true;
-      }
-      else if((event.mask & IN_OPEN) != 0)
-      {
-        opened = true;
-      }
-      else if((event.mask & IN_CLOSE) != 0)
-      {
-        closed = true;
-      }
+      clients_.closed = clients_.overflowed = false;
     }
   }
-  if(not link_->wants_sessions())
+  if(not wants_sessions_)
   {
-    int exclusive = 0;
-    if(closed
-       and ::ioctl(slave_.get(), TIOCGEXCL, &exclusive) == 0
-       and exclusive != 0
-       and walk_holders(true).empty())
-    {
-      (void)::ioctl(slave_.get(), TIOCNXCL);
-    }
     return changes;
   }
-  if(opened and not recount and not held_)
+  if(seen.opened and not seen.overflowed and not held_)
   {
     held_ = true;
     changes.push_back(session_edge::opened);
   }
-  if(not closed and not recount)
+  if(seen.unverified or (not seen.closed and not seen.overflowed))
   {
     return changes;
   }
-  auto const holds = still_held() or not(holders_ = walk_holders(false)).empty();
-  if(holds != held_ and (recount or not holds))
+  if(seen.holds != held_ and (seen.overflowed or not seen.holds))
   {
-    held_ = holds;
-    changes.push_back(holds ? session_edge::opened : session_edge::closed);
-  }
-  if(not holds)
-  {
-    (void)::ioctl(slave_.get(), TIOCNXCL);
+    held_ = seen.holds;
+    changes.push_back(seen.holds ? session_edge::opened : session_edge::closed);
   }
   return changes;
 }
@@ -226,52 +429,62 @@ auto pty_bridge::still_held() const -> bool
   });
 }
 
-auto pty_bridge::walk_holders(bool first_only) -> std::vector<std::string>
+auto pty_bridge::walk_holders() -> std::optional<std::vector<std::string>>
 {
-  namespace fs = std::filesystem;
-  ++scans_;
+  scans_.fetch_add(1, std::memory_order_relaxed);
   std::vector<std::string> found;
-  auto const               own_slave = std::to_string(slave_.get());
-  auto const               skip      = fs::directory_options::skip_permission_denied;
-  std::error_code          failed;
   struct stat              node{};
   if(::stat(path_.c_str(), &node) != 0)
   {
     return found;
   }
-  for(fs::directory_iterator process{"/proc", skip, failed};
-      not failed and process != fs::directory_iterator{}; process.increment(failed))
+  auto const self        = ::getpid();
+  auto const interrupted = [&] {
+    pollfd waiting{.fd = clients_watch_.get(), .events = POLLIN, .revents = 0};
+    return ::poll(&waiting, 1, 0) > 0;
+  };
+  auto const holds = [&](pid_t pid, int fds, std::string_view name) {
+    std::array<char, PATH_MAX> target{};
+    struct stat                seen{};
+    auto                       held = -1;
+    auto const length = ::readlinkat(fds, std::string{name}.c_str(), target.data(), target.size());
+    std::from_chars(name.data(), name.data() + name.size(), held);
+    return length > 0
+       and std::string_view{target.data(), static_cast<std::size_t>(length)} == path_
+       and ::fstatat(fds, std::string{name}.c_str(), &seen, 0) == 0
+       and seen.st_dev == node.st_dev
+       and seen.st_ino == node.st_ino
+       and not(pid == self and held == slave_.get())
+       and ::syscall(SYS_kcmp, self, pid, KCMP_FILE, slave_.get(), held) != 0;
+  };
+  unique_fd const processes{::open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+  if(processes.get() < 0)
   {
-    auto const pid = process->path().filename().string();
-    if(pid.empty() or not std::ranges::all_of(pid, [](char c) { return c >= '0' and c <= '9'; }))
+    return found;
+  }
+  auto const complete = each_name(processes.get(), interrupted, [&](std::string_view name) {
+    auto pid = pid_t{};
+    if(std::from_chars(name.data(), name.data() + name.size(), pid).ptr
+       != name.data() + name.size())
     {
-      continue;
+      return true;
     }
-    std::error_code unreadable;
-    for(fs::directory_iterator fd{process->path() / "fd", skip, unreadable};
-        not unreadable and fd != fs::directory_iterator{}; fd.increment(unreadable))
-    {
-      std::error_code gone;
-      struct stat     seen{};
-      if(fs::read_symlink(fd->path(), gone) != path_
-         or gone
-         or ::stat(fd->path().c_str(), &seen) != 0
-         or seen.st_dev != node.st_dev
-         or seen.st_ino != node.st_ino)
-      {
-        continue;
-      }
-      if(fd->path().filename().string() == own_slave
-         and fs::equivalent(process->path(), "/proc/self", gone))
-      {
-        continue;
-      }
-      found.push_back(fd->path().string());
-      if(first_only)
-      {
-        return found;
-      }
-    }
+    auto const      at = std::format("{}/fd", name);
+    unique_fd const fds{::openat(processes.get(), at.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+    return fds.get() < 0
+        or each_name(
+               fds.get(), interrupted,
+               [&](std::string_view fd) {
+                 if(holds(pid, fds.get(), fd))
+                 {
+                   found.push_back(std::format("/proc/{}/fd/{}", pid, fd));
+                 }
+                 return true;
+               });
+  });
+  if(not complete)
+  {
+    return std::nullopt;
   }
   return found;
 }
@@ -306,7 +519,9 @@ auto pty_bridge::flush() -> std::optional<std::string>
 {
   if(link_->device_changed())
   {
+    std::scoped_lock const lock{clients_mutex_};
     (void)::ioctl(slave_.get(), TIOCNXCL);
+    clients_.cleared = false;
   }
   link_->drain(outgoing_);
   std::size_t written = 0;

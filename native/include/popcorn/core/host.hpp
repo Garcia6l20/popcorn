@@ -1022,6 +1022,12 @@ public:
   [[nodiscard]] static auto fork_generation() noexcept -> std::uint64_t;
 
   /**
+   * @brief Installs the `atfork` handler fork_generation() counts with. Idempotent, any thread.
+   *        Every host calls it, and so does any state that reads fork_generation() without one.
+   */
+  static void watch_forks() noexcept;
+
+  /**
    * @brief The thread abandon_thread() gave up, expired once it left the engine for good: from
    *        then on no thread runs the members, and a holder of a member_owner() share may edit
    *        their hooks. Valid from the destroyed host's copy as well.
