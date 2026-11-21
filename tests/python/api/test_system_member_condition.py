@@ -102,11 +102,12 @@ def test_a_never_true_condition_runs_no_python_per_event(
 ) -> None:
     system = ping()
     a = system.members["a"]
+    before = ticker(a).ticks
     stop = asyncio.run(wait(system, echoes(a, 1000)))
     assert stop.reason is StopReason.TIME
     assert stop.fired == ()
     assert ready_calls == []
-    assert ticker(a).ticks >= MIN_TICKS
+    assert ticker(a).ticks - before >= MIN_TICKS
 
 
 def test_a_condition_of_another_member_is_refused(ping: Callable[[], System]) -> None:
@@ -183,6 +184,7 @@ def test_a_python_event_on_the_same_member_still_runs_python_per_event(
     system = ping()
     a = system.members["a"]
     calls: list[int] = []
+    before = ticker(a).ticks
 
     def never(machine: popcorn.Machine) -> bool:
         calls.append(1)
@@ -200,7 +202,7 @@ def test_a_python_event_on_the_same_member_still_runs_python_per_event(
     stop = asyncio.run(body())
     assert stop.reason is StopReason.TIME
     assert len(calls) > 0
-    assert ticker(a).ticks >= MIN_TICKS
+    assert ticker(a).ticks - before >= MIN_TICKS
 
 
 def test_a_never_true_condition_on_each_member_of_three_runs_no_python(
@@ -217,6 +219,9 @@ def test_a_never_true_condition_on_each_member_of_three_runs_no_python(
                 )
             )
 
+    before = [ticker(member).ticks for member in trio.members.values()]
     stops = asyncio.run(body())
     assert [stop.reason for stop in stops] == [StopReason.TIME] * 3
     assert ready_calls == []
+    after = [ticker(member).ticks for member in trio.members.values()]
+    assert all(later - earlier >= MIN_TICKS for earlier, later in zip(before, after, strict=True))
