@@ -85,13 +85,16 @@ def test_any_of_names_only_the_member_that_held_at_the_stop(
 
 
 @pytest.mark.parametrize("wait", WAITS)
-def test_all_of_names_every_member(ping: Callable[[], System], wait: Wait) -> None:
+def test_all_of_names_every_member(
+    ping: Callable[[], System], wait: Wait, ready_calls: list[Condition]
+) -> None:
     system = ping()
     a = system.members["a"]
     first, second = echoes(a, 1), echoes(a, 2)
     stop = asyncio.run(wait(system, all_of(first, second)))
     assert stop.reason is StopReason.USER
     assert stop.fired == (first, second)
+    assert ready_calls == [first, second]
 
 
 @pytest.mark.parametrize("wait", WAITS)
