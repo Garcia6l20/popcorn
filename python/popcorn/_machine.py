@@ -2622,12 +2622,13 @@ class Machine:
         wait only, the machine runs on.
 
         A `Condition`, `m.ref.var("x").ge(3)`, or a `Conditions` from `any_of` or `all_of`, is
-        evaluated natively inside a free run, no Python, after every event and at every slice
-        end, wall-budget ends included, so the free-run stop lands up to one slice after a
-        parked run's. When `for_` elapses the wait returns a TIME
-        stop without evaluating it there, as a parked run does, unlike a Python event. The
-        returned stop's `fired` names the conditions that held at the boundary that ended the
-        wait, empty for a stop that is not USER.
+        evaluated natively inside a free run, no Python. A lone machine asks after every event and
+        at every slice end, wall-budget ends included, so its free-run stop lands up to one slice
+        after a parked run's. A member of a linked system asks after every dispatched event and
+        once each time its core falls asleep, parked or running. When `for_` elapses the wait
+        returns a TIME stop without evaluating it there, as a parked run does, unlike a Python
+        event. The returned stop's `fired` names the conditions that held at the boundary that
+        ended the wait, empty for a stop that is not USER.
 
         `deadline` stops waiting at that virtual time instead, a TIME stop, exclusive with
         `for_`. Already past, it returns a TIME stop at once: parked, no instruction runs.

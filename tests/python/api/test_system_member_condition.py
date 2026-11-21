@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 
 import popcorn
 import pytest
-from popcorn import Condition, StopReason, System, all_of, any_of
+from popcorn import Condition, StopReason, System, _core, all_of, any_of
 from popcorn._refs import Conditions
 from popcorn.units import ms
 
@@ -98,3 +98,63 @@ def test_a_condition_of_another_member_is_refused(ping: Callable[[], System]) ->
     a, b = system.members["a"], system.members["b"]
     with pytest.raises(ValueError, match="another machine"):
         asyncio.run(a.wait_for(echoes(b, 1), for_=ms(1)))
+
+
+def test_two_waits_on_one_member_each_get_their_own_fired(ping: Callable[[], System]) -> None:
+    system = ping()
+    a = system.members["a"]
+    first, second = echoes(a, 1), echoes(a, 2)
+
+    async def body() -> tuple[popcorn.Stop, popcorn.Stop]:
+        async with system.running():
+            one = asyncio.create_task(a.wait_for(first, for_=ms(1)))
+            two = asyncio.create_task(a.wait_for(second, for_=ms(1)))
+            return await one, await two
+
+    one, two = asyncio.run(body())
+    assert one.reason is two.reason is StopReason.USER
+    assert one.fired == (first,)
+    assert two.fired == (second,)
+    assert one.time < two.time
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("size", 0, "1 to 8 bytes"),
+        ("size", 9, "1 to 8 bytes"),
+        ("bits", 0, "shift and bits"),
+        ("shift", 60, "shift and bits"),
+        ("where", 0x4000_0000, "plain memory"),
+    ],
+)
+def test_a_raw_condition_predicate_validates_its_members(
+    ping: Callable[[], System], field: str, value: int, match: str
+) -> None:
+    a = ping().members["a"]
+    member = _core.MemoryCondition()
+    member.where = 0x2000_8000
+    member.size = 4
+    member.shift = 0
+    member.bits = 32
+    setattr(member, field, value)
+    when = _core.ConditionSet()
+    when.members = [member]
+    with pytest.raises(ValueError, match=match):
+        a._handle.predicate_condition(when)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("count", [0, 65])
+def test_a_raw_condition_predicate_takes_one_to_64_members(
+    ping: Callable[[], System], count: int
+) -> None:
+    a = ping().members["a"]
+    member = _core.MemoryCondition()
+    member.where = 0x2000_8000
+    member.size = 4
+    member.shift = 0
+    member.bits = 32
+    when = _core.ConditionSet()
+    when.members = [member] * count
+    with pytest.raises(ValueError, match="1 to 64"):
+        a._handle.predicate_condition(when)  # pyright: ignore[reportPrivateUsage]

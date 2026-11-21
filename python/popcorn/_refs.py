@@ -424,8 +424,8 @@ def native_set(conditions: Conditions) -> _core.ConditionSet:
 
 
 class Conditions:
-    """Conditions evaluated natively together after every event of a free run, as one
-    `Machine.wait_for` event. Flat and immutable: build it with `any_of` or `all_of`.
+    """Conditions evaluated natively together as one `Machine.wait_for` event, at the boundaries a
+    single `Condition` is evaluated at. Flat and immutable: build it with `any_of` or `all_of`.
 
         up, failed = m.ref.var("link").up, m.ref.var("link").error
         either = popcorn.any_of(up.eq(True), failed.ne(0))
