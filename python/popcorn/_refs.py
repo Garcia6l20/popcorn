@@ -360,8 +360,8 @@ class Condition:
     slice ends: a wait on it ends at the first event boundary or slice end after the value
     changed, the boundary a parked `run(stop_when=)` sees. A member of a linked system asks it
     after every dispatched event and once each time its core falls asleep, at the instant it
-    falls asleep, never at another slice end. Parked, `wait_for` runs its `ready`
-    as a `stop_when`.
+    falls asleep, never at another slice end, parked or not. On a lone parked machine `wait_for`
+    runs its `ready` as a `stop_when`.
 
         link_up = m.ref.var("link").up
         async with m.running():

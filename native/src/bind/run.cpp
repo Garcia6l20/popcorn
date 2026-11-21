@@ -631,10 +631,7 @@ auto machine_handle::predicate_pc_at(address at) const -> native_predicate
       .described("the core to reach an address");
 }
 
-auto machine_handle::wait_when(
-    core::condition_set          when,
-    std::optional<std::uint64_t> for_ps,
-    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
+void machine_handle::check_conditions(core::condition_set const& when) const
 {
   if(when.members.empty() or when.members.size() > 64)
   {
@@ -659,6 +656,30 @@ auto machine_handle::wait_when(
               member.where));
     }
   }
+}
+
+auto machine_handle::predicate_condition(core::condition_set when) const -> native_predicate
+{
+  check_conditions(when);
+  return native_predicate{
+      [engine = &engine(), when = std::move(when)] {
+        auto const tested = [&](auto const& member) {
+          return core::condition_holds(member, *engine);
+        };
+        return when.combine == core::condition_set::mode::all
+                 ? std::ranges::all_of(when.members, tested)
+                 : std::ranges::any_of(when.members, tested);
+      },
+      slot_}
+      .described("a condition on memory");
+}
+
+auto machine_handle::wait_when(
+    core::condition_set          when,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
+{
+  check_conditions(when);
   return waiting_on({.when = std::move(when)}, for_ps, deadline_ps, wait_shape::fired);
 }
 

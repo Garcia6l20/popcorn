@@ -707,6 +707,15 @@ public:
           std::optional<std::uint64_t> for_ps,
           std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
+  /**
+   * @brief A predicate true while the conditions hold, read natively with no GIL, members
+   *        combined as @p when says.
+   * @param when The conditions.
+   * @throws std::invalid_argument as wait_when().
+   */
+  [[= py::doc{"Predicate: the conditions hold, read natively."}]] [[nodiscard]] auto
+      predicate_condition(core::condition_set when) const -> native_predicate;
+
   /** @brief A predicate true while the next instruction is at @p at. */
   [[= py::doc{"Predicate: pc is at an address."}]] [[nodiscard]] auto
       predicate_pc_at(address at) const -> native_predicate;
@@ -1966,6 +1975,7 @@ private:
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
   void               apply_reset_request(core::held_lock const& held);
   [[nodiscard]] auto engine() const -> core::machine&;
+  void               check_conditions(core::condition_set const& when) const;
 
   /**
    * @brief Names of the non-alias peripherals whose model is a @p Port that @p keep accepts.

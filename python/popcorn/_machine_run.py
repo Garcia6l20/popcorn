@@ -308,6 +308,7 @@ async def goal(
     stop_when: Callable[[Machine], bool] | None,
     exact: int | None,
     deadline: VirtualTime | None = None,
+    gate: _core.Predicate | None = None,
     run: bool = False,
     returning: Resolver | None = None,
 ) -> Stop:
@@ -323,6 +324,7 @@ async def goal(
             for_=for_,
             deadline=deadline,
             stop_when=None if stop_when is None else machine._handler(stop_when),
+            gate=gate,
             run=run,
             returning=returning,
         )
@@ -391,14 +393,36 @@ async def wait_condition(
     members = conditions.members
     if not machine._handle.session_open():
         stopped: list[tuple[Condition, ...]] = []
+        gate: _core.Predicate | None = None
 
-        def stop_when(machine: Machine) -> bool:
-            held = event.ready(machine)
-            if held:
-                stopped.append(tuple(member for member in members if member.ready(machine)))
-            return held
+        def fired_now(machine: Machine) -> tuple[Condition, ...]:
+            return tuple(member for member in members if member.ready(machine))
 
-        stop = await bounded_run(machine, for_=for_, deadline=deadline, stop_when=stop_when)
+        if machine._linked() is None:
+
+            def stop_when(machine: Machine) -> bool:
+                held = event.ready(machine)
+                if held:
+                    stopped.append(fired_now(machine))
+                return held
+
+        else:
+            gate = machine._handle.predicate_condition(native_set(conditions))
+
+            def stop_when(machine: Machine) -> bool:
+                stopped.append(fired_now(machine))
+                return True
+
+        stop = await goal(
+            machine,
+            until=None,
+            budget=machine._default_budget,
+            for_=for_,
+            deadline=deadline,
+            stop_when=stop_when,
+            exact=None,
+            gate=gate,
+        )
         held = stop.reason is StopReason.USER and bool(stopped)
         fired = stopped[-1] if held else ()
         stop = dataclasses.replace(stop, fired=fired)
