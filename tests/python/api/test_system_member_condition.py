@@ -4,23 +4,38 @@ gate, `Stop.fired` captured at the stop instant."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 
 import popcorn
 import pytest
-from popcorn import Condition, StopReason, System, _core, all_of, any_of
+from popcorn import Condition, StopReason, System, UartLink, _core, all_of, any_of
+from popcorn._machine_events import Ready
 from popcorn._refs import Conditions
 from popcorn.units import ms
 
-from .linked import Build
+from .linked import L, Ticker, member, ticker
 
 LOG_WORDS_PER_ECHO = 2
+MIN_TICKS = 20
 Wait = Callable[[System, Condition | Conditions], Awaitable[popcorn.Stop]]
 
 
 @pytest.fixture
-def ping(pair: Build) -> Callable[[], System]:
-    return lambda: pair(a_entry="link_ping", b_entry="link_echo")
+def ping(u575: popcorn.PartDescription) -> Iterator[Callable[[], System]]:
+    made: list[System] = []
+
+    def build() -> System:
+        a = member(u575, "link_ping", "a", models={"TIM6": Ticker})
+        b = member(u575, "link_echo", "b")
+        system = System(
+            {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+        )
+        made.append(system)
+        return system
+
+    yield build
+    for one in made:
+        one.close()
 
 
 @pytest.fixture
@@ -91,6 +106,7 @@ def test_a_never_true_condition_runs_no_python_per_event(
     assert stop.reason is StopReason.TIME
     assert stop.fired == ()
     assert ready_calls == []
+    assert ticker(a).ticks >= MIN_TICKS
 
 
 def test_a_condition_of_another_member_is_refused(ping: Callable[[], System]) -> None:
@@ -158,3 +174,49 @@ def test_a_raw_condition_predicate_takes_one_to_64_members(
     when.members = [member] * count
     with pytest.raises(ValueError, match="1 to 64"):
         a._handle.predicate_condition(when)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("wait", WAITS)
+def test_a_python_event_on_the_same_member_still_runs_python_per_event(
+    ping: Callable[[], System], wait: Wait
+) -> None:
+    system = ping()
+    a = system.members["a"]
+    calls: list[int] = []
+
+    def never(machine: popcorn.Machine) -> bool:
+        calls.append(1)
+        return False
+
+    async def body() -> popcorn.Stop:
+        if wait is wait_running:
+            async with system.running():
+                return await a.wait_for(Ready(never), for_=ms(1))
+        stop, _ = await asyncio.gather(
+            a.wait_for(Ready(never), for_=ms(1)), system.members["b"].run(for_=ms(1))
+        )
+        return stop
+
+    stop = asyncio.run(body())
+    assert stop.reason is StopReason.TIME
+    assert len(calls) > 0
+    assert ticker(a).ticks >= MIN_TICKS
+
+
+def test_a_never_true_condition_on_each_member_of_three_runs_no_python(
+    trio: System, ready_calls: list[Condition]
+) -> None:
+    async def body() -> list[popcorn.Stop]:
+        async with trio.running():
+            return list(
+                await asyncio.gather(
+                    *(
+                        member.wait_for(echoes(member, 1000), for_=ms(1))
+                        for member in trio.members.values()
+                    )
+                )
+            )
+
+    stops = asyncio.run(body())
+    assert [stop.reason for stop in stops] == [StopReason.TIME] * 3
+    assert ready_calls == []

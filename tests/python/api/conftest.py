@@ -21,7 +21,7 @@ from popcorn._refs import Pending
 from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms
 
-from .linked import Build, links, member
+from .linked import Build, L, links, member
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -538,6 +538,23 @@ def load_each_unforwarded(m: popcorn.Machine, addresses: Sequence[int]) -> None:
         assert ended.wait(10)
         with contextlib.suppress(popcorn.EmulationError):
             m.halt()
+
+
+@pytest.fixture
+def trio(u575: popcorn.PartDescription) -> Iterator[popcorn.System]:
+    """Members `a`, `b` and `c` on `u575` chained `a.USART1-b.USART1`, `b.USART2-c.USART2`."""
+    a = member(u575, "link_ping", "a")
+    b = member(u575, "link_echo", "b")
+    c = member(u575, "idle", "c")
+    system = popcorn.System(
+        {"a": a, "b": b, "c": c},
+        [
+            popcorn.UartLink("a.USART1", "b.USART1", latency=L, baud=460_800),
+            popcorn.UartLink("b.USART2", "c.USART2", latency=L, baud=460_800),
+        ],
+    )
+    yield system
+    system.close()
 
 
 @pytest.fixture
